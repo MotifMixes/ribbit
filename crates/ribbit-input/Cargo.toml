@@ -1,0 +1,9 @@
+[package]
+name = "ribbit-input"
+description = "Leapster buttons, stylus/touchscreen and ADC input model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

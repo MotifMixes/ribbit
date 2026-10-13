@@ -1,0 +1,25 @@
+[package]
+name = "ribbit-core"
+description = "Leapster machine: lifecycle, timing and state (frontend-independent)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ribbit-cpu.workspace = true
+ribbit-memory.workspace = true
+ribbit-video.workspace = true
+ribbit-audio.workspace = true
+ribbit-input.workspace = true
+ribbit-debug.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+backtrace = "0.3"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }

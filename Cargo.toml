@@ -1,0 +1,64 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ribbit-core",
+    "crates/ribbit-cpu",
+    "crates/ribbit-memory",
+    "crates/ribbit-video",
+    "crates/ribbit-audio",
+    "crates/ribbit-input",
+    "crates/ribbit-debug",
+    "crates/ribbit-desktop",
+    "crates/ribbit-frontend",
+    "crates/ribbit-android",
+]
+default-members = [
+    "crates/ribbit-core",
+    "crates/ribbit-cpu",
+    "crates/ribbit-memory",
+    "crates/ribbit-video",
+    "crates/ribbit-audio",
+    "crates/ribbit-input",
+    "crates/ribbit-debug",
+    "crates/ribbit-desktop",
+    "crates/ribbit-frontend",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+# License intentionally not set yet: the project owner must choose one.
+# Any code derived from MAME's BSD-3-Clause ARCompact core must retain its notice
+# (see docs/architecture.md, "Reuse and licensing").
+
+[workspace.dependencies]
+ribbit-core = { path = "crates/ribbit-core" }
+ribbit-cpu = { path = "crates/ribbit-cpu" }
+ribbit-memory = { path = "crates/ribbit-memory" }
+ribbit-video = { path = "crates/ribbit-video" }
+ribbit-audio = { path = "crates/ribbit-audio" }
+ribbit-input = { path = "crates/ribbit-input" }
+ribbit-debug = { path = "crates/ribbit-debug" }
+ribbit-frontend = { path = "crates/ribbit-frontend" }
+
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+sha1 = "0.11"
+crc32fast = "1.5"
+clap = { version = "4.6", features = ["derive"] }
+anyhow = "1"
+winit = "0.30"
+wgpu = "30"
+pollster = "1"
+
+[profile.dev]
+# Emulator cores are unusably slow at opt-level 0.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

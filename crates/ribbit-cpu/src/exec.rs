@@ -1,0 +1,944 @@
+//! Instruction execution, interrupts, zero-overhead loops and timers.
+//!
+//! Semantics cite the PRM ("Instruction Set Details", ch. 9) unless noted.
+//! Every path that the PRM leaves undefined, or that Ribbit does not model,
+//! returns a `CpuError` instead of guessing.
+
+use crate::decode::decode;
+use crate::disasm::disassemble;
+use crate::isa::*;
+use crate::{
+    AuxAccess, AuxExt, AuxKind, Cpu, CpuError, HaltReason, IllegalPolicy, MmidMode, Step, Timer, debug, reg, status32,
+};
+use ribbit_memory::Bus;
+
+/// AUX_MACMODE bits. CS and the S flags' positions are taken from MAME; the
+/// PRM figure (Figure 71) is not legible enough to confirm them. HYPOTHESIS.
+const MACMODE_CS: u32 = 1 << 1;
+const MACMODE_S2: u32 = 1 << 5;
+const MACMODE_S1: u32 = 1 << 8;
+
+const UNMODELLED_AUX_LOG_LIMIT: usize = 256;
+
+enum Flow {
+    Next,
+    Jump(u32),
+    Halt(HaltReason),
+    /// Take exception/interrupt `vector` with ILINK2 = next PC.
+    Exception(u8),
+}
+
+fn add(b: u32, c: u32, cin: bool) -> (u32, bool, bool) {
+    let (r1, c1) = b.overflowing_add(c);
+    let (r, c2) = r1.overflowing_add(cin as u32);
+    let v = ((b ^ r) & (c ^ r)) >> 31 != 0;
+    (r, c1 || c2, v)
+}
+
+fn sub(b: u32, c: u32, bin: bool) -> (u32, bool, bool) {
+    let r = b.wrapping_sub(c).wrapping_sub(bin as u32);
+    let borrow = (b as u64) < c as u64 + bin as u64;
+    let v = ((b ^ c) & (b ^ r)) >> 31 != 0;
+    (r, borrow, v)
+}
+
+fn sat32(x: i64) -> (u32, bool) {
+    if x > i32::MAX as i64 {
+        (i32::MAX as u32, true)
+    } else if x < i32::MIN as i64 {
+        (i32::MIN as u32, true)
+    } else {
+        (x as i32 as u32, false)
+    }
+}
+
+fn sat16(x: i32) -> (u16, bool) {
+    if x > i16::MAX as i32 {
+        (i16::MAX as u16, true)
+    } else if x < i16::MIN as i32 {
+        (i16::MIN as u16, true)
+    } else {
+        (x as i16 as u16, false)
+    }
+}
+
+fn norm32(c: u32) -> u32 {
+    if c == 0 || c == u32::MAX {
+        31
+    } else if (c as i32) >= 0 {
+        c.leading_zeros() - 1
+    } else {
+        (!c).leading_zeros() - 1
+    }
+}
+
+fn norm16(c: u32) -> u32 {
+    let v = c as u16;
+    if v == 0 || v == u16::MAX {
+        15
+    } else if (v as i16) >= 0 {
+        v.leading_zeros() - 1
+    } else {
+        (!v).leading_zeros() - 1
+    }
+}
+
+impl Cpu {
+    pub fn step_with(&mut self, bus: &mut impl Bus, ext: &mut impl AuxExt) -> Result<Step, crate::CpuError> {
+        if self.halted() {
+            return Err(CpuError::Halted { pc: self.pc });
+        }
+        // The A5 has no BTA register, so "interrupts and exceptions are held
+        // off until the instruction in the delay slot commits" (PRM, BTA).
+        if self.delay_target.is_none()
+            && let Some(vector) = self.pending_interrupt()
+        {
+            self.enter_interrupt(vector);
+            self.tick(1)?;
+            return Ok(Step::Interrupt { vector });
+        }
+        if self.sleeping {
+            self.tick(1)?;
+            return Ok(Step::Sleeping);
+        }
+
+        let pc = self.pc;
+        let i = self.icache.get(pc, || decode(bus, pc));
+        if self.delay_target.is_some() && (i.is_branch() || i.op == Op::Lp) {
+            // "Bcc ... cannot immediately follow a Bcc.D, BLcc.D, Jcc.D,
+            // JLcc.D, BRcc.D or BBITn.D instruction" (PRM); LPcc likewise.
+            return Err(self.unpredictable(&i, "branch, jump or LP in a delay slot"));
+        }
+        let flow = self.execute(&i, bus, ext)?;
+        self.instructions_retired += 1;
+        let delay_slot_of = self.delay_target.take();
+        match flow {
+            Flow::Halt(reason) => {
+                if reason == HaltReason::Flag {
+                    self.pc = i.next();
+                }
+                self.tick(1)?;
+                self.last_instr = Some(i);
+                return Ok(Step::Halted(reason));
+            }
+            Flow::Exception(vector) => {
+                self.pc = i.next();
+                self.enter_interrupt(vector);
+            }
+            Flow::Jump(target) if i.delay => {
+                self.delay_target = Some(target);
+                self.pc = i.next();
+            }
+            Flow::Jump(target) => self.pc = target,
+            Flow::Next => {
+                self.pc = match delay_slot_of {
+                    Some(target) => target,
+                    None => self.loop_end_check(i.next()),
+                };
+            }
+        }
+        self.tick(1)?;
+        self.last_instr = Some(i);
+        Ok(Step::Executed)
+    }
+
+    // -----------------------------------------------------------------------
+    // Interrupts (PRM ch. 4, Figure 83; A5 priorities, Tables 23/24)
+
+    fn pending_irqs(&self) -> u32 {
+        let mut p = self.irq_lines;
+        if self.timers[0].pending {
+            p |= 1 << 3;
+        }
+        if self.timers[1].pending {
+            p |= 1 << 7;
+        }
+        if (3..32).contains(&self.aux_irq_hint) {
+            p |= 1 << self.aux_irq_hint;
+        }
+        p & 0xFFFF_FFF8
+    }
+
+    /// Highest-priority interrupt that would be taken now, if any.
+    pub fn pending_interrupt(&self) -> Option<u8> {
+        let p = self.pending_irqs();
+        // "The higher the interrupt number the higher the priority within the
+        // interrupt level set ... IRQ7 always has the highest relative
+        // priority within its level set" (PRM, Interrupt Priority).
+        let pick = |set: u32| if set & (1 << 7) != 0 { 7 } else { 31 - set.leading_zeros() as u8 };
+        let l2 = p & self.aux_irq_lev;
+        let l1 = p & !self.aux_irq_lev;
+        if self.flag(status32::E2) && l2 != 0 {
+            Some(pick(l2))
+        } else if self.flag(status32::E1) && l1 != 0 {
+            Some(pick(l1))
+        } else {
+            None
+        }
+    }
+
+    /// Interrupt/exception entry. Vectors 1 (memory error) and 2 (instruction
+    /// error) and level-2 IRQs use ILINK2 and mask both levels; level-1 IRQs
+    /// use ILINK1 and mask level 1. ILINK holds the next PC.
+    fn enter_interrupt(&mut self, vector: u8) {
+        let level2 = vector < 3 || self.aux_irq_lev & (1 << vector) != 0;
+        if level2 {
+            self.regs[reg::ILINK2] = self.pc;
+            self.status32_l2 = self.status32;
+            self.status32 &= !(status32::E1 | status32::E2);
+            self.aux_irq_lv12 |= 2;
+        } else {
+            self.regs[reg::ILINK1] = self.pc;
+            self.status32_l1 = self.status32;
+            self.status32 &= !status32::E1;
+            self.aux_irq_lv12 |= 1;
+        }
+        self.sleeping = false;
+        self.debug &= !debug::ZZ;
+        self.pc = self.int_vector_base.wrapping_add(8 * vector as u32);
+    }
+
+    /// ARCtangent-A5 loop mechanism (PRM "ARCtangent-A5 Loop Operation"):
+    /// when NEXT_PC equals LP_END, LP_COUNT is decremented and, unless it was
+    /// 1, PC becomes LP_START. Only checked on sequential flow: after a taken
+    /// branch or a delay slot the next PC comes from the branch (the ARC 600
+    /// rule; the A5 description does not cover branches, so this is a
+    /// HYPOTHESIS for the A5).
+    fn loop_end_check(&mut self, next: u32) -> u32 {
+        if next != self.lp_end {
+            return next;
+        }
+        let count = self.regs[reg::LP_COUNT];
+        self.regs[reg::LP_COUNT] = count.wrapping_sub(1);
+        if count != 1 { self.lp_start } else { next }
+    }
+
+    fn tick(&mut self, cycles: u64) -> Result<(), CpuError> {
+        self.cycles += cycles;
+        // Fast path (same result): neither timer reaches LIMIT in this step.
+        if self.timers.iter().all(|t| (t.limit.wrapping_sub(t.count) as u64) >= cycles) {
+            for t in &mut self.timers {
+                t.count = t.count.wrapping_add(cycles as u32);
+            }
+            return Ok(());
+        }
+        for _ in 0..cycles {
+            for t in &mut self.timers {
+                if t.count == t.limit {
+                    t.count = 0;
+                    if t.control & Timer::W != 0 {
+                        return Err(CpuError::Unsupported {
+                            pc: self.pc,
+                            word: 0,
+                            info: crate::ErrorInfo::new(
+                                String::new(),
+                                "processor timer watchdog reset (system-specific; not modelled)",
+                            ),
+                        });
+                    }
+                    if t.control & Timer::IE != 0 {
+                        t.pending = true;
+                    }
+                } else {
+                    t.count = t.count.wrapping_add(1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Errors
+
+    fn unpredictable(&self, i: &Instr, reason: &str) -> CpuError {
+        CpuError::Unpredictable { pc: i.addr, info: crate::ErrorInfo::new(disassemble(i), reason) }
+    }
+
+    fn unsupported(&self, i: &Instr, reason: &str) -> CpuError {
+        CpuError::Unsupported { pc: i.addr, word: i.word, info: crate::ErrorInfo::new(disassemble(i), reason) }
+    }
+
+    fn illegal(&self, i: &Instr, reason: &str) -> Result<Flow, CpuError> {
+        match self.config.illegal {
+            IllegalPolicy::Stop => {
+                Err(CpuError::Illegal { pc: i.addr, word: i.word, info: crate::ErrorInfo::new(disassemble(i), reason) })
+            }
+            IllegalPolicy::Exception => Ok(Flow::Exception(2)),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Operands
+
+    fn read_reg(&mut self, r: u8, i: &Instr) -> Result<u32, CpuError> {
+        if r < 32 {
+            return Ok(self.regs[r as usize]);
+        }
+        if let Some(xy) = &mut self.xy {
+            if crate::xy::is_port(r) {
+                return Ok(xy.read(r));
+            }
+            if r == 56 {
+                // Saved/restored by the Leapster RTOS like a plain register;
+                // its function is UNKNOWN (MAME also stores it plainly).
+                return Ok(self.regs[56]);
+            }
+        }
+        match r {
+            0..=31 | 57..=60 => Ok(self.regs[r as usize]),
+            63 => Ok(i.addr & !3),
+            32..=56 => {
+                Err(self
+                    .unsupported(i, &format!("extension core register r{r} (XY memory/DSP extension) is not modelled")))
+            }
+            _ => Err(self.unsupported(i, &format!("read of reserved core register r{r}"))),
+        }
+    }
+
+    fn read(&mut self, s: Src, i: &Instr) -> Result<u32, CpuError> {
+        match s {
+            Src::None => Ok(0),
+            Src::Imm(v) | Src::Limm(v) => Ok(v),
+            Src::Reg(r) => self.read_reg(r, i),
+        }
+    }
+
+    fn check_dst(&self, d: Dst, i: &Instr) -> Result<(), CpuError> {
+        if matches!(d, Dst::None | Dst::Discard) || matches!(d, Dst::Reg(r) if r < 32) {
+            return Ok(());
+        }
+        if self.xy.is_some() && matches!(d, Dst::Reg(32..=56)) {
+            return Ok(());
+        }
+        match d {
+            Dst::Reg(r @ 32..=56) => Err(self.unsupported(
+                i,
+                &format!("write to extension core register r{r} (XY memory/DSP extension) is not modelled"),
+            )),
+            Dst::Reg(61) => Err(self.unsupported(i, "write to reserved core register r61")),
+            Dst::Reg(63) => Err(self.unpredictable(i, "PCL as a destination")),
+            _ => Ok(()),
+        }
+    }
+
+    fn write_dst(&mut self, d: Dst, v: u32) {
+        if let Dst::Reg(r) = d
+            && r < 32
+        {
+            self.regs[r as usize] = v;
+            return;
+        }
+        if let (Dst::Reg(r), Some(xy)) = (d, &mut self.xy)
+            && crate::xy::is_port(r)
+        {
+            xy.write(r, v);
+            return;
+        }
+        if let Dst::Reg(r) = d {
+            if (57..=59).contains(&r) {
+                self.diag.mul_result_writes += 1;
+            }
+            self.regs[r as usize] = v;
+        }
+    }
+
+    fn set_zn(&mut self, r: u32) {
+        self.status32 &= !(status32::Z | status32::N);
+        if r == 0 {
+            self.status32 |= status32::Z;
+        }
+        if r >> 31 != 0 {
+            self.status32 |= status32::N;
+        }
+    }
+
+    fn set_bit(&mut self, bit: u32, on: bool) {
+        if on {
+            self.status32 |= bit;
+        } else {
+            self.status32 &= !bit;
+        }
+    }
+
+    fn flags(&mut self, r: u32, c: Option<bool>, v: Option<bool>) {
+        self.set_zn(r);
+        if let Some(c) = c {
+            self.set_bit(status32::C, c);
+        }
+        if let Some(v) = v {
+            self.set_bit(status32::V, v);
+        }
+    }
+
+    fn cond(&self, cc: Cond) -> bool {
+        cond_holds(cc, self.flag(status32::Z), self.flag(status32::N), self.flag(status32::C), self.flag(status32::V))
+    }
+
+    /// Address of the instruction after the delay slot (BLINK for BL.D/JL.D).
+    fn after_delay_slot(&mut self, bus: &mut impl Bus, i: &Instr) -> u32 {
+        let pc = i.next();
+        self.icache.get(pc, || decode(bus, pc)).next()
+    }
+
+    // -----------------------------------------------------------------------
+    // Auxiliary registers (PRM ch. 3)
+
+    fn log_unmodelled_aux(&mut self, pc: u32, reg: u32, kind: AuxKind, value: u32) {
+        self.diag.aux_unmodelled_total += 1;
+        if self.diag.aux_unmodelled.len() < UNMODELLED_AUX_LOG_LIMIT {
+            self.diag.aux_unmodelled.push(AuxAccess { pc, reg, kind, value });
+        }
+    }
+
+    fn aux_read(&mut self, n: u32, i: &Instr, ext: &mut impl AuxExt) -> Result<u32, CpuError> {
+        let s = self.status32;
+        let bit = |b: u32, pos: u32| ((s & b != 0) as u32) << pos;
+        Ok(match n {
+            // Obsolete STATUS: Z N C V E2 E1 H in bits 31..25, PC[25:2] in 23..0.
+            0x00 => {
+                bit(status32::Z, 31)
+                    | bit(status32::N, 30)
+                    | bit(status32::C, 29)
+                    | bit(status32::V, 28)
+                    | bit(status32::E2, 27)
+                    | bit(status32::E1, 26)
+                    | bit(status32::H, 25)
+                    | ((i.next() >> 2) & 0x00FF_FFFF)
+            }
+            0x01 => self.semaphore & 0xF,
+            0x02 => self.lp_start & !1,
+            0x03 => self.lp_end & !1,
+            0x04 => self.config.identity,
+            0x05 => self.debug,
+            // PC "contains the next instruction address"; in a delay slot it
+            // is the branch target (PRM, PC register).
+            0x06 => self.delay_target.unwrap_or(i.next()) & !1,
+            0x0A => s & status32::IMPLEMENTED,
+            0x0B => self.status32_l1 & status32::IMPLEMENTED & !status32::H,
+            0x0C => self.status32_l2 & status32::IMPLEMENTED & !status32::H,
+            0x12 => return Err(self.unsupported(i, "read of write-only aux register MULHI")),
+            0x21 => self.timers[0].count,
+            0x22 => self.timers[0].control | if self.timers[0].pending { Timer::IP } else { 0 },
+            0x23 => self.timers[0].limit,
+            0x100 => self.timers[1].count,
+            0x101 => self.timers[1].control | if self.timers[1].pending { Timer::IP } else { 0 },
+            0x102 => self.timers[1].limit,
+            0x25 => self.int_vector_base,
+            0x41 => self.macmode,
+            0x43 => self.aux_irq_lv12 & 3,
+            0x200 => self.aux_irq_lev & 0xFFFF_FFF8,
+            0x201 => self.aux_irq_hint,
+            n if self.xy.is_some()
+                && (crate::xy::AUX_BASE..crate::xy::AUX_BASE + crate::xy::AUX_COUNT).contains(&n) =>
+            {
+                self.xy.as_ref().map_or(0, |xy| xy.aux_read(n))
+            }
+            _ => match ext.aux_read(n) {
+                Some(v) => v,
+                None => {
+                    // "Accessing the extension auxiliary register region in the
+                    // basecase version of the ARCtangent-A5 processor will
+                    // return the ID register" (PRM, Illegal Auxiliary Register
+                    // Usage). Logged because the Leapster's extensions are unknown.
+                    self.log_unmodelled_aux(i.addr, n, AuxKind::Read, 0);
+                    self.config.identity
+                }
+            },
+        })
+    }
+
+    fn aux_write(&mut self, n: u32, v: u32, i: &Instr, ext: &mut impl AuxExt) -> Result<(), CpuError> {
+        let implemented_status = status32::IMPLEMENTED & !status32::H;
+        if let Some(xy) = &mut self.xy
+            && (crate::xy::AUX_BASE..crate::xy::AUX_BASE + crate::xy::AUX_COUNT).contains(&n)
+        {
+            return xy.aux_write(n, v).map_err(|reason| self.unsupported(i, reason));
+        }
+        match n {
+            0x01 => self.semaphore = v & 0xF,
+            0x02 => self.lp_start = v & !1,
+            0x03 => self.lp_end = v & !1,
+            0x0B => self.status32_l1 = v & implemented_status,
+            0x0C => self.status32_l2 = v & implemented_status,
+            0x12 => self.regs[reg::MHI] = v,
+            0x21 => self.timers[0].count = v,
+            0x22 => {
+                self.timers[0].control = v & (Timer::IE | Timer::NH | Timer::W);
+                self.timers[0].pending = false;
+            }
+            0x23 => self.timers[0].limit = v,
+            0x100 => self.timers[1].count = v,
+            0x101 => {
+                self.timers[1].control = v & (Timer::IE | Timer::NH | Timer::W);
+                self.timers[1].pending = false;
+            }
+            0x102 => self.timers[1].limit = v,
+            0x25 => self.int_vector_base = v & !0x3FF,
+            0x41 => {
+                let flags = MACMODE_S1 | MACMODE_S2;
+                let keep = if v & MACMODE_CS != 0 { 0 } else { self.macmode & flags };
+                self.macmode = keep | (v & !(flags | MACMODE_CS));
+            }
+            0x43 => self.aux_irq_lv12 &= !(v & 3),
+            0x200 => self.aux_irq_lev = v & 0xFFFF_FFF8,
+            // "Writing 0x00 ... clears a software triggered interrupt. Writing
+            // a value greater than 0x1F will clear ... Writing values 0x0 to
+            // 0x2 have no effect" (PRM; read as: 0 clears, 1-2 ignored).
+            0x201 => match v {
+                3..=31 => self.aux_irq_hint = v,
+                1 | 2 => {}
+                _ => self.aux_irq_hint = 0,
+            },
+            // Read-only registers (STATUS, IDENTITY, DEBUG, PC, STATUS32) and
+            // everything else: offer to the machine, otherwise log. "Writes to
+            // non implemented auxiliary registers are ignored" (PRM).
+            _ => {
+                if !ext.aux_write(n, v) {
+                    self.log_unmodelled_aux(i.addr, n, AuxKind::Write, v);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Execution
+
+    fn execute(&mut self, i: &Instr, bus: &mut impl Bus, ext: &mut impl AuxExt) -> Result<Flow, CpuError> {
+        match i.op {
+            Op::Illegal(why) => return self.illegal(i, why),
+            Op::Arc700Only(_) => {
+                return self.illegal(i, "ARC 700-only instruction (Instruction Error on the ARCtangent-A5)");
+            }
+            Op::Unimp => return self.illegal(i, "UNIMP_S"),
+            Op::Extension { .. } => return Err(self.unsupported(i, "extension instruction with no known definition")),
+            Op::Muldw | Op::Macdw | Op::Msubdw => {
+                return Err(self.unsupported(i, "dual 16-bit DSP multiply (no authoritative specification)"));
+            }
+            Op::Divaw => return Err(self.unsupported(i, "DIVAW: PRM does not state whether the comparison is signed")),
+            Op::Rnd16 => {
+                return Err(self.unsupported(i, "RND16: PRM tables and description disagree on the result format"));
+            }
+            _ => {}
+        }
+        self.check_dst(i.dst, i)?;
+
+        // Control-flow instructions evaluate their own conditions.
+        match i.op {
+            Op::B | Op::Bl => {
+                if !self.cond(i.cc) {
+                    return Ok(Flow::Next);
+                }
+                if i.op == Op::Bl {
+                    let ret = if i.delay { self.after_delay_slot(bus, i) } else { i.next() };
+                    self.regs[reg::BLINK] = ret;
+                }
+                return Ok(Flow::Jump(i.target));
+            }
+            Op::Br(c) => {
+                let (b, v) = (self.read(i.src1, i)?, self.read(i.src2, i)?);
+                return Ok(if c.holds(b, v) { Flow::Jump(i.target) } else { Flow::Next });
+            }
+            Op::Bbit0 | Op::Bbit1 => {
+                let (b, v) = (self.read(i.src1, i)?, self.read(i.src2, i)?);
+                let set = b & (1 << (v & 31)) != 0;
+                return Ok(if set == (i.op == Op::Bbit1) { Flow::Jump(i.target) } else { Flow::Next });
+            }
+            Op::J | Op::Jl => {
+                let target = self.read(i.src2, i)? & !1;
+                if !self.cond(i.cc) {
+                    return Ok(Flow::Next);
+                }
+                if i.op == Op::Jl {
+                    let ret = if i.delay { self.after_delay_slot(bus, i) } else { i.next() };
+                    self.regs[reg::BLINK] = ret;
+                }
+                if i.set_flags {
+                    // J.F [ILINKn]: STATUS32 <- STATUS32_Ln (PRM, Jcc).
+                    let saved = if i.src2 == Src::Reg(reg::ILINK1 as u8) { self.status32_l1 } else { self.status32_l2 };
+                    self.status32 = saved & status32::IMPLEMENTED & !status32::H;
+                }
+                return Ok(Flow::Jump(target));
+            }
+            Op::Lp => {
+                if self.cond(i.cc) {
+                    self.lp_start = i.next();
+                    self.lp_end = i.target;
+                    return Ok(Flow::Next);
+                }
+                return Ok(Flow::Jump(i.target));
+            }
+            _ => {}
+        }
+
+        if !self.cond(i.cc) {
+            return Ok(Flow::Next);
+        }
+
+        match i.op {
+            Op::Ld => return self.exec_load(i, bus),
+            Op::St => return self.exec_store(i, bus),
+            Op::Push => {
+                let v = self.read(i.data, i)?;
+                let sp = self.regs[reg::SP].wrapping_sub(4);
+                self.regs[reg::SP] = sp;
+                bus.write32(sp, v);
+                return Ok(Flow::Next);
+            }
+            Op::Pop => {
+                let sp = self.regs[reg::SP];
+                let v = bus.read32(sp);
+                self.regs[reg::SP] = sp.wrapping_add(4);
+                self.write_dst(i.dst, v);
+                return Ok(Flow::Next);
+            }
+            Op::Flag => {
+                let v = self.read(i.src2, i)?;
+                if v & status32::H != 0 {
+                    // "If the H flag is set ... all other flag states are
+                    // ignored and are not updated" (PRM, FLAG).
+                    self.status32 |= status32::H;
+                    self.debug |= debug::SH;
+                    return Ok(Flow::Halt(HaltReason::Flag));
+                }
+                self.status32 = (self.status32 & !status32::FLAG_WRITABLE) | (v & status32::FLAG_WRITABLE);
+                return Ok(Flow::Next);
+            }
+            Op::Lr => {
+                let n = self.read(i.src2, i)?;
+                let v = self.aux_read(n, i, ext)?;
+                self.write_dst(i.dst, v);
+                return Ok(Flow::Next);
+            }
+            Op::Sr => {
+                let v = self.read(i.src1, i)?;
+                let n = self.read(i.src2, i)?;
+                self.aux_write(n, v, i, ext)?;
+                return Ok(Flow::Next);
+            }
+            Op::Sleep => {
+                self.sleeping = true;
+                self.debug |= debug::ZZ;
+                return Ok(Flow::Next);
+            }
+            Op::Brk => {
+                self.status32 |= status32::H;
+                self.debug |= debug::BH;
+                return Ok(Flow::Halt(HaltReason::Brk));
+            }
+            // SWI "immediately raises the Instruction Error interrupt ...
+            // ILINK2 is used as the return address" (PRM, SWI).
+            Op::Swi => return Ok(Flow::Exception(2)),
+            Op::Nop => return Ok(Flow::Next),
+            _ => {}
+        }
+
+        let b = self.read(i.src1, i)?;
+        let c = self.read(i.src2, i)?;
+        let f = i.set_flags;
+        let carry = self.flag(status32::C);
+        let shift_carry = |n: u32, bit: u32| if n == 0 { None } else { Some((b >> bit) & 1 != 0) };
+
+        let (result, cf, vf): (Option<u32>, Option<bool>, Option<bool>) = match i.op {
+            Op::Add | Op::Add1 | Op::Add2 | Op::Add3 => {
+                let k = match i.op {
+                    Op::Add1 => 1,
+                    Op::Add2 => 2,
+                    Op::Add3 => 3,
+                    _ => 0,
+                };
+                let (r, cy, v) = add(b, c << k, false);
+                (Some(r), Some(cy), Some(v))
+            }
+            Op::Adc => {
+                let (r, cy, v) = add(b, c, carry);
+                (Some(r), Some(cy), Some(v))
+            }
+            Op::Sub | Op::Sub1 | Op::Sub2 | Op::Sub3 => {
+                let k = match i.op {
+                    Op::Sub1 => 1,
+                    Op::Sub2 => 2,
+                    Op::Sub3 => 3,
+                    _ => 0,
+                };
+                let (r, bw, v) = sub(b, c << k, false);
+                (Some(r), Some(bw), Some(v))
+            }
+            Op::Sbc => {
+                let (r, bw, v) = sub(b, c, carry);
+                (Some(r), Some(bw), Some(v))
+            }
+            Op::Rsub => {
+                let (r, bw, v) = sub(c, b, false);
+                (Some(r), Some(bw), Some(v))
+            }
+            Op::Neg => (Some(0u32.wrapping_sub(c)), None, None),
+            Op::Cmp => {
+                let (r, bw, v) = sub(b, c, false);
+                self.flags(r, Some(bw), Some(v));
+                return Ok(Flow::Next);
+            }
+            Op::Rcmp => {
+                let (r, bw, v) = sub(c, b, false);
+                self.flags(r, Some(bw), Some(v));
+                return Ok(Flow::Next);
+            }
+            Op::Tst => {
+                self.flags(b & c, None, None);
+                return Ok(Flow::Next);
+            }
+            Op::Btst => {
+                self.flags(b & (1 << (c & 31)), None, None);
+                return Ok(Flow::Next);
+            }
+            Op::Max | Op::Min => {
+                let (d, _, v) = sub(b, c, false);
+                let take_c = if i.op == Op::Max { (c as i32) >= (b as i32) } else { (c as i32) <= (b as i32) };
+                let r = if take_c { c } else { b };
+                self.write_dst(i.dst, r);
+                if f {
+                    // Z/N/V from src1-src2; C set if src2 is selected (PRM, MAX/MIN).
+                    self.flags(d, Some(take_c), Some(v));
+                }
+                return Ok(Flow::Next);
+            }
+            Op::And => (Some(b & c), None, None),
+            Op::Or => (Some(b | c), None, None),
+            Op::Bic => (Some(b & !c), None, None),
+            Op::Xor => (Some(b ^ c), None, None),
+            Op::Mov => (Some(c), None, None),
+            Op::Bset => (Some(b | (1 << (c & 31))), None, None),
+            Op::Bclr => (Some(b & !(1 << (c & 31))), None, None),
+            Op::Bxor => (Some(b ^ (1 << (c & 31))), None, None),
+            Op::Bmsk => {
+                let n = c & 31;
+                let mask = if n == 31 { u32::MAX } else { (1u32 << (n + 1)) - 1 };
+                (Some(b & mask), None, None)
+            }
+            // Single-operand, source in src2 (PRM, ASL/ASR/LSR/ROR/RRC/RLC).
+            Op::Asl => {
+                let r = c << 1;
+                (Some(r), Some(c >> 31 != 0), Some((c ^ r) >> 31 != 0))
+            }
+            Op::Asr => (Some(((c as i32) >> 1) as u32), Some(c & 1 != 0), None),
+            Op::Lsr => (Some(c >> 1), Some(c & 1 != 0), None),
+            Op::Ror => (Some(c.rotate_right(1)), Some(c & 1 != 0), None),
+            Op::Rrc => (Some(((carry as u32) << 31) | (c >> 1)), Some(c & 1 != 0), None),
+            // RLC: "V = Undefined"; left unchanged.
+            Op::Rlc => (Some((c << 1) | carry as u32), Some(c >> 31 != 0), None),
+            Op::Sexb => (Some(c as u8 as i8 as i32 as u32), None, None),
+            Op::Sexw => (Some(c as u16 as i16 as i32 as u32), None, None),
+            Op::Extb => (Some(c & 0xFF), None, None),
+            Op::Extw => (Some(c & 0xFFFF), None, None),
+            Op::Abs => {
+                let r = (c as i32).wrapping_abs() as u32;
+                // N and V set if src = 0x8000_0000; C = MSB of src (PRM, ABS).
+                (Some(r), Some(c >> 31 != 0), Some(c == 0x8000_0000))
+            }
+            Op::Not => (Some(!c), None, None),
+            // Barrel shifts: only the bottom 5 bits of src2 are used. For a
+            // shift of 0 no bit is shifted out and C is left unchanged
+            // (HYPOTHESIS: the PRM does not cover the zero case).
+            Op::AslM => {
+                let n = c & 31;
+                (Some(b << n), shift_carry(n, 32u32.wrapping_sub(n) & 31), None)
+            }
+            Op::LsrM => {
+                let n = c & 31;
+                (Some(b >> n), shift_carry(n, n.wrapping_sub(1)), None)
+            }
+            Op::AsrM => {
+                let n = c & 31;
+                (Some(((b as i32) >> n) as u32), shift_carry(n, n.wrapping_sub(1)), None)
+            }
+            Op::RorM => {
+                let n = c & 31;
+                (Some(b.rotate_right(n)), shift_carry(n, n.wrapping_sub(1)), None)
+            }
+            Op::Mul64 | Op::Mulu64 => {
+                let p = if i.op == Op::Mul64 {
+                    ((b as i32 as i64) * (c as i32 as i64)) as u64
+                } else {
+                    b as u64 * c as u64
+                };
+                self.regs[reg::MLO] = p as u32;
+                self.regs[reg::MHI] = (p >> 32) as u32;
+                self.regs[reg::MMID] = match self.config.mmid {
+                    MmidMode::Middle => (p >> 16) as u32,
+                    MmidMode::LowLeapster => p as u32,
+                };
+                return Ok(Flow::Next);
+            }
+            Op::Adds => {
+                let (r, s) = sat32(b as i32 as i64 + c as i32 as i64);
+                self.sticky_saturation(s, s);
+                (Some(r), Some(b.overflowing_add(c).1), Some(s))
+            }
+            Op::Subs => {
+                let (r, s) = sat32(b as i32 as i64 - c as i32 as i64);
+                self.sticky_saturation(s, s);
+                (Some(r), Some(b < c), Some(s))
+            }
+            Op::Addsdw | Op::Subsdw => {
+                let lane = |x: u32, y: u32| {
+                    let (x, y) = (x as u16 as i16 as i32, y as u16 as i16 as i32);
+                    sat16(if i.op == Op::Addsdw { x + y } else { x - y })
+                };
+                let (hi, s1) = lane(b >> 16, c >> 16);
+                let (lo, s2) = lane(b, c);
+                self.sticky_saturation(s1, s2);
+                (Some(((hi as u32) << 16) | lo as u32), None, Some(s1 || s2))
+            }
+            Op::Asls | Op::Asrs => {
+                let n = c as i32;
+                let left = if i.op == Op::Asls { n } else { n.wrapping_neg() };
+                let (r, s) = if left >= 0 {
+                    if left > 31 {
+                        // PRM, ASLS: saturates to 0x7FFF_FFFF / 0x8000_0000 for
+                        // positive non-zero / negative input.
+                        match (b as i32).signum() {
+                            0 => (0, false),
+                            1 => (i32::MAX as u32, true),
+                            _ => (i32::MIN as u32, true),
+                        }
+                    } else {
+                        sat32((b as i32 as i64) << left)
+                    }
+                } else {
+                    ((((b as i32) >> left.unsigned_abs().min(31)) as u32), false)
+                };
+                self.sticky_saturation(s, s);
+                (Some(r), None, Some(s))
+            }
+            Op::Sat16 => {
+                let (r, s) = sat16(c as i32);
+                self.sticky_saturation(s, s);
+                (Some(r as i16 as i32 as u32), None, Some(s))
+            }
+            Op::Abss | Op::Negs => {
+                let x = c as i32 as i64;
+                let (r, s) = sat32(if i.op == Op::Abss { x.abs() } else { -x });
+                self.sticky_saturation(s, s);
+                self.write_dst(i.dst, r);
+                if f {
+                    if i.op == Op::Abss {
+                        // "In contrast with other instructions, the value of
+                        // the input operand is used to set the flags" (PRM, ABSS).
+                        self.flags(c, None, Some(s));
+                    } else {
+                        self.flags(r, None, Some(s));
+                    }
+                }
+                return Ok(Flow::Next);
+            }
+            Op::Abssw | Op::Negsw => {
+                let x = c as u16 as i16 as i32;
+                let (r, s) = sat16(if i.op == Op::Abssw { x.abs() } else { -x });
+                let r = r as i16 as i32 as u32;
+                self.sticky_saturation(s, s);
+                self.write_dst(i.dst, r);
+                if f {
+                    if i.op == Op::Abssw {
+                        // Flags from the 16-bit input (PRM, ABSSW).
+                        self.flags((c as u16 as i16 as i32) as u32, None, Some(s));
+                    } else {
+                        self.flags(r, None, Some(s));
+                    }
+                }
+                return Ok(Flow::Next);
+            }
+            Op::Swap => (Some(c.rotate_left(16)), None, None),
+            Op::Norm => {
+                self.write_dst(i.dst, norm32(c));
+                if f {
+                    // Z/N describe the source (PRM, NORM).
+                    self.flags(c, None, None);
+                }
+                return Ok(Flow::Next);
+            }
+            Op::Normw => {
+                self.write_dst(i.dst, norm16(c));
+                if f {
+                    self.flags(c as u16 as i16 as i32 as u32, None, None);
+                }
+                return Ok(Flow::Next);
+            }
+            other => return Err(self.unsupported(i, &format!("no executor for {other:?}"))),
+        };
+
+        if let Some(r) = result {
+            self.write_dst(i.dst, r);
+            if f && !i.short {
+                self.flags(r, cf, vf);
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    fn sticky_saturation(&mut self, s1: bool, s2: bool) {
+        if s1 {
+            self.macmode |= MACMODE_S1;
+        }
+        if s2 {
+            self.macmode |= MACMODE_S2;
+        }
+    }
+
+    /// Effective address and base write-back (PRM Table 52).
+    fn address(&mut self, i: &Instr) -> Result<u32, CpuError> {
+        let base = self.read(i.src1, i)?;
+        let off = self.read(i.src2, i)?;
+        let scale = match i.mem.size {
+            Size::Word => 2,
+            Size::Half => 1,
+            Size::Byte => 0,
+        };
+        let (addr, new_base) = match i.mem.wb {
+            WriteBack::None => (base.wrapping_add(off), None),
+            WriteBack::Pre => (base.wrapping_add(off), Some(base.wrapping_add(off))),
+            WriteBack::Post => (base, Some(base.wrapping_add(off))),
+            WriteBack::Scaled => (base.wrapping_add(off << scale), None),
+        };
+        if let (Some(nb), Src::Reg(r)) = (new_base, i.src1) {
+            self.check_dst(Dst::Reg(r), i)?;
+            self.write_dst(Dst::Reg(r), nb);
+        }
+        Ok(addr)
+    }
+
+    fn exec_load(&mut self, i: &Instr, bus: &mut impl Bus) -> Result<Flow, CpuError> {
+        if let (Dst::Reg(d), Src::Reg(b)) = (i.dst, i.src1)
+            && d == b
+            && i.mem.wb != WriteBack::None
+            && i.mem.wb != WriteBack::Scaled
+        {
+            return Err(self.unpredictable(i, "load with write-back into its own base register"));
+        }
+        let addr = self.address(i)?;
+        if i.dst == Dst::Discard {
+            // PREFETCH: "The returning load is not written to any core
+            // register." No cache is modelled, so no memory access is made.
+            return Ok(Flow::Next);
+        }
+        let v = match (i.mem.size, i.mem.sign_extend) {
+            (Size::Word, _) => bus.read32(addr),
+            (Size::Half, false) => bus.read16(addr) as u32,
+            (Size::Half, true) => bus.read16(addr) as i16 as i32 as u32,
+            (Size::Byte, false) => bus.read8(addr) as u32,
+            (Size::Byte, true) => bus.read8(addr) as i8 as i32 as u32,
+        };
+        self.write_dst(i.dst, v);
+        Ok(Flow::Next)
+    }
+
+    fn exec_store(&mut self, i: &Instr, bus: &mut impl Bus) -> Result<Flow, CpuError> {
+        let v = self.read(i.data, i)?;
+        let addr = self.address(i)?;
+        match i.mem.size {
+            Size::Word => bus.write32(addr, v),
+            Size::Half => bus.write16(addr, v as u16),
+            Size::Byte => bus.write8(addr, v as u8),
+        }
+        Ok(Flow::Next)
+    }
+}

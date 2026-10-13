@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ribbit for Android: a NativeActivity app (no Java code). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.ribbit.emulator"
+    android:versionCode="1"
+    android:versionName="0.0.1">
+
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+
+    <!-- Read your own BIOS and cartridge dumps from anywhere on the device. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
+    <application
+        android:label="Ribbit"
+        android:icon="@mipmap/ic_launcher"
+        android:hasCode="false"
+        android:extractNativeLibs="true"
+        android:appCategory="game"
+        android:isGame="true"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <meta-data android:name="android.app.lib_name" android:value="ribbit" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

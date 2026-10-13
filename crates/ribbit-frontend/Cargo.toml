@@ -1,0 +1,33 @@
+[package]
+name = "ribbit-frontend"
+description = "Ribbit's user interface (desktop and Android): window, menus, input, sound, saves"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ribbit-core.workspace = true
+ribbit-cpu.workspace = true
+ribbit-memory.workspace = true
+ribbit-video.workspace = true
+ribbit-input.workspace = true
+ribbit-debug.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+toml.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+egui = "0.36.2"
+egui-wgpu = "0.36.2"
+cpal = "0.18"
+png = "0.18"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+egui-winit = "0.36.2"
+rfd = "0.17"
+
+[target.'cfg(target_os = "android")'.dependencies]
+egui-winit = { version = "0.36.2", default-features = false, features = ["android-native-activity"] }

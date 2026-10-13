@@ -1,0 +1,11 @@
+[package]
+name = "ribbit-cpu"
+description = "ARCtangent-A5 (ARCompact ISA) processor model for the Leapster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ribbit-memory.workspace = true
+thiserror.workspace = true

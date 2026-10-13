@@ -1,0 +1,13 @@
+[package]
+name = "ribbit-memory"
+description = "Leapster memory map, firmware/cartridge images, and NVRAM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+sha1.workspace = true
+crc32fast.workspace = true

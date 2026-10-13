@@ -1,0 +1,286 @@
+
+crates\ribbit-cpu\tests\vectors\corpus.o:     file format elf32-littlearc
+
+
+Disassembly of section .text:
+
+00000000 <_start>:
+   0:	2200 00c1           	add	r1,r2,r3
+   4:	2200 80c1           	add.f	r1,r2,r3
+   8:	2240 0fc1           	add	r1,r2,0x3f
+   c:	2180 0020           	add	r1,r1,-2048
+  10:	2180 0fdf           	add	r1,r1,2047
+  14:	21c0 0081           	add.eq	r1,r1,r2
+  18:	21c0 8162           	add.f.ne	r1,r1,0x5
+  1c:	2600 70c1 1234 5678 	add	r1,0x12345678,r3
+  24:	2200 0f81 8765 4321 	add	r1,r2,0x87654321
+  2c:	2200 00fe           	add	0,r2,r3
+  30:	2501 0184           	adc	r4,r5,r6
+  34:	2502 0184           	sub	r4,r5,r6
+  38:	2503 8184           	sbc.f	r4,r5,r6
+  3c:	2004 1247           	and	r7,r8,r9
+  40:	2045 1fc7           	or	r7,r8,0x3f
+  44:	2006 1247           	bic	r7,r8,r9
+  48:	2307 930a           	xor.f	r10,r11,r12
+  4c:	2208 00c1           	max	r1,r2,r3
+  50:	2209 80c1           	min.f	r1,r2,r3
+  54:	210a 0080           	mov	r1,r2
+  58:	214a 0c00           	mov	r1,0x30
+  5c:	218a 0fff           	mov	r1,-1
+  60:	21ca 0089           	mov.gt	r1,r2
+  64:	210a 8f80 dead beef 	mov.f	r1,0xdeadbeef
+  6c:	210b 8080           	tst	r1,r2
+  70:	210c 8080           	cmp	r1,r2
+  74:	210c 8f80 1234 5678 	cmp	r1,0x12345678
+  7c:	210d 8080           	rcmp	r1,r2
+  80:	220e 00c1           	rsub	r1,r2,r3
+  84:	224f 07c1           	bset	r1,r2,0x1f
+  88:	2210 00c1           	bclr	r1,r2,r3
+  8c:	2151 81c0           	btst	r1,0x7
+  90:	2252 00c1           	bxor	r1,r2,0x3
+  94:	2253 03c1           	bmsk	r1,r2,0xf
+  98:	2214 00c1           	add1	r1,r2,r3
+  9c:	2215 00c1           	add2	r1,r2,r3
+  a0:	2216 00c1           	add3	r1,r2,r3
+  a4:	2217 00c1           	sub1	r1,r2,r3
+  a8:	2218 00c1           	sub2	r1,r2,r3
+  ac:	2219 00c1           	sub3	r1,r2,r3
+  b0:	21c0 008d           	add.hi	r1,r1,r2
+  b4:	21c0 008e           	add.ls	r1,r1,r2
+  b8:	21c0 008f           	add.pnz	r1,r1,r2
+  bc:	21c0 0087           	add.v	r1,r1,r2
+  c0:	21c0 0088           	add.nv	r1,r1,r2
+  c4:	21c0 008a           	add.ge	r1,r1,r2
+  c8:	21c0 008b           	add.lt	r1,r1,r2
+  cc:	21c0 008c           	add.le	r1,r1,r2
+  d0:	21c0 0084           	add.n	r1,r1,r2
+  d4:	21c0 0083           	add.p	r1,r1,r2
+  d8:	21c0 0085           	add.c	r1,r1,r2
+  dc:	21c0 0086           	add.nc	r1,r1,r2
+  e0:	212f 0080           	asl	r1,r2
+  e4:	212f 8081           	asr.f	r1,r2
+  e8:	212f 0082           	lsr	r1,r2
+  ec:	212f 0083           	ror	r1,r2
+  f0:	212f 0084           	rrc	r1,r2
+  f4:	212f 0085           	sexb	r1,r2
+  f8:	212f 0086           	sexw	r1,r2
+  fc:	212f 0087           	extb	r1,r2
+ 100:	212f 0088           	extw	r1,r2
+ 104:	212f 0089           	abs	r1,r2
+ 108:	212f 008a           	not	r1,r2
+ 10c:	212f 008b           	rlc	r1,r2
+ 110:	216f 0fc0           	asl	r1,0x3f
+ 114:	212f 0f8a 1122 3344 	not	r1,0x11223344
+ 11c:	216f 003f           	sleep	0
+ 120:	216f 017f           	sleep	0x5
+ 124:	226f 003f           	swi
+ 128:	2029 0040           	flag	r1
+ 12c:	2069 00c0           	flag	0x3
+ 130:	20e9 0081           	flag.eq	r2
+ 134:	212a 0080           	lr	r1,[r2]
+ 138:	216a 0480           	lr	r1,[mulhi]
+ 13c:	212a 0f80 0000 1234 	lr	r1,[0x1234]
+ 144:	212b 0080           	sr	r1,[r2]
+ 148:	216b 0940           	sr	r1,[int_vector_base]
+ 14c:	26ab 70c1 1234 5678 	sr	0x12345678,[aux_irq_lv12]
+ 154:	264a 7000           	nop
+ 158:	2a00 00c1           	asl	r1,r2,r3
+ 15c:	2a41 0141           	lsr	r1,r2,0x5
+ 160:	2a02 00c1           	asr	r1,r2,r3
+ 164:	2a03 00c1           	ror	r1,r2,r3
+ 168:	2940 81c1           	asl.f	r1,r1,0x7
+ 16c:	2904 00be           	mul64	0,r1,r2
+ 170:	2905 0fbe 0000 1234 	mulu64	0,r1,0x1234
+ 178:	2904 0fbe 1234 5678 	mul64	0,r1,0x12345678
+ 180:	2a06 00c1           	adds	r1,r2,r3
+ 184:	2a07 00c1           	subs	r1,r2,r3
+ 188:	2a08 00c1           	divaw	r1,r2,r3
+ 18c:	2a0a 00c1           	asls	r1,r2,r3
+ 190:	2a0b 00c1           	asrs	r1,r2,r3
+ 194:	2a28 00c1           	addsdw	r1,r2,r3
+ 198:	2a29 00c1           	subsdw	r1,r2,r3
+ 19c:	292f 0080           	swap	r1,r2
+ 1a0:	292f 0081           	norm	r1,r2
+ 1a4:	292f 0082           	sat16	r1,r2
+ 1a8:	292f 0083           	rnd16	r1,r2
+ 1ac:	292f 0084           	abssw	r1,r2
+ 1b0:	292f 0085           	abss	r1,r2
+ 1b4:	292f 0086           	negsw	r1,r2
+ 1b8:	292f 0087           	negs	r1,r2
+ 1bc:	292f 0088           	normw	r1,r2
+ 1c0:	1200 0001           	ld	r1,[r2]
+ 1c4:	1204 0001           	ld	r1,[r2,4]
+ 1c8:	1200 8001           	ld	r1,[r2,-256]
+ 1cc:	12ff 0001           	ld	r1,[r2,255]
+ 1d0:	1201 0081           	ldb	r1,[r2,1]
+ 1d4:	1201 00c1           	ldb.x	r1,[r2,1]
+ 1d8:	1202 0101           	ldh	r1,[r2,2]
+ 1dc:	1202 0141           	ldh.x	r1,[r2,2]
+ 1e0:	1204 0201           	ld.aw	r1,[r2,4]
+ 1e4:	1204 0401           	ld.ab	r1,[r2,4]
+ 1e8:	1204 0601           	ld.as	r1,[r2,4]
+ 1ec:	1204 0701           	ldh.as	r1,[r2,4]
+ 1f0:	1208 0801           	ld.di	r1,[r2,8]
+ 1f4:	1600 7001 1234 5678 	ld	r1,[0x12345678]
+ 1fc:	2230 00c1           	ld	r1,[r2,r3]
+ 200:	2233 00c1           	ldb.x	r1,[r2,r3]
+ 204:	22b4 00c1           	ldh.ab	r1,[r2,r3]
+ 208:	2230 0f81 1234 5678 	ld	r1,[r2,0x12345678]
+ 210:	2630 70c1 1234 5678 	ld	r1,[0x12345678,r3]
+ 218:	1a00 0040           	st	r1,[r2]
+ 21c:	1afc 8040           	st	r1,[r2,-4]
+ 220:	1a01 0042           	stb	r1,[r2,1]
+ 224:	1a02 0044           	sth	r1,[r2,2]
+ 228:	1afc 8048           	st.aw	r1,[r2,-4]
+ 22c:	1a04 0050           	st.ab	r1,[r2,4]
+ 230:	1a03 0058           	st.as	r1,[r2,3]
+ 234:	1a00 0060           	st.di	r1,[r2]
+ 238:	1e00 7040 1234 5678 	st	r1,[0x12345678]
+ 240:	1a08 0f80 1122 3344 	st	0x11223344,[r2,8]
+ 248:	0001 0000           	b	0	;248 <_start+0x248>
+ 24c:	0009 0020           	b.d	8	;254 <_start+0x254>
+ 250:	264a 7000           	nop
+ 254:	07f4 ffc1           	beq	-12	;248 <_start+0x248>
+ 258:	07fc ffe2           	bne.d	-4	;254 <_start+0x254>
+ 25c:	264a 7000           	nop
+ 260:	07f4 ffc9           	bgt	-12	;254 <_start+0x254>
+ 264:	0171 0000           	b	368	;3d4 <_far>
+ 268:	0fe2 ffcf           	bl	-32	;248 <_start+0x248>
+ 26c:	0fea ffef           	bl.d	-24	;254 <_start+0x254>
+ 270:	264a 7000           	nop
+ 274:	0fd4 ffc2           	blne	-44	;248 <_start+0x248>
+ 278:	095e 0000           	bl	348	;3d4 <_far>
+ 27c:	09cd 8080           	breq	r1,r2,-52	;248 <_start+0x248>
+ 280:	09d5 80a1           	brne.d	r1,r2,-44	;254 <_start+0x254>
+ 284:	264a 7000           	nop
+ 288:	09cd 81d2           	brlt	r1,0x7,-52	;254 <_start+0x254>
+ 28c:	09c9 8083           	brge	r1,r2,-56	;254 <_start+0x254>
+ 290:	09c5 8084           	brlo	r1,r2,-60	;254 <_start+0x254>
+ 294:	09c1 8fd5           	brhs	r1,0x3f,-64	;254 <_start+0x254>
+ 298:	09bd 8f80 1234 5678 	breq	r1,0x12345678,-68	;254 <_start+0x254>
+ 2a0:	09b5 808e           	bbit0	r1,r2,-76	;254 <_start+0x254>
+ 2a4:	09b1 87ff           	bbit1.d	r1,0x1f,-80	;254 <_start+0x254>
+ 2a8:	264a 7000           	nop
+ 2ac:	2020 0040           	j	[r1]
+ 2b0:	2021 0080           	j.d	[r2]
+ 2b4:	264a 7000           	nop
+ 2b8:	2020 0f80 1234 5678 	j	0x12345678
+ 2c0:	20a0 0800           	j	32
+ 2c4:	20e0 00c1           	jeq	[r3]
+ 2c8:	2022 0040           	jl	[r1]
+ 2cc:	2023 0080           	jl.d	[r2]
+ 2d0:	264a 7000           	nop
+ 2d4:	2022 0f80 1234 5678 	jl	0x12345678
+ 2dc:	20e2 07c2           	jlne	[blink]
+ 2e0:	2020 8740           	j.f	[ilink1]
+ 2e4:	2020 8780           	j.f	[ilink2]
+ 2e8:	20a8 0180           	lp	12	;2f4 <_start+0x2f4>
+ 2ec:	264a 7000           	nop
+ 2f0:	264a 7000           	nop
+ 2f4:	20e8 0122           	lpne	0x8	;2fc <_start+0x2fc>
+ 2f8:	264a 7000           	nop
+ 2fc:	6140                	ld_s	r0,[r1,r2]
+ 2fe:	64ab                	ldb_s	r3,[r12,r13]
+ 300:	6716                	ldw_s	r14,[r15,r0]
+ 302:	6279                	add_s	r1,r2,r3
+ 304:	6a27                	add_s	r1,r2,0x7
+ 306:	6a2b                	sub_s	r1,r2,0x3
+ 308:	6a31                	asl_s	r1,r2,0x1
+ 30a:	6a3f                	asr_s	r1,r2,0x7
+ 30c:	7082                	add_s	r0,r0,r20
+ 30e:	708a                	mov_s	r0,r20
+ 310:	7092                	cmp_s	r0,r20
+ 312:	709a                	mov_s	r20,r0
+ 314:	70c7 1234 5678      	add_s	r0,r0,0x12345678
+ 31a:	71cf 1234 5678      	mov_s	r1,0x12345678
+ 320:	71d7 1234 5678      	cmp_s	r1,0x12345678
+ 326:	7900                	j_s	[r1]
+ 328:	7a20                	j_s.d	[r2]
+ 32a:	78e0                	nop_s
+ 32c:	7b40                	jl_s	[r3]
+ 32e:	7c60                	jl_s.d	[r12]
+ 330:	78e0                	nop_s
+ 332:	79c0                	sub_s.ne	r1,r1,r1
+ 334:	78e0                	nop_s
+ 336:	7ce0                	jeq_s	[blink]
+ 338:	7de0                	jne_s	[blink]
+ 33a:	7ee0                	j_s	[blink]
+ 33c:	7fe0                	j_s.d	[blink]
+ 33e:	78e0                	nop_s
+ 340:	7942                	sub_s	r1,r1,r2
+ 342:	7944                	and_s	r1,r1,r2
+ 344:	7945                	or_s	r1,r1,r2
+ 346:	7946                	bic_s	r1,r1,r2
+ 348:	7947                	xor_s	r1,r1,r2
+ 34a:	794b                	tst_s	r1,r2
+ 34c:	794c                	mul64_s	0,r1,r2
+ 34e:	794d                	sexb_s	r1,r2
+ 350:	794e                	sexw_s	r1,r2
+ 352:	794f                	extb_s	r1,r2
+ 354:	7950                	extw_s	r1,r2
+ 356:	7951                	abs_s	r1,r2
+ 358:	7952                	not_s	r1,r2
+ 35a:	7953                	neg_s	r1,r2
+ 35c:	7954                	add1_s	r1,r1,r2
+ 35e:	7955                	add2_s	r1,r1,r2
+ 360:	7956                	add3_s	r1,r1,r2
+ 362:	7958                	asl_s	r1,r1,r2
+ 364:	7959                	lsr_s	r1,r1,r2
+ 366:	795a                	asr_s	r1,r1,r2
+ 368:	795b                	asl_s	r1,r2
+ 36a:	795c                	asr_s	r1,r2
+ 36c:	795d                	lsr_s	r1,r2
+ 36e:	7fff                	brk_s
+ 370:	823f                	ld_s	r1,[r2,0x7c]
+ 372:	8a3f                	ldb_s	r1,[r2,0x1f]
+ 374:	923f                	ldw_s	r1,[r2,0x3e]
+ 376:	9a21                	ldw_s.x	r1,[r2,0x2]
+ 378:	a221                	st_s	r1,[r2,0x4]
+ 37a:	aa25                	stb_s	r1,[r2,0x5]
+ 37c:	b223                	stw_s	r1,[r2,0x6]
+ 37e:	b91f                	asl_s	r1,r1,0x1f
+ 380:	b921                	lsr_s	r1,r1,0x1
+ 382:	693a                	asr_s	r1,r1,0x2
+ 384:	692b                	sub_s	r1,r1,0x3
+ 386:	b984                	bset_s	r1,r1,0x4
+ 388:	b9a5                	bclr_s	r1,r1,0x5
+ 38a:	b9c6                	bmsk_s	r1,r1,0x6
+ 38c:	b9e7                	btst_s	r1,0x7
+ 38e:	c11f                	ld_s	r1,[sp,0x7c]
+ 390:	c122                	ldb_s	r1,[sp,0x8]
+ 392:	c141                	st_s	r1,[sp,0x4]
+ 394:	c163                	stb_s	r1,[sp,0xc]
+ 396:	c190                	add_s	r1,sp,0x40
+ 398:	c0a4                	add_s	sp,sp,0x10
+ 39a:	c1a4                	sub_s	sp,sp,0x10
+ 39c:	c1c1                	pop_s	r1
+ 39e:	c0d1                	pop_s	blink
+ 3a0:	c5e1                	push_s	r13
+ 3a2:	c0f1                	push_s	blink
+ 3a4:	c900                	ld_s	r0,[gp,-1024]
+ 3a6:	c8ff                	ld_s	r0,[gp,1020]
+ 3a8:	cb00                	ldb_s	r0,[gp,-256]
+ 3aa:	ccff                	ldw_s	r0,[gp,510]
+ 3ac:	cfff                	add_s	r0,gp,-4
+ 3ae:	d1ff                	ld_s	r1,[pcl,0x3fc]	;7a8 <_far+0x3d4>
+ 3b0:	d9ff                	mov_s	r1,0xff
+ 3b2:	e17f                	add_s	r1,r1,0x7f
+ 3b4:	e1ff                	cmp_s	r1,0x7f
+ 3b6:	e901                	breq_s	r1,0,2	;3b6 <_start+0x3b6>
+ 3b8:	e9ff                	brne_s	r1,0,-2	;3b6 <_start+0x3b6>
+ 3ba:	f1ff                	b_s	-2	;3b6 <_start+0x3b6>
+ 3bc:	f3fd                	beq_s	-6	;3b6 <_start+0x3b6>
+ 3be:	f5fd                	bne_s	-6	;3b6 <_start+0x3b6>
+ 3c0:	f63b                	bgt_s	-10	;3b6 <_start+0x3b6>
+ 3c2:	f67b                	bge_s	-10	;3b6 <_start+0x3b6>
+ 3c4:	f6b9                	blt_s	-14	;3b6 <_start+0x3b6>
+ 3c6:	f6f9                	ble_s	-14	;3b6 <_start+0x3b6>
+ 3c8:	f737                	bhi_s	-18	;3b6 <_start+0x3b6>
+ 3ca:	f777                	bhs_s	-18	;3b6 <_start+0x3b6>
+ 3cc:	f7b5                	blo_s	-22	;3b6 <_start+0x3b6>
+ 3ce:	f7f5                	bls_s	-22	;3b6 <_start+0x3b6>
+ 3d0:	f801                	bl_s	4	;3d4 <_far>
+ 3d2:	78e0                	nop_s
+
+000003d4 <_far>:
+ 3d4:	264a 7000           	nop
