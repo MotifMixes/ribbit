@@ -56,6 +56,12 @@ winit = "0.30"
 wgpu = "30"
 pollster = "1"
 
+[profile.release]
+# Whole-program optimisation: the interpreter's hot loop spans crates
+# (cpu, memory, core), so cross-crate inlining matters.
+lto = "fat"
+codegen-units = 1
+
 [profile.dev]
 # Emulator cores are unusably slow at opt-level 0.
 opt-level = 1

@@ -89,6 +89,7 @@ pub fn run(opts: StartOptions) -> Result<()> {
 
 /// Runs the app on an existing event loop (Android builds its own).
 pub fn run_with(event_loop: EventLoop<()>, opts: StartOptions) -> Result<()> {
+    crate::perf::prefer_performance_cores();
     let mut app = App::new(opts);
     event_loop.run_app(&mut app)?;
     app.shutdown();
@@ -313,7 +314,8 @@ impl App {
                 self.settings.window_scale = s;
                 self.save_settings();
                 if let Some(g) = &self.gpu {
-                    let _ = g.window.request_inner_size(Self::window_size(s));
+                    let screen = g.window.current_monitor().map(|m| m.size());
+                    let _ = g.window.request_inner_size(Self::window_size(Self::fitting_scale(s, screen)));
                 }
             }
             Action::SettingsChanged => self.save_settings(),
@@ -324,6 +326,19 @@ impl App {
                 event_loop.exit();
             }
         }
+    }
+
+    /// `scale`, reduced until the window fits on `screen` (16x is 2560
+    /// pixels, bigger than most screens).
+    fn fitting_scale(scale: u32, screen: Option<PhysicalSize<u32>>) -> u32 {
+        let mut scale = scale.max(1);
+        if let Some(screen) = screen {
+            // Leave room for the title bar and the taskbar.
+            while scale > 1 && (160 * scale > screen.width || 160 * scale + 56 + 120 > screen.height) {
+                scale -= 1;
+            }
+        }
+        scale
     }
 
     fn window_size(scale: u32) -> PhysicalSize<u32> {
@@ -682,7 +697,7 @@ impl App {
         self.lcd_px =
             Gpu::lcd_rect((area.min.x * ppp, area.min.y * ppp, area.width() * ppp, area.height() * ppp), display);
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = self.session.is_some().then_some((self.lcd_px, display));
+        let lcd = self.session.is_some().then_some((self.lcd_px, display, self.settings.ai));
         if let Err(e) = gpu.render(lcd, &jobs, &out.textures_delta, ppp) {
             self.fatal = Some(e);
             event_loop.exit();
@@ -701,7 +716,12 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("Ribbit")
-            .with_inner_size(Self::window_size(self.settings.window_scale.clamp(1, 8)))
+            // Never maximized or full screen at start: a normal window, the
+            // chosen size or the largest that fits the screen.
+            .with_inner_size(Self::window_size(Self::fitting_scale(
+                self.settings.window_scale,
+                event_loop.primary_monitor().map(|m| m.size()),
+            )))
             .with_min_inner_size(PhysicalSize::new(320, 240))
             .with_window_icon(crate::icon::window_icon());
         #[cfg(windows)]

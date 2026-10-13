@@ -247,16 +247,43 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
         });
         ui.menu_button("Video", |ui| {
             let before = settings.display;
-            ui.radio_value(&mut settings.display, Display::Sharp, "Sharp (crisp, fills the window)");
+            ui.radio_value(&mut settings.display, Display::Ai, "AI upscale (HD)");
+            ui.radio_value(&mut settings.display, Display::Sharp, "Sharp pixels");
             ui.radio_value(&mut settings.display, Display::Lcd, "LCD grid");
             ui.radio_value(&mut settings.display, Display::Pixel, "Pixel perfect (whole-number scale)");
             ui.radio_value(&mut settings.display, Display::Smooth, "Smooth (bicubic)");
             if settings.display != before {
                 actions.push(Action::SettingsChanged);
             }
+            ui.menu_button("AI upscale settings", |ui| {
+                use crate::upscale::{Model, Resolution, Style};
+                let before = settings.ai;
+                ui.label(egui::RichText::new("Style").strong());
+                ui.radio_value(&mut settings.ai.style, Style::Clean, "Clean (ArtCNN)")
+                    .on_hover_text("Crisp lines and flat fills. Best for Leapster games, whose art is antialiased vector graphics.");
+                ui.radio_value(&mut settings.ai.style, Style::Soft, "Soft (Anime4K)")
+                    .on_hover_text("A softer neural upscaler.");
+                ui.radio_value(&mut settings.ai.style, Style::Cartoon, "Pixel-art edges (ScaleFX + ArtCNN)")
+                    .on_hover_text("For flat pixel art. Blotchy on antialiased art.");
+                ui.separator();
+                ui.label(egui::RichText::new("Quality").strong());
+                for m in Model::ALL {
+                    ui.radio_value(&mut settings.ai.model, m, m.label());
+                }
+                ui.label(egui::RichText::new("Bigger networks are sharper and use more GPU.").weak());
+                ui.separator();
+                ui.label(egui::RichText::new("Resolution").strong());
+                for r in Resolution::ALL {
+                    ui.radio_value(&mut settings.ai.resolution, r, r.label());
+                }
+                if settings.ai != before {
+                    settings.display = Display::Ai;
+                    actions.push(Action::SettingsChanged);
+                }
+            });
             ui.separator();
             ui.menu_button("Window size", |ui| {
-                for s in 2..=6 {
+                for s in [2, 3, 4, 16] {
                     if ui.radio(settings.window_scale == s, format!("{s}x ({}x{})", 160 * s, 160 * s)).clicked() {
                         actions.push(Action::SetWindowScale(s));
                         ui.close();
@@ -430,6 +457,7 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
         ui.add_space(6.0);
         ui.label("Ribbit includes no firmware or games. Use dumps of hardware you own.");
         ui.label("Parts of the audio and touchscreen behaviour follow MAME's research (BSD-3-Clause).");
+        ui.label("AI upscaling: ArtCNN (Joao Chrisostomo, Kacper Michajlow), Anime4K (bloc97), ScaleFX (Sp00kyFox); all MIT.");
         ui.add_space(6.0);
         ui.label(egui::RichText::new(format!("Saves: {}", info.save_dir)).weak());
     });

@@ -34,7 +34,12 @@ cargo run -p ribbit-desktop -- --help
     LB/RB = volume, Guide = menu.
   * Esc = pause, Tab (hold) = fast-forward, \` (hold) = rewind, F5/F9 = quick save/load state (slots 1–5 in the
     Emulation menu), F11 = fullscreen, F12 = screenshot.
-  * Video → Sharp (default), LCD grid, Pixel perfect or Smooth.
+  * Video → **AI upscale (HD)** (default): the ArtCNN neural network (WGSL port, `scripts/gen-artcnn.py`)
+    upscales the picture, up to 2560 × 2560. Video → AI upscale settings picks the style (Clean = ArtCNN, Soft =
+    Anime4K `scripts/gen-anime4k.py`, Pixel-art edges = ScaleFX first), quality (Fast … Ultra) and resolution
+    (Auto, 2×, 3×, 4×, 16×). `cargo run --release -p ribbit-frontend --example upscale` runs it on a saved frame.
+    Also Sharp pixels, LCD grid, Pixel perfect, Smooth. Window size 2×, 3×, 4× or 16× (as big as fits; never maximized or full screen unless you ask).
+    Display only: none of this changes emulation.
   * Emulation → Advanced holds the experimental options: MAME's power-line workaround (needed by v1.5) and the
     CPU clock (96 MHz nominal, 48 MHz as in MAME).
 * **Release zip**: `python -I scripts/package-release.py` writes `target/dist/Ribbit-<version>-windows-x64.zip`

@@ -76,6 +76,13 @@ enum Command {
         /// Write the decoded LCD contents to a PPM file afterwards.
         #[arg(long)]
         dump_frame: Option<PathBuf>,
+        /// Start from a save state (same BIOS and cartridge); --max-steps
+        /// then counts from the state.
+        #[arg(long)]
+        load_state: Option<PathBuf>,
+        /// Write a save state when the run ends.
+        #[arg(long)]
+        save_state: Option<PathBuf>,
         /// DEBUG ONLY: fixed read value for an unmodelled peripheral register,
         /// e.g. 0x01809004=0x00200000 (to follow another emulator's path).
         #[arg(long, value_parser = parse_stub)]
@@ -189,6 +196,8 @@ fn real_main() -> Result<ExitCode> {
             trace,
             tail,
             dump_frame,
+            load_state,
+            save_state,
             mmio_stub,
             dump_mem,
             straps,
@@ -211,6 +220,11 @@ fn real_main() -> Result<ExitCode> {
             config.input_lines = input_lines.or(config.input_lines);
             config.experimental_mame_touch |= experimental_mame_touch;
             let mut machine = build_machine(&images, &config)?;
+            if let Some(path) = &load_state {
+                let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+                machine.load_state(&bytes).with_context(|| format!("loading state {}", path.display()))?;
+                println!("state loaded from {} (cycle {})", path.display(), machine.cpu.cycles);
+            }
             if !touch_press.is_empty() {
                 machine
                     .enable_experimental_mame_touch(ribbit_core::io::touch::MameTouchConfig { presses: touch_press });
@@ -291,6 +305,10 @@ fn real_main() -> Result<ExitCode> {
             if let Some(path) = dump_frame {
                 let status = dump_ppm(&machine, &path)?;
                 println!("frame: {status:?} -> {}", path.display());
+            }
+            if let Some(path) = save_state {
+                std::fs::write(&path, machine.save_state()).with_context(|| format!("writing {}", path.display()))?;
+                println!("state saved to {}", path.display());
             }
             Ok(match report.stop {
                 StopReason::Cpu(_) => ExitCode::from(2),

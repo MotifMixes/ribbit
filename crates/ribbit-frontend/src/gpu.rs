@@ -1,8 +1,9 @@
-//! wgpu presentation: the emulated LCD (exact pixels, sharp-bilinear, an LCD
-//! grid look or Catmull-Rom smoothed)
+//! wgpu presentation: the emulated LCD (AI-upscaled, exact pixels,
+//! sharp-bilinear, an LCD grid look or Catmull-Rom smoothed)
 //! plus the egui user interface on top. Display only: nothing here changes
 //! what is emulated.
 
+use crate::upscale::{AiSettings, Network, Upscaler};
 use anyhow::{Context, Result};
 use ribbit_video::{HEIGHT, WIDTH};
 use std::sync::Arc;
@@ -109,21 +110,61 @@ fn fs_lcd(in: Out) -> @location(0) vec4<f32> {
     let strength = 0.22 * clamp((scale - 2.0) / 2.0, 0.0, 1.0);
     return vec4<f32>(c.rgb * (1.0 - strength * (1.0 - line)), 1.0);
 }
+
+// Catmull-Rom kernel.
+fn cr(x: f32) -> f32 {
+    let a = abs(x);
+    if (a < 1.0) {
+        return (1.5 * a - 2.5) * a * a + 1.0;
+    }
+    if (a < 2.0) {
+        return ((-0.5 * a + 2.5) * a - 4.0) * a + 2.0;
+    }
+    return 0.0;
+}
+
+// Fits an upscaled picture to the window: Catmull-Rom when enlarging, the
+// same kernel widened to the footprint when shrinking (no aliasing).
+@fragment
+fn fs_resample(in: Out) -> @location(0) vec4<f32> {
+    let p = in.uv * vec2<f32>(textureDimensions(tex));
+    let fw = fwidth(p);
+    let r = clamp(max(fw.x, fw.y), 1.0, 4.0);
+    let c = p - 0.5;
+    let lo = vec2<i32>(ceil(c - 2.0 * r));
+    let hi = vec2<i32>(floor(c + 2.0 * r));
+    var acc = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var j = lo.y; j <= hi.y; j++) {
+        let wy = cr((c.y - f32(j)) / r);
+        for (var i = lo.x; i <= hi.x; i++) {
+            let w = wy * cr((c.x - f32(i)) / r);
+            acc += texel(vec2<i32>(i, j)).rgb * w;
+            wsum += w;
+        }
+    }
+    return vec4<f32>(clamp(acc / wsum, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
 "#;
 
 /// How the 160x160 LCD image is scaled (display only).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum Display {
+    /// Neural-network upscaling (see `upscale`), fills the space.
+    #[default]
+    Ai,
     /// Exact pixels, whole-number scale.
     Pixel,
     /// Square pixels with antialiased edges, fills the space.
-    #[default]
     Sharp,
     /// Sharp plus a faint pixel grid.
     Lcd,
     /// Catmull-Rom bicubic, fills the space.
     Smooth,
 }
+
+/// Where the LCD goes (x, y, w, h in physical pixels) and how it is drawn.
+pub type LcdView = ((f32, f32, f32, f32), Display, AiSettings);
 
 pub struct Gpu {
     pub window: Arc<Window>,
@@ -132,7 +173,17 @@ pub struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     texture: wgpu::Texture,
+    lcd_view: wgpu::TextureView,
+    bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     bind_group: wgpu::BindGroup,
+    resample: wgpu::RenderPipeline,
+    /// None when the GPU cannot render to Rgba16Float (AI falls back to Sharp).
+    upscaler: Option<Upscaler>,
+    /// The LCD changed since the last upscale.
+    frame_dirty: bool,
+    last_frame: Vec<u32>,
+    last_chain: Vec<Network>,
     pixel: wgpu::RenderPipeline,
     sharp: wgpu::RenderPipeline,
     lcd: wgpu::RenderPipeline,
@@ -247,8 +298,34 @@ impl Gpu {
             })
         };
         let (pixel, sharp, lcd, smooth) = (make("fs"), make("fs_sharp"), make("fs_lcd"), make("fs_smooth"));
+        let resample = make("fs_resample");
+        let upscaler = Upscaler::supported(&adapter).then(Upscaler::default);
+        if upscaler.is_none() {
+            tracing::warn!(target: "ribbit::video", "GPU cannot render Rgba16Float: AI upscaling unavailable");
+        }
         let egui = egui_wgpu::Renderer::new(&device, config.format, egui_wgpu::RendererOptions::default());
-        Ok(Self { window, surface, device, queue, config, texture, bind_group, pixel, sharp, lcd, smooth, egui })
+        Ok(Self {
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            texture,
+            lcd_view: view,
+            bgl,
+            sampler,
+            bind_group,
+            resample,
+            upscaler,
+            frame_dirty: true,
+            last_frame: Vec::new(),
+            last_chain: Vec::new(),
+            pixel,
+            sharp,
+            lcd,
+            smooth,
+            egui,
+        })
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -264,12 +341,17 @@ impl Gpu {
         let (ax, ay, aw, ah) = area;
         let side = match display {
             Display::Pixel => ((aw.min(ah) / WIDTH as f32).floor().max(1.0)) * WIDTH as f32,
-            Display::Sharp | Display::Lcd | Display::Smooth => aw.min(ah).max(1.0),
+            Display::Ai | Display::Sharp | Display::Lcd | Display::Smooth => aw.min(ah).max(1.0),
         };
         (ax + (aw - side) / 2.0, ay + (ah - side) / 2.0, side, side)
     }
 
-    pub fn upload(&self, frame: &[u32; WIDTH * HEIGHT]) {
+    pub fn upload(&mut self, frame: &[u32; WIDTH * HEIGHT]) {
+        if self.last_frame.as_slice() != frame.as_slice() {
+            self.last_frame.clear();
+            self.last_frame.extend_from_slice(frame);
+            self.frame_dirty = true;
+        }
         let rgba: Vec<u8> = frame.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 0xFF]).collect();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -287,7 +369,7 @@ impl Gpu {
     /// Draws the LCD into `lcd` (None: no game screen) and egui on top.
     pub fn render(
         &mut self,
-        lcd: Option<((f32, f32, f32, f32), Display)>,
+        lcd: Option<LcdView>,
         paint_jobs: &[egui::ClippedPrimitive],
         textures: &egui::TexturesDelta,
         pixels_per_point: f32,
@@ -317,6 +399,27 @@ impl Gpu {
             egui_wgpu::ScreenDescriptor { size_in_pixels: [self.config.width, self.config.height], pixels_per_point };
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let extra = self.egui.update_buffers(&self.device, &self.queue, &mut encoder, paint_jobs, &screen);
+        // AI upscale, only when the picture or the chain changed.
+        let mut ai_bind_group = None;
+        if let (Some(((_, _, w, h), Display::Ai, ai)), Some(up)) = (lcd, &mut self.upscaler) {
+            let size = WIDTH as u32;
+            let chain = ai.chain(size, ai.resolution.target(size, w.min(h)));
+            let view = if self.frame_dirty || chain != self.last_chain || up.output().is_none() {
+                self.frame_dirty = false;
+                self.last_chain.clone_from(&chain);
+                up.run(&self.device, &mut encoder, &self.lcd_view, size, &chain, 0)
+            } else {
+                up.output().unwrap()
+            };
+            ai_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("upscaled"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            }));
+        }
         {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -333,19 +436,27 @@ impl Gpu {
                     ..Default::default()
                 })
                 .forget_lifetime();
-            if let Some(((x, y, w, h), display)) = lcd {
+            if let Some(((x, y, w, h), display, _)) = lcd {
                 let (fw, fh) = (self.config.width as f32, self.config.height as f32);
                 let (x0, y0) = (x.max(0.0), y.max(0.0));
                 let (w, h) = (w.min(fw - x0), h.min(fh - y0));
                 if w >= 1.0 && h >= 1.0 {
                     pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
-                    pass.set_pipeline(match display {
-                        Display::Pixel => &self.pixel,
-                        Display::Sharp => &self.sharp,
-                        Display::Lcd => &self.lcd,
-                        Display::Smooth => &self.smooth,
-                    });
-                    pass.set_bind_group(0, &self.bind_group, &[]);
+                    match (&ai_bind_group, display) {
+                        (Some(group), Display::Ai) => {
+                            pass.set_pipeline(&self.resample);
+                            pass.set_bind_group(0, group, &[]);
+                        }
+                        _ => {
+                            pass.set_pipeline(match display {
+                                Display::Pixel => &self.pixel,
+                                Display::Ai | Display::Sharp => &self.sharp,
+                                Display::Lcd => &self.lcd,
+                                Display::Smooth => &self.smooth,
+                            });
+                            pass.set_bind_group(0, &self.bind_group, &[]);
+                        }
+                    }
                     pass.draw(0..3, 0..1);
                     pass.set_viewport(0.0, 0.0, fw, fh, 0.0, 1.0);
                 }
@@ -371,7 +482,7 @@ mod tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
             .validate(&module)
             .expect("shader validates");
-        for entry in ["fs", "fs_sharp", "fs_lcd", "fs_smooth"] {
+        for entry in ["fs", "fs_sharp", "fs_lcd", "fs_smooth", "fs_resample"] {
             assert!(module.entry_points.iter().any(|e| e.name == entry), "{entry}");
         }
     }

@@ -3,7 +3,8 @@
 Run:    python -I scripts/package-release.py [--skip-build]
 Output: target/dist/Ribbit-<version>-windows-x64.zip
 
-The zip holds only the two programs and a short read-me written here. It is
+The zip holds only the two programs, a short read-me written here and the
+third-party licence notices. It is
 assembled in a fresh staging folder from named files, so no BIOS, ROM, save
 or other local file can end up inside; the script also refuses any file that
 is not on its list.
@@ -47,6 +48,14 @@ Controls (Input > Key bindings... to change)
   Controllers (XInput etc.): D-pad/stick, A, B, X/Y = Hint, Start = Pause,
   Back = Home, LB/RB = volume, Guide = menu.
 
+Picture
+-------
+Video > AI upscale (HD) is the default: the ArtCNN neural network upscales
+the 160x160 picture, up to 2560 x 2560 (Video > AI upscale settings: style
+Clean / Soft / Pixel-art edges, quality, resolution 2x / 3x / 4x / 16x or
+Auto). Window size: 2x, 3x, 4x or 16x (16x: as big as fits).
+Sharp pixels, LCD grid, Pixel perfect and Smooth are still there.
+
 Where things go
 ---------------
 Settings, game saves, save states and screenshots: %APPDATA%\\Ribbit
@@ -88,7 +97,9 @@ def main():
         shutil.copy2(src, stage / exe)
     (stage / 'README.txt').write_bytes(README.format(version=ver).replace('\n', '\r\n').encode('utf-8'))
 
-    allowed = set(PROGRAMS) | {'README.txt'}
+    shutil.copy2(ROOT / 'THIRD-PARTY-NOTICES.txt', stage / 'THIRD-PARTY-NOTICES.txt')
+
+    allowed = set(PROGRAMS) | {'README.txt', 'THIRD-PARTY-NOTICES.txt'}
     found = {p.name for p in stage.iterdir()}
     if found != allowed:
         sys.exit(f'unexpected files in the package: {sorted(found - allowed)}')

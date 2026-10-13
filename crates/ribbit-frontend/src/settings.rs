@@ -18,6 +18,8 @@ pub struct Settings {
     /// Cartridges opened recently, newest first.
     pub recent_carts: Vec<PathBuf>,
     pub display: Display,
+    /// AI upscaler style, quality and resolution (Display::Ai).
+    pub ai: crate::upscale::AiSettings,
     /// Window size as a multiple of 160 pixels.
     pub window_scale: u32,
     pub volume: f32,
@@ -48,7 +50,8 @@ impl Default for Settings {
         Self {
             bios: None,
             recent_carts: Vec::new(),
-            display: Display::Sharp,
+            display: Display::Ai,
+            ai: Default::default(),
             window_scale: 4,
             volume: 0.8,
             muted: false,

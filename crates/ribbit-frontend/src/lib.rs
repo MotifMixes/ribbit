@@ -9,9 +9,11 @@ mod files;
 mod gamepad;
 mod gpu;
 mod icon;
+mod perf;
 pub mod saves;
 pub mod settings;
 mod ui;
+pub mod upscale;
 
 pub use app::{StartOptions, run, run_with};
 pub use settings::default_data_dir;
