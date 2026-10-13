@@ -6,7 +6,7 @@
 
 use ribbit_core::{Machine, StopReason};
 use ribbit_debug::Breakpoints;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -42,6 +42,11 @@ struct Shared {
     audio: Mutex<Vec<i16>>,
     stats: Mutex<Stats>,
     quit: AtomicBool,
+    /// UI-thread lock requests in progress. std's mutex is not fair: the
+    /// emulation thread, re-locking right after each chunk, could otherwise
+    /// keep the UI waiting for tens of milliseconds (measured up to 43 ms:
+    /// dropped clicks, stuttering sound).
+    ui_waiting: AtomicUsize,
 }
 
 pub struct Emu {
@@ -58,6 +63,7 @@ impl Emu {
             audio: Mutex::new(Vec::new()),
             stats: Mutex::new(Stats::default()),
             quit: AtomicBool::new(false),
+            ui_waiting: AtomicUsize::new(0),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -73,7 +79,15 @@ impl Emu {
     /// The machine, for the UI thread (held briefly: the emulation thread
     /// waits meanwhile).
     pub fn lock(&self) -> MutexGuard<'_, Machine> {
-        self.shared.machine.lock().unwrap_or_else(|e| e.into_inner())
+        self.shared.ui_waiting.fetch_add(1, Ordering::SeqCst);
+        let t = Instant::now();
+        let g = self.shared.machine.lock().unwrap_or_else(|e| e.into_inner());
+        self.shared.ui_waiting.fetch_sub(1, Ordering::SeqCst);
+        let waited = t.elapsed();
+        if waited > Duration::from_millis(8) {
+            tracing::debug!(target: "ribbit::emu", waited_ms = waited.as_secs_f64() * 1e3, "UI waited for the machine");
+        }
+        g
     }
 
     pub fn set_control(&self, c: Control) {
@@ -153,6 +167,10 @@ fn run(s: &Shared) {
             }
             g.0
         };
+        // Let a waiting UI thread go first.
+        while s.ui_waiting.load(Ordering::SeqCst) > 0 {
+            std::thread::yield_now();
+        }
         let mut m = s.machine.lock().unwrap_or_else(|e| e.into_inner());
         let hz = m.clock.cpu_hz as f64;
         let now = Instant::now();

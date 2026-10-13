@@ -272,6 +272,11 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 }
                 ui.label(egui::RichText::new("Bigger networks are sharper and use more GPU.").weak());
                 ui.separator();
+                ui.label(egui::RichText::new("Sharpness").strong());
+                for sh in crate::upscale::Sharpness::ALL {
+                    ui.radio_value(&mut settings.ai.sharpness, sh, sh.label());
+                }
+                ui.separator();
                 ui.label(egui::RichText::new("Resolution").strong());
                 for r in Resolution::ALL {
                     ui.radio_value(&mut settings.ai.resolution, r, r.label());

@@ -19,6 +19,7 @@ mod restore_soft_m;
 mod restore_soft_vl;
 mod restore_vl;
 mod scalefx;
+mod sharpen;
 
 use std::collections::HashMap;
 
@@ -58,10 +59,14 @@ pub enum Network {
     ScaleFx,
     ArtCnnC4F16,
     ArtCnnC4F32,
+    SharpenLow,
+    SharpenMedium,
+    SharpenHigh,
+    SharpenMax,
 }
 
 impl Network {
-    pub const ALL: [Network; 11] = [
+    pub const ALL: [Network; 15] = [
         Network::UpscaleS,
         Network::UpscaleM,
         Network::UpscaleL,
@@ -73,6 +78,10 @@ impl Network {
         Network::ScaleFx,
         Network::ArtCnnC4F16,
         Network::ArtCnnC4F32,
+        Network::SharpenLow,
+        Network::SharpenMedium,
+        Network::SharpenHigh,
+        Network::SharpenMax,
     ];
 
     pub fn passes(self) -> &'static [Pass] {
@@ -88,6 +97,10 @@ impl Network {
             Network::ScaleFx => scalefx::PASSES,
             Network::ArtCnnC4F16 => artcnn_c4f16::PASSES,
             Network::ArtCnnC4F32 => artcnn_c4f32::PASSES,
+            Network::SharpenLow => sharpen::LOW,
+            Network::SharpenMedium => sharpen::MEDIUM,
+            Network::SharpenHigh => sharpen::HIGH,
+            Network::SharpenMax => sharpen::MAX,
         }
     }
 
@@ -113,6 +126,10 @@ impl Network {
             "scalefx" => Network::ScaleFx,
             "art16" => Network::ArtCnnC4F16,
             "art32" => Network::ArtCnnC4F32,
+            "sharp1" => Network::SharpenLow,
+            "sharp2" => Network::SharpenMedium,
+            "sharp3" => Network::SharpenHigh,
+            "sharp4" => Network::SharpenMax,
             _ => return None,
         })
     }
@@ -217,12 +234,50 @@ impl Resolution {
     }
 }
 
+/// Sharpening after the upscale (contrast-adaptive; Max: limited unsharp
+/// mask).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum Sharpness {
+    Off,
+    Low,
+    Medium,
+    #[default]
+    High,
+    Max,
+}
+
+impl Sharpness {
+    pub const ALL: [Sharpness; 5] =
+        [Sharpness::Off, Sharpness::Low, Sharpness::Medium, Sharpness::High, Sharpness::Max];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sharpness::Off => "Off",
+            Sharpness::Low => "Low",
+            Sharpness::Medium => "Medium",
+            Sharpness::High => "High",
+            Sharpness::Max => "Max",
+        }
+    }
+
+    fn network(self) -> Option<Network> {
+        match self {
+            Sharpness::Off => None,
+            Sharpness::Low => Some(Network::SharpenLow),
+            Sharpness::Medium => Some(Network::SharpenMedium),
+            Sharpness::High => Some(Network::SharpenHigh),
+            Sharpness::Max => Some(Network::SharpenMax),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AiSettings {
     pub style: Style,
     pub model: Model,
     pub resolution: Resolution,
+    pub sharpness: Sharpness,
 }
 
 impl AiSettings {
@@ -245,6 +300,7 @@ impl AiSettings {
         if chain.is_empty() {
             chain.push(self.model.upscaler(self.style, 0));
         }
+        chain.extend(self.sharpness.network());
         chain
     }
 }
@@ -515,19 +571,29 @@ mod tests {
     #[test]
     fn chains_reach_the_target_by_the_1_2x_rule() {
         use Network::*;
-        let soft = AiSettings { style: Style::Soft, model: Model::Balanced, resolution: Resolution::Auto };
+        let soft = AiSettings {
+            style: Style::Soft,
+            model: Model::Balanced,
+            resolution: Resolution::Auto,
+            sharpness: Sharpness::Off,
+        };
         assert_eq!(soft.chain(160, 150.0), vec![UpscaleM], "never empty");
         assert_eq!(soft.chain(160, 640.0), vec![UpscaleM; 2]);
         assert_eq!(soft.chain(160, 2160.0), vec![UpscaleM; 4]);
         assert_eq!(soft.chain(160, 10_000.0), vec![UpscaleM; 4], "capped at 2560");
-        let cartoon = AiSettings { style: Style::Cartoon, model: Model::High, resolution: Resolution::Auto };
+        let cartoon = AiSettings {
+            style: Style::Cartoon,
+            model: Model::High,
+            resolution: Resolution::Auto,
+            sharpness: Sharpness::Off,
+        };
         assert_eq!(cartoon.chain(160, 480.0), vec![ScaleFx]);
         assert_eq!(cartoon.chain(160, 1080.0), vec![ScaleFx, ArtCnnC4F32]);
         assert_eq!(cartoon.chain(160, 2160.0), vec![ScaleFx, ArtCnnC4F32, ArtCnnC4F16]);
         let clean = AiSettings::default();
-        assert_eq!(clean.chain(160, 2160.0), vec![ArtCnnC4F32, ArtCnnC4F32, ArtCnnC4F16, ArtCnnC4F16]);
+        assert_eq!(clean.chain(160, 2160.0), vec![ArtCnnC4F32, ArtCnnC4F32, ArtCnnC4F16, ArtCnnC4F16, SharpenHigh]);
         let fast = AiSettings { model: Model::Fast, ..clean };
-        assert_eq!(fast.chain(160, 640.0), vec![ArtCnnC4F16, UpscaleS]);
+        assert_eq!(fast.chain(160, 640.0), vec![ArtCnnC4F16, UpscaleS, SharpenHigh]);
         assert_eq!(Resolution::X16.target(160, 500.0), 2560.0);
         assert_eq!(Resolution::Auto.target(160, 500.0), 500.0);
     }
