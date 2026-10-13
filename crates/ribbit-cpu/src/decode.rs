@@ -11,6 +11,7 @@
 //! the executor and the disassembler can report them.
 
 use crate::isa::*;
+use crate::why;
 use ribbit_memory::Bus;
 
 /// Result of the old length-only probe; kept for callers that only need the
@@ -138,7 +139,7 @@ fn decode32(i: &mut Instr, w: u32) {
                 sext((hi << 10) | lo, 20) << 1
             } else {
                 if bit(w, 4) {
-                    i.op = Op::Illegal("B far: reserved bit 4 set");
+                    i.op = Op::Illegal(why!("B far: reserved bit 4 set"));
                 }
                 sext(((w & 0xF) << 20) | (hi << 10) | lo, 24) << 1
             };
@@ -173,11 +174,11 @@ fn decode32(i: &mut Instr, w: u32) {
                 0x5 => Op::Br(BrCond::Hs),
                 0xE => Op::Bbit0,
                 0xF => Op::Bbit1,
-                _ => Op::Illegal("BRcc: reserved sub-opcode"),
+                _ => Op::Illegal(why!("BRcc: reserved sub-opcode")),
             };
             // The PRM defines the long-immediate forms only without .d.
             if i.delay && (matches!(i.src1, Src::Limm(_)) || matches!(i.src2, Src::Limm(_))) {
-                i.op = Op::Illegal("BRcc/BBIT.d with long immediate");
+                i.op = Op::Illegal(why!("BRcc/BBIT.d with long immediate"));
             }
         }
         0x02 => {
@@ -202,11 +203,11 @@ fn decode32(i: &mut Instr, w: u32) {
             i.src2 = Src::Imm(s9);
             i.data = src_reg((w >> 6) & 0x3F);
             if zz == 3 {
-                i.op = Op::Illegal("ST: reserved data size");
+                i.op = Op::Illegal(why!("ST: reserved data size"));
             } else if zz == 1 && aa == 3 {
-                i.op = Op::Illegal("STB.AS: undefined (PRM Table 52)");
+                i.op = Op::Illegal(why!("STB.AS: undefined (PRM Table 52)"));
             } else if b == 62 && (aa == 1 || aa == 2) {
-                i.op = Op::Illegal("ST: address write-back with long-immediate base");
+                i.op = Op::Illegal(why!("ST: address write-back with long-immediate base"));
             }
         }
         0x04 => decode_04(i, w),
@@ -240,19 +241,19 @@ fn mem_mode(zz: u32, x: bool, aa: u32, di: bool) -> MemMode {
 /// Load restrictions (PRM "Load Register with Offset"/"Load Register-Register").
 fn check_load(i: &mut Instr, zz: u32, x: bool, aa: u32, b: u32, a: u32) {
     if zz == 3 {
-        i.op = Op::Illegal("LD: reserved data size");
+        i.op = Op::Illegal(why!("LD: reserved data size"));
     } else if x && zz == 0 {
-        i.op = Op::Illegal("LD: sign extension of a long word");
+        i.op = Op::Illegal(why!("LD: sign extension of a long word"));
     } else if b == 62 && (aa == 1 || aa == 2) {
-        i.op = Op::Illegal("LD: address write-back with long-immediate base");
+        i.op = Op::Illegal(why!("LD: address write-back with long-immediate base"));
     } else if a == 60 || a == 61 || a == 63 {
-        i.op = Op::Illegal("LD: destination is LP_COUNT, r61 or PCL");
+        i.op = Op::Illegal(why!("LD: destination is LP_COUNT, r61 or PCL"));
     } else if zz == 1 && aa == 3 {
-        i.op = Op::Illegal("LDB.AS: undefined (PRM Table 52)");
+        i.op = Op::Illegal(why!("LDB.AS: undefined (PRM Table 52)"));
     } else if a == 62 && (zz == 1 || x || i.mem.bypass_cache) {
         // PREFETCH is LD with a = limm; byte sizes are "invalid and a reserved
         // format" and the syntax has no .di/.x (PRM, PREFETCH).
-        i.op = Op::Illegal("PREFETCH: reserved variant");
+        i.op = Op::Illegal(why!("PREFETCH: reserved variant"));
     }
 }
 
@@ -329,10 +330,10 @@ fn decode_04(i: &mut Instr, w: u32) {
         0x17 => dual(Op::Sub1),
         0x18 => dual(Op::Sub2),
         0x19 => dual(Op::Sub3),
-        0x1A => dual(Op::Arc700Only("mpy")),
-        0x1B => dual(Op::Arc700Only("mpyh")),
-        0x1C => dual(Op::Arc700Only("mpyhu")),
-        0x1D => dual(Op::Arc700Only("mpyu")),
+        0x1A => dual(Op::Arc700Only(why!("mpy"))),
+        0x1B => dual(Op::Arc700Only(why!("mpyh"))),
+        0x1C => dual(Op::Arc700Only(why!("mpyhu"))),
+        0x1D => dual(Op::Arc700Only(why!("mpyu"))),
         _ => (Op::Nop, false),
     };
     if is_dual {
@@ -344,7 +345,7 @@ fn decode_04(i: &mut Instr, w: u32) {
     if f && matches!(sub, 0x28..=0x2B) {
         // LP, FLAG, LR and SR: "F is always encoded as 0" (PRM).
         general_operands(i, w);
-        i.op = Op::Illegal("LP/FLAG/LR/SR with F=1");
+        i.op = Op::Illegal(why!("LP/FLAG/LR/SR with F=1"));
         return;
     }
     match sub {
@@ -369,7 +370,7 @@ fn decode_04(i: &mut Instr, w: u32) {
             if !f {
                 // "The flag setting field, F, is always encoded as 1 for this
                 // instruction" (PRM, CMP/TST/RCMP/BTST); F=0 is unspecified.
-                i.op = Op::Illegal("CMP/TST/RCMP/BTST with F=0");
+                i.op = Op::Illegal(why!("CMP/TST/RCMP/BTST with F=0"));
             }
         }
         0x20..=0x23 => {
@@ -380,14 +381,14 @@ fn decode_04(i: &mut Instr, w: u32) {
             let ilink = matches!(i.src2, Src::Reg(29 | 30));
             if i.delay && matches!(i.src2, Src::Limm(_)) {
                 // The PRM lists Jcc/JLcc limm only without .D.
-                i.op = Op::Illegal("Jcc.D/JLcc.D with long immediate");
+                i.op = Op::Illegal(why!("Jcc.D/JLcc.D with long immediate"));
             } else if f && i.op == Op::Jl {
                 // Only Jcc.F [ILINKn] is defined; JLcc has no .F form.
-                i.op = Op::Illegal("JLcc.F");
+                i.op = Op::Illegal(why!("JLcc.F"));
             } else if f && !ilink {
-                i.op = Op::Illegal("Jcc.F without ILINK1/ILINK2");
+                i.op = Op::Illegal(why!("Jcc.F without ILINK1/ILINK2"));
             } else if ilink && !f {
-                i.op = Op::Illegal("Jcc [ILINKn] without .F");
+                i.op = Op::Illegal(why!("Jcc [ILINKn] without .F"));
             }
         }
         0x28 => {
@@ -402,7 +403,7 @@ fn decode_04(i: &mut Instr, w: u32) {
                 // "Encoding the operand mode to be 0x0 or 0x1 is not
                 // recommended. Additionally using operand mode 0x3 with
                 // sub-operand mode 0x0 is not recommended." (PRM, LPcc)
-                _ => i.op = Op::Illegal("LP: operand mode not recommended (undefined)"),
+                _ => i.op = Op::Illegal(why!("LP: operand mode not recommended (undefined)")),
             }
         }
         0x29 => {
@@ -411,7 +412,7 @@ fn decode_04(i: &mut Instr, w: u32) {
         }
         0x2A | 0x2B => {
             if p == 3 {
-                i.op = Op::Illegal("LR/SR: conditional operand mode undefined on ARCtangent-A5");
+                i.op = Op::Illegal(why!("LR/SR: conditional operand mode undefined on ARCtangent-A5"));
                 i.src2 = second_operand(i, w);
                 return;
             }
@@ -439,12 +440,12 @@ fn decode_04(i: &mut Instr, w: u32) {
             if a == 62 && matches!(i.op, Op::Ld) {
                 // PRM: "Using an immediate value in the destination register
                 // field is not allowed for the ARCtangent-A5 or ARC 600."
-                i.op = Op::Illegal("LD reg-reg: immediate destination not allowed on ARCtangent-A5");
+                i.op = Op::Illegal(why!("LD reg-reg: immediate destination not allowed on ARCtangent-A5"));
             }
         }
         _ => {
             general_operands(i, w);
-            i.op = Op::Illegal("major 0x04: reserved sub-opcode");
+            i.op = Op::Illegal(why!("major 0x04: reserved sub-opcode"));
         }
     }
 }
@@ -455,7 +456,7 @@ fn decode_sop_04(i: &mut Instr, w: u32) {
     let c = (w >> 6) & 0x3F;
     i.src2 = if p == 0 { src_reg(c) } else { Src::Imm(c) };
     if p >= 2 {
-        i.op = Op::Illegal("single-operand instruction with s12/conditional format");
+        i.op = Op::Illegal(why!("single-operand instruction with s12/conditional format"));
         return;
     }
     let sub2 = w & 0x3F;
@@ -464,10 +465,10 @@ fn decode_sop_04(i: &mut Instr, w: u32) {
         i.op = match b {
             0x01 => Op::Sleep,
             0x02 => Op::Swi,
-            0x03 => Op::Arc700Only("sync"),
-            0x04 => Op::Arc700Only("rtie"),
+            0x03 => Op::Arc700Only(why!("sync")),
+            0x04 => Op::Arc700Only(why!("rtie")),
             0x05 => Op::Brk,
-            _ => Op::Illegal("zero-operand: reserved sub-opcode"),
+            _ => Op::Illegal(why!("zero-operand: reserved sub-opcode")),
         };
         return;
     }
@@ -486,8 +487,8 @@ fn decode_sop_04(i: &mut Instr, w: u32) {
         0x09 => Op::Abs,
         0x0A => Op::Not,
         0x0B => Op::Rlc,
-        0x0C => Op::Arc700Only("ex"),
-        _ => Op::Illegal("single-operand: reserved sub-opcode"),
+        0x0C => Op::Arc700Only(why!("ex")),
+        _ => Op::Illegal(why!("single-operand: reserved sub-opcode")),
     };
 }
 
@@ -518,7 +519,7 @@ fn decode_05(i: &mut Instr, w: u32) {
             i.dst = dst_reg(breg32(w));
             i.set_flags = f;
             i.op = match w & 0x3F {
-                _ if p >= 2 => Op::Illegal("single-operand extension with s12/conditional format"),
+                _ if p >= 2 => Op::Illegal(why!("single-operand extension with s12/conditional format")),
                 0x00 => Op::Swap,
                 0x01 => Op::Norm,
                 0x02 => Op::Sat16,
@@ -530,7 +531,7 @@ fn decode_05(i: &mut Instr, w: u32) {
                 0x08 => Op::Normw,
                 0x3F => {
                     i.dst = Dst::None;
-                    Op::Illegal("extension zero-operand: reserved")
+                    Op::Illegal(why!("extension zero-operand: reserved"))
                 }
                 sub2 => Op::Extension { major: 0x05, sub: 0x80 | sub2 as u8 },
             };
@@ -552,7 +553,7 @@ fn decode_05(i: &mut Instr, w: u32) {
         // Firmware evidence: US v2.1 at 0x4007_B49C executes 0x2B04_0F83
         // (A = 3, b = r3, c = limm) and then reads MMID (MAME ignores A too).
         if f {
-            i.op = Op::Illegal("MUL64/MULU64 with F=1");
+            i.op = Op::Illegal(why!("MUL64/MULU64 with F=1"));
         }
     }
 }
@@ -679,7 +680,7 @@ fn decode16(i: &mut Instr, h: u16) {
                 5 => match (h >> 8) & 7 {
                     0 => set(i, Op::Add, 28, sp, Src::Imm(u7)),
                     1 => set(i, Op::Sub, 28, sp, Src::Imm(u7)),
-                    _ => i.op = Op::Illegal("ADD_S/SUB_S sp: reserved sub-opcode"),
+                    _ => i.op = Op::Illegal(why!("ADD_S/SUB_S sp: reserved sub-opcode")),
                 },
                 6 => match h & 0x1F {
                     0x01 => {
@@ -690,7 +691,7 @@ fn decode16(i: &mut Instr, h: u16) {
                         i.op = Op::Pop;
                         i.dst = Dst::Reg(31);
                     }
-                    _ => i.op = Op::Illegal("POP_S: reserved sub-opcode"),
+                    _ => i.op = Op::Illegal(why!("POP_S: reserved sub-opcode")),
                 },
                 _ => match h & 0x1F {
                     0x01 => {
@@ -701,7 +702,7 @@ fn decode16(i: &mut Instr, h: u16) {
                         i.op = Op::Push;
                         i.data = reg(31);
                     }
-                    _ => i.op = Op::Illegal("PUSH_S: reserved sub-opcode"),
+                    _ => i.op = Op::Illegal(why!("PUSH_S: reserved sub-opcode")),
                 },
             }
         }
@@ -820,10 +821,10 @@ fn decode_0f(i: &mut Instr, h: u32, b: u8, c: u8) {
                         i.delay = true;
                         i.src2 = blink;
                     }
-                    _ => i.op = Op::Illegal("16-bit zero-operand: reserved sub-opcode"),
+                    _ => i.op = Op::Illegal(why!("16-bit zero-operand: reserved sub-opcode")),
                 }
             }
-            _ => i.op = Op::Illegal("16-bit single-operand: reserved sub-opcode"),
+            _ => i.op = Op::Illegal(why!("16-bit single-operand: reserved sub-opcode")),
         },
         0x02 => bbc(i, Op::Sub),
         0x04 => bbc(i, Op::And),
@@ -857,10 +858,10 @@ fn decode_0f(i: &mut Instr, h: u32, b: u8, c: u8) {
         0x1B => bc(i, Op::Asl),
         0x1C => bc(i, Op::Asr),
         0x1D => bc(i, Op::Lsr),
-        0x1E => i.op = Op::Arc700Only("trap_s"),
+        0x1E => i.op = Op::Arc700Only(why!("trap_s")),
         0x1F if h == 0x7FFF => i.op = Op::Brk,
-        0x1F => i.op = Op::Illegal("BRK_S: encoding must be 0x7FFF"),
-        _ => i.op = Op::Illegal("16-bit general: reserved sub-opcode"),
+        0x1F => i.op = Op::Illegal(why!("BRK_S: encoding must be 0x7FFF")),
+        _ => i.op = Op::Illegal(why!("16-bit general: reserved sub-opcode")),
     }
 }
 
@@ -1007,6 +1008,6 @@ mod tests {
         assert!(matches!(i.op, Op::Illegal(_)));
         // ARC 700-only MPY decodes as such.
         let w: u32 = (0x04 << 27) | (0x1A << 16);
-        assert_eq!(dec(0, &hw(&[(w >> 16) as u16, w as u16])).op, Op::Arc700Only("mpy"));
+        assert_eq!(dec(0, &hw(&[(w >> 16) as u16, w as u16])).op, Op::Arc700Only(why!("mpy")));
     }
 }

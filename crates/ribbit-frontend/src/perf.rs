@@ -35,3 +35,16 @@ pub fn prefer_performance_cores() {
 
 #[cfg(not(windows))]
 pub fn prefer_performance_cores() {}
+
+/// Above-normal priority for the calling thread (the emulation thread).
+#[cfg(windows)]
+pub fn raise_thread_priority() {
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
+    // SAFETY: a plain Win32 call on this thread's pseudo-handle.
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn raise_thread_priority() {}

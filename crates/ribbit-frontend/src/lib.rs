@@ -4,6 +4,7 @@
 
 pub mod app;
 mod audio_out;
+mod emu;
 mod files;
 #[cfg(not(target_os = "android"))]
 mod gamepad;

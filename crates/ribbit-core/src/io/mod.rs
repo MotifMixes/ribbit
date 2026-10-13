@@ -426,10 +426,62 @@ impl MachineBus<'_> {
 }
 
 impl Bus for MachineBus<'_> {
+    #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
         if !is_mmio(addr) {
             return self.sys.read8(addr);
         }
+        self.read8_mmio(addr)
+    }
+
+    #[inline(always)]
+    fn read16(&mut self, addr: u32) -> u16 {
+        if !is_mmio(addr) {
+            return self.sys.read16(addr);
+        }
+        self.read16_mmio(addr)
+    }
+
+    #[inline(always)]
+    fn read32(&mut self, addr: u32) -> u32 {
+        if !is_mmio(addr) {
+            return self.sys.read32(addr);
+        }
+        self.read32_mmio(addr)
+    }
+
+    // Sub-word writes are accepted only by byte-wide device registers (the
+    // UART); elsewhere they have no documented meaning and are reported as
+    // unmodelled rather than guessed.
+    #[inline(always)]
+    fn write8(&mut self, addr: u32, value: u8) {
+        if !is_mmio(addr) {
+            return self.sys.write8(addr, value);
+        }
+        self.write8_mmio(addr, value)
+    }
+
+    #[inline(always)]
+    fn write16(&mut self, addr: u32, value: u16) {
+        if !is_mmio(addr) {
+            return self.sys.write16(addr, value);
+        }
+        self.write16_mmio(addr, value)
+    }
+
+    #[inline(always)]
+    fn write32(&mut self, addr: u32, value: u32) {
+        if !is_mmio(addr) {
+            return self.sys.write32(addr, value);
+        }
+        self.write32_mmio(addr, value)
+    }
+}
+
+// Device-register paths, kept out of line so RAM accesses inline.
+impl MachineBus<'_> {
+    #[inline(never)]
+    fn read8_mmio(&mut self, addr: u32) -> u8 {
         self.io.catch_up();
         self.io.sync_needed = true;
         let (v, modelled) = self.narrow_read(addr, 1);
@@ -437,10 +489,8 @@ impl Bus for MachineBus<'_> {
         v.map_or_else(|| self.sys.read8(addr), |v| v as u8)
     }
 
-    fn read16(&mut self, addr: u32) -> u16 {
-        if !is_mmio(addr) {
-            return self.sys.read16(addr);
-        }
+    #[inline(never)]
+    fn read16_mmio(&mut self, addr: u32) -> u16 {
         self.io.catch_up();
         self.io.sync_needed = true;
         let addr = addr & !1;
@@ -449,10 +499,8 @@ impl Bus for MachineBus<'_> {
         v.map_or_else(|| self.sys.read16(addr), |v| v as u16)
     }
 
-    fn read32(&mut self, addr: u32) -> u32 {
-        if !is_mmio(addr) {
-            return self.sys.read32(addr);
-        }
+    #[inline(never)]
+    fn read32_mmio(&mut self, addr: u32) -> u32 {
         self.io.catch_up();
         self.io.sync_needed = true;
         let addr = addr & !3;
@@ -461,13 +509,8 @@ impl Bus for MachineBus<'_> {
         v.unwrap_or_else(|| self.sys.read32(addr))
     }
 
-    // Sub-word writes are accepted only by byte-wide device registers (the
-    // UART); elsewhere they have no documented meaning and are reported as
-    // unmodelled rather than guessed.
-    fn write8(&mut self, addr: u32, value: u8) {
-        if !is_mmio(addr) {
-            return self.sys.write8(addr, value);
-        }
+    #[inline(never)]
+    fn write8_mmio(&mut self, addr: u32, value: u8) {
         self.io.catch_up();
         self.io.sync_needed = true;
         let handled = self.io.write_narrow(addr, value as u32);
@@ -477,10 +520,8 @@ impl Bus for MachineBus<'_> {
         }
     }
 
-    fn write16(&mut self, addr: u32, value: u16) {
-        if !is_mmio(addr) {
-            return self.sys.write16(addr, value);
-        }
+    #[inline(never)]
+    fn write16_mmio(&mut self, addr: u32, value: u16) {
         self.io.catch_up();
         self.io.sync_needed = true;
         let addr = addr & !1;
@@ -491,10 +532,8 @@ impl Bus for MachineBus<'_> {
         }
     }
 
-    fn write32(&mut self, addr: u32, value: u32) {
-        if !is_mmio(addr) {
-            return self.sys.write32(addr, value);
-        }
+    #[inline(never)]
+    fn write32_mmio(&mut self, addr: u32, value: u32) {
         self.io.catch_up();
         self.io.sync_needed = true;
         let addr = addr & !3;

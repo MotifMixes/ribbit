@@ -100,6 +100,7 @@ impl SystemBus {
         }
     }
 
+    #[inline(always)]
     pub fn decode(&self, addr: u32) -> Region {
         let in_window = |base: u32, size: u32| addr.wrapping_sub(base) < size;
         if in_window(BIOS_BASE, BIOS_WINDOW) || in_window(BIOS_MIRROR, BIOS_WINDOW) {
@@ -202,6 +203,7 @@ impl SystemBus {
         }
     }
 
+    #[inline(always)]
     fn read_le(&mut self, addr: u32, width: u8) -> u32 {
         // Fast path: the whole access inside one ROM/RAM region (the common
         // case). Identical results to the byte loop below.
@@ -242,7 +244,24 @@ impl SystemBus {
         value
     }
 
+    #[inline(always)]
     fn write_le(&mut self, addr: u32, width: u8, value: u32) {
+        // Fast path: the whole access inside RAM or VRAM and no idle-probe
+        // write log. Identical results to the byte loop.
+        if self.write_log.is_none() {
+            let w = width as usize;
+            let bytes = &value.to_le_bytes()[..w];
+            match self.decode(addr) {
+                Region::Ram(o) if o + w <= self.ram.len() => return self.ram[o..o + w].copy_from_slice(bytes),
+                Region::Vram(o) if o + w <= self.vram.len() => return self.vram[o..o + w].copy_from_slice(bytes),
+                _ => {}
+            }
+        }
+        self.write_le_slow(addr, width, value)
+    }
+
+    #[inline(never)]
+    fn write_le_slow(&mut self, addr: u32, width: u8, value: u32) {
         let region = self.decode(addr);
         for i in 0..width as usize {
             let byte = (value >> (8 * i)) as u8;
@@ -277,21 +296,27 @@ impl SystemBus {
 // tested on a Leapster 2 and that firmware depends on it; unverified on the
 // original Leapster (docs/accuracy-matrix.md).
 impl Bus for SystemBus {
+    #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
         self.read_le(addr, 1) as u8
     }
+    #[inline(always)]
     fn read16(&mut self, addr: u32) -> u16 {
         self.read_le(addr & !1, 2) as u16
     }
+    #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
         self.read_le(addr & !3, 4)
     }
+    #[inline(always)]
     fn write8(&mut self, addr: u32, value: u8) {
         self.write_le(addr, 1, value as u32)
     }
+    #[inline(always)]
     fn write16(&mut self, addr: u32, value: u16) {
         self.write_le(addr & !1, 2, value as u32)
     }
+    #[inline(always)]
     fn write32(&mut self, addr: u32, value: u32) {
         self.write_le(addr & !3, 4, value)
     }

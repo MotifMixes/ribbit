@@ -38,6 +38,7 @@ pub fn cond_name(cc: Cond) -> Option<&'static str> {
 /// ARCtangent-A5 and ARC 600 processors, if an extension condition code is
 /// used that is not implemented, then the condition code test will always
 /// return false".
+#[inline(always)]
 pub fn cond_holds(cc: Cond, z: bool, n: bool, c: bool, v: bool) -> bool {
     match cc {
         COND_AL => true,
@@ -243,7 +244,7 @@ pub enum Op {
     Pop,
     /// An ARC 700-only instruction (MPY*, EX, SYNC, RTIE, TRAP_S): an
     /// Instruction Error on the ARCtangent-A5.
-    Arc700Only(&'static str),
+    Arc700Only(Why),
     /// An extension-instruction slot (majors 0x05-0x0B) with no known meaning.
     Extension {
         major: u8,
@@ -251,7 +252,7 @@ pub enum Op {
     },
     /// An encoding the PRM defines as raising an Instruction Error, or as
     /// undefined on the A5.
-    Illegal(&'static str),
+    Illegal(Why),
 }
 
 impl Op {
@@ -367,4 +368,102 @@ impl Instr {
     pub fn is_branch(&self) -> bool {
         matches!(self.op, Op::B | Op::Bl | Op::Br(_) | Op::Bbit0 | Op::Bbit1 | Op::J | Op::Jl)
     }
+}
+
+/// The reason text of an `Op::Illegal` or the mnemonic of an
+/// `Op::Arc700Only`, as a one-byte index into `WHY_TEXT`, so `Op` (and every
+/// cached `Instr`) stays small. Build one with `why!("text")`, which is
+/// resolved at compile time and fails the build for text not in the table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Why(u8);
+
+pub const WHY_TEXT: &[&str] = &[
+    "16-bit general: reserved sub-opcode",
+    "16-bit single-operand: reserved sub-opcode",
+    "16-bit zero-operand: reserved sub-opcode",
+    "ADD_S/SUB_S sp: reserved sub-opcode",
+    "B far: reserved bit 4 set",
+    "BRK_S: encoding must be 0x7FFF",
+    "BRcc/BBIT.d with long immediate",
+    "BRcc: reserved sub-opcode",
+    "CMP/TST/RCMP/BTST with F=0",
+    "JLcc.F",
+    "Jcc [ILINKn] without .F",
+    "Jcc.D/JLcc.D with long immediate",
+    "Jcc.F without ILINK1/ILINK2",
+    "LD reg-reg: immediate destination not allowed on ARCtangent-A5",
+    "LD: address write-back with long-immediate base",
+    "LD: destination is LP_COUNT, r61 or PCL",
+    "LD: reserved data size",
+    "LD: sign extension of a long word",
+    "LDB.AS: undefined (PRM Table 52)",
+    "LP/FLAG/LR/SR with F=1",
+    "LP: operand mode not recommended (undefined)",
+    "LR/SR: conditional operand mode undefined on ARCtangent-A5",
+    "MUL64/MULU64 with F=1",
+    "POP_S: reserved sub-opcode",
+    "PREFETCH: reserved variant",
+    "PUSH_S: reserved sub-opcode",
+    "ST: address write-back with long-immediate base",
+    "ST: reserved data size",
+    "STB.AS: undefined (PRM Table 52)",
+    "ex",
+    "extension zero-operand: reserved",
+    "major 0x04: reserved sub-opcode",
+    "mpy",
+    "mpyh",
+    "mpyhu",
+    "mpyu",
+    "rtie",
+    "single-operand extension with s12/conditional format",
+    "single-operand instruction with s12/conditional format",
+    "single-operand: reserved sub-opcode",
+    "sync",
+    "trap_s",
+    "zero-operand: reserved sub-opcode",
+];
+
+impl Why {
+    /// Index of `text` in `WHY_TEXT` (use through `why!`, in const context).
+    pub const fn of(text: &str) -> Why {
+        let mut i = 0;
+        while i < WHY_TEXT.len() {
+            let (a, b) = (WHY_TEXT[i].as_bytes(), text.as_bytes());
+            if a.len() == b.len() {
+                let mut j = 0;
+                while j < a.len() && a[j] == b[j] {
+                    j += 1;
+                }
+                if j == a.len() {
+                    return Why(i as u8);
+                }
+            }
+            i += 1;
+        }
+        panic!("text missing from WHY_TEXT");
+    }
+
+    pub fn as_str(self) -> &'static str {
+        WHY_TEXT[self.0 as usize]
+    }
+}
+
+impl std::fmt::Display for Why {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Debug for Why {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+/// `Why` for a literal, checked at compile time.
+#[macro_export]
+macro_rules! why {
+    ($text:literal) => {
+        const { $crate::isa::Why::of($text) }
+    };
 }

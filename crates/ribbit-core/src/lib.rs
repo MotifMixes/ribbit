@@ -209,6 +209,10 @@ pub struct Machine {
     pub buttons: Buttons,
     /// The most recent events, always recorded.
     pub trace_tail: TraceRing<RawEvent>,
+    /// Record every instruction in `trace_tail` (the "last events" shown
+    /// when a run stops). Costs ~10% speed; the GUI turns it off. Tracing to
+    /// a sink records regardless.
+    pub record_trace_tail: bool,
     /// Optional full trace output (one line per event, peripheral accesses
     /// included).
     pub trace_sink: Option<Box<dyn std::io::Write + Send>>,
@@ -261,6 +265,7 @@ impl Machine {
             bus,
             buttons: Buttons::default(),
             trace_tail: TraceRing::new(TRACE_TAIL),
+            record_trace_tail: true,
             trace_sink: None,
             io,
             clock: Clock::default(),
@@ -347,7 +352,11 @@ impl Machine {
         if self.io.voices.lfc_start_pending {
             self.io.voices.start_lfc(&mut self.bus);
         }
-        self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+        // (Checked here too: `advance` is out of line and most steps at
+        // 96:16 MHz have no tick.)
+        if ticks > 0 {
+            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+        }
         if self.cpu.halted() {
             // Earlier deferred ticks ran with the CPU active; this step's not.
             self.io.catch_up();
@@ -401,6 +410,7 @@ impl Machine {
         let mut report =
             RunReport { steps: 0, instructions: 0, interrupts: 0, pc: self.cpu.pc, stop: StopReason::StepLimit };
         self.io.record_events = self.trace_sink.is_some();
+        self.cpu.record_last = self.record_trace_tail || self.trace_sink.is_some();
         self.io.gpio.buttons = self.buttons;
         // Device state may have been changed from outside since the last run.
         self.io.sync_needed = true;
@@ -412,8 +422,14 @@ impl Machine {
             let cycle = self.cpu.cycles;
             let from = self.cpu.pc;
             let result = self.step();
-            if self.idle_skip && breakpoints.is_empty() && self.trace_sink.is_none() {
-                self.idle_track(&result, from, max_steps, &mut report);
+            // `idle_track` only acts while probing or after a backward jump;
+            // checking that here saves an out-of-line call on most steps.
+            if self.idle_skip
+                && breakpoints.is_empty()
+                && self.trace_sink.is_none()
+                && (self.idle.probe.is_some() || self.cpu.pc <= from)
+            {
+                self.idle_track(matches!(result, Ok(Step::Executed)), from, max_steps, &mut report);
             }
             if let Some(sink) = &mut self.trace_sink {
                 for a in self.io.take_events() {
@@ -423,7 +439,9 @@ impl Machine {
             match result {
                 Ok(Step::Executed) => {
                     report.instructions += 1;
-                    self.record_instr(cycle);
+                    if self.cpu.record_last {
+                        self.record_instr(cycle);
+                    }
                 }
                 Ok(Step::Interrupt { vector }) => {
                     report.interrupts += 1;
@@ -460,11 +478,14 @@ impl Machine {
     /// are identical until the next device or CPU-timer event, so time is
     /// advanced to just before that event in one go. Verified by comparing
     /// state digests with `idle_skip` off.
-    fn idle_track(&mut self, result: &Result<Step, CpuError>, from: u32, max_steps: u64, report: &mut RunReport) {
+    /// `executed`: the step was a plain instruction (no interrupt entry, sleep,
+    /// halt or error). Takes a bool, not the result, so the hot loop keeps the
+    /// result in registers.
+    fn idle_track(&mut self, executed: bool, from: u32, max_steps: u64, report: &mut RunReport) {
         let pc = self.cpu.pc;
         if let Some(p) = &mut self.idle.probe {
             p.steps += 1;
-            let interrupted = !matches!(result, Ok(Step::Executed));
+            let interrupted = !executed;
             if interrupted || self.io.probe_violation || p.steps > IDLE_PROBE_MAX_STEPS {
                 self.idle.stats[1] += 1;
                 self.idle_end_probe(false);
@@ -526,7 +547,7 @@ impl Machine {
             self.idle.skipped_steps += skip_steps;
             return;
         }
-        let backward = matches!(result, Ok(Step::Executed)) && pc <= from && self.cpu.delay_target.is_none();
+        let backward = executed && pc <= from && self.cpu.delay_target.is_none();
         if !backward {
             return;
         }

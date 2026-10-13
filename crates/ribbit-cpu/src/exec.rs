@@ -104,7 +104,7 @@ impl Cpu {
 
         let pc = self.pc;
         let i = self.icache.get(pc, || decode(bus, pc));
-        if self.delay_target.is_some() && (i.is_branch() || i.op == Op::Lp) {
+        if self.delay_target.is_some() && (i.is_branch() || matches!(i.op, Op::Lp)) {
             // "Bcc ... cannot immediately follow a Bcc.D, BLcc.D, Jcc.D,
             // JLcc.D, BRcc.D or BBITn.D instruction" (PRM); LPcc likewise.
             return Err(self.unpredictable(&i, "branch, jump or LP in a delay slot"));
@@ -138,7 +138,9 @@ impl Cpu {
             }
         }
         self.tick(1)?;
-        self.last_instr = Some(i);
+        if self.record_last {
+            self.last_instr = Some(i);
+        }
         Ok(Step::Executed)
     }
 
@@ -270,10 +272,18 @@ impl Cpu {
     // -----------------------------------------------------------------------
     // Operands
 
+    // Hot helpers: an always-inlined fast path (core registers r0-r31) and
+    // an out-of-line slow path, so error formatting does not stop inlining.
+    #[inline(always)]
     fn read_reg(&mut self, r: u8, i: &Instr) -> Result<u32, CpuError> {
         if r < 32 {
             return Ok(self.regs[r as usize]);
         }
+        self.read_reg_slow(r, i)
+    }
+
+    #[inline(never)]
+    fn read_reg_slow(&mut self, r: u8, i: &Instr) -> Result<u32, CpuError> {
         if let Some(xy) = &mut self.xy {
             if crate::xy::is_port(r) {
                 return Ok(xy.read(r));
@@ -295,6 +305,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn read(&mut self, s: Src, i: &Instr) -> Result<u32, CpuError> {
         match s {
             Src::None => Ok(0),
@@ -303,10 +314,16 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn check_dst(&self, d: Dst, i: &Instr) -> Result<(), CpuError> {
         if matches!(d, Dst::None | Dst::Discard) || matches!(d, Dst::Reg(r) if r < 32) {
             return Ok(());
         }
+        self.check_dst_slow(d, i)
+    }
+
+    #[inline(never)]
+    fn check_dst_slow(&self, d: Dst, i: &Instr) -> Result<(), CpuError> {
         if self.xy.is_some() && matches!(d, Dst::Reg(32..=56)) {
             return Ok(());
         }
@@ -321,6 +338,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn write_dst(&mut self, d: Dst, v: u32) {
         if let Dst::Reg(r) = d
             && r < 32
@@ -328,6 +346,11 @@ impl Cpu {
             self.regs[r as usize] = v;
             return;
         }
+        self.write_dst_slow(d, v)
+    }
+
+    #[inline(never)]
+    fn write_dst_slow(&mut self, d: Dst, v: u32) {
         if let (Dst::Reg(r), Some(xy)) = (d, &mut self.xy)
             && crate::xy::is_port(r)
         {
@@ -370,6 +393,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn cond(&self, cc: Cond) -> bool {
         cond_holds(cc, self.flag(status32::Z), self.flag(status32::N), self.flag(status32::C), self.flag(status32::V))
     }
@@ -506,7 +530,7 @@ impl Cpu {
 
     fn execute(&mut self, i: &Instr, bus: &mut impl Bus, ext: &mut impl AuxExt) -> Result<Flow, CpuError> {
         match i.op {
-            Op::Illegal(why) => return self.illegal(i, why),
+            Op::Illegal(why) => return self.illegal(i, why.as_str()),
             Op::Arc700Only(_) => {
                 return self.illegal(i, "ARC 700-only instruction (Instruction Error on the ARCtangent-A5)");
             }
@@ -529,7 +553,7 @@ impl Cpu {
                 if !self.cond(i.cc) {
                     return Ok(Flow::Next);
                 }
-                if i.op == Op::Bl {
+                if matches!(i.op, Op::Bl) {
                     let ret = if i.delay { self.after_delay_slot(bus, i) } else { i.next() };
                     self.regs[reg::BLINK] = ret;
                 }
@@ -542,14 +566,14 @@ impl Cpu {
             Op::Bbit0 | Op::Bbit1 => {
                 let (b, v) = (self.read(i.src1, i)?, self.read(i.src2, i)?);
                 let set = b & (1 << (v & 31)) != 0;
-                return Ok(if set == (i.op == Op::Bbit1) { Flow::Jump(i.target) } else { Flow::Next });
+                return Ok(if set == (matches!(i.op, Op::Bbit1)) { Flow::Jump(i.target) } else { Flow::Next });
             }
             Op::J | Op::Jl => {
                 let target = self.read(i.src2, i)? & !1;
                 if !self.cond(i.cc) {
                     return Ok(Flow::Next);
                 }
-                if i.op == Op::Jl {
+                if matches!(i.op, Op::Jl) {
                     let ret = if i.delay { self.after_delay_slot(bus, i) } else { i.next() };
                     self.regs[reg::BLINK] = ret;
                 }
@@ -693,7 +717,7 @@ impl Cpu {
             }
             Op::Max | Op::Min => {
                 let (d, _, v) = sub(b, c, false);
-                let take_c = if i.op == Op::Max { (c as i32) >= (b as i32) } else { (c as i32) <= (b as i32) };
+                let take_c = if matches!(i.op, Op::Max) { (c as i32) >= (b as i32) } else { (c as i32) <= (b as i32) };
                 let r = if take_c { c } else { b };
                 self.write_dst(i.dst, r);
                 if f {
@@ -756,7 +780,7 @@ impl Cpu {
                 (Some(b.rotate_right(n)), shift_carry(n, n.wrapping_sub(1)), None)
             }
             Op::Mul64 | Op::Mulu64 => {
-                let p = if i.op == Op::Mul64 {
+                let p = if matches!(i.op, Op::Mul64) {
                     ((b as i32 as i64) * (c as i32 as i64)) as u64
                 } else {
                     b as u64 * c as u64
@@ -782,7 +806,7 @@ impl Cpu {
             Op::Addsdw | Op::Subsdw => {
                 let lane = |x: u32, y: u32| {
                     let (x, y) = (x as u16 as i16 as i32, y as u16 as i16 as i32);
-                    sat16(if i.op == Op::Addsdw { x + y } else { x - y })
+                    sat16(if matches!(i.op, Op::Addsdw) { x + y } else { x - y })
                 };
                 let (hi, s1) = lane(b >> 16, c >> 16);
                 let (lo, s2) = lane(b, c);
@@ -791,7 +815,7 @@ impl Cpu {
             }
             Op::Asls | Op::Asrs => {
                 let n = c as i32;
-                let left = if i.op == Op::Asls { n } else { n.wrapping_neg() };
+                let left = if matches!(i.op, Op::Asls) { n } else { n.wrapping_neg() };
                 let (r, s) = if left >= 0 {
                     if left > 31 {
                         // PRM, ASLS: saturates to 0x7FFF_FFFF / 0x8000_0000 for
@@ -817,11 +841,11 @@ impl Cpu {
             }
             Op::Abss | Op::Negs => {
                 let x = c as i32 as i64;
-                let (r, s) = sat32(if i.op == Op::Abss { x.abs() } else { -x });
+                let (r, s) = sat32(if matches!(i.op, Op::Abss) { x.abs() } else { -x });
                 self.sticky_saturation(s, s);
                 self.write_dst(i.dst, r);
                 if f {
-                    if i.op == Op::Abss {
+                    if matches!(i.op, Op::Abss) {
                         // "In contrast with other instructions, the value of
                         // the input operand is used to set the flags" (PRM, ABSS).
                         self.flags(c, None, Some(s));
@@ -833,12 +857,12 @@ impl Cpu {
             }
             Op::Abssw | Op::Negsw => {
                 let x = c as u16 as i16 as i32;
-                let (r, s) = sat16(if i.op == Op::Abssw { x.abs() } else { -x });
+                let (r, s) = sat16(if matches!(i.op, Op::Abssw) { x.abs() } else { -x });
                 let r = r as i16 as i32 as u32;
                 self.sticky_saturation(s, s);
                 self.write_dst(i.dst, r);
                 if f {
-                    if i.op == Op::Abssw {
+                    if matches!(i.op, Op::Abssw) {
                         // Flags from the 16-bit input (PRM, ABSSW).
                         self.flags((c as u16 as i16 as i32) as u32, None, Some(s));
                     } else {

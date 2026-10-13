@@ -28,6 +28,7 @@ fn main() {
         m.load_state(&std::fs::read(&state).expect("read state")).expect("load state");
     }
 
+    m.record_trace_tail = std::env::var_os("RIBBIT_NO_TAIL").is_none();
     let mut handle: HANDLE = std::ptr::null_mut();
     // SAFETY: plain Win32 calls on this process's own pseudo-handles.
     unsafe {
@@ -72,6 +73,22 @@ fn main() {
     sampler.join().unwrap();
 
     let samples = samples.lock().unwrap();
+    if std::env::var_os("PROFILE_RAW").is_some() {
+        // Hottest instruction addresses, relative to `main` (for matching
+        // against a disassembly of this executable).
+        let base = main as *const () as usize as u64;
+        let mut counts: std::collections::HashMap<u64, u64> = Default::default();
+        for &ip in samples.iter() {
+            *counts.entry(ip).or_default() += 1;
+        }
+        let mut rows: Vec<_> = counts.into_iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+        println!("main at {base:#x}");
+        for (ip, n) in rows.iter().take(80) {
+            println!("{:6.2}% main{:+#x}", 100.0 * *n as f64 / samples.len() as f64, *ip as i64 - base as i64);
+        }
+        return;
+    }
     let mut by_fn: std::collections::HashMap<String, u64> = Default::default();
     let mut cache: std::collections::HashMap<u64, String> = Default::default();
     for &ip in samples.iter() {
@@ -80,7 +97,18 @@ fn main() {
             .or_insert_with(|| {
                 let mut name = None;
                 let by_line = std::env::var_os("PROFILE_LINES").is_some();
+                let chain = std::env::var_os("PROFILE_CHAIN").is_some();
                 backtrace::resolve(ip as *mut std::ffi::c_void, |s| {
+                    if chain {
+                        // Every inlined frame, innermost first.
+                        let file = s.filename().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().into_owned());
+                        let here = format!("{}:{}", file.unwrap_or_default(), s.lineno().unwrap_or(0));
+                        name = Some(match name.take() {
+                            None => here,
+                            Some(n) => format!("{n} < {here}"),
+                        });
+                        return;
+                    }
                     if name.is_none() {
                         name = if by_line {
                             let file =

@@ -351,6 +351,11 @@ impl VoiceEngine {
     /// Advances by `ticks` peripheral ticks at `peripheral_hz`, producing
     /// one sample per 1/8000 s. Exact over any split of `ticks`.
     pub fn advance(&mut self, ticks: u64, peripheral_hz: u64, bus: &mut impl Bus) {
+        // `phase` stays below `peripheral_hz` between calls, so no ticks
+        // means no sample and no change (most CPU steps at 96:16 MHz).
+        if ticks == 0 {
+            return;
+        }
         self.phase += ticks * SAMPLE_HZ;
         if !self.active() {
             // Idle: keep the clock phase; avoid a division on every step.

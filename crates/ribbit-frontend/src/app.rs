@@ -1,18 +1,18 @@
 //! The Ribbit application: one window, the emulated Leapster, egui menus.
 
 use crate::audio_out::AudioOut;
+use crate::emu::{Control, Emu};
 use crate::files::Pick;
 use crate::gpu::Gpu;
 use crate::saves::{AutoSave, SavePaths};
 use crate::settings::Settings;
 use crate::ui::{self, Action, UiState};
 use anyhow::{Context, Result};
-use ribbit_core::{Machine, StopReason};
-use ribbit_debug::Breakpoints;
+use ribbit_core::Machine;
 use ribbit_video::{HEIGHT, WIDTH};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent};
@@ -23,10 +23,6 @@ use winit::window::{Fullscreen, Window, WindowId};
 /// Rewind: a snapshot every half second of emulated time, 30 s kept.
 const REWIND_EVERY_CYCLES: u64 = 48_000_000;
 const REWIND_KEEP: usize = 60;
-
-/// Never emulate more than this per frame; drop lag beyond `MAX_LAG`.
-const MAX_SLICE: Duration = Duration::from_millis(100);
-const MAX_LAG: Duration = Duration::from_millis(250);
 
 /// How Ribbit was started (command line / config file overrides).
 #[derive(Debug, Clone, Default)]
@@ -43,7 +39,9 @@ pub struct StartOptions {
 }
 
 struct Session {
-    machine: Machine,
+    /// The machine, running on its own thread.
+    emu: Emu,
+    experimental_touch: bool,
     saves: SavePaths,
     autosave: AutoSave,
     title: String,
@@ -67,8 +65,7 @@ pub struct App {
     fast_forward: bool,
     rewinding: bool,
     modifiers: ModifiersState,
-    pace: Option<(Instant, u64)>,
-    speed: (Instant, u64, f64),
+    speed_percent: f64,
     audio: Option<AudioOut>,
     #[cfg(not(target_os = "android"))]
     pads: Option<crate::gamepad::Gamepads>,
@@ -120,8 +117,7 @@ impl App {
             fast_forward: false,
             rewinding: false,
             modifiers: ModifiersState::empty(),
-            pace: None,
-            speed: (Instant::now(), 0, 100.0),
+            speed_percent: 100.0,
             audio: AudioOut::open(),
             #[cfg(not(target_os = "android"))]
             pads: crate::gamepad::Gamepads::open(),
@@ -167,6 +163,8 @@ impl App {
             ribbit_core::io::straps::MAME_LEAPSTER2_MEASURED
         };
         let mut machine = Machine::with_straps(firmware, cartridge, self.opts.straps.unwrap_or(default_straps));
+        // Playing, not debugging: skip the per-instruction trace history.
+        machine.record_trace_tail = false;
         let mhz = self.opts.cpu_mhz.unwrap_or(self.settings.cpu_mhz).max(1);
         machine.clock = ribbit_core::Clock::new(mhz * 1_000_000, ribbit_core::Clock::PERIPHERAL_HZ);
         if self.settings.mame_gpio_lines {
@@ -201,7 +199,8 @@ impl App {
             None => format!("bios-{:08x}", machine.firmware().id().crc32),
         };
         self.session = Some(Session {
-            machine,
+            experimental_touch: machine.experimental_touch_enabled(),
+            emu: Emu::start(machine),
             saves,
             autosave: AutoSave::default(),
             title,
@@ -210,7 +209,6 @@ impl App {
             last_snapshot: 0,
         });
         self.paused = false;
-        self.pace = None;
         if let Some(a) = &mut self.audio {
             a.clear();
         }
@@ -219,10 +217,11 @@ impl App {
     }
 
     fn end_session(&mut self) {
-        if let Some(mut s) = self.session.take()
-            && let Err(e) = s.saves.flush(&mut s.machine)
-        {
-            tracing::warn!(target: "ribbit::saves", "saving: {e:#}");
+        if let Some(s) = self.session.take() {
+            let mut machine = s.emu.stop();
+            if let Err(e) = s.saves.flush(&mut machine) {
+                tracing::warn!(target: "ribbit::saves", "saving: {e:#}");
+            }
         }
     }
 
@@ -280,7 +279,6 @@ impl App {
                     Pick::Cartridge => self.open_cart(path),
                 }
             }
-            self.pace = None; // the dialog blocked; don't race to catch up
         }
         #[cfg(target_os = "android")]
         self.ui.browser.start(what, start.as_deref());
@@ -371,7 +369,7 @@ impl App {
         let (Some(path), Some(s)) = (self.state_path(slot), &self.session) else {
             return;
         };
-        let bytes = s.machine.save_state();
+        let bytes = s.emu.lock().save_state();
         let result = (|| -> Result<()> {
             std::fs::create_dir_all(path.parent().unwrap())?;
             let tmp = path.with_extension("tmp");
@@ -389,12 +387,14 @@ impl App {
         let Some(path) = self.state_path(slot) else {
             return;
         };
-        let result = std::fs::read(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|bytes| self.session.as_mut().unwrap().machine.load_state(&bytes).map_err(anyhow::Error::from));
+        let result = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|bytes| {
+            self.session.as_ref().unwrap().emu.lock().load_state(&bytes).map_err(anyhow::Error::from)
+        });
         match result {
             Ok(()) => {
-                self.pace = None;
+                let emu = &self.session.as_ref().unwrap().emu;
+                emu.resync();
+                emu.clear_audio();
                 if let Some(a) = &mut self.audio {
                     a.clear();
                 }
@@ -406,17 +406,22 @@ impl App {
 
     fn reset(&mut self) {
         if let Some(s) = &mut self.session {
-            let _ = s.saves.flush(&mut s.machine);
-            s.machine.reset();
-            self.pace = None;
+            {
+                let mut m = s.emu.lock();
+                let _ = s.saves.flush(&mut m);
+                m.reset();
+            }
+            s.emu.resync();
+            s.emu.clear_audio();
             self.ui.toast("Reset");
         }
     }
 
     fn toggle_pause(&mut self) {
-        if self.session.is_some() {
+        if let Some(s) = &self.session {
             self.paused = !self.paused;
-            self.pace = None;
+            s.emu.resync();
+            s.emu.clear_audio();
             if let Some(a) = &mut self.audio {
                 a.clear();
             }
@@ -461,81 +466,65 @@ impl App {
         }
     }
 
-    /// Emulates as much as real time (times the speed setting) allows.
+    /// Per frame: tells the emulation thread whether and how fast to run,
+    /// and does the UI-side work (rewind, sound, autosave, speed meter).
     fn emulate(&mut self) {
         let Some(s) = &mut self.session else {
             return;
         };
-        if self.paused {
-            return;
-        }
-        if self.rewinding {
-            // Step back one snapshot every few frames.
-            if let Some(state) = s.rewind.pop_back() {
-                let _ = s.machine.load_state(&state);
-                s.last_snapshot = s.machine.cpu.cycles;
-            }
-            self.pace = None;
-            if let Some(a) = &mut self.audio {
-                a.clear();
-            }
-            return;
-        }
-        if s.machine.cpu.cycles >= s.last_snapshot + REWIND_EVERY_CYCLES {
-            s.rewind.push_back(s.machine.save_state());
-            if s.rewind.len() > REWIND_KEEP {
-                s.rewind.pop_front();
-            }
-            s.last_snapshot = s.machine.cpu.cycles;
-        }
-        let m = &mut s.machine;
-        let hz = m.clock.cpu_hz as f64;
         let speed = if self.fast_forward || self.settings.speed_percent == 0 {
             f64::INFINITY
         } else {
             self.settings.speed_percent as f64 / 100.0
         };
-        let now = Instant::now();
-        let steps = if speed.is_finite() {
-            let (origin, base) = *self.pace.get_or_insert((now, m.cpu.cycles));
-            let target = base + (now.duration_since(origin).as_secs_f64() * hz * speed) as u64;
-            let behind = target.saturating_sub(m.cpu.cycles);
-            let max_lag = (MAX_LAG.as_secs_f64() * hz * speed) as u64;
-            if behind > max_lag {
-                self.pace = Some((now, m.cpu.cycles));
-            }
-            behind.min(max_lag).min((MAX_SLICE.as_secs_f64() * hz * speed) as u64)
-        } else {
-            self.pace = None;
-            (hz * 0.25) as u64 // fast-forward: a big slice per frame
-        };
-        let r = m.run(steps, &Breakpoints::default());
-        if r.stop != StopReason::StepLimit {
-            self.paused = true;
-            self.ui.error = Some(format!("Emulation stopped: {:?}", r.stop));
-            tracing::warn!(target: "ribbit::boot", ?r, "emulation stopped");
+        s.emu.set_control(Control { running: !self.paused && !self.rewinding, speed });
+        if self.paused {
+            return;
         }
-        // Sound.
-        let out = &mut m.io.voices.output;
-        self.audio_buf.resize(out.len(), 0);
-        out.pop_into(&mut self.audio_buf);
+        if self.rewinding {
+            // Step back one snapshot per frame.
+            if let Some(state) = s.rewind.pop_back() {
+                let mut m = s.emu.lock();
+                let _ = m.load_state(&state);
+                s.last_snapshot = m.cpu.cycles;
+            }
+            s.emu.resync();
+            s.emu.clear_audio();
+            if let Some(a) = &mut self.audio {
+                a.clear();
+            }
+            return;
+        }
+        let now = Instant::now();
+        {
+            let mut m = s.emu.lock();
+            if m.cpu.cycles >= s.last_snapshot + REWIND_EVERY_CYCLES {
+                s.rewind.push_back(m.save_state());
+                if s.rewind.len() > REWIND_KEEP {
+                    s.rewind.pop_front();
+                }
+                s.last_snapshot = m.cpu.cycles;
+            }
+            if let Err(e) = s.autosave.tick(&s.saves, &mut m, now) {
+                tracing::warn!(target: "ribbit::saves", "autosave failed: {e:#}");
+            }
+        }
+        // Sound (the thread keeps it at real-time speed only).
+        s.emu.take_audio(&mut self.audio_buf);
         if let Some(a) = &mut self.audio {
-            if speed.is_finite() && speed == 1.0 {
+            if speed == 1.0 {
                 let gain = if self.settings.muted { 0.0 } else { self.settings.volume };
                 a.push(&self.audio_buf, gain);
             } else {
-                a.clear(); // no pitch-shifted audio at other speeds
+                a.clear();
             }
         }
-        // Saves.
-        if let Err(e) = s.autosave.tick(&s.saves, m, now) {
-            tracing::warn!(target: "ribbit::saves", "autosave failed: {e:#}");
-        }
-        // Speed meter.
-        let elapsed = now.duration_since(self.speed.0).as_secs_f64();
-        if elapsed >= 1.0 {
-            let done = m.cpu.cycles.saturating_sub(self.speed.1) as f64;
-            self.speed = (now, m.cpu.cycles, 100.0 * done / (elapsed * hz));
+        let stats = s.emu.stats();
+        self.speed_percent = stats.speed_percent;
+        if let Some(stop) = stats.stopped {
+            s.emu.clear_stopped();
+            self.paused = true;
+            self.ui.error = Some(format!("Emulation stopped: {stop}"));
         }
     }
 
@@ -544,7 +533,8 @@ impl App {
         let Some(s) = &mut self.session else {
             return;
         };
-        let Some(touch) = s.machine.io.touch.as_mut() else {
+        let mut m = s.emu.lock();
+        let Some(touch) = m.io.touch.as_mut() else {
             return;
         };
         let (x, y, w, h) = self.lcd_px;
@@ -591,11 +581,13 @@ impl App {
         }
         if code == KeyCode::Tab {
             self.fast_forward = pressed;
-            self.pace = None;
+            if let Some(s) = &self.session {
+                s.emu.resync();
+            }
             return;
         }
-        if let (Some(b), Some(s)) = (self.settings.button_for(code), &mut self.session) {
-            s.machine.buttons.set(b, pressed);
+        if let (Some(b), Some(s)) = (self.settings.button_for(code), &self.session) {
+            s.emu.lock().buttons.set(b, pressed);
         }
     }
 
@@ -623,8 +615,8 @@ impl App {
             103 => Button::VolumeUp,   // BUTTON_R1
             _ => return,
         };
-        if let Some(s) = &mut self.session {
-            s.machine.buttons.set(button, pressed);
+        if let Some(s) = &self.session {
+            s.emu.lock().buttons.set(button, pressed);
         }
     }
 
@@ -640,8 +632,8 @@ impl App {
         for e in events {
             match e {
                 PadEvent::Button(b, pressed) => {
-                    if let Some(s) = &mut self.session {
-                        s.machine.buttons.set(b, pressed);
+                    if let Some(s) = &self.session {
+                        s.emu.lock().buttons.set(b, pressed);
                     }
                 }
                 PadEvent::Menu => {
@@ -661,7 +653,7 @@ impl App {
         self.poll_pads();
         self.emulate();
         if let Some(s) = &self.session {
-            s.machine.render_frame(&mut self.frame);
+            s.emu.lock().render_frame(&mut self.frame);
         }
         let save_dir = self.save_dir().display().to_string();
         let slots = self.slot_times();
@@ -675,12 +667,12 @@ impl App {
                 running: self.session.is_some(),
                 paused: self.paused,
                 title: self.session.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
-                speed: self.speed.2,
+                speed: self.speed_percent,
                 bios_name: self.settings.bios.as_ref().map(|p| {
                     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
                 }),
                 fullscreen: gpu.window.fullscreen().is_some(),
-                experimental_touch: self.session.as_ref().is_some_and(|s| s.machine.experimental_touch_enabled()),
+                experimental_touch: self.session.as_ref().is_some_and(|s| s.experimental_touch),
                 save_dir,
                 slots,
                 rewinding: self.rewinding,
@@ -753,12 +745,12 @@ impl ApplicationHandler for App {
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         // Android: the surface goes away when the app is backgrounded.
         if let Some(s) = &mut self.session {
-            let _ = s.saves.flush(&mut s.machine);
+            let _ = s.saves.flush(&mut s.emu.lock());
+            s.emu.resync();
         }
         self.save_settings();
         self.gpu = None;
         self.egui_state = None;
-        self.pace = None;
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

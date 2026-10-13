@@ -262,6 +262,14 @@ pub struct Cpu {
     /// step result, which is moved on every step).
     #[serde(skip)]
     pub last_instr: Option<Instr>,
+    /// Keep `last_instr` after every step (diagnostics; an 88-byte copy per
+    /// instruction). A halting instruction is always kept.
+    #[serde(skip, default = "keep_last_instr")]
+    pub record_last: bool,
+}
+
+fn keep_last_instr() -> bool {
+    true
 }
 
 impl Cpu {
@@ -292,6 +300,7 @@ impl Cpu {
             xy: None,
             icache: icache::ICache::default(),
             last_instr: None,
+            record_last: true,
         };
         cpu.reset();
         cpu
@@ -330,6 +339,7 @@ impl Cpu {
             xy: config.xy_extension.then(xy::XyExtension::default),
             icache,
             last_instr: None,
+            record_last: self.record_last,
             config,
             diag: Diagnostics::default(),
         };

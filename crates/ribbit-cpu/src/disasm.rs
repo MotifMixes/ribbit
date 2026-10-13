@@ -122,7 +122,7 @@ fn base_name(i: &Instr) -> String {
         }
         Op::Push => "push_s".into(),
         Op::Pop => "pop_s".into(),
-        Op::Arc700Only(n) => n.into(),
+        Op::Arc700Only(n) => n.as_str().into(),
         Op::Extension { major, sub } => format!("ext{major:02x}.{sub:02x}"),
         Op::Illegal(_) => "illegal".into(),
     }

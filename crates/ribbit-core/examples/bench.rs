@@ -21,6 +21,9 @@ fn main() {
     }
     // Third argument "noskip": run every idle-loop iteration (verification).
     m.idle_skip = args.next().as_deref() != Some("noskip");
+    // RIBBIT_NO_TAIL=1: no per-instruction trace history, as in the GUI.
+    m.record_trace_tail = std::env::var_os("RIBBIT_NO_TAIL").is_none();
+    let retired0 = m.cpu.instructions_retired;
     let t = std::time::Instant::now();
     let r = m.run(steps, &Breakpoints::default());
     let s = t.elapsed().as_secs_f64();
@@ -34,5 +37,12 @@ fn main() {
         m.idle_stats(),
         r.stop,
         m.state_digest()
+    );
+    let c = &m.cpu.icache;
+    println!(
+        "decode cache: {} hits, {} misses, {} uncached fetches (exact with noskip)",
+        c.hits,
+        c.misses,
+        (m.cpu.instructions_retired - retired0).saturating_sub(c.hits + c.misses)
     );
 }
