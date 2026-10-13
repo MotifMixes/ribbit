@@ -16,6 +16,8 @@ ribbit-debug.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+bincode = "1.3"
+miniz_oxide = "0.8"
 toml.workspace = true
 
 [dev-dependencies]

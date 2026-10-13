@@ -88,6 +88,52 @@ impl std::fmt::Display for TraceEvent {
 /// Events kept for crash reports.
 pub const TRACE_TAIL: usize = 64;
 
+/// Save-state format: magic, version, then a deflated bincode payload.
+const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
+pub const STATE_VERSION: u32 = 1;
+
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error("not a Ribbit save state")]
+    NotAState,
+    #[error("save state version {0} is not supported (this build reads version {STATE_VERSION})")]
+    Version(u32),
+    #[error("this save state is for a different BIOS or cartridge")]
+    WrongImages,
+    #[error("damaged save state: {0}")]
+    Damaged(String),
+}
+
+#[derive(serde::Serialize)]
+struct StateRef<'a> {
+    bios_crc: u32,
+    cart_crc: Option<u32>,
+    cpu: &'a Cpu,
+    ram: &'a [u8],
+    vram: &'a [u8],
+    buttons: &'a Buttons,
+    io: &'a Peripherals,
+    clock: &'a Clock,
+    interrupt_counts: &'a [u64],
+    first_cart_pc: Option<(u64, u32)>,
+    touch_config: &'a Option<io::touch::MameTouchConfig>,
+}
+
+#[derive(serde::Deserialize)]
+struct State {
+    bios_crc: u32,
+    cart_crc: Option<u32>,
+    cpu: Cpu,
+    ram: Vec<u8>,
+    vram: Vec<u8>,
+    buttons: Buttons,
+    io: Peripherals,
+    clock: Clock,
+    interrupt_counts: Vec<u64>,
+    first_cart_pc: Option<(u64, u32)>,
+    touch_config: Option<io::touch::MameTouchConfig>,
+}
+
 const IDLE_PROBE_MAX_STEPS: u64 = 512;
 const IDLE_BACKOFF_STEPS: u64 = 20_000;
 
@@ -111,7 +157,6 @@ struct IdleProbe {
     snapshot: ribbit_cpu::idle::IdleSnapshot,
     cycles: u64,
     retired: u64,
-    report_steps: u64,
     steps: u64,
     event_syncs: u64,
 }
@@ -448,10 +493,14 @@ impl Machine {
                 } else {
                     4
                 }] += 1;
-                self.idle.backoff.insert(p.head, report.steps + IDLE_BACKOFF_STEPS);
+                self.idle.backoff.insert(p.head, self.cpu.cycles + IDLE_BACKOFF_STEPS);
                 return;
             }
-            let (cycles, steps) = (self.cpu.cycles - p.cycles, report.steps + 1 - p.report_steps);
+            // Every step (instruction, interrupt entry, sleep) is one cycle,
+            // so the absolute cycle count measures the iteration even when
+            // the probe spans several `run` calls.
+            let cycles = self.cpu.cycles - p.cycles;
+            let steps = cycles;
             let instructions = self.cpu.instructions_retired - p.retired;
             if cycles == 0 || steps == 0 {
                 return;
@@ -486,7 +535,7 @@ impl Machine {
             self.idle.recent_next = (self.idle.recent_next + 1) % self.idle.recent.len();
             return;
         }
-        if self.idle.backoff.get(&pc).is_some_and(|&until| report.steps < until) || self.io.sync_needed {
+        if self.idle.backoff.get(&pc).is_some_and(|&until| self.cpu.cycles < until) || self.io.sync_needed {
             return;
         }
         self.idle.stats[0] += 1;
@@ -495,7 +544,6 @@ impl Machine {
             snapshot: self.cpu.idle_snapshot(),
             cycles: self.cpu.cycles,
             retired: self.cpu.instructions_retired,
-            report_steps: report.steps + 1,
             steps: 0,
             event_syncs: self.io.event_syncs,
         });
@@ -506,10 +554,70 @@ impl Machine {
 
     fn idle_end_probe(&mut self, _ok: bool) {
         if let Some(p) = self.idle.probe.take() {
-            self.idle.backoff.insert(p.head, self.cpu.instructions_retired + IDLE_BACKOFF_STEPS);
+            self.idle.backoff.insert(p.head, self.cpu.cycles + IDLE_BACKOFF_STEPS);
         }
         self.io.probe = false;
         self.bus.write_log = None;
+    }
+
+    /// The complete machine state (CPU, memory, devices, time), compressed.
+    /// ROMs are not included: a state loads only into a machine with the
+    /// same BIOS and cartridge.
+    pub fn save_state(&self) -> Vec<u8> {
+        let state = StateRef {
+            bios_crc: self.firmware.id().crc32,
+            cart_crc: self.cartridge.as_ref().map(|c| c.id().crc32),
+            cpu: &self.cpu,
+            ram: self.bus.ram(),
+            vram: self.bus.vram(),
+            buttons: &self.buttons,
+            io: &self.io,
+            clock: &self.clock,
+            interrupt_counts: &self.interrupt_counts,
+            first_cart_pc: self.first_cart_pc,
+            touch_config: &self.touch_config,
+        };
+        let payload = bincode::serialize(&state).expect("in-memory serialisation cannot fail");
+        let mut out = STATE_MAGIC.to_vec();
+        out.extend_from_slice(&STATE_VERSION.to_le_bytes());
+        out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(&payload, 1));
+        out
+    }
+
+    /// Restores a state made by `save_state` on the same BIOS and cartridge.
+    /// On error the machine is unchanged.
+    pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        let body = bytes.strip_prefix(STATE_MAGIC.as_slice()).ok_or(StateError::NotAState)?;
+        let version = u32::from_le_bytes(body.get(..4).ok_or(StateError::NotAState)?.try_into().unwrap());
+        if version != STATE_VERSION {
+            return Err(StateError::Version(version));
+        }
+        let payload =
+            miniz_oxide::inflate::decompress_to_vec(&body[4..]).map_err(|e| StateError::Damaged(format!("{e:?}")))?;
+        let s: State = bincode::deserialize(&payload).map_err(|e| StateError::Damaged(e.to_string()))?;
+        if s.bios_crc != self.firmware.id().crc32 || s.cart_crc != self.cartridge.as_ref().map(|c| c.id().crc32) {
+            return Err(StateError::WrongImages);
+        }
+        if s.interrupt_counts.len() != self.interrupt_counts.len() {
+            return Err(StateError::Damaged("interrupt counters".into()));
+        }
+        if !self.bus.restore_memory(&s.ram, &s.vram) {
+            return Err(StateError::Damaged("memory size".into()));
+        }
+        // The ROM is the same, so the decode cache stays valid.
+        let icache = std::mem::take(&mut self.cpu.icache);
+        self.cpu = s.cpu;
+        self.cpu.icache = icache;
+        self.buttons = s.buttons;
+        self.io = s.io;
+        self.io.sync_needed = true;
+        self.clock = s.clock;
+        self.interrupt_counts.copy_from_slice(&s.interrupt_counts);
+        self.first_cart_pc = s.first_cart_pc;
+        self.touch_config = s.touch_config;
+        self.idle = IdleTracker::default();
+        self.trace_tail = TraceRing::new(TRACE_TAIL);
+        Ok(())
     }
 
     /// Steps skipped by idle fast-forwarding since reset.
@@ -730,6 +838,27 @@ mod tests {
         assert_eq!(r.stop, StopReason::StepLimit);
         assert_eq!(m.io.adc.fifo.len(), io::touch::INIT_SAMPLES + 12);
         assert_eq!(m.io.intc.flags & io::intc::FLAG_ADC, io::intc::FLAG_ADC);
+    }
+
+    #[test]
+    fn save_state_round_trips_and_checks_images() {
+        let prog = [MOV_R0_1[0], MOV_R0_1[1], ADD_R0_R0_1[0], ADD_R0_R0_1[1], B_SELF[0], B_SELF[1]];
+        let mut a = machine(&prog);
+        a.run(1000, &Breakpoints::default());
+        let state = a.save_state();
+        assert!(state.starts_with(b"RIBBITST"));
+        let mut b = machine(&prog);
+        b.load_state(&state).unwrap();
+        assert_eq!(a.state_digest(), b.state_digest());
+        a.run(5000, &Breakpoints::default());
+        b.run(5000, &Breakpoints::default());
+        assert_eq!((a.state_digest(), a.cpu.cycles), (b.state_digest(), b.cpu.cycles));
+        // Another BIOS: refused, machine unchanged.
+        let mut other = machine(&[BRK_S, BRK_S]);
+        let before = other.state_digest();
+        assert!(matches!(other.load_state(&state), Err(StateError::WrongImages)));
+        assert_eq!(other.state_digest(), before);
+        assert!(matches!(other.load_state(b"junk"), Err(StateError::NotAState)));
     }
 }
 

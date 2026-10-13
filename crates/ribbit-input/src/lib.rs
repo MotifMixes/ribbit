@@ -77,7 +77,7 @@ impl Button {
 /// Union of all button bits.
 pub const BUTTON_BITS: u32 = 0xB703_E380;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Buttons {
     pressed: u32,
 }

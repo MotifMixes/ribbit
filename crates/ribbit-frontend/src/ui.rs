@@ -20,8 +20,12 @@ pub enum Action {
     ToggleFullscreen,
     SetWindowScale(u32),
     SettingsChanged,
+    SaveState(u8),
+    LoadState(u8),
     Quit,
 }
+
+pub const STATE_SLOTS: u8 = 5;
 
 /// What the UI shows (read-only snapshot).
 pub struct Info {
@@ -33,6 +37,9 @@ pub struct Info {
     pub fullscreen: bool,
     pub experimental_touch: bool,
     pub save_dir: String,
+    /// When each save-state slot was last written (None = empty).
+    pub slots: Vec<Option<String>>,
+    pub rewinding: bool,
 }
 
 #[derive(Default)]
@@ -84,6 +91,14 @@ pub fn draw(
         area = ui.max_rect();
         if !info.running {
             welcome(ui, settings, info, actions);
+        } else if info.rewinding {
+            ui.painter().text(
+                area.left_top() + egui::vec2(12.0, 10.0),
+                egui::Align2::LEFT_TOP,
+                "⏪ Rewinding",
+                egui::FontId::proportional(18.0),
+                egui::Color32::WHITE,
+            );
         } else if info.paused {
             let p = ui.painter();
             p.rect_filled(area, 0.0, egui::Color32::from_black_alpha(140));
@@ -161,6 +176,31 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 actions.push(Action::Reset);
                 ui.close();
             }
+            ui.separator();
+            ui.add_enabled_ui(info.running, |ui| {
+                ui.menu_button("Save State", |ui| {
+                    for slot in 1..=STATE_SLOTS {
+                        let when = info.slots.get(slot as usize - 1).cloned().flatten().unwrap_or_else(|| "empty".into());
+                        let key = if slot == 1 { "F5" } else { "" };
+                        if ui.add(egui::Button::new(format!("Slot {slot}  ({when})")).shortcut_text(key)).clicked() {
+                            actions.push(Action::SaveState(slot));
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button("Load State", |ui| {
+                    for slot in 1..=STATE_SLOTS {
+                        let when = info.slots.get(slot as usize - 1).cloned().flatten();
+                        let key = if slot == 1 { "F9" } else { "" };
+                        let label = format!("Slot {slot}  ({})", when.as_deref().unwrap_or("empty"));
+                        if ui.add_enabled(when.is_some(), egui::Button::new(label).shortcut_text(key)).clicked() {
+                            actions.push(Action::LoadState(slot));
+                            ui.close();
+                        }
+                    }
+                });
+                ui.label(egui::RichText::new("Hold ` (left of 1) to rewind").weak());
+            });
             ui.separator();
             ui.menu_button("Speed", |ui| {
                 for (p, label) in [(50, "50%"), (100, "100% (normal)"), (200, "200%"), (400, "400%"), (0, "Unlimited")] {
@@ -331,6 +371,8 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
                 ("Stylus", "Left mouse button / touch"),
                 ("Pause", "Esc"),
                 ("Fast-forward", "Hold Tab"),
+                ("Rewind", "Hold ` (left of 1)"),
+                ("Quick save / load", "F5 / F9"),
                 ("Reset", "Ctrl+R"),
                 ("Open cartridge", "Ctrl+O"),
                 ("Fullscreen", "F11"),

@@ -19,7 +19,7 @@ pub const VOICE_COMMAND_ADDR: u32 = 0x0180_2070;
 /// MAME: command 0x10 starts a voice; any other stops it.
 pub const COMMAND_START: u8 = 0x10;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VoiceCommand {
     pub command: u8,
     pub voice: u8,
@@ -31,7 +31,7 @@ impl VoiceCommand {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioUnit {
     pub last_command: Option<VoiceCommand>,
     pub commands: u64,

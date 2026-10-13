@@ -24,7 +24,7 @@ pub const ADDR: u32 = 0x0180_9004;
 pub const MAME_LEAPSTER2_MEASURED: u32 = 0x63FF_BFFF;
 pub const CART_ABSENT: u32 = 1 << 26;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Straps {
     pub value: u32,
 }
@@ -56,7 +56,7 @@ impl Straps {
 /// it), so it has no effect on timing here.
 pub const CLOCK_ADDR: u32 = 0x0180_9008;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClockControl {
     pub value: u32,
     pub writes: u64,

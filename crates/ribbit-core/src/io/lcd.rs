@@ -38,14 +38,14 @@ pub const DMA_STATUS: u32 = 0x0180_8818;
 pub const DMA_START: u32 = 0x1B;
 
 /// A copy to perform: `words` 32-bit words from `source` to `dest`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DmaRequest {
     pub source: u32,
     pub dest: u32,
     pub words: u32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcdController {
     pub regs: LcdRegs,
     pub dma_source: u32,

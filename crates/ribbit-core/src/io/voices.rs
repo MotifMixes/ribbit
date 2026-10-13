@@ -35,7 +35,7 @@ pub const START_COMMAND: u8 = 0x10;
 const LFC_FRAME: usize = 192;
 const LFC_SKIP: u32 = 256;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Lfc {
     pub pointer: u32,
     pub mode: u16,
@@ -45,6 +45,7 @@ pub struct Lfc {
     end: u8,
     coeff: [[f64; 10]; 2],
     history: [f64; 10],
+    #[serde(with = "ribbit_memory::serde_array")]
     samples: [f64; LFC_FRAME],
     pub frames: u64,
 }
@@ -66,7 +67,7 @@ impl Default for Lfc {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VoiceEngine {
     pub start: [u32; 8],
     pub end: [u32; 8],
@@ -83,8 +84,13 @@ pub struct VoiceEngine {
     /// Fractional sample-clock state, in peripheral ticks x SAMPLE_HZ.
     phase: u64,
     pub samples_generated: u64,
-    /// Mixed output at 8 kHz, for a future host audio backend.
+    /// Mixed output at 8 kHz, for the host audio backend (not saved).
+    #[serde(skip, default = "default_output")]
     pub output: ribbit_audio::SampleRing,
+}
+
+fn default_output() -> ribbit_audio::SampleRing {
+    ribbit_audio::SampleRing::new(8_000)
 }
 
 impl Default for VoiceEngine {
@@ -102,7 +108,7 @@ impl Default for VoiceEngine {
             lfc_start_pending: false,
             phase: 0,
             samples_generated: 0,
-            output: ribbit_audio::SampleRing::new(8_000),
+            output: default_output(),
         }
     }
 }

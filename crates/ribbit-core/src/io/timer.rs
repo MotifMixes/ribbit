@@ -16,7 +16,7 @@
 //!   write to CONTROL de-asserts it. HYPOTHESIS.
 
 /// One memory-mapped timer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MmioTimer {
     pub count: u32,
     pub control: u32,

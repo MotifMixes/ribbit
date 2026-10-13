@@ -35,7 +35,7 @@ pub const ERASED: u8 = 0xFF;
 const START_READ: u32 = 1;
 const START_WRITE: u32 = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Eeprom {
     pub data: Vec<u8>,
     /// Cartridge save chip (device 0x20); None without a cartridge.

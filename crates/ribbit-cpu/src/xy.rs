@@ -23,12 +23,38 @@ const XYCONFIG: usize = 0x18;
 const BURST_SIZE: usize = 0x1B;
 const WORDS: usize = 0x400;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct XyExtension {
     /// aux 0x80-0x9F: AX0-3, AY0-3, MX00-MY31, XYCONFIG, burst registers.
     pub aux: [u32; AUX_COUNT as usize],
     /// [bank][x=0 / y=1][word]
+    #[serde(with = "xy_mem")]
     pub mem: Box<[[[u32; WORDS]; 2]; 2]>,
+}
+
+/// XY memory as one flat list of words (save states).
+mod xy_mem {
+    use super::WORDS;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    type Mem = [[[u32; WORDS]; 2]; 2];
+
+    pub fn serialize<S: Serializer>(m: &Mem, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(m.iter().flatten().flatten())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Box<Mem>, D::Error> {
+        let v = Vec::<u32>::deserialize(d)?;
+        if v.len() != 4 * WORDS {
+            return Err(D::Error::custom("XY memory size"));
+        }
+        let mut m = Box::new([[[0; WORDS]; 2]; 2]);
+        for (i, w) in v.into_iter().enumerate() {
+            m[i / (2 * WORDS)][(i / WORDS) % 2][i % WORDS] = w;
+        }
+        Ok(m)
+    }
 }
 
 impl Default for XyExtension {

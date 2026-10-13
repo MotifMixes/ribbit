@@ -141,6 +141,16 @@ impl SystemBus {
         &self.unmapped_summary
     }
 
+    /// Restores RAM and VRAM (save states); false if the sizes differ.
+    pub fn restore_memory(&mut self, ram: &[u8], vram: &[u8]) -> bool {
+        if ram.len() != self.ram.len() || vram.len() != self.vram.len() {
+            return false;
+        }
+        self.ram.copy_from_slice(ram);
+        self.vram.copy_from_slice(vram);
+        true
+    }
+
     /// RAM/VRAM/ROM byte without side effects (no logging); None elsewhere.
     pub fn peek8(&self, addr: u32) -> Option<u8> {
         match self.decode(addr) {

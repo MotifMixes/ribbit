@@ -33,7 +33,7 @@ pub const DMA_IRQ_LINE: u8 = 0x12;
 pub const FLAG_VOICE_ACK: u32 = 1 << 18;
 pub const VOICE_ACK_IRQ_LINE: u8 = 0x1D;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IntFlags {
     pub flags: u32,
     pub enable: u32,

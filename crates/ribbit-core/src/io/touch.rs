@@ -52,7 +52,7 @@ pub const FIFO_CAPACITY: usize = 0x10000;
 /// A scripted stylus press, in emulated time since reset. X/Y are raw ADC
 /// values in MAME's input-port units (0..=0x7F0); how they map to pixels on a
 /// real panel is UNKNOWN (that is what calibration measures).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TouchPress {
     pub start_ms: u64,
     pub duration_ms: u64,
@@ -85,13 +85,13 @@ impl std::str::FromStr for TouchPress {
 }
 
 /// Configuration of the experimental model; kept across machine resets.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MameTouchConfig {
     /// Empty = no-touch mode (stylus always up).
     pub presses: Vec<TouchPress>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MameTouch {
     pub config: MameTouchConfig,
     peripheral_hz: u64,

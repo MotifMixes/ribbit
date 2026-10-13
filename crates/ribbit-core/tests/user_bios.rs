@@ -430,6 +430,14 @@ fn idle_skip_is_exact(name: &str) {
     assert!(fast.3 > 100_000_000, "{name}: idle loop fast-forwarded ({} steps)", fast.3);
     assert_eq!(slow.3, 0);
     assert_eq!((fast.0, fast.1, fast.2), (slow.0, slow.1, slow.2), "{name}: same state, cycles and instructions");
+    // As the window runs it: one frame's worth of steps per call.
+    let mut m = Machine::with_straps(fw.clone(), None, STRAPS_SKIP_CALIBRATION);
+    for _ in 0..300_000_000 / 1_600_000 {
+        m.run(1_600_000, &Breakpoints::default());
+    }
+    m.run(300_000_000 - m.cpu.cycles, &Breakpoints::default());
+    assert!(m.idle_skipped_steps() > 100_000_000, "{name}: chunked runs fast-forward too");
+    assert_eq!((m.state_digest(), m.cpu.cycles), (slow.0, slow.1), "{name}: chunked runs identical");
 }
 
 #[test]
@@ -440,4 +448,38 @@ fn v15_idle_skip_is_exact() {
 #[test]
 fn v21_idle_skip_is_exact() {
     idle_skip_is_exact(V21);
+}
+
+// ---------------------------------------------------------------------------
+// Save states: a state loaded into a fresh machine continues identically.
+
+fn save_state_is_exact(name: &str) {
+    let Some(fw) = firmware(name) else {
+        eprintln!("RIBBIT_BIOS_DIR not set; skipping");
+        return;
+    };
+    let mut a = Machine::with_straps(fw.clone(), None, STRAPS_SKIP_CALIBRATION);
+    a.run(150_000_000, &Breakpoints::default());
+    let state = a.save_state();
+    let mut b = Machine::with_straps(fw, None, STRAPS_SKIP_CALIBRATION);
+    b.load_state(&state).expect("load");
+    assert_eq!(a.state_digest(), b.state_digest(), "{name}: identical right after loading");
+    a.run(150_000_000, &Breakpoints::default());
+    b.run(150_000_000, &Breakpoints::default());
+    assert_eq!(
+        (a.state_digest(), a.cpu.cycles, a.cpu.instructions_retired, a.io.lcd.transfers),
+        (b.state_digest(), b.cpu.cycles, b.cpu.instructions_retired, b.io.lcd.transfers),
+        "{name}: identical 150 M steps later"
+    );
+    eprintln!("{name}: state size {} KiB", state.len() / 1024);
+}
+
+#[test]
+fn v15_save_state_is_exact() {
+    save_state_is_exact(V15);
+}
+
+#[test]
+fn v21_save_state_is_exact() {
+    save_state_is_exact(V21);
 }

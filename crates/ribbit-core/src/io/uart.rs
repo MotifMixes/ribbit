@@ -23,7 +23,7 @@ pub const STATUS_ADDR: u32 = 0x0180_D514;
 pub const STATUS_TX_READY: u32 = 1 << 7;
 pub const STATUS_RX_EMPTY: u32 = 1 << 5;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DebugUart {
     pub tx: Vec<u8>,
     /// Last value written to the status/control register.

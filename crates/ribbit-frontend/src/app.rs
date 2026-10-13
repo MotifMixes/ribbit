@@ -20,6 +20,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
+/// Rewind: a snapshot every half second of emulated time, 30 s kept.
+const REWIND_EVERY_CYCLES: u64 = 48_000_000;
+const REWIND_KEEP: usize = 60;
+
 /// Never emulate more than this per frame; drop lag beyond `MAX_LAG`.
 const MAX_SLICE: Duration = Duration::from_millis(100);
 const MAX_LAG: Duration = Duration::from_millis(250);
@@ -43,6 +47,10 @@ struct Session {
     saves: SavePaths,
     autosave: AutoSave,
     title: String,
+    /// Prefix for this game's save-state files.
+    state_key: String,
+    rewind: std::collections::VecDeque<Vec<u8>>,
+    last_snapshot: u64,
 }
 
 pub struct App {
@@ -57,6 +65,7 @@ pub struct App {
     frame: Box<[u32; WIDTH * HEIGHT]>,
     paused: bool,
     fast_forward: bool,
+    rewinding: bool,
     modifiers: ModifiersState,
     pace: Option<(Instant, u64)>,
     speed: (Instant, u64, f64),
@@ -106,6 +115,7 @@ impl App {
             frame: Box::new([0; WIDTH * HEIGHT]),
             paused: false,
             fast_forward: false,
+            rewinding: false,
             modifiers: ModifiersState::empty(),
             pace: None,
             speed: (Instant::now(), 0, 100.0),
@@ -178,7 +188,19 @@ impl App {
             self.settings.add_recent(path);
             self.save_settings();
         }
-        self.session = Some(Session { machine, saves, autosave: AutoSave::default(), title });
+        let state_key = match machine.cartridge() {
+            Some(c) => format!("cart-{:08x}", c.id().crc32),
+            None => format!("bios-{:08x}", machine.firmware().id().crc32),
+        };
+        self.session = Some(Session {
+            machine,
+            saves,
+            autosave: AutoSave::default(),
+            title,
+            state_key,
+            rewind: Default::default(),
+            last_snapshot: 0,
+        });
         self.paused = false;
         self.pace = None;
         if let Some(a) = &mut self.audio {
@@ -288,6 +310,8 @@ impl App {
                 }
             }
             Action::SettingsChanged => self.save_settings(),
+            Action::SaveState(slot) => self.save_state(slot),
+            Action::LoadState(slot) => self.load_state(slot),
             Action::Quit => {
                 self.quit = true;
                 event_loop.exit();
@@ -298,6 +322,64 @@ impl App {
     fn window_size(scale: u32) -> PhysicalSize<u32> {
         // Room for the menu and status bars.
         PhysicalSize::new(160 * scale, 160 * scale + 56)
+    }
+
+    fn state_path(&self, slot: u8) -> Option<PathBuf> {
+        let s = self.session.as_ref()?;
+        Some(self.opts.data_dir.join("states").join(format!("{}-slot{slot}.state", s.state_key)))
+    }
+
+    /// When each slot was saved, for the menus.
+    fn slot_times(&self) -> Vec<Option<String>> {
+        (1..=ui::STATE_SLOTS)
+            .map(|slot| {
+                let modified = std::fs::metadata(self.state_path(slot)?).ok()?.modified().ok()?;
+                let secs = modified.elapsed().ok()?.as_secs();
+                Some(match secs {
+                    0..=59 => "just now".to_string(),
+                    60..=3599 => format!("{} min ago", secs / 60),
+                    3600..=86_399 => format!("{} h ago", secs / 3600),
+                    _ => format!("{} days ago", secs / 86_400),
+                })
+            })
+            .collect()
+    }
+
+    fn save_state(&mut self, slot: u8) {
+        let (Some(path), Some(s)) = (self.state_path(slot), &self.session) else {
+            return;
+        };
+        let bytes = s.machine.save_state();
+        let result = (|| -> Result<()> {
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, &bytes)?;
+            std::fs::rename(&tmp, &path)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.ui.toast(format!("State saved to slot {slot}")),
+            Err(e) => self.ui.error = Some(format!("Saving state failed: {e:#}")),
+        }
+    }
+
+    fn load_state(&mut self, slot: u8) {
+        let Some(path) = self.state_path(slot) else {
+            return;
+        };
+        let result = std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| self.session.as_mut().unwrap().machine.load_state(&bytes).map_err(anyhow::Error::from));
+        match result {
+            Ok(()) => {
+                self.pace = None;
+                if let Some(a) = &mut self.audio {
+                    a.clear();
+                }
+                self.ui.toast(format!("State loaded from slot {slot}"));
+            }
+            Err(e) => self.ui.error = Some(format!("Loading state failed: {e:#}")),
+        }
     }
 
     fn reset(&mut self) {
@@ -364,6 +446,25 @@ impl App {
         };
         if self.paused {
             return;
+        }
+        if self.rewinding {
+            // Step back one snapshot every few frames.
+            if let Some(state) = s.rewind.pop_back() {
+                let _ = s.machine.load_state(&state);
+                s.last_snapshot = s.machine.cpu.cycles;
+            }
+            self.pace = None;
+            if let Some(a) = &mut self.audio {
+                a.clear();
+            }
+            return;
+        }
+        if s.machine.cpu.cycles >= s.last_snapshot + REWIND_EVERY_CYCLES {
+            s.rewind.push_back(s.machine.save_state());
+            if s.rewind.len() > REWIND_KEEP {
+                s.rewind.pop_front();
+            }
+            s.last_snapshot = s.machine.cpu.cycles;
         }
         let m = &mut s.machine;
         let hz = m.clock.cpu_hz as f64;
@@ -455,10 +556,16 @@ impl App {
                 KeyCode::F10 => return self.ui.menu_visible = !self.ui.menu_visible,
                 KeyCode::F11 => return self.toggle_fullscreen(),
                 KeyCode::F12 => return self.screenshot(),
+                KeyCode::F5 => return self.save_state(1),
+                KeyCode::F9 => return self.load_state(1),
                 KeyCode::KeyO if ctrl => return self.act(Action::Pick(Pick::Cartridge), event_loop),
                 KeyCode::KeyR if ctrl => return self.reset(),
                 _ => {}
             }
+        }
+        if code == KeyCode::Backquote {
+            self.rewinding = pressed && self.session.is_some();
+            return;
         }
         if code == KeyCode::Tab {
             self.fast_forward = pressed;
@@ -505,6 +612,7 @@ impl App {
             s.machine.render_frame(&mut self.frame);
         }
         let save_dir = self.save_dir().display().to_string();
+        let slots = self.slot_times();
         let (Some(gpu), Some(state)) = (&mut self.gpu, &mut self.egui_state) else {
             return;
         };
@@ -522,6 +630,8 @@ impl App {
                 fullscreen: gpu.window.fullscreen().is_some(),
                 experimental_touch: self.session.as_ref().is_some_and(|s| s.machine.experimental_touch_enabled()),
                 save_dir,
+                slots,
+                rewinding: self.rewinding,
             };
         let mut actions = Vec::new();
         let mut area = egui::Rect::NOTHING;

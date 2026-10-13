@@ -63,7 +63,7 @@ pub mod debug {
 }
 
 /// What MMID holds after MUL64/MULU64.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MmidMode {
     /// PRM: the middle 32 bits of the 64-bit product (bits 47:16).
     Middle,
@@ -75,7 +75,7 @@ pub enum MmidMode {
 }
 
 /// What happens on an encoding the PRM defines as an Instruction Error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IllegalPolicy {
     /// Stop with a diagnostic. During bring-up an illegal instruction is far
     /// more likely to be an emulator bug than intended behaviour.
@@ -84,7 +84,7 @@ pub enum IllegalPolicy {
     Exception,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CpuConfig {
     /// INT_VECTOR_BASE after reset (VECBASE_AC_BUILD). 0x4000_0000 for the
     /// Leapster per MAME; the BIOS vector table is there.
@@ -112,7 +112,7 @@ impl CpuConfig {
 }
 
 /// An ARC processor timer (PRM "Processor Timers Auxiliary Registers").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Timer {
     pub count: u32,
     pub control: u32,
@@ -223,8 +223,11 @@ pub enum CpuError {
     Halted { pc: u32 },
 }
 
-#[derive(Clone, PartialEq, Eq)]
+/// `Serialize`/`Deserialize` cover the architectural state (save states);
+/// the decode cache, diagnostics and `last_instr` are rebuilt, not saved.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
+    #[serde(with = "ribbit_memory::serde_array")]
     pub regs: [u32; NUM_CORE_REGS],
     pub pc: u32,
     pub status32: u32,
@@ -248,13 +251,16 @@ pub struct Cpu {
     pub cycles: u64,
     pub instructions_retired: u64,
     pub config: CpuConfig,
+    #[serde(skip)]
     pub diag: Diagnostics,
     /// Present when `config.xy_extension` is set.
     pub xy: Option<xy::XyExtension>,
     /// Decoded-instruction cache for ROM ranges (speed only).
+    #[serde(skip)]
     pub icache: icache::ICache,
     /// The most recently executed instruction (kept here rather than in the
     /// step result, which is moved on every step).
+    #[serde(skip)]
     pub last_instr: Option<Instr>,
 }
 

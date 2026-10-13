@@ -20,7 +20,7 @@ pub const DATA_ADDR: u32 = 0x0180_00A0;
 pub const STATUS_ADDR: u32 = 0x0180_00A8;
 pub const STATUS_EMPTY: u32 = 1 << 8;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Adc {
     /// Packed samples, oldest first (MAME's format: channel << 16 | data << 5).
     pub fifo: VecDeque<u32>,

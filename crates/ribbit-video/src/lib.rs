@@ -14,7 +14,7 @@
 pub const WIDTH: usize = 160;
 pub const HEIGHT: usize = 160;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcdRegs {
     /// Byte offset of the framebuffer within VRAM.
     pub fb_base: u32,

@@ -41,7 +41,7 @@ use voices::VoiceEngine;
 /// (MAME header, eLinux, the BIOS's own clock table); MAME runs its core at
 /// 48 MHz to match videos. Ribbit counts one cycle per CPU step, so the ratio
 /// is only as good as that placeholder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Clock {
     pub cpu_hz: u64,
     pub peripheral_hz: u64,
@@ -143,6 +143,9 @@ impl std::fmt::Display for MmioAccess {
 /// Peripheral accesses kept for reports.
 pub const MMIO_TAIL: usize = 64;
 
+/// `Serialize`/`Deserialize` cover device state (save states); traces and
+/// diagnostics are not saved.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Peripherals {
     pub timers: [MmioTimer; 3],
     pub intc: IntFlags,
@@ -159,9 +162,12 @@ pub struct Peripherals {
     /// EXPERIMENTAL, UNVERIFIED MAME-derived touch/ADC sample source. None
     /// (the default) = no ADC conversions and channel controls unmodelled.
     pub touch: Option<MameTouch>,
+    #[serde(skip, default = "default_mmio_tail")]
     pub mmio_tail: TraceRing<MmioAccess>,
     /// Accesses since the last `take_events` (for the trace sink).
+    #[serde(skip)]
     events: Vec<MmioAccess>,
+    #[serde(skip)]
     pub record_events: bool,
     /// Debug-only fixed read values for registers no device models, used to
     /// follow the same path as another emulator in differential tests (e.g.
@@ -169,6 +175,7 @@ pub struct Peripherals {
     pub stubs: std::collections::BTreeMap<u32, u32>,
     /// For each unmodelled register: the instruction addresses that accessed
     /// it (first 16), for finding the driver code behind an access.
+    #[serde(skip)]
     pub unmodelled_pcs: std::collections::BTreeMap<u32, Vec<u32>>,
     /// Catch-up scheduling (speed only; results are identical to advancing
     /// every step): peripheral ticks not yet applied, the number of ticks
@@ -184,6 +191,10 @@ pub struct Peripherals {
     /// iteration ineligible for fast-forwarding.
     pub probe: bool,
     pub probe_violation: bool,
+}
+
+fn default_mmio_tail() -> TraceRing<MmioAccess> {
+    TraceRing::new(MMIO_TAIL)
 }
 
 impl Default for Peripherals {

@@ -10,6 +10,7 @@ pub mod firmware;
 pub mod image;
 pub mod known;
 pub mod map;
+pub mod serde_array;
 
 pub use bus::{Bus, SystemBus, UnmappedAccess};
 pub use cartridge::{CartHeader, Cartridge, CartridgeError, Nvram};

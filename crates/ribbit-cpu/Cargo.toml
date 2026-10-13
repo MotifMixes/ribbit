@@ -7,5 +7,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde.workspace = true
 ribbit-memory.workspace = true
 thiserror.workspace = true

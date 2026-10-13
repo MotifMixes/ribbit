@@ -19,7 +19,7 @@ use ribbit_input::{BUTTON_BITS, Buttons};
 
 pub const ADDR: u32 = 0x0180_004C;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GpioInput {
     /// Copied from the machine's `Buttons` before each run.
     pub buttons: Buttons,
