@@ -1,9 +1,8 @@
 //! Audio hardware model.
 //!
-//! STATUS: only sample-format primitives exist. The voice engine (five
-//! pitched A-law voices, two raw 8 kHz A-law voices, an LPC speech voice
-//! and two circular PCM DMA channels feeding a 32 kHz DAC, as described by
-//! MAME `leapster_a.cpp`) is not implemented. See docs/hardware-research.md.
+//! Sample-format primitives shared by the emulator and the host output: A-law,
+//! the emulator-to-host sample ring and the 8 to 32 kHz output interpolator.
+//! The voice engine itself lives in `ribbit-core` (io/voices.rs).
 
 /// Output rate of the DAC path observed by MAME (control value 0x7f01).
 /// UNVERIFIED on hardware.
@@ -24,6 +23,53 @@ pub fn alaw_to_linear(a: u8) -> i16 {
         }
     }
     if a & 0x80 != 0 { t } else { -t }
+}
+
+/// MAME's 4x polyphase interpolator for the 8 kHz legacy mix (64-tap
+/// Kaiser-windowed sinc, beta 6, 3.9 kHz cutoff, each phase normalised to
+/// unity DC gain). Coefficients from MAME `leapster_a.cpp` (master da56c5ac,
+/// BSD-3-Clause). MAME: "Whether the hardware interpolates or simply repeats
+/// samples is unverified" - UNVERIFIED; used for host output only.
+const INTERP: [[f64; 16]; 4] = [
+    [
+        -0.0005094, 0.0025431, -0.0068394, 0.0143336, -0.0260942, 0.0440515, -0.0745725, 0.1565483, 0.9505791,
+        -0.0801511, 0.0273811, -0.0095530, 0.0023707, 0.0001665, -0.0006333, 0.0003789,
+    ],
+    [
+        -0.0010008, 0.0042238, -0.0112934, 0.0245213, -0.0474114, 0.0872235, -0.1680786, 0.4713854, 0.7696265,
+        -0.1867429, 0.0869947, -0.0441397, 0.0216283, -0.0095494, 0.0035005, -0.0008878,
+    ],
+    [
+        -0.0008878, 0.0035005, -0.0095494, 0.0216283, -0.0441397, 0.0869947, -0.1867429, 0.7696265, 0.4713854,
+        -0.1680786, 0.0872235, -0.0474114, 0.0245213, -0.0112934, 0.0042238, -0.0010008,
+    ],
+    [
+        0.0003789, -0.0006333, 0.0001665, 0.0023707, -0.0095530, 0.0273811, -0.0801511, 0.9505791, 0.1565483,
+        -0.0745725, 0.0440515, -0.0260942, 0.0143336, -0.0068394, 0.0025431, -0.0005094,
+    ],
+];
+
+/// Raises 8 kHz samples to 32 kHz (four outputs per input) as MAME does.
+#[derive(Debug, Clone, Default)]
+pub struct Upsample4x {
+    /// Most recent input first.
+    history: [f64; 16],
+}
+
+impl Upsample4x {
+    pub fn reset(&mut self) {
+        self.history = [0.0; 16];
+    }
+
+    /// Takes one 8 kHz sample and returns the next four 32 kHz samples.
+    pub fn push(&mut self, sample: i16) -> [i16; 4] {
+        self.history.copy_within(0..15, 1);
+        self.history[0] = sample as f64;
+        INTERP.map(|taps| {
+            let v: f64 = taps.iter().zip(&self.history).map(|(t, x)| t * x).sum();
+            v.round().clamp(-32768.0, 32767.0) as i16
+        })
+    }
 }
 
 /// Fixed-capacity ring buffer between the emulation thread and a host audio
@@ -100,6 +146,25 @@ mod tests {
             assert!(v > prev, "code {m:#x}");
             prev = v;
         }
+    }
+
+    #[test]
+    fn upsampler_passes_dc_and_delays_by_about_1ms() {
+        let mut u = Upsample4x::default();
+        let mut out = Vec::new();
+        for _ in 0..16 {
+            out.extend(u.push(1000));
+        }
+        // Each phase has unity DC gain: a settled constant comes out unchanged.
+        assert!(out[60..].iter().all(|&s| (s - 1000).abs() <= 1), "{:?}", &out[60..]);
+        // An impulse peaks 8 input samples (1 ms) later.
+        u.reset();
+        let mut imp = Vec::new();
+        for i in 0..16 {
+            imp.extend(u.push(if i == 0 { 10000 } else { 0 }));
+        }
+        let peak = (0..imp.len()).max_by_key(|&i| imp[i]).unwrap();
+        assert_eq!(peak / 4, 8, "{imp:?}");
     }
 
     #[test]

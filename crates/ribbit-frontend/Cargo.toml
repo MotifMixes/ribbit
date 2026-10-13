@@ -12,6 +12,7 @@ ribbit-cpu.workspace = true
 ribbit-memory.workspace = true
 ribbit-video.workspace = true
 ribbit-input.workspace = true
+ribbit-audio.workspace = true
 ribbit-debug.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -28,6 +29,10 @@ png = "0.18"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 egui-winit = "0.36.2"
 rfd = "0.17"
+gilrs = "0.11"
 
 [target.'cfg(target_os = "android")'.dependencies]
 egui-winit = { version = "0.36.2", default-features = false, features = ["android-native-activity"] }
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }

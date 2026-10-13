@@ -2,15 +2,13 @@
 
 An emulator in development for the **original 2003 LeapFrog Leapster** (the blue-and-silver handheld).
 
-> **Status: Ribbit does not emulate the Leapster yet.** The ARCompact CPU core executes (decoder validated against
-> GNU binutils; control flow matches MAME on real firmware). Both original-Leapster BIOSes (Universal v1.5, US v2.1)
-> boot their RTOS, initialise the LCD, run framebuffer DMA and switch to the touch-calibration display mode, then
-> wait for touchscreen ADC samples, which are not emulated by default. An opt-in, clearly labelled
-> **experimental** touch model borrowed from MAME (`--experimental-mame-touch`) gets both past calibration. With
-> the EEPROMs and the voice engine modelled, SpongeBob on the US v2.1 BIOS runs through name entry, its intro and a
-> cut-scene to the main menu and loads an activity, at full speed with sound; saves persist. Not yet play-tested
-> beyond that.
-> See [docs/accuracy-matrix.md](docs/accuracy-matrix.md).
+> **Status: early, but SpongeBob is playable on the US v2.1 BIOS.** The ARCompact CPU core is validated against
+> GNU binutils and matches MAME's control flow on real firmware. With the opt-in, clearly labelled **experimental**
+> touch model borrowed from MAME, *SpongeBob SquarePants: Saves the Day* runs on the US v2.1 BIOS through name entry,
+> its intro and the main menu; all four activities load, Krabby Patty gameplay responds to the d-pad, and saves
+> persist. Sound uses MAME's (unverified) voice and speech model. The Universal v1.5 BIOS turns itself off a few
+> seconds after start-up unless MAME's equally unverified power-line workaround is switched on. Only one game has
+> been tested. See [docs/accuracy-matrix.md](docs/accuracy-matrix.md).
 
 Leapster games are Flash content run by a player built into the console firmware. To run games you will need a
 dump of the **BIOS from your own console**, as well as your cartridge. No firmware or game data is included or will
@@ -28,12 +26,21 @@ cargo run -p ribbit-desktop -- --help
 ## Playing
 
 * **Windows**: run `target/release/ribbit-gui.exe` (or `ribbit run`). Use File → Open BIOS… once, then
-  File → Open Cartridge… (or drop files onto the window). Settings, saves and screenshots go to `%APPDATA%\Ribbit`.
-  Mouse = stylus (experimental touch model), arrows/Z/X/H/Enter/Backspace = Leapster buttons (Input → Key
-  bindings…), Esc = pause, Tab = fast-forward, F11 = fullscreen, F12 = screenshot.
-* **Android** (arm64): `python -I scripts/build-apk.py` builds `target/android/ribbit-debug.apk` (needs the Android
-  SDK/NDK and `cargo-ndk`). On first launch, grant "All files access" so the in-app browser can open your files.
-  Touch = stylus; gamepad A/B, X/Y = Hint, Start = Pause, Select = Home; Back = menu.
+  File → Open Cartridge… (or drop files onto the window). Settings, saves, save states and screenshots go to
+  `%APPDATA%\Ribbit`.
+  * Keyboard: arrows, Z = A, X = B, H = Hint, Enter = Pause, Backspace = Home (Input → Key bindings…).
+  * Mouse = stylus (experimental touch model).
+  * Controllers (XInput and others via gilrs): d-pad/stick, A, B, X/Y = Hint, Start = Pause, Back = Home,
+    LB/RB = volume, Guide = menu.
+  * Esc = pause, Tab (hold) = fast-forward, \` (hold) = rewind, F5/F9 = quick save/load state (slots 1–5 in the
+    Emulation menu), F11 = fullscreen, F12 = screenshot.
+  * Video → Sharp (default), LCD grid, Pixel perfect or Smooth.
+  * Emulation → Advanced holds the experimental options: MAME's power-line workaround (needed by v1.5) and the
+    CPU clock (96 MHz nominal, 48 MHz as in MAME).
+* **Release zip**: `python -I scripts/package-release.py` writes `target/dist/Ribbit-<version>-windows-x64.zip`
+  (the two programs and a read-me only; no firmware).
+* **Android** (arm64, untested on a device): `python -I scripts/build-apk.py` builds
+  `target/android/ribbit-debug.apk` (needs the Android SDK/NDK and `cargo-ndk`).
 
 ## Documentation
 

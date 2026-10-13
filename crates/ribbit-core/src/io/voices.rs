@@ -20,8 +20,10 @@
 //! | A-law | standard G.711 (`ribbit_audio::alaw_to_linear`); MAME's table is the same curve at half amplitude and opposite sign |
 //! | Mix | sum of voice * 0.125 * volume / 0x4000, clamped to 16 bits (MAME) |
 //!
-//! Not modelled: PCM DMA (0x0180_3000; no BIOS or SpongeBob access seen), the
-//! 32 kHz interpolation, analog output, the other 0x0180_4000 registers.
+//! Not modelled: PCM DMA (0x0180_3000; no BIOS or SpongeBob access seen),
+//! analog output, the other 0x0180_4000 registers. MAME's 8 to 32 kHz
+//! interpolation is applied by the host output (`ribbit_audio::Upsample4x`),
+//! since without PCM DMA nothing emulated observes the 32 kHz stream.
 
 use ribbit_memory::Bus;
 

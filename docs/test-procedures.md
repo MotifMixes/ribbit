@@ -105,7 +105,11 @@ target/release/ribbit --config local/play.toml run
 ```
 
 Mouse = stylus (EXPERIMENTAL touch model), arrows = d-pad, Z = A, X = B, H = Hint, Enter = Pause,
-Backspace = Home, F = display mode. Saves are written to the configured files when the window closes.
+Backspace = Home; controllers via gilrs. Saves are autosaved and written when the window closes. F5/F9 = state slot
+1, hold ` = rewind. `ribbit-gui.exe` is the same app without a console; to try it without touching your settings,
+point `APPDATA` at a scratch folder.
+
+Release zip: `python -I scripts/package-release.py` (checks that only the two programs and README.txt are packed).
 
 ## MAME differential check (local only)
 
@@ -178,3 +182,8 @@ cargo check --target aarch64-apple-ios -p ribbit-core
 | 2026-10-13 | same | New GUI (egui menus/dialogs, settings, autosave) | builds; window, menus, welcome screen and game verified by screenshots |
 | 2026-10-13 | same | Android: `cargo ndk` build + `scripts/build-apk.py` | APK built, signature verified; **not yet run on a device** |
 | 2026-10-13 | same | `cargo test --workspace`; Clippy host + aarch64-linux-android; fmt | 186 passed; clean; clean |
+| 2026-10-13 | same | Save states: `save_state_round_trips_and_checks_images`, `v15/v21_save_state_is_exact` | passed |
+| 2026-10-13 | same | v2.1 + SpongeBob soak, 200 s and 360 s (34.6 G steps), saved profile | step limit, no CPU error, main menu still animating (5,633 DMAs); no PCM DMA (0x0180_3000) access |
+| 2026-10-13 | same | v1.5 + SpongeBob, `--straps 0x63FFFFFF`, 30 s, default vs `--input-lines 0x48FC1C7F` | default: shutdown write to 0x0180_B000 from 0x4007_0262, black screen; workaround: name-entry screen |
+| 2026-10-13 | same | GUI display modes Sharp / LCD grid (APPDATA scratch folder, window capture) | both render; first LCD build failed shader validation at window open, fixed, now caught by `lcd_shaders_parse_and_validate` |
+| 2026-10-13 | same | `cargo test --workspace`; Clippy host + aarch64-linux-android; fmt | 191 passed; clean; clean |

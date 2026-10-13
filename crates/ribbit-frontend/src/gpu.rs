@@ -1,4 +1,5 @@
-//! wgpu presentation: the emulated LCD (exact pixels or Catmull-Rom smoothed)
+//! wgpu presentation: the emulated LCD (exact pixels, sharp-bilinear, an LCD
+//! grid look or Catmull-Rom smoothed)
 //! plus the egui user interface on top. Display only: nothing here changes
 //! what is emulated.
 
@@ -62,6 +63,52 @@ fn fs_smooth(in: Out) -> @location(0) vec4<f32> {
     }
     return clamp(acc, vec4<f32>(0.0), vec4<f32>(1.0));
 }
+
+// Bilinear between the four texels around texel-space point `t` (texel
+// centres at integer + 0.5).
+fn bilinear(t: vec2<f32>) -> vec4<f32> {
+    let q = t - 0.5;
+    let b = vec2<i32>(floor(q));
+    let f = q - floor(q);
+    let top = mix(texel(b), texel(b + vec2<i32>(1, 0)), f.x);
+    let bottom = mix(texel(b + vec2<i32>(0, 1)), texel(b + vec2<i32>(1, 1)), f.x);
+    return mix(top, bottom, f.y);
+}
+
+// Sharp bilinear: each texel is a solid square; only the one output pixel
+// straddling a texel edge is blended, so any scale looks crisp and even.
+fn sharp(p: vec2<f32>, px_per_texel: vec2<f32>) -> vec4<f32> {
+    let cell = floor(p);
+    let f = p - cell;
+    // Distance into the cell, pushed towards the centre except within half
+    // an output pixel of the edge.
+    let g = clamp((f - 0.5) * px_per_texel + 0.5, vec2<f32>(0.0), vec2<f32>(1.0));
+    return bilinear(cell + g);
+}
+
+@fragment
+fn fs_sharp(in: Out) -> @location(0) vec4<f32> {
+    let p = in.uv * vec2<f32>(textureDimensions(tex));
+    let s = 1.0 / max(fwidth(p), vec2<f32>(1e-4));
+    return sharp(p, s);
+}
+
+// Sharp, plus a faint dark gap between pixels like the real LCD's grid;
+// the gap fades out below 3x scale where it would only shimmer.
+@fragment
+fn fs_lcd(in: Out) -> @location(0) vec4<f32> {
+    let p = in.uv * vec2<f32>(textureDimensions(tex));
+    let s = 1.0 / max(fwidth(p), vec2<f32>(1e-4));
+    let c = sharp(p, s);
+    let f = p - floor(p);
+    // Distance to the nearest cell edge, in output pixels.
+    let d = min(f, 1.0 - f) * s;
+    let scale = min(s.x, s.y);
+    let gap = 0.08 * scale;
+    let line = smoothstep(gap - 0.5, gap + 0.5, min(d.x, d.y));
+    let strength = 0.22 * clamp((scale - 2.0) / 2.0, 0.0, 1.0);
+    return vec4<f32>(c.rgb * (1.0 - strength * (1.0 - line)), 1.0);
+}
 "#;
 
 /// How the 160x160 LCD image is scaled (display only).
@@ -69,8 +116,12 @@ fn fs_smooth(in: Out) -> @location(0) vec4<f32> {
 pub enum Display {
     /// Exact pixels, whole-number scale.
     Pixel,
-    /// Catmull-Rom bicubic, fills the space.
+    /// Square pixels with antialiased edges, fills the space.
     #[default]
+    Sharp,
+    /// Sharp plus a faint pixel grid.
+    Lcd,
+    /// Catmull-Rom bicubic, fills the space.
     Smooth,
 }
 
@@ -83,6 +134,8 @@ pub struct Gpu {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     pixel: wgpu::RenderPipeline,
+    sharp: wgpu::RenderPipeline,
+    lcd: wgpu::RenderPipeline,
     smooth: wgpu::RenderPipeline,
     pub egui: egui_wgpu::Renderer,
 }
@@ -193,9 +246,9 @@ impl Gpu {
                 cache: None,
             })
         };
-        let (pixel, smooth) = (make("fs"), make("fs_smooth"));
+        let (pixel, sharp, lcd, smooth) = (make("fs"), make("fs_sharp"), make("fs_lcd"), make("fs_smooth"));
         let egui = egui_wgpu::Renderer::new(&device, config.format, egui_wgpu::RendererOptions::default());
-        Ok(Self { window, surface, device, queue, config, texture, bind_group, pixel, smooth, egui })
+        Ok(Self { window, surface, device, queue, config, texture, bind_group, pixel, sharp, lcd, smooth, egui })
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -211,7 +264,7 @@ impl Gpu {
         let (ax, ay, aw, ah) = area;
         let side = match display {
             Display::Pixel => ((aw.min(ah) / WIDTH as f32).floor().max(1.0)) * WIDTH as f32,
-            Display::Smooth => aw.min(ah).max(1.0),
+            Display::Sharp | Display::Lcd | Display::Smooth => aw.min(ah).max(1.0),
         };
         (ax + (aw - side) / 2.0, ay + (ah - side) / 2.0, side, side)
     }
@@ -288,6 +341,8 @@ impl Gpu {
                     pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
                     pass.set_pipeline(match display {
                         Display::Pixel => &self.pixel,
+                        Display::Sharp => &self.sharp,
+                        Display::Lcd => &self.lcd,
                         Display::Smooth => &self.smooth,
                     });
                     pass.set_bind_group(0, &self.bind_group, &[]);
@@ -303,5 +358,21 @@ impl Gpu {
             self.egui.free_texture(id);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// wgpu only reports shader errors when the window opens; check here.
+    #[test]
+    fn lcd_shaders_parse_and_validate() {
+        let module = naga::front::wgsl::parse_str(super::SHADER)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(super::SHADER)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
+            .validate(&module)
+            .expect("shader validates");
+        for entry in ["fs", "fs_sharp", "fs_lcd", "fs_smooth"] {
+            assert!(module.entry_points.iter().any(|e| e.name == entry), "{entry}");
+        }
     }
 }

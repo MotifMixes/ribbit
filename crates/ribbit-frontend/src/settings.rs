@@ -32,6 +32,12 @@ pub struct Settings {
     /// saved calibration instead of forcing calibration at every boot.
     /// Ribbit's machine default (a Leapster 2 measurement) has it clear.
     pub skip_boot_calibration: bool,
+    /// CPU clock in MHz: 96 is the nominal figure, 48 is what MAME runs.
+    pub cpu_mhz: u64,
+    /// EXPERIMENTAL: MAME's workaround of reading every unresolved GPIO line
+    /// as 1 ("to avoid detecting a shutdown for now"), which the v1.5 BIOS
+    /// needs to stay on. A guess, not hardware behaviour.
+    pub mame_gpio_lines: bool,
     /// Where saves go (default: `saves` in the data folder).
     pub save_dir: Option<PathBuf>,
     pub show_status_bar: bool,
@@ -42,7 +48,7 @@ impl Default for Settings {
         Self {
             bios: None,
             recent_carts: Vec::new(),
-            display: Display::Smooth,
+            display: Display::Sharp,
             window_scale: 4,
             volume: 0.8,
             muted: false,
@@ -50,6 +56,8 @@ impl Default for Settings {
             keys: default_keys(),
             experimental_touch: true,
             skip_boot_calibration: false,
+            cpu_mhz: 96,
+            mame_gpio_lines: false,
             save_dir: None,
             show_status_bar: true,
         }

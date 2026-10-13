@@ -120,14 +120,22 @@ loads an activity; its profile is saved and read back. Details: hardware-researc
 * Desktop: real-time pacing (title shows % speed), host audio output (cpal; 8 kHz voice mix resampled linearly),
   save files via config. Local play config: `local/play.toml` (git-ignored).
 
+## Phase 4f status (2026-10-13): usable app
+
+* Save states (exact, verified per BIOS), 5 slots, rewind; controllers on desktop (gilrs); display modes Sharp
+  (default) and LCD grid alongside Pixel / Smooth; MAME's 32 kHz output interpolator (host side); opt-in
+  experimental settings for the v1.5 power line and the CPU clock; release zip script.
+* SpongeBob on US v2.1: activities load and respond; 6-minute soak clean. v1.5 needs the experimental workaround.
+* Android: builds, untested on a device; paused at the owner's request.
+
 ## Next task
 
-1. **Play-test SpongeBob** in the window; fix what breaks (owner feedback).
-2. **Sound accuracy**: compare against MAME/hardware recordings; the 32 kHz interpolation; volume levels.
-3. **v1.5 shutdown line** (GPIO bit 11): hardware evidence (Q22).
+1. **Play-test SpongeBob** further (the remaining activities, long sessions); fix what breaks (owner feedback).
+2. **Sound accuracy**: compare against hardware recordings; volume levels; PCM DMA when a title uses it.
+3. **v1.5 shutdown line** (GPIO bit 11): hardware evidence (Q22); the MAME workaround stays opt-in until then.
 4. **Accuracy debts**: CPU timing model (1 cycle/step placeholder), touch model (experimental), straps default
    (Q24), EEPROM sizes (Q6).
-5. Display quality (later): edge-aware upscaler.
+5. Android: first run on a device (when the owner resumes it).
 
 ## Later, optional tracks (owner's decision)
 

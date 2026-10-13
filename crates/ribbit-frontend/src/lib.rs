@@ -5,6 +5,8 @@
 pub mod app;
 mod audio_out;
 mod files;
+#[cfg(not(target_os = "android"))]
+mod gamepad;
 mod gpu;
 mod icon;
 pub mod saves;

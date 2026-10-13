@@ -226,11 +226,31 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             {
                 actions.push(Action::SettingsChanged);
             }
+            ui.menu_button("Advanced (experimental)", |ui| {
+                ui.label(egui::RichText::new("Unverified guesses. Apply at the next start.").weak());
+                if ui
+                    .checkbox(&mut settings.mame_gpio_lines, "MAME power-line workaround")
+                    .on_hover_text(
+                        "Reads every unidentified GPIO line as 1, as MAME does. The v1.5 (Universal) BIOS otherwise                          sees a shutdown request on line 11 and turns itself off. Not known to match hardware.",
+                    )
+                    .changed()
+                {
+                    actions.push(Action::SettingsChanged);
+                }
+                ui.label("CPU clock:");
+                for (mhz, label) in [(96, "96 MHz (nominal)"), (48, "48 MHz (MAME)")] {
+                    if ui.radio_value(&mut settings.cpu_mhz, mhz, label).clicked() {
+                        actions.push(Action::SettingsChanged);
+                    }
+                }
+            });
         });
         ui.menu_button("Video", |ui| {
             let before = settings.display;
+            ui.radio_value(&mut settings.display, Display::Sharp, "Sharp (crisp, fills the window)");
+            ui.radio_value(&mut settings.display, Display::Lcd, "LCD grid");
+            ui.radio_value(&mut settings.display, Display::Pixel, "Pixel perfect (whole-number scale)");
             ui.radio_value(&mut settings.display, Display::Smooth, "Smooth (bicubic)");
-            ui.radio_value(&mut settings.display, Display::Pixel, "Pixel perfect");
             if settings.display != before {
                 actions.push(Action::SettingsChanged);
             }
@@ -381,6 +401,23 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
             ] {
                 ui.label(what);
                 ui.label(key);
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        ui.label(egui::RichText::new("Controller").strong());
+        egui::Grid::new("pad").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+            for (what, button) in [
+                ("Arrows", "D-pad / left stick"),
+                ("A / B", "A / B"),
+                ("Hint", "X or Y"),
+                ("Pause", "Start"),
+                ("Home", "Back / Select"),
+                ("Volume - / +", "LB / RB"),
+                ("Menu", "Guide"),
+            ] {
+                ui.label(what);
+                ui.label(button);
                 ui.end_row();
             }
         });

@@ -43,29 +43,29 @@ hardware-research.md, "Phase 4" and "Phase 4b".
 | LCD controller registers (base/stride/format) | Partial | MAME + BIOS `LcdMPI::Init` | `io::lcd::tests`, `tests/user_bios.rs` | Panel timing (0x8004-802C) and dither tables (0x8180-81BC) stored nowhere, not modelled |
 | LCD timing / VBlank | Not started | — | — | UNKNOWN in all sources |
 | Framebuffer DMA | Partial | MAME + BIOS `CopyToScreen`/ISR | `io::lcd::tests`, `framebuffer_dma_copies_to_vram_and_raises_line_0x12`, `tests/user_bios.rs` | Instant copy; transfer time and error status UNKNOWN; only command 0x1B executed |
-| Buttons (GIODataIn bits) | Matches reference | MAME input ports | `ribbit-input` tests | Not yet mapped to MMIO; non-button bits HYPOTHESIS |
+| Buttons (GIODataIn bits) | Matches reference | MAME input ports | `ribbit-input` tests | Mapped to 0x0180_004C (row below) |
 | Touchscreen / ADC | Skeleton (`Touch`) | — | — | Sample format known from the BIOS ISR (channel in bits 17:16, value in 15:5); rate, idle values and pressure UNKNOWN; MAME's model is guesswork |
 | **EXPERIMENTAL** touch sample source (`--experimental-mame-touch`, off by default) | **Experimental, unverified** (not a status level: reproduces another emulator's guesses) | MAME master da56c5ac `leapster.cpp` | `io::touch::tests` (6), `experimental_touch_*` machine tests (2), `v15/v21_experimental_touch_*` BIOS tests | Rate, sample order, pressure values, idle position, channels 1-3 all MAME guesses; reports and logs label every run that uses it |
-| Input register 0x0180_004C (buttons, power/shutdown line) | Partial | MAME (button bits) + both BIOSes' pollers; v1.5 SysMgr (bit 11 = active-low shutdown) | `io::gpio::tests`, `v15/v21_buttons_read_released_*` | Buttons active-low from the frontend; all other bits unresolved, read 0 (override `--input-lines`). **Blocks v1.5**: power-off at ~4 s |
+| Input register 0x0180_004C (buttons, power/shutdown line) | Partial | MAME (button bits) + both BIOSes' pollers; v1.5 SysMgr (bit 11 = active-low shutdown) | `io::gpio::tests`, `v15/v21_buttons_read_released_*` | Buttons active-low from the frontend; all other bits unresolved, read 0. **Blocks v1.5**: power-off at ~4 s. Opt-in **experimental** MAME workaround (all unresolved bits 1 = 0x48FC1C7F; `--input-lines`, GUI Emulation → Advanced): v1.5 + SpongeBob then reaches name entry (30 s run). Not adopted as default: no hardware evidence |
 | Audio unit: voice-command acknowledge (0x0180_2070 → flag bit 18 → line 0x1D) | Partial | BIOS audio driver (both) + MAME | `io::audio::tests`, `v15/v21_voice_command_is_acknowledged_*` | Latency UNKNOWN (immediate). Unblocked AudioTask and v2.1's PlayMovie |
-| Audio voice engine: voices 0-7, LFC speech, status 0x0180_2078 | Partial | MAME `leapster_a.cpp` (researched, unverified) + BIOS register use | `io::voices::tests` (5), `*_startup_voice_plays` | 8 kHz mix played on the host (linear resampling in the frontend); MAME's 32 kHz interpolation, PCM DMA, vector 0x15 not modelled; levels unverified |
+| Audio voice engine: voices 0-7, LFC speech, status 0x0180_2078 | Partial | MAME `leapster_a.cpp` (researched, unverified) + BIOS register use | `io::voices::tests` (5), `*_startup_voice_plays` | 8 kHz mix; the host output raises it to 32 kHz with MAME's 64-tap interpolator (`upsampler_passes_dc_and_delays_by_about_1ms`; whether hardware interpolates is UNVERIFIED), then resamples linearly to the device rate. PCM DMA (0x0180_3000, vector 0x13) not modelled: neither BIOS nor SpongeBob accesses it (200 s soak). Vector 0x15 not modelled; levels unverified |
 | Idle-loop fast-forwarding | Exact (speed only) | Probe + state comparison | `v15/v21_idle_skip_is_exact` (digest, cycles, instructions equal with it on/off) | Disabled while tracing or with breakpoints; diagnostics counters (MMIO read counts) differ |
 | Power control 0x0180_B000 | Not started | v1.5/v2.1 SysMgr | `power_off_requested` in BIOS tests | Bit 8 = power-off request (HYPOTHESIS); writes are only reported |
 | Audio A-law decode | Matches reference | ITU-T G.711 | `alaw_*` tests | Leapster use of standard A-law is SOURCED, not verified |
-| Audio voices / LFC / PCM DMA | Not started | — | — | |
-| Audio output buffering | Partial (`SampleRing`) | — | `ring_counts_overruns_and_underruns` | No host output yet |
+| Audio output buffering | Partial (`SampleRing`) | — | `ring_counts_overruns_and_underruns` | Host output via cpal; queue capped at 0.25 s |
 | Clock/timing model | Partial | BIOS constants | `io::tests::clock_converts_without_drift`, `clock_fast_path_matches_wide_arithmetic` | Peripheral clock 16 MHz (firmware evidence); CPU 96 MHz nominal, 1 cycle per step (placeholder; MAME uses 48 MHz to match videos). Speed: ~30 M steps/s raw, 2.0x real time with exact idle-loop fast-forwarding (about 1.3x in SpongeBob's menus) |
 | CPU vs MAME 0.289 (real BIOS) | Matches reference (control flow) | MAME trace | `scripts/compare-mame-trace.py` | 3,206 + 750 PCs identical order; one STATUS32 discrepancy attributed to MAME 0.289 |
-| Save states | Not started | — | — | Deferred by design |
-| Desktop window | Partial | — | manual launch (2026-10-12) | Shows emulated LCD only (black until firmware enables it) |
+| Save states | Exact | Whole-machine serialisation (CPU, memory, devices; ROMs excluded and checked by CRC) | `save_state_round_trips_and_checks_images`, `v15/v21_save_state_is_exact` (continuation identical to an uninterrupted run) | Format version 1; states from other builds are refused, not converted. Rewind uses the same snapshots |
+| Desktop app (`ribbit-gui`) | Partial | — | manual runs, screenshots | egui menus, settings, file dialogs, autosave, 5 state slots + rewind, controllers (gilrs), display modes Sharp / LCD grid / Pixel / Smooth (display only) |
 | Headless runner | Partial | — | manual runs, exit codes | |
-| Android / iOS | Not started | type-check of core + winit/wgpu probe | `cargo check` only | NDK/Xcode not installed; no device runs |
+| Android | Builds | — | `cargo ndk` Clippy, `scripts/build-apk.py` (signature verified) | **Never run on a device**; paused at the owner's request |
+| iOS | Not started | type-check of core | `cargo check` only | Xcode not available |
 
 ## Compatibility
 
 | Title | Image | Status |
 |---|---|---|
-| SpongeBob SquarePants: Saves the Day (USA, alt), 500-11002 | Identified (CRC32 `0f2ad725`) | **Runs to its menus on US v2.1 with the experimental touch model**: name entry, intro, Mr. Krabs cut-scene, main menu, Krabby Patty level picker; profile saved to and read back from the cartridge chip. No sound output, 0.28x speed, gameplay inside activities not yet checked. v1.5 powers off at ~4 s (GPIO bit 11) |
+| SpongeBob SquarePants: Saves the Day (USA, alt), 500-11002 | Identified (CRC32 `0f2ad725`) | **Playable on US v2.1 with the experimental touch model**: name entry, intro, main menu; all four activities load; Krabby Patty gameplay responds to the d-pad; profile saved to and read back from the cartridge chip; sound (MAME model); ~1.3x real time; 360 s soak with no CPU error. UK/Spanish 2.x BIOSes behave like US v2.1; the German dump (bad) never draws its screen. v1.5 powers off at ~4 s (GPIO bit 11) unless the experimental workaround is on, then reaches name entry |
 
 ### BIOS boot status (no cartridge, default straps; tests in `crates/ribbit-core/tests/user_bios.rs`)
 

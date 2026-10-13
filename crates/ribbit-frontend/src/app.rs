@@ -70,6 +70,8 @@ pub struct App {
     pace: Option<(Instant, u64)>,
     speed: (Instant, u64, f64),
     audio: Option<AudioOut>,
+    #[cfg(not(target_os = "android"))]
+    pads: Option<crate::gamepad::Gamepads>,
     audio_buf: Vec<i16>,
     cursor: Option<(f64, f64)>,
     mouse_down: bool,
@@ -120,6 +122,8 @@ impl App {
             pace: None,
             speed: (Instant::now(), 0, 100.0),
             audio: AudioOut::open(),
+            #[cfg(not(target_os = "android"))]
+            pads: crate::gamepad::Gamepads::open(),
             audio_buf: Vec::new(),
             cursor: None,
             mouse_down: false,
@@ -162,8 +166,11 @@ impl App {
             ribbit_core::io::straps::MAME_LEAPSTER2_MEASURED
         };
         let mut machine = Machine::with_straps(firmware, cartridge, self.opts.straps.unwrap_or(default_straps));
-        if let Some(mhz) = self.opts.cpu_mhz {
-            machine.clock = ribbit_core::Clock::new(mhz * 1_000_000, ribbit_core::Clock::PERIPHERAL_HZ);
+        let mhz = self.opts.cpu_mhz.unwrap_or(self.settings.cpu_mhz).max(1);
+        machine.clock = ribbit_core::Clock::new(mhz * 1_000_000, ribbit_core::Clock::PERIPHERAL_HZ);
+        if self.settings.mame_gpio_lines {
+            tracing::warn!(target: "ribbit::boot", "EXPERIMENTAL: unresolved GPIO lines read 1 (MAME's workaround)");
+            machine.io.gpio.unresolved_lines = !ribbit_input::BUTTON_BITS;
         }
         if self.opts.experimental_touch.unwrap_or(self.settings.experimental_touch) {
             machine.enable_experimental_mame_touch(Default::default());
@@ -606,7 +613,37 @@ impl App {
         }
     }
 
+    /// Applies controller input (desktop; Android pads arrive as keys).
+    #[cfg(not(target_os = "android"))]
+    fn poll_pads(&mut self) {
+        use crate::gamepad::PadEvent;
+        let Some(pads) = &mut self.pads else {
+            return;
+        };
+        let mut events = Vec::new();
+        pads.poll(|e| events.push(e));
+        for e in events {
+            match e {
+                PadEvent::Button(b, pressed) => {
+                    if let Some(s) = &mut self.session {
+                        s.machine.buttons.set(b, pressed);
+                    }
+                }
+                PadEvent::Menu => {
+                    self.ui.menu_visible = true;
+                    if self.session.is_some() && !self.paused {
+                        self.toggle_pause();
+                    }
+                }
+                PadEvent::Connected(name) => self.ui.toast(format!("Controller connected: {name}")),
+                PadEvent::Disconnected(name) => self.ui.toast(format!("Controller disconnected: {name}")),
+            }
+        }
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(not(target_os = "android"))]
+        self.poll_pads();
         self.emulate();
         if let Some(s) = &self.session {
             s.machine.render_frame(&mut self.frame);

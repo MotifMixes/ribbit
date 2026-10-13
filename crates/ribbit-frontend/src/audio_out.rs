@@ -1,24 +1,26 @@
 //! Host audio output: plays the voice engine's 8 kHz mix through the default
 //! output device (cpal). Frontend only: nothing here affects emulation.
 //!
-//! The emulator pushes 8 kHz samples after every frame; the device callback
-//! resamples them to the device rate with linear interpolation (MAME uses a
-//! 64-tap interpolator; whether the hardware interpolates at all is UNKNOWN)
-//! and plays silence when the queue runs dry. The queue is kept short so
+//! The emulator pushes 8 kHz samples after every frame. They are raised to
+//! 32 kHz with MAME's 64-tap interpolator (`ribbit_audio::Upsample4x`;
+//! whether the hardware interpolates at all is UNVERIFIED - repeating samples
+//! instead sounds harsh), then the device callback resamples linearly to the
+//! device rate and plays silence when the queue runs dry. The queue is kept short so
 //! sound stays in sync with the picture.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-/// Source rate of the voice engine.
-const SOURCE_HZ: f64 = 8_000.0;
-/// Queue limit (seconds of audio) before old samples are dropped.
-const MAX_QUEUE: usize = 8_000 / 4;
+/// Rate of the queued (interpolated) audio.
+const SOURCE_HZ: f64 = ribbit_audio::DAC_RATE_HZ as f64;
+/// Queue limit (a quarter second) before old samples are dropped.
+const MAX_QUEUE: usize = ribbit_audio::DAC_RATE_HZ as usize / 4;
 
 pub struct AudioOut {
     queue: Arc<Mutex<VecDeque<i16>>>,
     _stream: cpal::Stream,
+    upsample: ribbit_audio::Upsample4x,
     pub dropped: u64,
 }
 
@@ -26,6 +28,7 @@ impl AudioOut {
     /// Drops queued audio (pause, reset).
     pub fn clear(&mut self) {
         self.queue.lock().unwrap().clear();
+        self.upsample.reset();
     }
 
     /// Opens the default output device; None (with a log line) if there is
@@ -57,13 +60,15 @@ impl AudioOut {
         };
         stream.play()?;
         tracing::info!(target: "ribbit::audio", device_hz, channels = config.channels, "audio output open");
-        Ok(Self { queue, _stream: stream, dropped: 0 })
+        Ok(Self { queue, _stream: stream, upsample: Default::default(), dropped: 0 })
     }
 
     /// Queues new 8 kHz samples from the emulator at `gain` (0..=1).
     pub fn push(&mut self, samples: &[i16], gain: f32) {
         let mut q = self.queue.lock().unwrap();
-        q.extend(samples.iter().map(|&s| (s as f32 * gain) as i16));
+        for &s in samples {
+            q.extend(self.upsample.push(s).map(|v| (v as f32 * gain) as i16));
+        }
         while q.len() > MAX_QUEUE {
             q.pop_front();
             self.dropped += 1;
