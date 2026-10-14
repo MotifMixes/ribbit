@@ -360,6 +360,7 @@ impl VoiceEngine {
         if !self.active() {
             // Idle: keep the clock phase; avoid a division on every step.
             if self.phase >= peripheral_hz {
+                self.output_silence(self.phase / peripheral_hz);
                 self.phase %= peripheral_hz;
             }
             return;
@@ -367,12 +368,22 @@ impl VoiceEngine {
         while self.phase >= peripheral_hz {
             self.phase -= peripheral_hz;
             if !self.active() {
+                self.output_silence(1 + self.phase / peripheral_hz);
                 self.phase %= peripheral_hz;
                 break;
             }
             let s = self.sample(bus);
             self.output.push(s);
             self.samples_generated += 1;
+        }
+    }
+
+    /// The DAC keeps running while no voice plays: `n` silent samples for
+    /// the host output (not emulated state; the host plays a continuous
+    /// stream instead of bursts with holes between sounds).
+    fn output_silence(&mut self, n: u64) {
+        for _ in 0..n.min(self.output.capacity() as u64) {
+            self.output.push(0);
         }
     }
 

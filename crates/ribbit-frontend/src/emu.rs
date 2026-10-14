@@ -4,6 +4,7 @@
 //! time (times the speed setting); the UI thread locks the machine briefly
 //! for input, the picture, save states and saves.
 
+use crate::audio_out::AudioSink;
 use ribbit_core::{Machine, StopReason};
 use ribbit_debug::Breakpoints;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,14 +18,14 @@ const CHUNK: Duration = Duration::from_millis(2);
 /// Drop lag beyond this (the game then runs slower than real time rather
 /// than catching up in a burst).
 const MAX_LAG: Duration = Duration::from_millis(250);
-/// Most sound kept for the UI thread to collect (a second at 8 kHz).
-const AUDIO_KEEP: usize = 8_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Control {
     pub running: bool,
     /// 1.0 = real time; infinity = as fast as possible.
     pub speed: f64,
+    /// Volume (0 = muted).
+    pub gain: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39,7 +40,9 @@ struct Shared {
     machine: Mutex<Machine>,
     control: Mutex<(Control, bool)>, // (control, resync pacing)
     wake: Condvar,
-    audio: Mutex<Vec<i16>>,
+    /// Sound goes straight from this thread to the output queue, so it does
+    /// not depend on the window being redrawn.
+    sink: Mutex<Option<AudioSink>>,
     stats: Mutex<Stats>,
     quit: AtomicBool,
     /// UI-thread lock requests in progress. std's mutex is not fair: the
@@ -58,9 +61,9 @@ impl Emu {
     pub fn start(machine: Machine) -> Self {
         let shared = Arc::new(Shared {
             machine: Mutex::new(machine),
-            control: Mutex::new((Control { running: false, speed: 1.0 }, true)),
+            control: Mutex::new((Control { running: false, speed: 1.0, gain: 1.0 }, true)),
             wake: Condvar::new(),
-            audio: Mutex::new(Vec::new()),
+            sink: Mutex::new(None),
             stats: Mutex::new(Stats::default()),
             quit: AtomicBool::new(false),
             ui_waiting: AtomicUsize::new(0),
@@ -104,15 +107,8 @@ impl Emu {
         self.shared.wake.notify_all();
     }
 
-    /// Sound produced since the last call (8 kHz).
-    pub fn take_audio(&self, out: &mut Vec<i16>) {
-        let mut a = self.shared.audio.lock().unwrap();
-        out.clear();
-        out.append(&mut a);
-    }
-
-    pub fn clear_audio(&self) {
-        self.shared.audio.lock().unwrap().clear();
+    pub fn set_audio_sink(&self, sink: Option<AudioSink>) {
+        *self.shared.sink.lock().unwrap() = sink;
     }
 
     pub fn stats(&self) -> Stats {
@@ -153,6 +149,7 @@ fn run(s: &Shared) {
     let mut pace: Option<(Instant, u64)> = None;
     let mut meter: Option<(Instant, u64)> = None;
     let none = Breakpoints::default();
+    let mut audio = Vec::new();
     while !s.quit.load(Ordering::Relaxed) {
         let control = {
             let mut g = s.control.lock().unwrap();
@@ -201,19 +198,12 @@ fn run(s: &Shared) {
         }
         // Sound, at real-time speed only (no pitch-shifted audio).
         let out = &mut m.io.voices.output;
-        let n = out.len();
-        if control.speed == 1.0 {
-            let mut a = s.audio.lock().unwrap();
-            let start = a.len();
-            a.resize(start + n, 0);
-            out.pop_into(&mut a[start..]);
-            if a.len() > AUDIO_KEEP {
-                let excess = a.len() - AUDIO_KEEP;
-                a.drain(..excess);
-            }
-        } else {
-            let mut sink = vec![0; n];
-            out.pop_into(&mut sink);
+        audio.resize(out.len(), 0);
+        out.pop_into(&mut audio);
+        if control.speed == 1.0
+            && let Some(sink) = s.sink.lock().unwrap().as_mut()
+        {
+            sink.push(&audio, control.gain);
         }
         // Speed meter.
         let cycles = m.cpu.cycles;

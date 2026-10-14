@@ -66,10 +66,11 @@ pub struct App {
     rewinding: bool,
     modifiers: ModifiersState,
     speed_percent: f64,
+    /// For the periodic audio-gap log line.
+    audio_log: (Instant, u64),
     audio: Option<AudioOut>,
     #[cfg(not(target_os = "android"))]
     pads: Option<crate::gamepad::Gamepads>,
-    audio_buf: Vec<i16>,
     cursor: Option<(f64, f64)>,
     mouse_down: bool,
     finger: Option<(u64, (f64, f64))>,
@@ -118,10 +119,10 @@ impl App {
             rewinding: false,
             modifiers: ModifiersState::empty(),
             speed_percent: 100.0,
+            audio_log: (Instant::now(), 0),
             audio: AudioOut::open(),
             #[cfg(not(target_os = "android"))]
             pads: crate::gamepad::Gamepads::open(),
-            audio_buf: Vec::new(),
             cursor: None,
             mouse_down: false,
             finger: None,
@@ -200,7 +201,11 @@ impl App {
         };
         self.session = Some(Session {
             experimental_touch: machine.experimental_touch_enabled(),
-            emu: Emu::start(machine),
+            emu: {
+                let emu = Emu::start(machine);
+                emu.set_audio_sink(self.audio.as_ref().map(|a| a.sink()));
+                emu
+            },
             saves,
             autosave: AutoSave::default(),
             title,
@@ -394,7 +399,6 @@ impl App {
             Ok(()) => {
                 let emu = &self.session.as_ref().unwrap().emu;
                 emu.resync();
-                emu.clear_audio();
                 if let Some(a) = &mut self.audio {
                     a.clear();
                 }
@@ -412,7 +416,6 @@ impl App {
                 m.reset();
             }
             s.emu.resync();
-            s.emu.clear_audio();
             self.ui.toast("Reset");
         }
     }
@@ -421,7 +424,6 @@ impl App {
         if let Some(s) = &self.session {
             self.paused = !self.paused;
             s.emu.resync();
-            s.emu.clear_audio();
             if let Some(a) = &mut self.audio {
                 a.clear();
             }
@@ -477,7 +479,8 @@ impl App {
         } else {
             self.settings.speed_percent as f64 / 100.0
         };
-        s.emu.set_control(Control { running: !self.paused && !self.rewinding, speed });
+        let gain = if self.settings.muted { 0.0 } else { self.settings.volume };
+        s.emu.set_control(Control { running: !self.paused && !self.rewinding, speed, gain });
         if self.paused {
             return;
         }
@@ -489,7 +492,6 @@ impl App {
                 s.last_snapshot = m.cpu.cycles;
             }
             s.emu.resync();
-            s.emu.clear_audio();
             if let Some(a) = &mut self.audio {
                 a.clear();
             }
@@ -509,23 +511,43 @@ impl App {
                 tracing::warn!(target: "ribbit::saves", "autosave failed: {e:#}");
             }
         }
-        // Sound (the thread keeps it at real-time speed only).
-        s.emu.take_audio(&mut self.audio_buf);
-        if let Some(a) = &mut self.audio {
-            if speed == 1.0 {
-                let gain = if self.settings.muted { 0.0 } else { self.settings.volume };
-                a.push(&self.audio_buf, gain);
-            } else {
-                a.clear();
-            }
+        // Sound goes from the emulation thread straight to the output (real-
+        // time speed only); at other speeds drop what is queued.
+        if speed != 1.0
+            && let Some(a) = &mut self.audio
+        {
+            a.clear();
         }
         let stats = s.emu.stats();
         self.speed_percent = stats.speed_percent;
+        if let Some(a) = &self.audio
+            && now.duration_since(self.audio_log.0).as_secs() >= 5
+        {
+            let n = a.underruns();
+            if n > self.audio_log.1 {
+                tracing::info!(target: "ribbit::audio", gaps = n - self.audio_log.1, speed = self.speed_percent, "audio ran dry (last 5 s)");
+            }
+            self.audio_log = (now, n);
+        }
         if let Some(stop) = stats.stopped {
             s.emu.clear_stopped();
             self.paused = true;
             self.ui.error = Some(format!("Emulation stopped: {stop}"));
         }
+    }
+
+    /// Whether a press at window position `p` (physical pixels) belongs to
+    /// the UI. The game screen lives in egui's background panel, so only a
+    /// menu, dialog or popup above it (or a widget being dragged) counts;
+    /// `is_pointer_over_egui` alone is true over the whole game screen and
+    /// swallowed every stylus click.
+    fn ui_at(&self, p: (f64, f64)) -> bool {
+        if self.egui_ctx.egui_is_using_pointer() {
+            return true;
+        }
+        let ppp = self.egui_ctx.pixels_per_point();
+        let pos = egui::pos2(p.0 as f32 / ppp, p.1 as f32 / ppp);
+        self.egui_ctx.layer_id_at(pos).is_some_and(|l| l.order != egui::Order::Background)
     }
 
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
@@ -754,11 +776,11 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // (`ui_at` decides whether a press belongs to the UI or the stylus.)
         let consumed = match (&mut self.egui_state, &self.gpu) {
             (Some(st), Some(g)) => st.on_window_event(&g.window, &event).consumed,
             _ => false,
         };
-        let over_ui = self.egui_ctx.is_pointer_over_egui() || self.egui_ctx.egui_wants_pointer_input();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -789,7 +811,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 let down = state == ElementState::Pressed;
-                if down && over_ui {
+                if down && self.cursor.is_some_and(|p| self.ui_at(p)) {
                     return;
                 }
                 self.mouse_down = down;
@@ -798,7 +820,7 @@ impl ApplicationHandler for App {
             WindowEvent::Touch(t) => {
                 let pos = (t.location.x, t.location.y);
                 match t.phase {
-                    TouchPhase::Started if self.finger.is_none() && !over_ui => {
+                    TouchPhase::Started if self.finger.is_none() && !self.ui_at(pos) => {
                         self.finger = Some((t.id, pos));
                         self.set_stylus(Some(pos));
                     }

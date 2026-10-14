@@ -93,6 +93,10 @@ impl SampleRing {
         self.len
     }
 
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
