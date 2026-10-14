@@ -150,6 +150,7 @@ fn run(s: &Shared) {
     let mut meter: Option<(Instant, u64)> = None;
     let none = Breakpoints::default();
     let mut audio = Vec::new();
+    let mut last_chunk = Instant::now();
     while !s.quit.load(Ordering::Relaxed) {
         let control = {
             let mut g = s.control.lock().unwrap();
@@ -190,7 +191,12 @@ fn run(s: &Shared) {
             std::thread::sleep(Duration::from_micros(500));
             continue;
         }
+        let gap = now.duration_since(last_chunk);
+        if gap > Duration::from_millis(12) {
+            tracing::debug!(target: "ribbit::emu", gap_ms = gap.as_secs_f64() * 1e3, "emulation thread stalled");
+        }
         let r = m.run(steps, &none);
+        last_chunk = Instant::now();
         if r.stop != StopReason::StepLimit {
             tracing::warn!(target: "ribbit::boot", ?r, "emulation stopped");
             s.stats.lock().unwrap().stopped = Some(format!("{:?}", r.stop));

@@ -309,6 +309,14 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if ui.add(egui::Slider::new(&mut settings.volume, 0.0..=1.0).text("Volume").show_value(false)).changed() {
                 actions.push(Action::SettingsChanged);
             }
+            ui.separator();
+            ui.label(egui::RichText::new("Sound").strong());
+            for e in crate::audio_out::Enhance::ALL {
+                if ui.radio_value(&mut settings.audio_enhance, e, e.label()).clicked() {
+                    actions.push(Action::SettingsChanged);
+                }
+            }
+            ui.label(egui::RichText::new("The Leapster itself is mono with 8 kHz sound; these are effects.").weak());
         });
         ui.menu_button("Input", |ui| {
             if item(ui, "Key bindings…", "") {

@@ -64,10 +64,11 @@ pub enum Network {
     SharpenHigh,
     SharpenMax,
     Crisp,
+    CrispStrong,
 }
 
 impl Network {
-    pub const ALL: [Network; 16] = [
+    pub const ALL: [Network; 17] = [
         Network::UpscaleS,
         Network::UpscaleM,
         Network::UpscaleL,
@@ -84,6 +85,7 @@ impl Network {
         Network::SharpenHigh,
         Network::SharpenMax,
         Network::Crisp,
+        Network::CrispStrong,
     ];
 
     pub fn passes(self) -> &'static [Pass] {
@@ -104,6 +106,7 @@ impl Network {
             Network::SharpenHigh => sharpen::HIGH,
             Network::SharpenMax => sharpen::MAX,
             Network::Crisp => sharpen::CRISP,
+            Network::CrispStrong => sharpen::CRISP_STRONG,
         }
     }
 
@@ -134,6 +137,7 @@ impl Network {
             "sharp3" => Network::SharpenHigh,
             "sharp4" => Network::SharpenMax,
             "crisp" => Network::Crisp,
+            "crisp2" => Network::CrispStrong,
             _ => return None,
         })
     }
@@ -249,13 +253,22 @@ pub enum Sharpness {
     Max,
     /// Shock filter at the upscaled resolution: hard, clean cartoon
     /// outlines and crisp text.
-    #[default]
     Crisp,
+    /// Stronger shock filter: faint small strokes snap to solid shapes too.
+    #[default]
+    ExtraCrisp,
 }
 
 impl Sharpness {
-    pub const ALL: [Sharpness; 6] =
-        [Sharpness::Off, Sharpness::Low, Sharpness::Medium, Sharpness::High, Sharpness::Max, Sharpness::Crisp];
+    pub const ALL: [Sharpness; 7] = [
+        Sharpness::Off,
+        Sharpness::Low,
+        Sharpness::Medium,
+        Sharpness::High,
+        Sharpness::Max,
+        Sharpness::Crisp,
+        Sharpness::ExtraCrisp,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -265,6 +278,7 @@ impl Sharpness {
             Sharpness::High => "High",
             Sharpness::Max => "Max",
             Sharpness::Crisp => "Crisp lines (cartoon)",
+            Sharpness::ExtraCrisp => "Extra crisp lines",
         }
     }
 
@@ -276,6 +290,7 @@ impl Sharpness {
             Sharpness::High => Some(Network::SharpenHigh),
             Sharpness::Max => Some(Network::SharpenMax),
             Sharpness::Crisp => Some(Network::Crisp),
+            Sharpness::ExtraCrisp => Some(Network::CrispStrong),
         }
     }
 }
@@ -600,9 +615,9 @@ mod tests {
         assert_eq!(cartoon.chain(160, 1080.0), vec![ScaleFx, ArtCnnC4F32]);
         assert_eq!(cartoon.chain(160, 2160.0), vec![ScaleFx, ArtCnnC4F32, ArtCnnC4F16]);
         let clean = AiSettings::default();
-        assert_eq!(clean.chain(160, 2160.0), vec![ArtCnnC4F32, ArtCnnC4F32, ArtCnnC4F16, ArtCnnC4F16, Crisp]);
+        assert_eq!(clean.chain(160, 2160.0), vec![ArtCnnC4F32, ArtCnnC4F32, ArtCnnC4F16, ArtCnnC4F16, CrispStrong]);
         let fast = AiSettings { model: Model::Fast, ..clean };
-        assert_eq!(fast.chain(160, 640.0), vec![ArtCnnC4F16, UpscaleS, Crisp]);
+        assert_eq!(fast.chain(160, 640.0), vec![ArtCnnC4F16, UpscaleS, CrispStrong]);
         assert_eq!(Resolution::X16.target(160, 500.0), 2560.0);
         assert_eq!(Resolution::Auto.target(160, 500.0), 500.0);
     }

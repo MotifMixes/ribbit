@@ -89,6 +89,19 @@ impl std::fmt::Display for TraceEvent {
 pub const TRACE_TAIL: usize = 64;
 
 /// Save-state format: magic, version, then a deflated bincode payload.
+/// An uncompressed machine state from `Machine::snapshot`.
+pub struct RawState(Vec<u8>);
+
+impl RawState {
+    /// The `save_state` format (header + deflate).
+    pub fn compress(self) -> Vec<u8> {
+        let mut out = STATE_MAGIC.to_vec();
+        out.extend_from_slice(&STATE_VERSION.to_le_bytes());
+        out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(&self.0, 1));
+        out
+    }
+}
+
 const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 pub const STATE_VERSION: u32 = 1;
 
@@ -584,7 +597,9 @@ impl Machine {
     /// The complete machine state (CPU, memory, devices, time), compressed.
     /// ROMs are not included: a state loads only into a machine with the
     /// same BIOS and cartridge.
-    pub fn save_state(&self) -> Vec<u8> {
+    /// The machine state, serialised but not yet compressed: the fast part of
+    /// `save_state`, so a caller holding the machine can compress elsewhere.
+    pub fn snapshot(&self) -> RawState {
         let state = StateRef {
             bios_crc: self.firmware.id().crc32,
             cart_crc: self.cartridge.as_ref().map(|c| c.id().crc32),
@@ -599,10 +614,12 @@ impl Machine {
             touch_config: &self.touch_config,
         };
         let payload = bincode::serialize(&state).expect("in-memory serialisation cannot fail");
-        let mut out = STATE_MAGIC.to_vec();
-        out.extend_from_slice(&STATE_VERSION.to_le_bytes());
-        out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(&payload, 1));
-        out
+        RawState(payload)
+    }
+
+    /// The complete machine state, compressed (see `snapshot`).
+    pub fn save_state(&self) -> Vec<u8> {
+        self.snapshot().compress()
     }
 
     /// Restores a state made by `save_state` on the same BIOS and cartridge.

@@ -48,6 +48,9 @@ struct Session {
     /// Prefix for this game's save-state files.
     state_key: String,
     rewind: std::collections::VecDeque<Vec<u8>>,
+    /// Snapshots are taken under the machine lock (~1 ms) and compressed on
+    /// this worker (~4 ms), so taking one does not stall the picture.
+    compress: Compressor,
     last_snapshot: u64,
 }
 
@@ -211,6 +214,7 @@ impl App {
             title,
             state_key,
             rewind: Default::default(),
+            compress: Compressor::start(),
             last_snapshot: 0,
         });
         self.paused = false;
@@ -480,6 +484,9 @@ impl App {
             self.settings.speed_percent as f64 / 100.0
         };
         let gain = if self.settings.muted { 0.0 } else { self.settings.volume };
+        if let Some(a) = &self.audio {
+            a.set_enhance(self.settings.audio_enhance);
+        }
         s.emu.set_control(Control { running: !self.paused && !self.rewinding, speed, gain });
         if self.paused {
             return;
@@ -498,13 +505,16 @@ impl App {
             return;
         }
         let now = Instant::now();
+        while let Ok(state) = s.compress.done.try_recv() {
+            s.rewind.push_back(state);
+            if s.rewind.len() > REWIND_KEEP {
+                s.rewind.pop_front();
+            }
+        }
         {
             let mut m = s.emu.lock();
             if m.cpu.cycles >= s.last_snapshot + REWIND_EVERY_CYCLES {
-                s.rewind.push_back(m.save_state());
-                if s.rewind.len() > REWIND_KEEP {
-                    s.rewind.pop_front();
-                }
+                let _ = s.compress.todo.send(m.snapshot());
                 s.last_snapshot = m.cpu.cycles;
             }
             if let Err(e) = s.autosave.tick(&s.saves, &mut m, now) {
@@ -671,6 +681,7 @@ impl App {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        let frame_start = Instant::now();
         #[cfg(not(target_os = "android"))]
         self.poll_pads();
         self.emulate();
@@ -719,6 +730,10 @@ impl App {
         }
         for a in actions {
             self.act(a, event_loop);
+        }
+        let took = frame_start.elapsed();
+        if took.as_millis() >= 12 {
+            tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
         }
     }
 }
@@ -844,6 +859,30 @@ impl ApplicationHandler for App {
         if let Some(g) = &self.gpu {
             g.window.request_redraw();
         }
+    }
+}
+
+/// A worker thread that compresses rewind snapshots.
+struct Compressor {
+    todo: std::sync::mpsc::Sender<ribbit_core::RawState>,
+    done: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl Compressor {
+    fn start() -> Self {
+        let (todo, jobs) = std::sync::mpsc::channel::<ribbit_core::RawState>();
+        let (results, done) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("ribbit-rewind".into())
+            .spawn(move || {
+                for raw in jobs {
+                    if results.send(raw.compress()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawning the rewind worker");
+        Self { todo, done }
     }
 }
 

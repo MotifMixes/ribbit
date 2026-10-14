@@ -23,6 +23,8 @@ pub struct Settings {
     /// Window size as a multiple of 160 pixels.
     pub window_scale: u32,
     pub volume: f32,
+    /// Host-side sound effects (the hardware is mono, 8 kHz).
+    pub audio_enhance: crate::audio_out::Enhance,
     pub muted: bool,
     /// Emulation speed in percent (0 = unlimited).
     pub speed_percent: u32,
@@ -54,6 +56,7 @@ impl Default for Settings {
             ai: Default::default(),
             window_scale: 4,
             volume: 0.8,
+            audio_enhance: Default::default(),
             muted: false,
             speed_percent: 100,
             keys: default_keys(),

@@ -106,7 +106,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 /// otherwise), by an amount that grows with the edge gradient. Soft ramps
 /// become crisp steps, flat areas do not change: cartoon line art (and text)
 /// regains hard, clean outlines. Run at the upscaled resolution, a few times.
-const SHOCK_WGSL: &str = r#"
+macro_rules! shock_body {
+    () => {
+        r#"
 @group(0) @binding(0) var t0: texture_2d<f32>;
 
 fn px(p: vec2<i32>) -> vec3<f32> {
@@ -143,22 +145,48 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let gx = luma(px(q + vec2<i32>(1, 0))) - luma(px(q - vec2<i32>(1, 0)));
     let gy = luma(px(q + vec2<i32>(0, 1))) - luma(px(q - vec2<i32>(0, 1)));
     let grad = sqrt(gx * gx + gy * gy);
-    let amount = clamp(grad * 2.5, 0.0, 1.0) * 0.6;
+    let amount = clamp(grad * GAIN, 0.0, 1.0) * CAP;
     // Laplacian > 0: neighbours brighter than the centre, so the centre is
     // on the dark side of the edge.
     let goal = select(bright, dark, lap > 0.0);
     return vec4<f32>(mix(e, goal, amount), 1.0);
 }
-"#;
+"#
+    };
+}
 
-const SHOCK: Pass = Pass {
-    desc: "Crisp lines (shock filter)",
-    inputs: &["MAIN"],
-    outputs: &["MAIN"],
-    kind: PassKind::Conv,
-    wgsl: SHOCK_WGSL,
-};
+macro_rules! shock {
+    ($desc:literal, $gain:literal, $cap:literal) => {
+        Pass {
+            desc: $desc,
+            inputs: &["MAIN"],
+            outputs: &["MAIN"],
+            kind: PassKind::Conv,
+            wgsl: const_format_shock!($gain, $cap),
+        }
+    };
+}
 
-/// Crisp cartoon lines: three shock-filter iterations, then light
-/// contrast-adaptive sharpening.
+macro_rules! const_format_shock {
+    ($gain:literal, $cap:literal) => {
+        concat!(
+            "const GAIN: f32 = ",
+            $gain,
+            ";
+const CAP: f32 = ",
+            $cap,
+            ";
+",
+            shock_body!()
+        )
+    };
+}
+
+const SHOCK: Pass = shock!("Crisp lines (shock filter)", "2.5", "0.6");
+const SHOCK_STRONG: Pass = shock!("Crisp lines, strong (shock filter)", "6.0", "0.85");
+
+/// Crisp cartoon lines: three shock-filter iterations.
 pub const CRISP: &[Pass] = &[SHOCK, SHOCK, SHOCK];
+/// Stronger: faint small strokes (tiny text, the "TM" in logos) snap to
+/// solid shapes too.
+pub const CRISP_STRONG: &[Pass] = &[SHOCK_STRONG, SHOCK_STRONG, SHOCK_STRONG, SHOCK_STRONG, SHOCK_STRONG];
