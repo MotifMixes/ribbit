@@ -150,7 +150,18 @@ impl VoiceEngine {
                         }
                     }
                     0x13C..=0x15B if ((off - 0x13C) / 2) & 1 == 0 => self.volume[((off - 0x13C) / 4) as usize] = v,
-                    0x15C..=0x16F if ((off - 0x15C) / 2) & 1 == 0 => self.pitch[((off - 0x15C) / 4) as usize] = v,
+                    0x15C..=0x16F if ((off - 0x15C) / 2) & 1 == 0 => {
+                        // Takes effect at once, also on a playing voice: the
+                        // BIOS's sound driver bends notes by rewriting pitch
+                        // every ~16 ms without restarting them (sequence
+                        // command 0x8A; SetPitch at US v2.1 0x4003_06E0).
+                        // VERIFIED-FW; MAME reads pitch only at note start.
+                        let ch = ((off - 0x15C) / 4) as usize;
+                        self.pitch[ch] = v;
+                        if self.triggered[ch] {
+                            self.dx[ch] = v as f32 / 32768.0;
+                        }
+                    }
                     _ => return false,
                 }
             }
@@ -464,6 +475,20 @@ mod tests {
         assert!(e.triggered[0]);
         e.command(0x01, 0);
         assert_eq!(e.status(), 0);
+    }
+
+    #[test]
+    fn pitch_writes_bend_a_playing_note() {
+        let mut e = VoiceEngine::default();
+        e.start[1] = 0x0001_0000;
+        e.end[1] = 0x8000 << 16;
+        assert!(e.write(BASE + 0x160, 0x8000)); // voice 1: 1 byte per sample
+        e.command(START_COMMAND, 1);
+        assert_eq!(e.dx[1], 1.0);
+        assert!(e.write(BASE + 0x160, 0xC000)); // bend up mid-note
+        assert_eq!(e.dx[1], 1.5, "applies to the playing note at once");
+        assert!(e.write(BASE + 0x15C, 0x4000)); // voice 0 is idle
+        assert_eq!((e.pitch[0], e.dx[0]), (0x4000, 0.0), "kept for its next start");
     }
 
     #[test]

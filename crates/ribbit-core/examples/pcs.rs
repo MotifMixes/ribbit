@@ -55,6 +55,12 @@ fn main() {
     let log_mmio = std::env::var_os("RIBBIT_MMIO").is_some();
     if log_mmio {
         m.io.mmio_tail = ribbit_debug::TraceRing::new(2_000_000);
+        if let Ok(r) = std::env::var("RIBBIT_MMIO_RANGE") {
+            // "lo-hi" (hex): keep only accesses in that range.
+            let (lo, hi) = r.split_once('-').expect("lo-hi");
+            let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).unwrap();
+            m.io.mmio_filter = Some((hex(lo), hex(hi)));
+        }
     }
     let end = m.cpu.cycles + len.parse::<u64>().unwrap() * ms;
     let log_calls = std::env::var_os("RIBBIT_CALLS").is_some();

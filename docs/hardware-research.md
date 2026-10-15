@@ -776,3 +776,22 @@ Proof of concept: `crates/ribbit-core/examples/hdframe.rs` captures one pass (1,
 SpongeBob intro), rasterizes it at 640x640 with even-odd toggling per fill and depth order, and matches the
 BIOS's frame in shape, layering and colour, at 4x the detail. Not decoded yet: gradient and bitmap fills,
 the rule byte, dirty-rectangle passes, clipping/masks, and the other BIOS revisions' addresses.
+
+## Sequenced music: instruments, pitch bends (2026-10-15)
+
+VERIFIED-FW on the US v2.1 BIOS (SpongeBob hub music), plus the LeapFrog sequence-format notes by
+BLiNXthetimesweeperGOD (gist "LeapFrog Sequencer (Leap-Font)": MIDI-like tracks; command 0x8A "Pitch offset"
+with bend and duration; program change 0xC0 selects cartridge instead of BIOS sounds).
+
+* Instruments are A-law samples described by 20-byte records, e.g. at BIOS 0x401E_F25C: u32 sample start,
+  u32 sample end, u16 loop start, u16 loop end (low halves of addresses), f32 root pitch (83.59 here),
+  u16 unknown (0x4F40), u16 unknown (0x7FFF; the value written to 0x0180_4170/4184 below).
+* Per note the driver writes for voice v: 0x0180_4184+4v and 0x0180_4170+4v (same value; record's last
+  field), start 0x0180_40C4+8v, end/loop 0x0180_4104+8v, pitch 0x0180_415C+4v, volume 0x0180_413C+4v and
+  again 0x0180_41A4+4v, then the start command. 0x4170/0x4184/0x41A4 are not in MAME's map: UNKNOWN
+  (envelope? second channel?).
+* **Pitch bends** are software: SetPitch (0x4003_06E0; voice, base pitch, offset with 0x80 = none, scaled
+  through the table at 0x4010_0E5C) rewrites the pitch register about every 16 ms while the note plays
+  (e.g. 0x9BB0 up to 0xBFC8 over 180 ms and back). So the hardware must apply pitch writes immediately;
+  Ribbit now does (MAME latches pitch at note start, which plays bends flat).
+* The intro cut scenes' soundtracks are LFC streams on voice 7 (one per scene), not sequenced notes.

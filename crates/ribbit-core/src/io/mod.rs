@@ -172,6 +172,9 @@ pub struct Peripherals {
     pub tv_link: Option<tv_link::TvLink>,
     #[serde(skip, default = "default_mmio_tail")]
     pub mmio_tail: TraceRing<MmioAccess>,
+    /// Debug: keep only accesses in this address range in `mmio_tail`.
+    #[serde(skip)]
+    pub mmio_filter: Option<(u32, u32)>,
     /// Accesses since the last `take_events` (for the trace sink).
     #[serde(skip)]
     events: Vec<MmioAccess>,
@@ -223,6 +226,7 @@ impl Default for Peripherals {
             lmax_tv: None,
             tv_link: None,
             mmio_tail: TraceRing::new(MMIO_TAIL),
+            mmio_filter: None,
             events: Vec::new(),
             record_events: false,
             stubs: Default::default(),
@@ -379,7 +383,9 @@ impl Peripherals {
         if self.record_events {
             self.events.push(access);
         }
-        self.mmio_tail.push(access);
+        if self.mmio_filter.is_none_or(|(lo, hi)| (lo..=hi).contains(&access.addr)) {
+            self.mmio_tail.push(access);
+        }
     }
 
     pub fn take_events(&mut self) -> Vec<MmioAccess> {
