@@ -408,8 +408,8 @@ fn span(acc: &mut [[f32; 3]], lcd_w: &mut [f32], x0: usize, a: f32, b: f32, look
     for x in first.max(x0)..last {
         let cov = (b.min(x as f32 + 1.0) - a.max(x as f32)).max(0.0);
         let i = x - x0;
-        for k in 0..3 {
-            acc[i][k] += look.0[k] * cov;
+        for (a, c) in acc[i].iter_mut().zip(look.0) {
+            *a += c * cov;
         }
         lcd_w[i] += look.1 * cov;
     }
