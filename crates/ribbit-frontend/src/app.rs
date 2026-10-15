@@ -45,6 +45,8 @@ pub struct StartOptions {
 }
 
 struct Session {
+    /// EXPERIMENTAL HD picture, when HD vectors are on and this BIOS supports it.
+    hd: Option<ribbit_core::hd::HdCanvas>,
     /// The machine, running on its own thread.
     emu: Emu,
     experimental_touch: bool,
@@ -196,6 +198,10 @@ impl App {
         if self.opts.experimental_touch.unwrap_or(self.settings.experimental_touch) {
             machine.enable_experimental_mame_touch(Default::default());
         }
+        let hd = self.settings.hd_vectors.then(|| Self::start_hd(&mut machine)).flatten();
+        if self.settings.hd_vectors && hd.is_none() {
+            self.ui.toast("HD vectors are not available with this BIOS");
+        }
         let mut saves = SavePaths::for_machine(&self.save_dir(), &machine);
         if let Some(p) = &self.opts.system_eeprom {
             saves.system = Some(p.clone());
@@ -221,6 +227,7 @@ impl App {
             None => format!("bios-{:08x}", machine.firmware().id().crc32),
         };
         self.session = Some(Session {
+            hd,
             experimental_touch: machine.experimental_touch_enabled(),
             emu: {
                 let emu = Emu::start(machine);
@@ -368,12 +375,38 @@ impl App {
                 self.fit_window = FIT_TRIES;
             }
             Action::SettingsChanged => self.save_settings(),
+            Action::HdChanged => {
+                self.save_settings();
+                self.set_hd(self.settings.hd_vectors);
+            }
             Action::SaveState(slot) => self.save_state(slot),
             Action::LoadState(slot) => self.load_state(slot),
             Action::Quit => {
                 self.quit = true;
                 event_loop.exit();
             }
+        }
+    }
+
+    /// Turns HD capture on in `machine`; the canvas to draw into, or None
+    /// if this BIOS's rasterizer is not recognised.
+    fn start_hd(machine: &mut Machine) -> Option<ribbit_core::hd::HdCanvas> {
+        machine.enable_hd_capture().then(|| ribbit_core::hd::HdCanvas::new(machine.hd.as_ref().unwrap().hooks))
+    }
+
+    /// HD vectors on or off for the running game.
+    fn set_hd(&mut self, on: bool) {
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        let mut m = s.emu.lock();
+        s.hd = if on { Self::start_hd(&mut m) } else { None };
+        if !on {
+            m.disable_hd_capture();
+        }
+        drop(m);
+        if on && s.hd.is_none() {
+            self.ui.toast("HD vectors are not available with this BIOS");
         }
     }
 
@@ -774,11 +807,27 @@ impl App {
         #[cfg(not(target_os = "android"))]
         self.poll_pads();
         self.emulate();
-        if let Some(s) = &self.session {
-            s.emu.lock().render_frame(&mut self.frame);
+        let mut hd_frame = false;
+        if let Some(s) = &mut self.session {
+            let passes = {
+                let mut m = s.emu.lock();
+                m.render_frame(&mut self.frame);
+                m.hd.as_mut().map(|h| h.take()).unwrap_or_default()
+            };
             // Automatic calibration is hidden: black instead of its targets.
-            if self.settings.auto_calibrate && crate::calibrate::target(&self.frame).is_some() {
+            let hidden = self.settings.auto_calibrate && crate::calibrate::target(&self.frame).is_some();
+            if hidden {
                 self.frame.fill(0);
+            }
+            // EXPERIMENTAL HD: this frame's renders at 4x, kept true to the LCD.
+            if let Some(canvas) = &mut s.hd
+                && !hidden
+            {
+                for p in &passes {
+                    canvas.apply(p, &self.frame[..]);
+                }
+                canvas.reconcile(&self.frame[..]);
+                hd_frame = true;
             }
         }
         let save_dir = self.save_dir().display().to_string();
@@ -787,6 +836,10 @@ impl App {
             return;
         };
         gpu.upload(&self.frame);
+        gpu.show_hd = hd_frame;
+        if let Some(c) = self.session.as_ref().and_then(|s| s.hd.as_ref()).filter(|_| hd_frame) {
+            gpu.upload_hd(&c.pixels);
+        }
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {

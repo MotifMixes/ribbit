@@ -184,6 +184,11 @@ pub struct Gpu {
     frame_dirty: bool,
     last_frame: Vec<u32>,
     last_chain: Vec<Network>,
+    /// EXPERIMENTAL HD picture (ribbit_core::hd), shown instead of the
+    /// LCD while `show_hd` is set.
+    hd_texture: wgpu::Texture,
+    hd_bind_group: wgpu::BindGroup,
+    pub show_hd: bool,
     pixel: wgpu::RenderPipeline,
     sharp: wgpu::RenderPipeline,
     lcd: wgpu::RenderPipeline,
@@ -265,6 +270,26 @@ impl Gpu {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
+        let hd_size = ribbit_core::hd::HD_SIZE as u32;
+        let hd_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hd"),
+            size: wgpu::Extent3d { width: hd_size, height: hd_size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let hd_view = hd_texture.create_view(&Default::default());
+        let hd_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hd"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hd_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lcd"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -311,6 +336,9 @@ impl Gpu {
             queue,
             config,
             texture,
+            hd_texture,
+            hd_bind_group,
+            show_hd: false,
             lcd_view: view,
             bgl,
             sampler,
@@ -368,6 +396,23 @@ impl Gpu {
         );
     }
 
+    /// The HD picture (0xAARRGGBB, `HD_SIZE` square).
+    pub fn upload_hd(&mut self, pixels: &[u32]) {
+        let size = ribbit_core::hd::HD_SIZE as u32;
+        let rgba: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 0xFF]).collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.hd_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * size), rows_per_image: None },
+            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        );
+    }
+
     /// Draws the LCD into `lcd` (None: no game screen) and egui on top.
     pub fn render(
         &mut self,
@@ -403,7 +448,7 @@ impl Gpu {
         let extra = self.egui.update_buffers(&self.device, &self.queue, &mut encoder, paint_jobs, &screen);
         // AI upscale, only when the picture or the chain changed.
         let mut ai_bind_group = None;
-        if let (Some(((_, _, w, h), Display::Ai, ai)), Some(up)) = (lcd, &mut self.upscaler) {
+        if let (Some(((_, _, w, h), Display::Ai, ai)), Some(up), false) = (lcd, &mut self.upscaler, self.show_hd) {
             let size = WIDTH as u32;
             let chain = ai.chain(size, ai.resolution.target(size, w.min(h)));
             let view = if self.frame_dirty || chain != self.last_chain || up.output().is_none() {
@@ -445,6 +490,10 @@ impl Gpu {
                 if w >= 1.0 && h >= 1.0 {
                     pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
                     match (&ai_bind_group, display) {
+                        _ if self.show_hd => {
+                            pass.set_pipeline(&self.resample);
+                            pass.set_bind_group(0, &self.hd_bind_group, &[]);
+                        }
                         (Some(group), Display::Ai) => {
                             pass.set_pipeline(&self.resample);
                             pass.set_bind_group(0, group, &[]);

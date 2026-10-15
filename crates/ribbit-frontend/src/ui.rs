@@ -21,6 +21,8 @@ pub enum Action {
     ToggleFullscreen,
     SetWindowScale(u32),
     SettingsChanged,
+    /// The HD vectors setting changed (applies to the running game at once).
+    HdChanged,
     SaveState(u8),
     LoadState(u8),
     AddRomFolder(PathBuf),
@@ -281,6 +283,14 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             });
         });
         ui.menu_button("Video", |ui| {
+            if ui
+                .checkbox(&mut settings.hd_vectors, "HD vectors, 640x640 (experimental)")
+                .on_hover_text("Redraws the game's vector art at 4x from the BIOS's own shape data. Bitmaps and anything not yet understood show the normal picture. Replaces the scaling options below while on.")
+                .changed()
+            {
+                actions.push(Action::HdChanged);
+            }
+            ui.separator();
             let before = settings.display;
             ui.radio_value(&mut settings.display, Display::Ai, "AI upscale (HD)");
             ui.radio_value(&mut settings.display, Display::Sharp, "Sharp pixels");

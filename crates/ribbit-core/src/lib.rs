@@ -414,6 +414,12 @@ impl Machine {
         true
     }
 
+    /// Stops HD capture (see `enable_hd_capture`).
+    pub fn disable_hd_capture(&mut self) {
+        self.hd = None;
+        self.cpu.icache.set_stops(&[]);
+    }
+
     pub fn experimental_touch_enabled(&self) -> bool {
         self.touch_config.is_some()
     }

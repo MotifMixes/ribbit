@@ -52,6 +52,9 @@ pub struct Settings {
     /// Where saves go (default: `saves` in the data folder).
     pub save_dir: Option<PathBuf>,
     pub show_status_bar: bool,
+    /// EXPERIMENTAL: redraw the BIOS's Flash vector art at 4x (640x640)
+    /// instead of showing the 160x160 LCD (ribbit_core::hd).
+    pub hd_vectors: bool,
 }
 
 impl Default for Settings {
@@ -76,6 +79,7 @@ impl Default for Settings {
             mame_gpio_lines: false,
             save_dir: None,
             show_status_bar: true,
+            hd_vectors: false,
         }
     }
 }
