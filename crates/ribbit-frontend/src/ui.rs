@@ -3,6 +3,7 @@
 
 use crate::files::{Browser, Pick};
 use crate::gpu::Display;
+use crate::library::{Art, Library};
 use crate::settings::{self, BINDABLE, Settings};
 use ribbit_input::Button;
 use std::path::PathBuf;
@@ -22,6 +23,11 @@ pub enum Action {
     SettingsChanged,
     SaveState(u8),
     LoadState(u8),
+    AddRomFolder(PathBuf),
+    RemoveRomFolder(PathBuf),
+    RescanLibrary,
+    /// Forget a game's art and make it again.
+    RemakeArt(PathBuf),
     Quit,
 }
 
@@ -76,6 +82,7 @@ pub fn draw(
     ui: &mut egui::Ui,
     st: &mut UiState,
     settings: &mut Settings,
+    library: &mut Library,
     info: &Info,
     actions: &mut Vec<Action>,
 ) -> egui::Rect {
@@ -89,7 +96,9 @@ pub fn draw(
     let mut area = egui::Rect::NOTHING;
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
         area = ui.max_rect();
-        if !info.running {
+        if !info.running && info.bios_name.is_some() {
+            library_screen(ui, settings, library, actions);
+        } else if !info.running {
             welcome(ui, settings, info, actions);
         } else if info.rewinding {
             ui.painter().text(
@@ -116,6 +125,7 @@ pub fn draw(
         actions.push(match pick {
             Pick::Bios => Action::SetBios(path),
             Pick::Cartridge => Action::OpenCartridge(path),
+            Pick::RomFolder => Action::AddRomFolder(path),
         });
     }
     toasts(&ctx, st);
@@ -148,7 +158,22 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                     }
                 }
             });
-            if ui.add_enabled(info.running, egui::Button::new("Close Cartridge")).clicked() {
+            ui.menu_button("Games Folders", |ui| {
+                for f in settings.rom_folders.clone() {
+                    let b = egui::Button::new(format!("✕  {}", f.display()));
+                    if ui.add(b).on_hover_text("Stop looking in this folder").clicked() {
+                        actions.push(Action::RemoveRomFolder(f));
+                        ui.close();
+                    }
+                }
+                if !settings.rom_folders.is_empty() {
+                    ui.separator();
+                }
+                if item(ui, "Add Games Folder…", "") {
+                    actions.push(Action::Pick(Pick::RomFolder));
+                }
+            });
+            if ui.add_enabled(info.running, egui::Button::new("Close Cartridge (back to games)")).clicked() {
                 actions.push(Action::CloseCartridge);
                 ui.close();
             }
@@ -160,6 +185,9 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
                 actions.push(Action::Screenshot);
                 ui.close();
+            }
+            if ui.checkbox(&mut settings.discord_presence, "Show my game on Discord").changed() {
+                actions.push(Action::SettingsChanged);
             }
             ui.separator();
             if item(ui, "Exit", "Alt+F4") {
@@ -393,6 +421,352 @@ fn welcome(ui: &mut egui::Ui, settings: &Settings, info: &Info, actions: &mut Ve
         ui.add_space(14.0);
         ui.label(egui::RichText::new("You can also drop a BIOS or cartridge file onto this window.").weak());
         ui.label(egui::RichText::new("No firmware or games are included: use dumps of hardware you own.").weak());
+    });
+}
+
+/// Card width the grid aims for (points).
+const CARD_WIDTH: f32 = 220.0;
+const CARD_GAP: f32 = 22.0;
+/// Ribbit's green (the frog), for play buttons and highlights.
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(46, 170, 82);
+const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(64, 196, 104);
+
+/// The game library: art and info for every game in the ROM folders;
+/// clicking a game plays it.
+fn library_screen(ui: &mut egui::Ui, settings: &Settings, library: &mut Library, actions: &mut Vec<Action>) {
+    let ctx = ui.ctx().clone();
+    for g in &mut library.games {
+        if let Art::Image(img) = &g.art {
+            let tex = ctx.load_texture(g.path.display().to_string(), img.clone(), egui::TextureOptions::LINEAR);
+            g.art = Art::Texture(tex);
+        }
+    }
+    backdrop(ui);
+    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(28, 20)).show(ui, |ui| {
+        library_header(ui, library, actions);
+        if library.games.is_empty() && !library.scanning {
+            empty_library(ui, settings, actions);
+            return;
+        }
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if settings.rom_folders.is_empty() {
+                // Only recent games so far: ask for the folder with the rest.
+                notice(ui, "These are your recent games. Choose your games folder to see all of them.", || {
+                    actions.push(Action::Pick(Pick::RomFolder));
+                });
+                ui.add_space(18.0);
+            }
+            let last = settings.recent_carts.first();
+            if let Some(game) = last.and_then(|p| library.games.iter().find(|g| &g.path == p)) {
+                hero(ui, game, actions);
+                ui.add_space(28.0);
+            }
+            ui.label(egui::RichText::new(format!("ALL GAMES  ·  {}", library.games.len())).size(13.0).strong().color(ACCENT));
+            ui.add_space(12.0);
+            let avail = ui.available_width();
+            let cols = (((avail + CARD_GAP) / (CARD_WIDTH + CARD_GAP)).floor() as usize).max(1);
+            let card_w = ((avail - CARD_GAP * (cols - 1) as f32) / cols as f32).floor().min(CARD_WIDTH * 1.4);
+            for row in library.games.chunks(cols) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = CARD_GAP;
+                    for game in row {
+                        game_card(ui, game, card_w, actions);
+                    }
+                });
+                ui.add_space(CARD_GAP);
+            }
+        });
+    });
+}
+
+/// A soft green glow at the top fading into the window background.
+fn backdrop(ui: &egui::Ui) {
+    let r = ui.max_rect();
+    let top = egui::Color32::from_rgb(18, 46, 30);
+    let bottom = egui::Color32::from_rgb(11, 12, 14);
+    let mid = egui::pos2(r.max.x, r.min.y + r.height() * 0.55);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(r.left_top(), top);
+    mesh.colored_vertex(r.right_top(), top);
+    mesh.colored_vertex(egui::pos2(r.min.x, mid.y), bottom);
+    mesh.colored_vertex(mid, bottom);
+    mesh.colored_vertex(r.left_bottom(), bottom);
+    mesh.colored_vertex(r.right_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 3, 2);
+    mesh.add_triangle(2, 3, 4);
+    mesh.add_triangle(3, 5, 4);
+    ui.painter().add(mesh);
+}
+
+fn library_header(ui: &mut egui::Ui, library: &Library, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        let frog = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("frog icon"))).unwrap_or_else(|| {
+            let img = egui::ColorImage::from_rgba_unmultiplied([256, 256], &crate::icon::frog_glyph_rgba(256));
+            let tex = ui.ctx().load_texture("frog icon", img, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("frog icon"), tex.clone()));
+            tex
+        });
+        ui.add(egui::Image::new((frog.id(), egui::vec2(42.0, 42.0))));
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Games").size(28.0).strong().color(egui::Color32::WHITE));
+        // Progress, next to the heading.
+        let pending = library.games.iter().filter(|g| matches!(g.art, Art::Pending)).count();
+        if library.scanning {
+            ui.add_space(10.0);
+            ui.spinner();
+            ui.label(egui::RichText::new("Looking for games…").weak());
+        } else if library.making_art && pending > 0 {
+            ui.add_space(10.0);
+            ui.spinner();
+            ui.label(egui::RichText::new(format!("Getting title screens… {pending} to go")).weak());
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if ui
+                .add(egui::Button::new(egui::RichText::new("⟳").size(16.0)).corner_radius(8).min_size(egui::vec2(36.0, 32.0)))
+                .on_hover_text("Look for new games in your folders")
+                .clicked()
+            {
+                actions.push(Action::RescanLibrary);
+            }
+            if ui.add(egui::Button::new("Open a file…").corner_radius(8).min_size(egui::vec2(0.0, 32.0))).clicked() {
+                actions.push(Action::Pick(Pick::Cartridge));
+            }
+            if primary_button(ui, "➕  Add games folder", egui::vec2(0.0, 32.0)).clicked() {
+                actions.push(Action::Pick(Pick::RomFolder));
+            }
+        });
+    });
+    ui.add_space(10.0);
+}
+
+fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
+    let id = ui.next_auto_id();
+    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+    let b = egui::Button::new(egui::RichText::new(text).strong().color(egui::Color32::WHITE))
+        .fill(if hovered { ACCENT_HOVER } else { ACCENT })
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(8)
+        .min_size(min);
+    if min.x > 0.0 { ui.add_sized(min, b) } else { ui.add(b) }
+}
+
+fn notice(ui: &mut egui::Ui, text: &str, mut on_click: impl FnMut()) {
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgba_unmultiplied(46, 170, 82, 28))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(46, 170, 82, 90)))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(text).color(egui::Color32::from_gray(225)));
+                ui.add_space(8.0);
+                if primary_button(ui, "📁  Choose games folder", egui::vec2(0.0, 28.0)).clicked() {
+                    on_click();
+                }
+            });
+        });
+}
+
+fn empty_library(ui: &mut egui::Ui, settings: &Settings, actions: &mut Vec<Action>) {
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.16).max(12.0));
+        ui.label(egui::RichText::new("🎮").size(64.0));
+        ui.add_space(8.0);
+        let (head, body) = if settings.rom_folders.is_empty() {
+            (
+                "Where are your Leapster games?",
+                "Choose the folder with your cartridge dumps. Ribbit looks there and in its subfolders.",
+            )
+        } else {
+            ("No Leapster games found yet", "Ribbit looked for cartridge dumps (.bin, .rom, .u3, .lst, or zipped) in the folders above.")
+        };
+        ui.label(egui::RichText::new(head).size(24.0).strong().color(egui::Color32::WHITE));
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(body).weak());
+        ui.add_space(22.0);
+        if primary_button(ui, "📁  Choose games folder", egui::vec2(280.0, 46.0)).clicked() {
+            actions.push(Action::Pick(Pick::RomFolder));
+        }
+        ui.add_space(10.0);
+        if ui.add(egui::Button::new("Open a single file…").corner_radius(8).min_size(egui::vec2(280.0, 36.0))).clicked() {
+            actions.push(Action::Pick(Pick::Cartridge));
+        }
+        ui.add_space(18.0);
+        ui.label(egui::RichText::new("No games are included: use dumps of cartridges you own.").size(12.5).weak());
+    });
+}
+
+/// "Name (USA, alt)" -> ("Name", Some("USA, alt")).
+fn split_region(title: &str) -> (&str, Option<&str>) {
+    match title.strip_suffix(')').and_then(|t| t.rsplit_once(" (")) {
+        Some((name, region)) => (name, Some(region)),
+        None => (title, None),
+    }
+}
+
+fn badge(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::NONE
+        .fill(egui::Color32::from_white_alpha(14))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(7, 2))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).size(11.5).color(egui::Color32::from_gray(200)));
+        });
+}
+
+/// Rounded art with a drop shadow (or a placeholder while it is made).
+fn paint_art(ui: &egui::Ui, game: &crate::library::Game, rect: egui::Rect, radius: u8) {
+    let p = ui.painter();
+    let shadow = egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(120) };
+    p.add(shadow.as_shape(rect, radius));
+    match &game.art {
+        Art::Texture(t) => {
+            egui::Image::new((t.id(), rect.size())).corner_radius(radius).paint_at(ui, rect);
+        }
+        other => {
+            p.rect_filled(rect, radius, egui::Color32::from_rgb(24, 30, 27));
+            let note = if matches!(other, Art::Pending) { "Getting title screen…" } else { "🎮" };
+            let font = egui::FontId::proportional(if matches!(other, Art::Pending) { 14.0 } else { 40.0 });
+            p.text(rect.center(), egui::Align2::CENTER_CENTER, note, font, egui::Color32::from_gray(120));
+        }
+    }
+}
+
+/// A round green play button.
+fn paint_play(p: &egui::Painter, c: egui::Pos2, r: f32, alpha: f32) {
+    p.circle_filled(c, r, ACCENT.gamma_multiply(alpha));
+    let s = r * 0.42;
+    let tri = vec![c + egui::vec2(-s * 0.7, -s), c + egui::vec2(-s * 0.7, s), c + egui::vec2(s * 1.05, 0.0)];
+    p.add(egui::Shape::convex_polygon(tri, egui::Color32::WHITE.gamma_multiply(alpha), egui::Stroke::NONE));
+}
+
+/// The last game played, big, with its details and a Play button.
+fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action>) {
+    let frame = egui::Frame::NONE
+        .fill(egui::Color32::from_white_alpha(6))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(14)))
+        .corner_radius(16)
+        .inner_margin(20);
+    frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_top(|ui| {
+            let side = (ui.available_width() * 0.32).clamp(180.0, 320.0);
+            let (rect, art) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+            paint_art(ui, game, rect, 12);
+            if art.hovered() {
+                paint_play(ui.painter(), rect.center(), 40.0, 1.0);
+            }
+            if art.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                actions.push(Action::OpenCartridge(game.path.clone()));
+            }
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("CONTINUE PLAYING").size(13.0).strong().color(ACCENT));
+                ui.add_space(6.0);
+                let (name, region) = split_region(&game.title);
+                ui.label(egui::RichText::new(name).size(28.0).strong().color(egui::Color32::WHITE));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if let Some(r) = region {
+                        badge(ui, r);
+                    }
+                    ui.label(egui::RichText::new(&game.subtitle).weak());
+                });
+                ui.add_space(14.0);
+                egui::Grid::new("hero details").num_columns(2).spacing([16.0, 5.0]).show(ui, |ui| {
+                    for (k, v) in game.details.iter().filter(|(k, _)| matches!(*k, "Built" | "Catalogue" | "Dump")) {
+                        ui.label(egui::RichText::new(*k).weak());
+                        ui.label(egui::RichText::new(v).color(egui::Color32::from_gray(210)));
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(20.0);
+                if primary_button(ui, "▶   Play", egui::vec2(180.0, 46.0)).clicked() {
+                    actions.push(Action::OpenCartridge(game.path.clone()));
+                }
+            });
+        });
+    });
+}
+
+/// One game: its art, title, region and a line of info. Click to play.
+fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, actions: &mut Vec<Action>) {
+    let pad = 10.0;
+    let inner_w = w - 2.0 * pad;
+    let (name, region) = split_region(&game.title);
+    // Every card the same height: two title lines, longer titles cut short.
+    let title_font = egui::FontId::proportional(15.5);
+    let mut job = egui::text::LayoutJob::simple(name.to_string(), title_font.clone(), egui::Color32::WHITE, inner_w);
+    job.wrap.max_rows = 2;
+    let title = ui.painter().layout_job(job);
+    let two_lines = ui.painter().layout_no_wrap("A
+A".into(), title_font, egui::Color32::WHITE).size().y;
+    let sub = ui.painter().layout_no_wrap(
+        game.subtitle.clone(),
+        egui::FontId::proportional(12.0),
+        egui::Color32::from_gray(140),
+    );
+    let sub_h = sub.size().y;
+    let h = pad + inner_w + 12.0 + two_lines + 6.0 + sub_h.max(18.0) + pad;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let lift = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.12);
+    let card = rect.translate(egui::vec2(0.0, -4.0 * lift));
+    let p = ui.painter();
+    let shadow = egui::epaint::Shadow {
+        offset: [0, (4.0 + 6.0 * lift) as i8],
+        blur: (12.0 + 14.0 * lift) as u8,
+        spread: 0,
+        color: egui::Color32::from_black_alpha(90 + (60.0 * lift) as u8),
+    };
+    p.add(shadow.as_shape(card, 14));
+    p.rect_filled(card, 14, egui::Color32::from_rgb(20, 23, 22).lerp_to_gamma(egui::Color32::from_rgb(28, 34, 31), lift));
+    let border = egui::Color32::from_white_alpha(12).lerp_to_gamma(ACCENT, lift);
+    p.rect_stroke(card, 14, egui::Stroke::new(1.0 + lift, border), egui::StrokeKind::Inside);
+    let art = egui::Rect::from_min_size(card.min + egui::vec2(pad, pad), egui::vec2(inner_w, inner_w));
+    paint_art(ui, game, art, 10);
+    if lift > 0.0 {
+        ui.painter().rect_filled(art, 10, egui::Color32::from_black_alpha((70.0 * lift) as u8));
+        paint_play(ui.painter(), art.center(), 30.0, lift);
+    }
+    let p = ui.painter();
+    let at = egui::pos2(card.min.x + pad, art.max.y + 12.0);
+    p.galley(at, title, egui::Color32::WHITE);
+    let mut x = at.x;
+    let y = at.y + two_lines + 6.0;
+    if let Some(r) = region {
+        let g = p.layout_no_wrap(r.to_string(), egui::FontId::proportional(11.0), egui::Color32::from_gray(200));
+        let b = egui::Rect::from_min_size(egui::pos2(x, y), g.size() + egui::vec2(12.0, 4.0));
+        p.rect_filled(b, 5, egui::Color32::from_white_alpha(14));
+        p.galley(b.min + egui::vec2(6.0, 2.0), g, egui::Color32::from_gray(200));
+        x = b.max.x + 8.0;
+    }
+    p.galley(egui::pos2(x, y + 1.0), sub, egui::Color32::from_gray(140));
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| {
+        ui.label(egui::RichText::new(&game.title).strong());
+        egui::Grid::new("game details").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
+            for (k, v) in &game.details {
+                ui.label(egui::RichText::new(*k).weak());
+                ui.label(v);
+                ui.end_row();
+            }
+        });
+        ui.label(egui::RichText::new("Click to play · right-click for more").weak());
+    });
+    if response.clicked() {
+        actions.push(Action::OpenCartridge(game.path.clone()));
+    }
+    response.context_menu(|ui| {
+        if ui.button("▶ Play").clicked() {
+            actions.push(Action::OpenCartridge(game.path.clone()));
+            ui.close();
+        }
+        if ui.button("Get title screen again").clicked() {
+            actions.push(Action::RemakeArt(game.path.clone()));
+            ui.close();
+        }
     });
 }
 

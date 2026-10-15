@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod io;
+pub mod zip;
 
 use ribbit_cpu::isa::Instr;
 use ribbit_cpu::{Cpu, CpuConfig, CpuError, HaltReason, Step};
@@ -29,15 +30,24 @@ pub enum LoadError {
     Firmware { path: PathBuf, source: FirmwareError },
     #[error("{path}")]
     Cartridge { path: PathBuf, source: CartridgeError },
+    #[error("{path}")]
+    Zip { path: PathBuf, source: zip::ZipError },
+}
+
+/// A file's bytes, or the ROM inside it if it is a .zip archive.
+pub fn read_image(path: impl AsRef<Path>) -> Result<Vec<u8>, LoadError> {
+    let path = path.as_ref();
+    let data = std::fs::read(path).map_err(|source| LoadError::Io { path: path.into(), source })?;
+    zip::unzip_image(data).map_err(|source| LoadError::Zip { path: path.into(), source })
 }
 
 pub fn load_firmware(path: &Path) -> Result<Firmware, LoadError> {
-    let data = std::fs::read(path).map_err(|source| LoadError::Io { path: path.into(), source })?;
+    let data = read_image(path)?;
     Firmware::from_bytes(data).map_err(|source| LoadError::Firmware { path: path.into(), source })
 }
 
 pub fn load_cartridge(path: &Path) -> Result<Cartridge, LoadError> {
-    let data = std::fs::read(path).map_err(|source| LoadError::Io { path: path.into(), source })?;
+    let data = read_image(path)?;
     Cartridge::from_bytes(data).map_err(|source| LoadError::Cartridge { path: path.into(), source })
 }
 

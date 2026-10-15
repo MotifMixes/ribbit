@@ -1,7 +1,7 @@
 fn main() {
-    let fw = ribbit_memory::Firmware::from_bytes(std::fs::read("roms/bios/152-11265_2.1.bin").unwrap()).unwrap();
+    let fw = ribbit_memory::Firmware::from_bytes(ribbit_core::read_image("roms/bios/152-11265_2.1.bin").unwrap()).unwrap();
     let cart =
-        ribbit_memory::Cartridge::from_bytes(std::fs::read(std::env::var("RIBBIT_CART").unwrap()).unwrap()).unwrap();
+        ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(std::env::var("RIBBIT_CART").unwrap()).unwrap()).unwrap();
     let mut m = ribbit_core::Machine::with_straps(fw, Some(cart), 0x63FF_FFFF);
     m.load_state(&std::fs::read(std::env::var("RIBBIT_STATE").unwrap()).unwrap()).unwrap();
     for _ in 0..5 {

@@ -15,12 +15,18 @@
 //!   the length in bits 27:16 (0 = linear); bit 29 selects 16-bit data in the
 //!   top half of the register. Memory size (2 banks x 2 x 1024 words, bank
 //!   selected by XYCONFIG bit 0) is also MAME's. SOURCED, not verified.
+//! * Bursts (MAME): writing aux 0x9B copies (low 16 bits + 1) bytes, a word
+//!   at a time, between system memory at aux 0x99 and X (bit 29 clear) or Y
+//!   memory from word aux 0x9A; bit 30 set copies into XY memory, clear copies
+//!   out of it. Synchronous, so XYCONFIG's busy bit reads clear. SOURCED.
 
 /// Aux register block: 0x80 + offset.
 pub const AUX_BASE: u32 = 0x80;
 pub const AUX_COUNT: u32 = 0x20;
 const XYCONFIG: usize = 0x18;
-const BURST_SIZE: usize = 0x1B;
+pub const BURST_SIZE: usize = 0x1B;
+const BURST_SYSTEM: usize = 0x19;
+const BURST_XY: usize = 0x1A;
 const WORDS: usize = 0x400;
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -137,21 +143,35 @@ impl XyExtension {
     }
 
     /// LR from aux 0x80-0x9F. XYCONFIG's bit 4 (burst busy) reads 0 because
-    /// bursts are not modelled as taking time (and are rejected, see below).
+    /// bursts complete at once.
     pub fn aux_read(&self, n: u32) -> u32 {
         let off = (n - AUX_BASE) as usize;
         if off == XYCONFIG { self.aux[off] & !0x10 } else { self.aux[off] }
     }
 
-    /// SR to aux 0x80-0x9F. Writing the burst size register starts a DMA
-    /// between XY and system memory (MAME); not modelled yet.
-    pub fn aux_write(&mut self, n: u32, value: u32) -> Result<(), &'static str> {
+    /// SR to aux 0x80-0x9F. Writing the burst size register (0x9B) copies
+    /// between XY and system memory (see the module notes).
+    pub fn aux_write(&mut self, n: u32, value: u32, bus: &mut impl ribbit_memory::Bus) {
         let off = (n - AUX_BASE) as usize;
-        if off == BURST_SIZE {
-            return Err("XY burst transfer (aux 0x9B) is not modelled");
-        }
         self.aux[off] = value;
-        Ok(())
+        if off == BURST_SIZE {
+            self.burst(value, bus);
+        }
+    }
+
+    fn burst(&mut self, value: u32, bus: &mut impl ribbit_memory::Bus) {
+        let (system, xy) = (self.aux[BURST_SYSTEM], self.aux[BURST_XY] as usize);
+        let size = (value & 0xFFFF) + 1;
+        let bank = (self.aux[XYCONFIG] & 1) as usize;
+        let memory = &mut self.mem[bank][((value >> 29) & 1) as usize];
+        for i in (0..size).step_by(4) {
+            let word = &mut memory[(xy + i as usize / 4) % WORDS];
+            if value & (1 << 30) != 0 {
+                *word = bus.read32(system.wrapping_add(i));
+            } else {
+                bus.write32(system.wrapping_add(i), *word);
+            }
+        }
     }
 }
 
@@ -215,11 +235,47 @@ mod tests {
         assert_eq!(xy.read(48), 0x1234_0000, "x0_nu shares MX00's format bit");
     }
 
+    /// System memory for burst tests: 64 KiB of words.
+    struct Ram(Vec<u32>);
+    impl ribbit_memory::Bus for Ram {
+        fn read8(&mut self, a: u32) -> u8 {
+            (self.0[a as usize / 4] >> ((a & 3) * 8)) as u8
+        }
+        fn read16(&mut self, a: u32) -> u16 {
+            (self.0[a as usize / 4] >> ((a & 2) * 8)) as u16
+        }
+        fn read32(&mut self, a: u32) -> u32 {
+            self.0[a as usize / 4]
+        }
+        fn write8(&mut self, a: u32, v: u8) {
+            let w = &mut self.0[a as usize / 4];
+            *w = (*w & !(0xFF << ((a & 3) * 8))) | (v as u32) << ((a & 3) * 8);
+        }
+        fn write16(&mut self, a: u32, v: u16) {
+            let w = &mut self.0[a as usize / 4];
+            *w = (*w & !(0xFFFF << ((a & 2) * 8))) | (v as u32) << ((a & 2) * 8);
+        }
+        fn write32(&mut self, a: u32, v: u32) {
+            self.0[a as usize / 4] = v;
+        }
+    }
+
     #[test]
-    fn burst_is_reported() {
+    fn burst_copies_into_and_out_of_xy_memory() {
         let mut xy = XyExtension::default();
-        assert!(xy.aux_write(0x9B, 0x10).is_err());
-        assert!(xy.aux_write(0x98, 0x11).is_ok());
+        let mut ram = Ram((0..0x4000).collect());
+        xy.aux_write(0x99, 0x100, &mut ram); // system address (word 0x40)
+        xy.aux_write(0x9A, 5, &mut ram); // XY word 5
+        xy.aux_write(0x9B, (1 << 30) | (1 << 29) | 11, &mut ram); // 12 bytes into Y
+        assert_eq!(&xy.mem[0][1][5..8], &[0x40, 0x41, 0x42]);
+        assert_eq!(xy.mem[0][1][8], 0, "only the burst's size");
+        assert_eq!(xy.mem[0][0][5], 0, "X untouched");
+        xy.mem[0][0][2] = 0xDEAD_BEEF;
+        xy.aux_write(0x9A, 2, &mut ram);
+        xy.aux_write(0x99, 0x200, &mut ram);
+        xy.aux_write(0x9B, 3, &mut ram); // 4 bytes out of X
+        assert_eq!(ram.0[0x80], 0xDEAD_BEEF);
+        xy.aux_write(0x98, 0x11, &mut ram);
         assert_eq!(xy.aux_read(0x98), 0x01, "busy bit reads clear");
     }
 }

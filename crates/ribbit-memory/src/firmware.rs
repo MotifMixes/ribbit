@@ -28,6 +28,19 @@ impl Firmware {
     /// Validates a firmware image. Unknown dumps are accepted (there may be
     /// undumped revisions) but reported as unverified by `known()`.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, FirmwareError> {
+        let fw = Self::from_bytes_any_model(data)?;
+        if let Some(k) = fw.known
+            && k.hardware != Hardware::Leapster
+        {
+            return Err(FirmwareError::WrongHardware { name: k.name, hardware: k.hardware });
+        }
+        Ok(fw)
+    }
+
+    /// EXPERIMENTAL: also accepts the BIOS of the Leapster TV, L-MAX and
+    /// Leapster 2, which run on the original's emulated hardware (as in MAME,
+    /// which marks them all not working). For research; not for players.
+    pub fn from_bytes_any_model(data: Vec<u8>) -> Result<Self, FirmwareError> {
         if data.is_empty() {
             return Err(FirmwareError::Empty);
         }
@@ -39,11 +52,6 @@ impl Firmware {
         }
         let id = ImageId::of(&data);
         let known = known::lookup(known::FIRMWARE, &id);
-        if let Some(k) = known
-            && k.hardware != Hardware::Leapster
-        {
-            return Err(FirmwareError::WrongHardware { name: k.name, hardware: k.hardware });
-        }
         Ok(Self { data, id, known })
     }
 

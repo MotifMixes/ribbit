@@ -4,6 +4,7 @@ use crate::audio_out::AudioOut;
 use crate::emu::{Control, Emu};
 use crate::files::Pick;
 use crate::gpu::Gpu;
+use crate::library::{ArtSource, Library};
 use crate::saves::{AutoSave, SavePaths};
 use crate::settings::Settings;
 use crate::ui::{self, Action, UiState};
@@ -22,6 +23,8 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 /// Rewind: a snapshot every half second of emulated time, 30 s kept.
 const REWIND_EVERY_CYCLES: u64 = 48_000_000;
+/// The window title: name and version.
+const APP_NAME: &str = concat!("Ribbit v", env!("CARGO_PKG_VERSION"));
 /// Frames spent sizing the window around the screen (the first frames can
 /// still be settling the menu bar's height).
 const FIT_TRIES: u8 = 6;
@@ -48,6 +51,8 @@ struct Session {
     saves: SavePaths,
     autosave: AutoSave,
     title: String,
+    /// When play started (Unix seconds), for Discord's timer.
+    started: u64,
     /// Prefix for this game's save-state files.
     state_key: String,
     rewind: std::collections::VecDeque<Vec<u8>>,
@@ -81,6 +86,8 @@ pub struct App {
     mouse_down: bool,
     finger: Option<(u64, (f64, f64))>,
     lcd_px: (f32, f32, f32, f32),
+    library: Library,
+    discord: crate::discord::Discord,
     /// Frames left to size the window around the screen (0 = done).
     fit_window: u8,
     fatal: Option<anyhow::Error>,
@@ -108,6 +115,7 @@ pub fn run_with(event_loop: EventLoop<()>, opts: StartOptions) -> Result<()> {
 impl App {
     pub fn new(opts: StartOptions) -> Self {
         let settings_path = opts.data_dir.join("settings.toml");
+        let opts_data_dir = opts.data_dir.clone();
         let mut settings = Settings::load(&settings_path);
         if let Some(f) = &opts.firmware {
             settings.bios = Some(f.clone());
@@ -136,14 +144,16 @@ impl App {
             finger: None,
             lcd_px: (0.0, 0.0, 0.0, 0.0),
             fit_window: 0,
+            library: Library::new(&opts_data_dir),
+            discord: crate::discord::Discord::start(),
             fatal: None,
             quit: false,
         };
-        let cart = app.opts.cartridge.clone();
-        if (cart.is_some() || app.settings.bios.is_some())
-            && let Err(e) = app.boot(cart)
-        {
-            app.ui.error = Some(format!("{e:#}"));
+        // A game given on the command line starts at once; otherwise the
+        // game library shows.
+        match app.opts.cartridge.clone() {
+            Some(cart) => app.open_cart(cart),
+            None => app.rescan_library(),
         }
         app
     }
@@ -218,6 +228,7 @@ impl App {
             saves,
             autosave: AutoSave::default(),
             title,
+            started: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
             state_key,
             rewind: Default::default(),
             compress: Compressor::start(),
@@ -252,19 +263,30 @@ impl App {
                 self.settings.bios = Some(path);
                 self.save_settings();
                 self.ui.toast(format!("BIOS: {name}"));
-                if self.session.is_none()
-                    && let Err(e) = self.boot(None)
-                {
-                    self.ui.error = Some(format!("{e:#}"));
-                }
+                self.rescan_library();
             }
             Err(e) => self.ui.error = Some(format!("Not a usable BIOS: {e:#}")),
         }
     }
 
+    /// Rescans the ROM folders (and recent games); art is made with the
+    /// BIOS, if there is one.
+    fn rescan_library(&mut self) {
+        let art = self.settings.bios.clone().map(|bios| ArtSource { bios });
+        self.library.scan(&self.settings.rom_folders, &self.settings.recent_carts, art);
+    }
+
+    fn add_rom_folder(&mut self, path: PathBuf) {
+        if !self.settings.rom_folders.contains(&path) {
+            self.settings.rom_folders.push(path);
+            self.save_settings();
+        }
+        self.rescan_library();
+    }
+
     fn open_dropped(&mut self, path: PathBuf) {
         // A BIOS is recognised by checksum; anything else is tried as a cartridge.
-        let is_bios = std::fs::read(&path)
+        let is_bios = ribbit_core::read_image(&path)
             .ok()
             .and_then(|d| ribbit_memory::Firmware::from_bytes(d).ok())
             .is_some_and(|fw| fw.known().is_some());
@@ -285,6 +307,7 @@ impl App {
         let start = match what {
             Pick::Bios => self.settings.bios.clone(),
             Pick::Cartridge => self.settings.recent_carts.first().cloned(),
+            Pick::RomFolder => self.settings.rom_folders.last().cloned(),
         };
         #[cfg(not(target_os = "android"))]
         {
@@ -292,6 +315,7 @@ impl App {
                 match what {
                     Pick::Bios => self.set_bios(path),
                     Pick::Cartridge => self.open_cart(path),
+                    Pick::RomFolder => self.add_rom_folder(path),
                 }
             }
         }
@@ -302,9 +326,9 @@ impl App {
     fn update_title(&self) {
         if let Some(g) = &self.gpu {
             let t = match &self.session {
-                Some(s) if self.paused => format!("Ribbit - {} (paused)", s.title),
-                Some(s) => format!("Ribbit - {}", s.title),
-                None => "Ribbit".to_string(),
+                Some(s) if self.paused => format!("{APP_NAME} - {} (paused)", s.title),
+                Some(s) => format!("{APP_NAME} - {}", s.title),
+                None => APP_NAME.to_string(),
             };
             g.window.set_title(&t);
         }
@@ -318,6 +342,19 @@ impl App {
             Action::CloseCartridge => {
                 self.end_session();
                 self.update_title();
+                // Recently played games join the library.
+                self.rescan_library();
+            }
+            Action::AddRomFolder(p) => self.add_rom_folder(p),
+            Action::RemoveRomFolder(p) => {
+                self.settings.rom_folders.retain(|f| *f != p);
+                self.save_settings();
+                self.rescan_library();
+            }
+            Action::RescanLibrary => self.rescan_library(),
+            Action::RemakeArt(p) => {
+                self.library.forget_art(&p);
+                self.rescan_library();
             }
             Action::Reset => self.reset(),
             Action::TogglePause => self.toggle_pause(),
@@ -766,9 +803,15 @@ impl App {
             };
         let mut actions = Vec::new();
         let mut area = egui::Rect::NOTHING;
-        let (ui_state, settings) = (&mut self.ui, &mut self.settings);
+        self.library.poll();
+        self.discord.set(match &self.session {
+            _ if !self.settings.discord_presence => crate::discord::Presence::Off,
+            Some(s) => crate::discord::Presence::playing(&s.title, s.started),
+            None => crate::discord::Presence::Browsing,
+        });
+        let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
         let out = self.egui_ctx.run_ui(raw, |ui| {
-            area = ui::draw(ui, ui_state, settings, &info, &mut actions);
+            area = ui::draw(ui, ui_state, settings, library, &info, &mut actions);
         });
         state.handle_platform_output(&gpu.window, out.platform_output);
         let ppp = out.pixels_per_point;
@@ -804,7 +847,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("Ribbit")
+            .with_title(APP_NAME)
             // Never maximized or full screen at start: a normal window, the
             // chosen size or the largest that fits the screen.
             .with_inner_size(Self::window_size(Self::fitting_scale(
@@ -948,7 +991,7 @@ impl Compressor {
 }
 
 /// "Game (USA, alt) [500-11002 / 500-01168] (MAME: x)" -> "Game (USA, alt)".
-fn short_name(full: &str) -> String {
+pub(crate) fn short_name(full: &str) -> String {
     full.split(" [").next().unwrap_or(full).trim().to_string()
 }
 

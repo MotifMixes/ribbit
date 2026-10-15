@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 pub enum Pick {
     Bios,
     Cartridge,
+    /// A folder of games for the library.
+    RomFolder,
 }
 
 impl Pick {
@@ -14,6 +16,7 @@ impl Pick {
         match self {
             Pick::Bios => "Open Leapster BIOS",
             Pick::Cartridge => "Open Leapster cartridge",
+            Pick::RomFolder => "Choose your games folder",
         }
     }
 }
@@ -21,13 +24,14 @@ impl Pick {
 /// Native file dialog (blocks until the user chooses). Desktop only.
 #[cfg(not(target_os = "android"))]
 pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
-    let mut d =
-        rfd::FileDialog::new().set_title(what.title()).add_filter("Leapster images", &["bin", "rom", "u3", "lst"]);
-    d = d.add_filter("All files", &["*"]);
+    let mut d = rfd::FileDialog::new().set_title(what.title());
     if let Some(dir) = start.and_then(|p| if p.is_dir() { Some(p) } else { p.parent() }) {
         d = d.set_directory(dir);
     }
-    d.pick_file()
+    if what == Pick::RomFolder {
+        return d.pick_folder();
+    }
+    d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"]).add_filter("All files", &["*"]).pick_file()
 }
 
 /// In-app file browser (egui).
@@ -92,6 +96,9 @@ impl Browser {
                     }
                 });
                 ui.label(egui::RichText::new(self.dir.display().to_string()).weak());
+                if what == Pick::RomFolder && ui.button("✔ Use this folder").clicked() {
+                    chosen = Some((what, self.dir.clone()));
+                }
                 if let Some(e) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, e);
                     #[cfg(target_os = "android")]
@@ -100,6 +107,9 @@ impl Browser {
                 ui.separator();
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for (name, path, is_dir) in &self.entries {
+                        if what == Pick::RomFolder && !*is_dir {
+                            continue;
+                        }
                         let label = if *is_dir { format!("📁 {name}") } else { format!("🎮 {name}") };
                         if ui.selectable_label(false, label).clicked() {
                             if *is_dir {

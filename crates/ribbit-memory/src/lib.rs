@@ -9,6 +9,7 @@ pub mod cartridge;
 pub mod firmware;
 pub mod image;
 pub mod known;
+mod known_carts;
 pub mod map;
 pub mod serde_array;
 

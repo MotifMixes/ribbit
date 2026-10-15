@@ -29,3 +29,6 @@ tracing.workspace = true
 
 [build-dependencies]
 embed-resource = "3"
+# The .exe icon, drawn by ribbit-frontend/src/frog_glyph.rs.
+ab_glyph = "0.2.32"
+epaint_default_fonts = "0.36.2"

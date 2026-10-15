@@ -2609,7 +2609,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-android"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "android_logger",
  "jni 0.21.1",
@@ -2621,14 +2621,15 @@ dependencies = [
 
 [[package]]
 name = "ribbit-audio"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "ribbit-core"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "backtrace",
  "bincode",
+ "crc32fast",
  "miniz_oxide 0.8.9",
  "png",
  "ribbit-audio",
@@ -2646,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-cpu"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "ribbit-memory",
  "serde",
@@ -2655,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-debug"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -2663,11 +2664,13 @@ dependencies = [
 
 [[package]]
 name = "ribbit-desktop"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "clap",
  "embed-resource",
+ "epaint_default_fonts",
  "ribbit-core",
  "ribbit-cpu",
  "ribbit-debug",
@@ -2680,13 +2683,15 @@ dependencies = [
 
 [[package]]
 name = "ribbit-frontend"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "cpal",
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "epaint_default_fonts",
  "gilrs",
  "naga",
  "png",
@@ -2709,14 +2714,14 @@ dependencies = [
 
 [[package]]
 name = "ribbit-input"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ribbit-memory"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "crc32fast",
  "serde",
@@ -2727,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-video"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]

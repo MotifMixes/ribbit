@@ -36,6 +36,10 @@ struct Images {
     /// Cartridge dump.
     #[arg(long)]
     cart: Option<PathBuf>,
+    /// EXPERIMENTAL: also boot Leapster TV, L-MAX and Leapster 2 BIOSes on
+    /// the original Leapster's emulated hardware (research only).
+    #[arg(long)]
+    experimental_any_model: bool,
 }
 
 // Parsed once at start-up; boxing the large `Headless` variant would buy nothing.
@@ -501,7 +505,12 @@ fn build_machine(images: &Images, config: &Config) -> Result<Machine> {
         "a firmware dump is required (--firmware). Leapster games are Flash content executed by the \
          console's built-in player, so a cartridge cannot boot without it.",
     )?;
-    let firmware = load_firmware(&fw_path)?;
+    let firmware = if images.experimental_any_model {
+        let data = ribbit_core::read_image(&fw_path)?;
+        ribbit_memory::Firmware::from_bytes_any_model(data)?
+    } else {
+        load_firmware(&fw_path)?
+    };
     print_firmware(&fw_path, &firmware);
     let cartridge = match cart {
         Some(path) => {

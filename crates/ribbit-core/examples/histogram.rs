@@ -10,10 +10,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("usage: histogram <bios> [steps]");
     let steps: u64 = args.next().map_or(20_000_000, |s| s.parse().expect("steps"));
-    let fw = ribbit_memory::Firmware::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+    let fw = ribbit_memory::Firmware::from_bytes(ribbit_core::read_image(&path).unwrap()).unwrap();
     let cart = std::env::var("RIBBIT_CART")
         .ok()
-        .map(|c| ribbit_memory::Cartridge::from_bytes(std::fs::read(&c).unwrap()).unwrap());
+        .map(|c| ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(&c).unwrap()).unwrap());
     let mut m = Machine::with_straps(fw, cart, 0x63FF_FFFF);
     if let Ok(state) = std::env::var("RIBBIT_STATE") {
         m.load_state(&std::fs::read(&state).unwrap()).unwrap();

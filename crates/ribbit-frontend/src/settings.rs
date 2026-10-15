@@ -17,6 +17,8 @@ pub struct Settings {
     pub bios: Option<PathBuf>,
     /// Cartridges opened recently, newest first.
     pub recent_carts: Vec<PathBuf>,
+    /// Folders the game library scans for cartridges.
+    pub rom_folders: Vec<PathBuf>,
     pub display: Display,
     /// AI upscaler style, quality and resolution (Display::Ai).
     pub ai: crate::upscale::AiSettings,
@@ -39,6 +41,8 @@ pub struct Settings {
     pub skip_boot_calibration: bool,
     /// Press the calibration targets automatically (needs the touchscreen).
     pub auto_calibrate: bool,
+    /// Show the game being played on Discord.
+    pub discord_presence: bool,
     /// CPU clock in MHz: 96 is the nominal figure, 48 is what MAME runs.
     pub cpu_mhz: u64,
     /// EXPERIMENTAL: MAME's workaround of reading every unresolved GPIO line
@@ -55,7 +59,8 @@ impl Default for Settings {
         Self {
             bios: None,
             recent_carts: Vec::new(),
-            display: Display::Ai,
+            rom_folders: Vec::new(),
+            display: Display::Pixel,
             ai: Default::default(),
             window_scale: 0,
             volume: 0.8,
@@ -66,6 +71,7 @@ impl Default for Settings {
             experimental_touch: true,
             skip_boot_calibration: false,
             auto_calibrate: true,
+            discord_presence: true,
             cpu_mhz: 96,
             mame_gpio_lines: false,
             save_dir: None,

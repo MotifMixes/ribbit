@@ -13,6 +13,8 @@
 //!   save PATH / load PATH   save state
 //!   label TEXT          name the following part of the report
 //!   digest [NAME]       print the machine state digest (for comparing builds)
+//!   tvdump PATH         write the L-MAX TV chip's memory (RIBBIT_LMAX_TV=1)
+//! RIBBIT_MAME_GPIO=1 reads unresolved GPIO lines as 1 (MAME's workaround).
 //! Every 250 ms of emulated time prints the speed (percent of real time at
 //! the CPU clock) and how much was idle-skipped.
 
@@ -37,8 +39,15 @@ fn main() {
     let [bios, cart, script, rest @ ..] = &args[..] else {
         panic!("usage: scenes <bios> <cart> <script> [system.eeprom] [cart.sav]");
     };
-    let fw = ribbit_memory::Firmware::from_bytes(std::fs::read(bios).unwrap()).unwrap();
-    let cart = ribbit_memory::Cartridge::from_bytes(std::fs::read(cart).unwrap()).unwrap();
+    let image = ribbit_core::read_image(bios).unwrap();
+    // RIBBIT_ANY_MODEL=1: EXPERIMENTAL, also boot Leapster TV / L-MAX / Leapster 2 BIOSes.
+    let fw = if std::env::var_os("RIBBIT_ANY_MODEL").is_some() {
+        ribbit_memory::Firmware::from_bytes_any_model(image)
+    } else {
+        ribbit_memory::Firmware::from_bytes(image)
+    }
+    .unwrap();
+    let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap();
     let mut m = Machine::with_straps(fw, Some(cart), 0x63FF_FFFF);
     if let Some(p) = rest.first() {
         m.io.eeprom.load(&std::fs::read(p).unwrap());
@@ -48,6 +57,14 @@ fn main() {
     }
     m.enable_experimental_mame_touch(MameTouchConfig::default());
     m.record_trace_tail = false;
+    if std::env::var_os("RIBBIT_LMAX_TV").is_some() {
+        // EXPERIMENTAL: the L-MAX's TV chip (see io/lmax_tv.rs).
+        m.io.lmax_tv = Some(Default::default());
+    }
+    if std::env::var_os("RIBBIT_MAME_GPIO").is_some() {
+        // EXPERIMENTAL: unresolved GPIO lines read 1 (MAME's workaround).
+        m.io.gpio.unresolved_lines = !ribbit_input::BUTTON_BITS;
+    }
     if let Ok(mhz) = std::env::var("RIBBIT_MHZ") {
         m.clock = ribbit_core::Clock::new(mhz.parse::<u64>().unwrap() * 1_000_000, m.clock.peripheral_hz);
     }
@@ -84,6 +101,11 @@ fn main() {
             Some("save") => std::fs::write(w[1], m.save_state()).unwrap(),
             Some("load") => m.load_state(&std::fs::read(w[1]).unwrap()).unwrap(),
             Some("label") => meter.label = w[1..].join(" "),
+            Some("tvdump") => {
+                let tv = m.io.lmax_tv.as_ref().expect("RIBBIT_LMAX_TV=1 for tvdump");
+                std::fs::write(w[1], &tv.mem).unwrap();
+                println!("tv memory: {} reads, {} writes", tv.reads, tv.writes);
+            }
             Some("digest") => println!("digest {} {:016x} at cycle {}", w.get(1).unwrap_or(&""), m.state_digest(), m.cpu.cycles),
             Some(other) => panic!("unknown command {other}"),
         }

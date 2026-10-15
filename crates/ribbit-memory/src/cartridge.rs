@@ -113,6 +113,20 @@ impl Cartridge {
     pub fn header(&self) -> Result<&CartHeader, &HeaderError> {
         self.header.as_ref()
     }
+
+    /// A text field of the header's 0x1003 directory, if present and
+    /// printable. Seen on SpongeBob: 0x0a part number ("152-01508"), 0x0b
+    /// title ("SpongeBob SquarePants"), 0x0f build date ("Oct 09 2003 18:23:53").
+    /// INFERRED from one title.
+    pub fn header_text(&self, id: u16) -> Option<String> {
+        let dir = self.header.as_ref().ok()?.directory.iter().find(|d| d.tag == 0x1003)?;
+        let ptr = dir.entries.iter().find(|e| e.id == id)?.value;
+        let at = cart_offset(&self.rom, ptr).ok()?;
+        let bytes = &self.rom[at..self.rom.len().min(at + 128)];
+        let text = &bytes[..bytes.iter().position(|&b| b == 0)?];
+        let ok = !text.is_empty() && text.iter().all(|&b| (0x20..0x7F).contains(&b));
+        ok.then(|| String::from_utf8_lossy(text).trim().to_string())
+    }
 }
 
 fn u16_at(data: &[u8], offset: usize) -> Result<u16, HeaderError> {
@@ -253,6 +267,20 @@ mod tests {
         assert_eq!(dir.tag, 0x1003);
         assert_eq!(dir.entries[0], SubEntry { id: 1, flags: 0x100, value: 0x8000_0800 });
         assert_eq!(dir.entries[1], SubEntry { id: 2, flags: 0x100, value: 0x10 });
+    }
+
+    #[test]
+    fn header_text_reads_strings() {
+        let mut rom = synthetic_cart();
+        rom[0x800..0x806].copy_from_slice(b"Title\0");
+        let cart = Cartridge::from_bytes(rom.clone()).unwrap();
+        assert_eq!(cart.header_text(1).as_deref(), Some("Title"));
+        // Not a pointer into the image, or no such id.
+        assert_eq!(cart.header_text(2), None);
+        assert_eq!(cart.header_text(3), None);
+        // Unprintable bytes are not text.
+        rom[0x800] = 0x01;
+        assert_eq!(Cartridge::from_bytes(rom).unwrap().header_text(1), None);
     }
 
     #[test]

@@ -31,7 +31,9 @@ Starting
 --------
 1. Run ribbit-gui.exe.
 2. File > Open BIOS... and choose your BIOS dump (asked once; remembered).
-3. File > Open Cartridge... (or drop a .bin onto the window).
+3. Choose your games folder. The game library shows every Leapster game in
+   it (plain or zipped dumps) with its title screen; click a game to play.
+   File > Open Cartridge... (or dropping a file on the window) also works.
 
 Known BIOS dumps: US v2.1 (152-11265) works best. The Universal v1.5 BIOS
 (155-10072) turns itself off after start-up unless you enable
@@ -50,11 +52,14 @@ Controls (Input > Key bindings... to change)
 
 Picture
 -------
-Video > AI upscale (HD) is the default: the ArtCNN neural network upscales
-the 160x160 picture, up to 2560 x 2560 (Video > AI upscale settings: style
-Clean / Soft / Pixel-art edges, quality, resolution 2x / 3x / 4x / 16x or
-Auto). Window size: 2x, 3x, 4x or 16x (16x: as big as fits).
-Sharp pixels, LCD grid, Pixel perfect and Smooth are still there.
+Pixel perfect is the default. Video > AI upscale (HD) runs the ArtCNN
+neural network on the 160x160 picture (Video > AI upscale settings).
+Window size: Fit screen (default), 2x, 3x, 4x or 16x.
+
+Discord
+-------
+While you play, Discord shows the game's name (File > Show my game on
+Discord to turn it off).
 
 Where things go
 ---------------

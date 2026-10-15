@@ -12,6 +12,7 @@ pub mod eeprom;
 pub mod gpio;
 pub mod intc;
 pub mod lcd;
+pub mod lmax_tv;
 pub mod straps;
 pub mod timer;
 pub mod touch;
@@ -162,6 +163,9 @@ pub struct Peripherals {
     /// EXPERIMENTAL, UNVERIFIED MAME-derived touch/ADC sample source. None
     /// (the default) = no ADC conversions and channel controls unmodelled.
     pub touch: Option<MameTouch>,
+    /// EXPERIMENTAL: the L-MAX's TV chip (None = absent, as on a Leapster).
+    #[serde(default)]
+    pub lmax_tv: Option<lmax_tv::LmaxTv>,
     #[serde(skip, default = "default_mmio_tail")]
     pub mmio_tail: TraceRing<MmioAccess>,
     /// Accesses since the last `take_events` (for the trace sink).
@@ -212,6 +216,7 @@ impl Default for Peripherals {
             clock_control: ClockControl::default(),
             uart: DebugUart::default(),
             touch: None,
+            lmax_tv: None,
             mmio_tail: TraceRing::new(MMIO_TAIL),
             events: Vec::new(),
             record_events: false,
@@ -404,7 +409,7 @@ fn time_independent(addr: u32) -> bool {
 }
 
 fn is_mmio(addr: u32) -> bool {
-    addr.wrapping_sub(map::MMIO_BASE) < map::MMIO_SIZE
+    addr.wrapping_sub(map::MMIO_BASE) < map::MMIO_SIZE || lmax_tv::contains(addr)
 }
 
 impl MachineBus<'_> {
@@ -529,6 +534,11 @@ impl Bus for MachineBus<'_> {
 impl MachineBus<'_> {
     #[inline(never)]
     fn read8_mmio(&mut self, addr: u32) -> u8 {
+        if let Some(tv) = self.io.lmax_tv.as_mut()
+            && lmax_tv::contains(addr)
+        {
+            return tv.read(addr, 1) as u8;
+        }
         if !time_independent(addr) {
             self.sync_time();
             self.io.sync_needed = true;
@@ -540,6 +550,11 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn read16_mmio(&mut self, addr: u32) -> u16 {
+        if let Some(tv) = self.io.lmax_tv.as_mut()
+            && lmax_tv::contains(addr)
+        {
+            return tv.read(addr, 2) as u16;
+        }
         if !time_independent(addr) {
             self.sync_time();
             self.io.sync_needed = true;
@@ -552,6 +567,11 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn read32_mmio(&mut self, addr: u32) -> u32 {
+        if let Some(tv) = self.io.lmax_tv.as_mut()
+            && lmax_tv::contains(addr)
+        {
+            return tv.read(addr, 4) as u32;
+        }
         if !time_independent(addr) {
             self.sync_time();
             self.io.sync_needed = true;
@@ -564,6 +584,11 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn write8_mmio(&mut self, addr: u32, value: u8) {
+        if let Some(tv) = self.io.lmax_tv.as_mut()
+            && lmax_tv::contains(addr)
+        {
+            return tv.write(addr, value as u32, 1);
+        }
         self.sync_time();
         self.io.sync_needed = true;
         let handled = self.io.write_narrow(addr, value as u32);
@@ -575,6 +600,11 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn write16_mmio(&mut self, addr: u32, value: u16) {
+        if let Some(tv) = self.io.lmax_tv.as_mut()
+            && lmax_tv::contains(addr)
+        {
+            return tv.write(addr, value as u32, 2);
+        }
         self.sync_time();
         self.io.sync_needed = true;
         let addr = addr & !1;
@@ -587,6 +617,11 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn write32_mmio(&mut self, addr: u32, value: u32) {
+        if let Some(tv) = self.io.lmax_tv.as_mut()
+            && lmax_tv::contains(addr)
+        {
+            return tv.write(addr, value as u32, 4);
+        }
         self.sync_time();
         self.io.sync_needed = true;
         let addr = addr & !3;

@@ -5,12 +5,14 @@
 pub mod app;
 mod audio_out;
 mod calibrate;
+mod discord;
 mod emu;
 mod files;
 #[cfg(not(target_os = "android"))]
 mod gamepad;
 mod gpu;
 mod icon;
+mod library;
 mod perf;
 pub mod saves;
 pub mod settings;

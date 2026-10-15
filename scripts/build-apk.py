@@ -5,51 +5,25 @@ Run:   python -I scripts/build-apk.py [--sdk DIR] [--ndk DIR]
 Output: target/android/ribbit-debug.apk
 
 Steps: cargo-ndk builds libribbit.so; the frog launcher icon is generated at
-each density; aapt2 compiles resources and links the manifest; the native
+each density (by the launcher_icons example, from the same frog as the desktop); aapt2 compiles resources and links the manifest; the native
 library is added; zipalign; apksigner with a debug key kept in local/ (so
 updates install over the previous build).
 """
 import argparse
 import os
-import struct
 import subprocess
 import sys
 import zipfile
-import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'target' / 'android'
 PACKAGE_DIR = ROOT / 'crates' / 'ribbit-android' / 'android'
-FROG = ROOT / 'crates' / 'ribbit-frontend' / 'src' / 'frog.txt'
 KEYSTORE = ROOT / 'local' / 'android-debug.keystore'
-
-PALETTE = {
-    'g': (0x6C, 0xCB, 0x3F), 'G': (0x2F, 0x7D, 0x1E), 'k': (0x14, 0x14, 0x14), 'w': (0xFF, 0xFF, 0xFF),
-    'o': (0xFF, 0x98, 0x00), 'y': (0xF1, 0xF8, 0xC8), 'b': (0x3F, 0x7F, 0xD9), 'p': (0xFF, 0x8F, 0xB1),
-}
-DENSITIES = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
-
 
 def run(cmd, **kw):
     print('>', ' '.join(str(c) for c in cmd))
     subprocess.run([str(c) for c in cmd], check=True, **kw)
-
-
-def png_rgba(size, rows):
-    n = len(rows)
-    raw = bytearray()
-    for y in range(size):
-        raw.append(0)
-        row = rows[y * n // size]
-        for x in range(size):
-            c = row[x * n // size]
-            raw.extend(PALETTE[c] + (255,) if c in PALETTE else (0, 0, 0, 0))
-
-    def chunk(tag, data):
-        return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
-    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0))
-            + chunk(b'IDAT', zlib.compress(bytes(raw), 9)) + chunk(b'IEND', b''))
 
 
 def latest(dir_: Path) -> Path:
@@ -84,12 +58,8 @@ def main():
         sys.exit(f'missing {lib}')
 
     # 2. Launcher icons.
-    rows = FROG.read_text().splitlines()
     res = OUT / 'res'
-    for name, size in DENSITIES.items():
-        d = res / f'mipmap-{name}'
-        d.mkdir(parents=True, exist_ok=True)
-        (d / 'ic_launcher.png').write_bytes(png_rgba(size, rows))
+    run(['cargo', 'run', '-q', '--release', '-p', 'ribbit-frontend', '--example', 'launcher_icons', '--', res], cwd=ROOT)
 
     # 3. Resources + manifest.
     flat = OUT / 'res.zip'

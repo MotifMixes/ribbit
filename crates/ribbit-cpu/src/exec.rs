@@ -838,12 +838,20 @@ impl Cpu {
         })
     }
 
-    fn aux_write(&mut self, n: u32, v: u32, i: &Instr, ext: &mut impl AuxExt) -> Result<(), CpuError> {
+    fn aux_write(
+        &mut self,
+        n: u32,
+        v: u32,
+        i: &Instr,
+        ext: &mut impl AuxExt,
+        bus: &mut impl Bus,
+    ) -> Result<(), CpuError> {
         let implemented_status = status32::IMPLEMENTED & !status32::H;
         if let Some(xy) = &mut self.xy
             && (crate::xy::AUX_BASE..crate::xy::AUX_BASE + crate::xy::AUX_COUNT).contains(&n)
         {
-            return xy.aux_write(n, v).map_err(|reason| self.unsupported(i, reason));
+            xy.aux_write(n, v, bus);
+            return Ok(());
         }
         match n {
             0x01 => self.semaphore = v & 0xF,
@@ -1004,7 +1012,7 @@ impl Cpu {
             Op::Sr => {
                 let v = self.read(i.src1, i)?;
                 let n = self.read(i.src2, i)?;
-                self.aux_write(n, v, i, ext)?;
+                self.aux_write(n, v, i, ext, bus)?;
                 return Ok(Flow::Next);
             }
             Op::Sleep => {

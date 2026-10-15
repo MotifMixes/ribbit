@@ -18,10 +18,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("usage: profile <bios> [steps]");
     let steps: u64 = args.next().map_or(100_000_000, |s| s.parse().expect("steps"));
-    let fw = ribbit_memory::Firmware::from_bytes(std::fs::read(&path).expect("read")).expect("firmware");
+    let fw = ribbit_memory::Firmware::from_bytes(ribbit_core::read_image(&path).expect("read")).expect("firmware");
     let cart = std::env::var("RIBBIT_CART")
         .ok()
-        .map(|c| ribbit_memory::Cartridge::from_bytes(std::fs::read(&c).expect("read cart")).expect("cartridge"));
+        .map(|c| ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(&c).expect("read cart")).expect("cartridge"));
     let mut m = ribbit_core::Machine::with_straps(fw, cart, 0x63FF_FFFF);
     // Optional: RIBBIT_CART (cartridge) and RIBBIT_STATE (save state to start from).
     if let Ok(state) = std::env::var("RIBBIT_STATE") {
