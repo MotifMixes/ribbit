@@ -587,9 +587,9 @@ impl Machine {
                 let bus = &self.bus;
                 let peek = |a: u32| bus.peek8(a).unwrap_or(0);
                 if from == hd.hooks.edge_ctor {
-                    hd.edge(self.cpu.regs[1], self.cpu.regs[2] as i32, peek);
+                    hd.edge(self.cpu.regs[1], peek);
                 } else if from == hd.hooks.scanline {
-                    hd.scanline(self.cpu.regs[14], peek);
+                    hd.scanline(self.cpu.regs[14], self.cpu.regs[17] as i32, peek);
                 }
             }
             // `idle_track` only acts while probing or after a backward jump;

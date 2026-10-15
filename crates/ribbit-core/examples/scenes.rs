@@ -150,6 +150,36 @@ fn main() {
                     print!("r{i}={r:08x}{}", if i % 8 == 7 { "\n" } else { " " });
                 }
             }
+            Some("hooktrace") => {
+                // hooktrace N: the next N HD hook events (US v2.1 addresses):
+                // edge constructor (scanline) or scanline driver (rectangle).
+                let (ctor, scan) = (0x4004_E0D8u32, 0x4005_0514u32);
+                let mut bp = Breakpoints::default();
+                bp.add(ctor);
+                bp.add(scan);
+                let (mut last_rect, mut n) = (None, 0);
+                let end = m.cpu.cycles + 2000 * (m.clock.cpu_hz / 1000);
+                while n < num(1, 100) && m.cpu.cycles < end {
+                    if m.cpu.pc == ctor || m.cpu.pc == scan {
+                        m.run(1, &Breakpoints::default());
+                    }
+                    m.run(end - m.cpu.cycles, &bp);
+                    let w = |a: u32| (0..4).fold(0u32, |v, i| v | (m.bus.peek8(a + i).unwrap_or(0) as u32) << (8 * i)) as i32;
+                    let t = m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64;
+                    if m.cpu.pc == ctor {
+                        println!("{t:10.3} edge y={}", m.cpu.regs[2] as i32);
+                        n += 1;
+                    } else if m.cpu.pc == scan {
+                        let r = m.cpu.regs[14];
+                        let rect = (w(r), w(r + 0x28), w(r + 0x2C), w(r + 0x30), w(r + 0x34));
+                        if last_rect != Some(rect) || std::env::var_os("RIBBIT_ALLSCAN").is_some() {
+                            println!("{t:10.3} scan r17={} rect x {}..{} y {}..{} scale {} (lcd transfers {})", m.cpu.regs[17] as i32, rect.1, rect.2, rect.3, rect.4, rect.0, m.io.lcd.transfers);
+                            last_rect = Some(rect);
+                            n += 1;
+                        }
+                    }
+                }
+            }
             Some("mem") => {
                 // mem ADDR LEN PATH: write emulated memory (RAM/ROM/VRAM) to a file.
                 let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).unwrap();

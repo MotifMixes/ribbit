@@ -133,8 +133,12 @@ pub struct HdCapture {
     /// Passes dropped because no renderer took them (the HD picture may then
     /// be stale until the next full redraw).
     pub dropped: u64,
-    /// Scanline of the last edge built (a lower one starts a new render).
-    last_y: i32,
+    /// Edges (and their fills) built since the last scanline event: the BIOS
+    /// builds a render's first edges before its first scanline reports the
+    /// render's rectangle, so the next scanline event says where they go.
+    pending: Pass,
+    /// The last scanline counter seen (a lower one starts a new render).
+    last_scan: i32,
     /// Bitmaps decoded so far, by (data, palette, format, size, stride, sample).
     images: HashMap<ImageKey, Arc<Image>>,
 }
@@ -148,17 +152,19 @@ const MAX_PENDING: usize = 64;
 
 impl HdCapture {
     pub fn new(hooks: Hooks) -> Self {
-        Self { hooks, current: Pass::default(), done: vec![], dropped: 0, last_y: 0, images: HashMap::new() }
+        Self {
+            hooks,
+            current: Pass::default(),
+            done: vec![],
+            dropped: 0,
+            pending: Pass::default(),
+            last_scan: 0,
+            images: HashMap::new(),
+        }
     }
 
-    /// The edge constructor was executed: `rec` is its edge record, `y` the
-    /// scanline being drawn. A scanline lower than the last edge's means a
-    /// new render (the BIOS may draw several regions before one transfer).
-    pub fn edge(&mut self, rec: u32, y: i32, peek: impl Fn(u32) -> u8) {
-        if y < self.last_y && !self.current.edges.is_empty() {
-            self.end_pass();
-        }
-        self.last_y = y;
+    /// The edge constructor was executed: `rec` is its edge record.
+    pub fn edge(&mut self, rec: u32, peek: impl Fn(u32) -> u8) {
         let b = |o: u32| peek(rec + o);
         let h = |o: u32| i16::from_le_bytes([b(o), b(o + 1)]);
         let w = |a: u32| u32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
@@ -168,15 +174,15 @@ impl HdCapture {
             fills: [w(rec + 0x08), w(rec + 0x0C)],
         };
         for f in e.fills {
-            if f != 0 && !self.current.fills.contains_key(&f) {
+            if f != 0 && !self.pending.fills.contains_key(&f) {
                 let c = |o: u32| u16::from_le_bytes([peek(f + o), peek(f + o + 1)]).min(255) as u8;
                 let painter = w(f + 0x20);
                 let bitmap = if painter == self.hooks.bitmap_painter { self.bitmap_fill(f, &peek) } else { None };
                 let fill = Fill { order: w(f + 0x0C), rgba: [c(0x28), c(0x26), c(0x24), c(0x2A)], painter, bitmap };
-                self.current.fills.insert(f, fill);
+                self.pending.fills.insert(f, fill);
             }
         }
-        self.current.edges.push(e);
+        self.pending.edges.push(e);
     }
 
     /// Reads bitmap fill `f` and decodes its bitmap (cached). None when it
@@ -207,21 +213,37 @@ impl HdCapture {
         Some(BitmapFill { matrix, clamp: peek(f + 0x34) & 1 != 0, smooth: peek(f + 0x36) != 0, image })
     }
 
-    /// The scanline driver ran with renderer `r`: keep its redraw rectangle
-    /// and scale; a different one from the pass's means a new render.
-    pub fn scanline(&mut self, r: u32, peek: impl Fn(u32) -> u8) {
+    /// The scanline driver ran with renderer `r` at scanline counter `y`
+    /// (r17, rising through a render): a different rectangle or scale, or a
+    /// lower counter, means a new render. The edges built since the last
+    /// event belong to this one.
+    pub fn scanline(&mut self, r: u32, y: i32, peek: impl Fn(u32) -> u8) {
         let w = |a: u32| i32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
         let (rect, scale) = (Some([w(r + 0x28), w(r + 0x2C), w(r + 0x30), w(r + 0x34)]), w(r));
-        if self.current.rect.is_some() && (self.current.rect, self.current.scale) != (rect, scale) {
-            self.end_pass();
+        if self.current.rect.is_some() && ((self.current.rect, self.current.scale) != (rect, scale) || y < self.last_scan) {
+            self.finish();
         }
+        self.last_scan = y;
         self.current.rect = rect;
         self.current.scale = scale;
+        self.absorb_pending();
     }
 
-    /// A render is complete (the frame went to the LCD, or another render
-    /// began).
+    fn absorb_pending(&mut self) {
+        let p = std::mem::take(&mut self.pending);
+        self.current.edges.extend(p.edges);
+        for (a, f) in p.fills {
+            self.current.fills.entry(a).or_insert(f);
+        }
+    }
+
+    /// The frame went to the LCD: the render in progress is complete.
     pub fn end_pass(&mut self) {
+        self.absorb_pending();
+        self.finish();
+    }
+
+    fn finish(&mut self) {
         if self.current.edges.is_empty() && self.current.rect.is_none() {
             return;
         }
@@ -630,9 +652,9 @@ mod tests {
         }
         let peek = |a: u32| mem[a as usize];
         let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1 });
-        c.scanline(0x100, peek);
-        c.edge(0, 0, peek);
-        c.scanline(0x100, peek); // later scanlines of the same render
+        c.edge(0, peek); // built before its render's first scanline event
+        c.scanline(0x100, 1, peek);
+        c.scanline(0x100, 2, peek); // later scanlines of the same render
         c.end_pass();
         c.end_pass(); // nothing drawn: no empty pass
         let passes = c.take();

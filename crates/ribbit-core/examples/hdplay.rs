@@ -51,6 +51,9 @@ fn main() {
         if let (Some(c), Some(hd)) = (canvas.as_mut(), m.hd.as_mut()) {
             let start = Instant::now();
             for p in hd.take() {
+                if std::env::var_os("RIBBIT_HD_LOG").is_some() {
+                    println!("{t:6} pass rect {:?} scale {} edges {} fills {}", p.rect, p.scale, p.edges.len(), p.fills.len());
+                }
                 for f in p.fills.values() {
                     *painters.entry(f.painter).or_insert(0usize) += 1;
                 }
