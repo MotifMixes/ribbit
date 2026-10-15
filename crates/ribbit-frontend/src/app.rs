@@ -177,7 +177,9 @@ impl App {
             self.ui.toast("Unknown BIOS dump: it may not work");
         }
         let cartridge = cart.as_deref().map(ribbit_core::load_cartridge).transpose()?;
-        let default_straps = if self.settings.skip_boot_calibration {
+        let default_straps = if firmware.is_leapster_tv() {
+            ribbit_core::io::straps::LEAPSTER_TV
+        } else if self.settings.skip_boot_calibration {
             0x63FF_FFFF
         } else {
             ribbit_core::io::straps::MAME_LEAPSTER2_MEASURED

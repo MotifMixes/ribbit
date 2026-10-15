@@ -23,6 +23,10 @@ pub const ADDR: u32 = 0x0180_9004;
 /// MAME's Leapster 2 measurement (with a cartridge inserted).
 pub const MAME_LEAPSTER2_MEASURED: u32 = 0x63FF_BFFF;
 pub const CART_ABSENT: u32 = 1 << 26;
+/// Leapster TV: MAME's value with bit 14 set. With bit 14 clear the TV BIOS
+/// boots to a blank calibration screen (seen in Ribbit, 2026-10-15); a TV
+/// keeps its pen-pad calibration in the controller instead. HYPOTHESIS.
+pub const LEAPSTER_TV: u32 = 0x63FF_FFFF;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Straps {

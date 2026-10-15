@@ -13,7 +13,7 @@ pub enum FirmwareError {
     TooLarge { size: usize, max: usize },
     #[error("firmware size {0:#x} is not a multiple of 4 bytes")]
     Misaligned(usize),
-    #[error("'{name}' is {hardware:?} firmware; Ribbit only targets the original Leapster")]
+    #[error("'{name}' is {hardware:?} firmware; Ribbit runs the original Leapster and (experimentally) the Leapster TV")]
     WrongHardware { name: &'static str, hardware: Hardware },
 }
 
@@ -26,11 +26,13 @@ pub struct Firmware {
 
 impl Firmware {
     /// Validates a firmware image. Unknown dumps are accepted (there may be
-    /// undumped revisions) but reported as unverified by `known()`.
+    /// undumped revisions) but reported as unverified by `known()`. The
+    /// Leapster TV BIOS is accepted (EXPERIMENTAL: see `is_leapster_tv`);
+    /// L-MAX and Leapster 2 BIOSes are refused.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, FirmwareError> {
         let fw = Self::from_bytes_any_model(data)?;
         if let Some(k) = fw.known
-            && k.hardware != Hardware::Leapster
+            && !matches!(k.hardware, Hardware::Leapster | Hardware::LeapsterTv)
         {
             return Err(FirmwareError::WrongHardware { name: k.name, hardware: k.hardware });
         }
@@ -65,6 +67,12 @@ impl Firmware {
 
     pub fn known(&self) -> Option<&'static KnownImage> {
         self.known
+    }
+
+    /// A known Leapster TV BIOS: the machine needs the TV video chip and
+    /// controller link (EXPERIMENTAL).
+    pub fn is_leapster_tv(&self) -> bool {
+        self.known.is_some_and(|k| k.hardware == Hardware::LeapsterTv)
     }
 }
 

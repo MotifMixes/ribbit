@@ -13,6 +13,7 @@ pub mod gpio;
 pub mod intc;
 pub mod lcd;
 pub mod lmax_tv;
+pub mod tv_link;
 pub mod straps;
 pub mod timer;
 pub mod touch;
@@ -166,6 +167,9 @@ pub struct Peripherals {
     /// EXPERIMENTAL: the L-MAX's TV chip (None = absent, as on a Leapster).
     #[serde(default)]
     pub lmax_tv: Option<lmax_tv::LmaxTv>,
+    /// EXPERIMENTAL: the Leapster TV's controller link (None = absent).
+    #[serde(default)]
+    pub tv_link: Option<tv_link::TvLink>,
     #[serde(skip, default = "default_mmio_tail")]
     pub mmio_tail: TraceRing<MmioAccess>,
     /// Accesses since the last `take_events` (for the trace sink).
@@ -217,6 +221,7 @@ impl Default for Peripherals {
             uart: DebugUart::default(),
             touch: None,
             lmax_tv: None,
+            tv_link: None,
             mmio_tail: TraceRing::new(MMIO_TAIL),
             events: Vec::new(),
             record_events: false,
@@ -249,6 +254,7 @@ impl Peripherals {
             .or_else(|| self.eeprom.read(addr))
             .or_else(|| self.voices.read(addr))
             .or_else(|| self.touch.as_ref().and_then(|t| t.read(addr)))
+            .or_else(|| self.tv_link.as_mut().and_then(|l| l.read(addr)))
     }
 
     /// 32-bit register write; `false` if no device implements `addr`.
@@ -267,6 +273,7 @@ impl Peripherals {
                     || self.audio_write(addr, value)
                     || self.eeprom.write(addr, value, &mut self.intc)
                     || self.voices.write(addr, value)
+                    || self.tv_link.as_mut().is_some_and(|l| l.write(addr, value))
             }
         }
     }
@@ -278,6 +285,7 @@ impl Peripherals {
             || self.touch_write(addr, value)
             || self.audio_write(addr, value)
             || self.voices.write(addr, value)
+            || self.tv_link.as_mut().is_some_and(|l| l.write(addr, value))
     }
 
     /// Voice command: acknowledged (audio.rs) and executed (voices.rs).
@@ -331,6 +339,7 @@ impl Peripherals {
             | 1 << intc::DMA_IRQ_LINE
             | 1 << intc::ADC_IRQ_LINE
             | 1 << intc::VOICE_ACK_IRQ_LINE
+            | 1 << tv_link::IRQ_LINE
     }
 
     /// Levels of the lines in `irq_mask` (same values as `irq_outputs`).
@@ -343,6 +352,7 @@ impl Peripherals {
         l |= (self.intc.dma_line() as u32) << intc::DMA_IRQ_LINE;
         l |= (self.intc.adc_line() as u32) << intc::ADC_IRQ_LINE;
         l |= (self.intc.voice_ack_line() as u32) << intc::VOICE_ACK_IRQ_LINE;
+        l |= (self.tv_link.as_ref().is_some_and(|t| t.irq_line()) as u32) << tv_link::IRQ_LINE;
         l
     }
 
@@ -356,6 +366,7 @@ impl Peripherals {
             .chain(std::iter::once((intc::DMA_IRQ_LINE, self.intc.dma_line())))
             .chain(std::iter::once((intc::ADC_IRQ_LINE, self.intc.adc_line())))
             .chain(std::iter::once((intc::VOICE_ACK_IRQ_LINE, self.intc.voice_ack_line())))
+            .chain(std::iter::once((tv_link::IRQ_LINE, self.tv_link.as_ref().is_some_and(|t| t.irq_line()))))
     }
 
     #[cfg(test)]
@@ -537,7 +548,7 @@ impl MachineBus<'_> {
         if let Some(tv) = self.io.lmax_tv.as_mut()
             && lmax_tv::contains(addr)
         {
-            return tv.read(addr, 1) as u8;
+            return tv.read(addr, 1, self.pc) as u8;
         }
         if !time_independent(addr) {
             self.sync_time();
@@ -553,7 +564,7 @@ impl MachineBus<'_> {
         if let Some(tv) = self.io.lmax_tv.as_mut()
             && lmax_tv::contains(addr)
         {
-            return tv.read(addr, 2) as u16;
+            return tv.read(addr, 2, self.pc) as u16;
         }
         if !time_independent(addr) {
             self.sync_time();
@@ -570,7 +581,7 @@ impl MachineBus<'_> {
         if let Some(tv) = self.io.lmax_tv.as_mut()
             && lmax_tv::contains(addr)
         {
-            return tv.read(addr, 4) as u32;
+            return tv.read(addr, 4, self.pc);
         }
         if !time_independent(addr) {
             self.sync_time();
@@ -587,7 +598,7 @@ impl MachineBus<'_> {
         if let Some(tv) = self.io.lmax_tv.as_mut()
             && lmax_tv::contains(addr)
         {
-            return tv.write(addr, value as u32, 1);
+            return tv.write(addr, value as u32, 1, self.pc);
         }
         self.sync_time();
         self.io.sync_needed = true;
@@ -603,7 +614,7 @@ impl MachineBus<'_> {
         if let Some(tv) = self.io.lmax_tv.as_mut()
             && lmax_tv::contains(addr)
         {
-            return tv.write(addr, value as u32, 2);
+            return tv.write(addr, value as u32, 2, self.pc);
         }
         self.sync_time();
         self.io.sync_needed = true;
@@ -620,7 +631,7 @@ impl MachineBus<'_> {
         if let Some(tv) = self.io.lmax_tv.as_mut()
             && lmax_tv::contains(addr)
         {
-            return tv.write(addr, value as u32, 4);
+            return tv.write(addr, value, 4, self.pc);
         }
         self.sync_time();
         self.io.sync_needed = true;

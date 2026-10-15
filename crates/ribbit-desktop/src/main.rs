@@ -520,7 +520,11 @@ fn build_machine(images: &Images, config: &Config) -> Result<Machine> {
         }
         None => None,
     };
-    let straps = config.straps.unwrap_or(ribbit_core::io::straps::MAME_LEAPSTER2_MEASURED);
+    let straps = config.straps.unwrap_or(if firmware.is_leapster_tv() {
+        ribbit_core::io::straps::LEAPSTER_TV
+    } else {
+        ribbit_core::io::straps::MAME_LEAPSTER2_MEASURED
+    });
     let mut machine = Machine::with_straps(firmware, cartridge, straps);
     if let Some(path) = &config.system_eeprom
         && path.exists()

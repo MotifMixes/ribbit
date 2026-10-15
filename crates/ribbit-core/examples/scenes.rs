@@ -48,7 +48,8 @@ fn main() {
     }
     .unwrap();
     let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap();
-    let mut m = Machine::with_straps(fw, Some(cart), 0x63FF_FFFF);
+    let straps = std::env::var("RIBBIT_STRAPS").map_or(0x63FF_FFFF, |s| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap());
+    let mut m = Machine::with_straps(fw, Some(cart), straps);
     if let Some(p) = rest.first() {
         m.io.eeprom.load(&std::fs::read(p).unwrap());
     }
@@ -56,7 +57,20 @@ fn main() {
         m.io.eeprom.insert_cart(Some(&std::fs::read(p).unwrap()));
     }
     m.enable_experimental_mame_touch(MameTouchConfig::default());
+    if let Ok(s) = std::env::var("RIBBIT_STUBS") {
+        // Research: fixed read values for unmodelled registers, "addr=value,...".
+        for kv in s.split(',') {
+            let (a, v) = kv.split_once('=').expect("addr=value");
+            let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).unwrap();
+            m.io.stubs.insert(hex(a), hex(v));
+        }
+    }
     m.record_trace_tail = false;
+    if std::env::var_os("RIBBIT_TV").is_some() {
+        // EXPERIMENTAL: Leapster TV (video chip and controller link).
+        m.enable_leapster_tv();
+        m.io.tv_link.as_mut().unwrap().logging = true;
+    }
     if std::env::var_os("RIBBIT_LMAX_TV").is_some() {
         // EXPERIMENTAL: the L-MAX's TV chip (see io/lmax_tv.rs).
         m.io.lmax_tv = Some(Default::default());
@@ -83,6 +97,14 @@ fn main() {
                 run_ms(&mut m, num(3, 200), &mut meter);
                 m.io.touch.as_mut().unwrap().live = None;
             }
+            Some("touch") => {
+                // touch X Y: stylus down at an LCD pixel until `release` (no run).
+                let raw = |p: u64| ((p as u32 * 0x7F0 + 79) / 159).min(0x7F0);
+                m.io.touch.as_mut().unwrap().live = Some((raw(num(1, 0)), raw(num(2, 0))));
+            }
+            Some("hold") => m.buttons.set(Button::from_name(w[1]).expect("button name"), true),
+            Some("lift") => m.buttons.set(Button::from_name(w[1]).expect("button name"), false),
+            Some("release") => m.io.touch.as_mut().unwrap().live = None,
             Some("btn") => {
                 let b = Button::from_name(w[1]).expect("button name");
                 m.buttons.set(b, true);
@@ -105,6 +127,46 @@ fn main() {
                 let tv = m.io.lmax_tv.as_ref().expect("RIBBIT_LMAX_TV=1 for tvdump");
                 std::fs::write(w[1], &tv.mem).unwrap();
                 println!("tv memory: {} reads, {} writes", tv.reads, tv.writes);
+                let mut v: Vec<_> = tv.pcs.iter().collect();
+                v.sort_by_key(|p| std::cmp::Reverse(*p.1));
+                for (pc, n) in v.iter().take(24) {
+                    println!("  tv access pc {pc:08x} x{n}");
+                }
+            }
+            Some("break") => {
+                // Run until the instruction at PC (or MAXMS), then print the registers.
+                let pc = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let mut bp = Breakpoints::default();
+                bp.add(pc);
+                let end = m.cpu.cycles + num(2, 10_000) * (m.clock.cpu_hz / 1000);
+                if m.cpu.pc == pc {
+                    m.run(1, &Breakpoints::default()); // step off the last hit
+                }
+                while m.cpu.pc != pc && m.cpu.cycles < end {
+                    m.run(end - m.cpu.cycles, &bp);
+                }
+                println!("break {pc:08x} at {} ms: hit={}", m.cpu.cycles / (m.clock.cpu_hz / 1000), m.cpu.pc == pc);
+                for (i, r) in m.cpu.regs.iter().enumerate().take(32) {
+                    print!("r{i}={r:08x}{}", if i % 8 == 7 { "\n" } else { " " });
+                }
+            }
+            Some("mem") => {
+                // mem ADDR LEN PATH: write emulated memory (RAM/ROM/VRAM) to a file.
+                let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).unwrap();
+                let (a, n) = (hex(w[1]), hex(w[2]));
+                let bytes: Vec<u8> = (0..n).map(|i| m.bus.peek8(a + i).unwrap_or(0)).collect();
+                std::fs::write(w[3], bytes).unwrap();
+            }
+            Some("linklog") => {
+                // The Leapster TV controller link's transactions since the last linklog.
+                let l = m.io.tv_link.as_mut().expect("RIBBIT_TV=1 for linklog");
+                let mut last = String::new();
+                for s in std::mem::take(&mut l.log) {
+                    if s != last {
+                        println!("link: {s}");
+                    }
+                    last = s;
+                }
             }
             Some("digest") => println!("digest {} {:016x} at cycle {}", w.get(1).unwrap_or(&""), m.state_digest(), m.cpu.cycles),
             Some(other) => panic!("unknown command {other}"),

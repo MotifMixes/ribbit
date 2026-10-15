@@ -689,3 +689,65 @@ GPIO bit 11).
 * Cart PCB: "ASY 310-10028 REV:00", ROM under epoxy (U3), 24LC02B (B1) (S1).
 * BIOS revisions: see the table above. How LCD panel variants (`0x0180_9004` bits) relate to production runs is
   UNKNOWN.
+
+## Leapster TV (EXPERIMENTAL, 2026-10-15)
+
+BIOS: Leapster TV Universal v2.1.11 (152-11594, 2 MiB), the user's dump matches MAME. Ribbit runs it on the
+original Leapster's emulated hardware plus two TV-only devices. Everything below is VERIFIED-FW (read from
+this BIOS and confirmed by running it); nothing comes from hardware documentation or measurements.
+
+### Video: the TV chip at 0x2400_0000 (io/lmax_tv.rs)
+
+* Same chip select and ID probe as the L-MAX (ID register +0x0C answers 0x0300_0000).
+* Picture: 200x160 pixels of 16 bits at +0x2_0000, rows packed (400 bytes). Pixel format **YCbCr 5:6:5**:
+  Cb bits 15-11, Y bits 10-5, Cr bits 4-0, BT.601 studio range. Derived from the BIOS's 4096-entry
+  RGB444-to-TV table at 0x400D_94A4 (black 0x8090, white 0x8750, red 0x5A9D, green 0x3484, yellow 0x1692).
+  Blue and magenta entries are lighter than textbook BT.601; shown as the table says.
+* The BIOS converts the game's 12-bit LCD frame (format 4) through that table into the middle 160 columns
+  (x = 20..179, loop at 0x4004_EA1E); the 20-pixel side borders take the colour in register +0x08.
+* How the chip widens 5/6-bit fields to 8 bits is UNKNOWN (Ribbit zero-fills, so neutral chroma stays 128).
+* Ribbit shows the 160x160 game window (frontends are LCD-sized); the border is not shown.
+
+### Controller link: second UART at 0x0180_D600 (io/tv_link.rs)
+
+* Same register layout as the debug UART at 0x0180_D500: +0x10 data, +0x14 status/control (bit 7 TX
+  ready, bit 5 RX empty), +0x18 = 0xCF (about 4800 baud from 16 MHz). Interrupt handler 0x4005_5298 on
+  vector 0x1C. Without the UART the BIOS hangs at 0x4005_581E draining a receive FIFO that never empties.
+* One wire: the UART hears its own bytes and checks each echo. Two ports share it, chosen by
+  0x0180_D700 bit 9 (port 0) or bit 8 (port 1). The BIOS polls both every 10 ms.
+* Transaction: 0xFF, command, data; the controller answers ack + data whose bytes sum to 0.
+
+| Command | Data sent | Answer | Meaning (from the BIOS's use of it) |
+|---|---|---|---|
+| AA | 00 10 46 | AC + 2 + sum | hello |
+| A6 | 15 bytes | A3 + 24 + sum | pen settings: thresholds, debounce, simple-mode scale (stored at 0x4005_4FEE) |
+| A5 | none | A5 25 + 36 + inner sum + sum | the controller's 37-byte memory: pen-pad calibration (affine map, 0x4005_5D50) |
+| AC | 25 + 36 + inner sum + sum | A9 | write that memory back |
+| 95 | none | 6A + 5 + sum | four 10-bit values (pad range) |
+| A9 | none | A9 | ping |
+| A3 | none | AA, or 0x5X packet | input poll |
+
+* Poll packet: header nibble with even parity; bit 3 set = short form (header, buttons, sum), clear =
+  long form with the pen (header, buttons, pressure, x, y, high bits, sum: 11-bit x/y, inverted pressure).
+* Buttons: header bits 0-1 and data bits 0-7 map through the table at 0x400B_FA34 onto the handheld's own
+  GIODataIn masks: Left, Up, Right, Down, Pause, A, B, Hint, Home, and 0x0004_0000.
+* The pen hovers: low pressure means "in range of the pad" (2 polls at <= 0x7C0; out after 10 above 0x7F0).
+  The BIOS tracks it as a pointer and posts pad events (0x1001_000A-C) for TV-native software.
+* 0x0004_0000 (data bit 7) is the **click** (the mask the TV driver returns at 0x4005_0044): pressed while
+  the pen is in range, the BIOS posts the stylus-down event that games use (0x1001_0002, at 0x4004_A550).
+  Ordinary Leapster games therefore need the click, not just the pen.
+
+### Ribbit's controller (HYPOTHESIS where the BIOS does not constrain it)
+
+Answers on port 0 only; the hello, A6 and 95 contents are neutral values or the BIOS's own defaults; the
+memory holds an ideal calibration (identity, so a pad position maps straight to the pixel). The stylus
+becomes: pen in range, the click 3 polls later, and on lifting the click up 3 polls before the pen leaves
+range. Transmission is instant (no baud timing).
+
+### Other TV differences
+
+* Straps: with bit 14 clear (the frontends' default) the TV BIOS boots to a blank calibration screen;
+  Ribbit uses 0x63FF_FFFF for the TV (`straps::LEAPSTER_TV`).
+* No GIODataIn reads: all buttons come from the controller.
+* Tested: SpongeBob SquarePants: Saves the Day boots to its title, name entry by stylus (typed "ABB", OK),
+  then the intro, all at full speed.

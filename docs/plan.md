@@ -145,4 +145,5 @@ loads an activity; its profile is saved and read back. Details: hardware-researc
   clearly labelled mode; the accurate path keeps using the user's BIOS.
 * **Static analysis.** Ghidra (an ARCompact SLEIGH module exists, SSTIC 2021) for decompiling the BIOS to
   map its hardware accesses. Complements, does not replace, execution traces.
-* **Other Leapster models** (L-MAX, TV, Leapster 2): later. Firmware identification already distinguishes them.
+* **Other Leapster models**: the Leapster TV runs (EXPERIMENTAL, 2026-10-15; hardware-research.md, "Leapster
+  TV"). L-MAX and Leapster 2: later. Firmware identification already distinguishes them.

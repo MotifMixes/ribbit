@@ -62,3 +62,12 @@ software list. Region pickers move on by themselves after about 30 s.
 
 Images whose first bytes are not "LEAP" are later cartridges with a different header layout;
 the BIOS boots them all the same.
+
+## Leapster TV (EXPERIMENTAL)
+
+BIOS: Leapster TV Universal v2.1.11 (152-11594). The game picture comes from the emulated TV chip and the
+controller (buttons and pen) is Ribbit's model of the TV controller; see hardware-research.md, "Leapster TV".
+
+| Game | CRC32 | Status | Checked | Notes |
+|---|---|---|---|---|
+| SpongeBob SquarePants: Saves the Day (USA, alt) | 0f2ad725 | Menus | automated 2026-10-15 | LEAPSTER TV logo, title, name entry by stylus (letters and OK work), then the intro, full speed |

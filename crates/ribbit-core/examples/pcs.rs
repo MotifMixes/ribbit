@@ -23,6 +23,23 @@ fn main() {
         m.io.eeprom.load(&std::fs::read(p).unwrap());
     }
     m.enable_experimental_mame_touch(Default::default());
+    if let Ok(s) = std::env::var("RIBBIT_STUBS") {
+        // Research: fixed read values for unmodelled registers, "addr=value,...".
+        for kv in s.split(',') {
+            let (a, v) = kv.split_once('=').expect("addr=value");
+            let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).unwrap();
+            m.io.stubs.insert(hex(a), hex(v));
+        }
+    }
+    if std::env::var_os("RIBBIT_TV").is_some() {
+        // EXPERIMENTAL: Leapster TV (video chip and controller link).
+        m.enable_leapster_tv();
+        m.io.tv_link.as_mut().unwrap().logging = true;
+    }
+    if std::env::var_os("RIBBIT_LMAX_TV").is_some() {
+        // EXPERIMENTAL: the L-MAX / Leapster TV video chip (see io/lmax_tv.rs).
+        m.io.lmax_tv = Some(Default::default());
+    }
     m.record_trace_tail = false;
     let none = Breakpoints::default();
     let ms = m.clock.cpu_hz / 1000;

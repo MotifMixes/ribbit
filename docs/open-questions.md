@@ -30,6 +30,30 @@ Ordered roughly by how much they block progress.
 | Q24 | Straps bit 14 on an original Leapster (0 = boot into touch calibration, per MAME) | Ribbit's default (MAME's raw Leapster 2 measurement) has it clear, so every boot calibrates; MAME's own default sets it | Observe whether a real unit calibrates on every power-on; read the register |
 | Q15 | Hardware revisions and LCD panel variants among original Leapsters | Behaviour may differ per unit | Catalogue PCB markings and BIOS versions from several consoles |
 
+## Leapster TV (experimental): guesses to resolve
+
+Everything the TV BIOS checks is modelled from its code (docs/hardware-research.md, "Leapster TV"). These
+are the parts Ribbit had to guess, because the BIOS accepts any value or never shows what hardware does.
+Code: `crates/ribbit-core/src/io/tv_link.rs`, `io/lmax_tv.rs`.
+
+| # | Guess (what Ribbit does now) | Why it matters | How to find out |
+|---|---|---|---|
+| T1 | Controller hello reply `AC 00 00`: the 2 bytes may be a device type or version | A TV-native app or another controller type may branch on them | Find where the BIOS reads the AC reply (A6 is queued after it, 0x4005_4FC8); a capture from a real controller |
+| T2 | A6 reply: thresholds 0x7C0/0x7F0 and debounce 2/10/10/10 are the BIOS's own defaults; scale bytes 16/0/16/0, movement bytes 13-14 = 0 and bytes 15-24 = 0 are invented | Pen feel (when a touch registers, drag thresholds); bytes 15-24 go to a struct at port +0xAC when one exists | Trace the readers of port state 0xC4-0xCD and 0xAC; real controller capture |
+| T3 | Controller memory (A5/AC): an ideal identity calibration. A real unit stores its own pad calibration; bytes 0x52-0x53 and 0x74-0x75 are unknown (0) | Absolute pen accuracy; what the BIOS's calibration screen (mode 1, routine 0x4005_5FA8) writes | Run the BIOS calibration flow (force mode 1) and read the block it writes back with AC |
+| T4 | 95 reply: pad range 0x040-0x3C0 per axis | Used by the BIOS's simple pen mode and calibration, not mode 3 | Trace the readers of port state 0x2C-0x48 |
+| T5 | Pen "pressure": Ribbit sends 0 for in range. Real meaning (proximity, height, real pressure?) unknown | Hover behaviour; TV-native drawing apps | Find a Leapster TV drawing title; hardware capture |
+| T6 | The stylus becomes pen-in-range then click 3 polls later; lift = click up, pen out of range 3 polls later. No hover without the mouse button | Taps and drags in games; there is no on-screen pointer when hovering | Let the frontend send mouse position while not clicking (hover) and see if the BIOS draws a pointer; check how the real pen/click is wired (tip switch or button) |
+| T7 | Controller only on port 0; port 1 silent | Two-player or a second device (the console's own panel?) may exist | Trace what the BIOS does with each port's device type (dispatcher 0x4004_94C0 requires type 6) |
+| T8 | Transmission is instant (no 4800-baud timing); UART IRQ = control bit 6 (TX) or bit 2 with data waiting (RX) | Timing-sensitive code, interrupt load | UART datasheet/compare with the 0x0180_D500 UART; hardware timing |
+| T9 | GIODataIn bit 0x800 (display mode toggle at 0x400A_AE46) is never produced; display mode stays 1 (pad mode) | Mode 0 sends pointer events directly; what physical control sets it is unknown | Find which controller or console input sets 0x800 |
+| T10 | TV pixel widening: 5/6-bit fields zero-filled to 8 bits; BT.601 studio-range conversion | Exact colours (red decodes to F0 06 00) | ADV7179 datasheet and the TV chip's wiring; capture real TV output |
+| T11 | Only the 160x160 game window is shown; the 200x160 frame's border (register +0x08) and the TV's aspect ratio are dropped | Faithful TV look | Decide display policy; check registers +0x00-+0x20 for position/size |
+| T12 | Straps 0x63FF_FFFF for the TV (bit 14 clear boots to a blank calibration screen) | Boot path | What the blank screen is (pad calibration?); real unit's straps |
+| T13 | TV chip registers +0x00-+0x20 other than the ID: unmodelled plain memory; +0x18 is a serial port to the encoder | Display mode bits (the mode setter flips +0x00 bits 0-1) | Trace writes; ADV7179 register map |
+| T14 | Sound on the TV uses the handheld's audio model unchanged | Audio correctness | Compare TV BIOS audio register use with the handheld's |
+| T15 | Only SpongeBob tested | Compatibility | Run the automated check over the library with the TV BIOS |
+
 ## Dumping (for the user)
 
 Only dump hardware you own. The BIOS ROM (U3) on the console board is a standard parallel ROM. Options:

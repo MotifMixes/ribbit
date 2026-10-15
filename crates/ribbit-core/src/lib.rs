@@ -340,7 +340,7 @@ impl Machine {
             rom.push((map::CART_BASE, map::CART_BASE.saturating_add(c.rom().len() as u32)));
         }
         cpu.icache.set_rom_ranges(&rom);
-        Self {
+        let mut m = Self {
             cpu,
             bus,
             buttons: Buttons::default(),
@@ -359,7 +359,11 @@ impl Machine {
             coverage: None,
             firmware,
             cartridge,
+        };
+        if m.firmware.is_leapster_tv() {
+            m.enable_leapster_tv();
         }
+        m
     }
 
     /// EXPERIMENTAL, UNVERIFIED: feeds ADC channel 0 with MAME's guessed
@@ -369,6 +373,29 @@ impl Machine {
         tracing::warn!(target: "ribbit::boot", "EXPERIMENTAL: MAME-derived touchscreen/ADC model enabled (unverified, not hardware behaviour)");
         self.touch_config = Some(config);
         self.install_touch();
+    }
+
+    /// EXPERIMENTAL: Leapster TV hardware: the TV video chip (the picture
+    /// comes from it, not the LCD) and the controller link. Done by
+    /// `with_straps` for a known Leapster TV BIOS. The stylus reaches the
+    /// controller's pen through `io.touch.live`, so touch input is enabled.
+    pub fn enable_leapster_tv(&mut self) {
+        tracing::warn!(target: "ribbit::boot", "EXPERIMENTAL: Leapster TV video chip and controller link");
+        if self.touch_config.is_none() {
+            self.touch_config = Some(Default::default());
+            self.install_touch();
+        }
+        self.install_leapster_tv();
+    }
+
+    fn install_leapster_tv(&mut self) {
+        self.io.lmax_tv = Some(Default::default());
+        self.io.tv_link = Some(Default::default());
+    }
+
+    /// The TV video chip and controller link are present (Leapster TV).
+    pub fn is_leapster_tv(&self) -> bool {
+        self.io.tv_link.is_some()
     }
 
     pub fn experimental_touch_enabled(&self) -> bool {
@@ -408,6 +435,9 @@ impl Machine {
             self.io.eeprom.insert_cart(Some(&save));
         }
         self.install_touch();
+        if self.firmware.is_leapster_tv() {
+            self.install_leapster_tv();
+        }
         self.clock = Clock::new(self.clock.cpu_hz, self.clock.peripheral_hz);
     }
 
@@ -494,6 +524,16 @@ impl Machine {
         self.io.record_events = self.trace_sink.is_some();
         self.cpu.record_last = self.record_trace_tail || self.trace_sink.is_some();
         self.io.gpio.buttons = self.buttons;
+        if let Some(l) = self.io.tv_link.as_mut() {
+            l.pressed = !self.buttons.gio_data_in();
+            // The stylus, as frontends give it (MAME touch units, 0..=0x7F0 per
+            // 160 pixels), becomes the pen on the TV controller's pad.
+            let live = self.io.touch.as_ref().and_then(|t| t.live);
+            l.pen = live.map(|(x, y)| {
+                let px = |r: u32| ((r * 159 + 0x3F8) / 0x7F0).min(159) as u16;
+                (px(x), px(y))
+            });
+        }
         // Device state may have been changed from outside since the last run.
         self.io.sync_needed = true;
         // Batches need nothing observed per instruction.
@@ -875,6 +915,11 @@ impl Machine {
 
     /// Decodes the current LCD contents from emulated VRAM.
     pub fn render_frame(&self, out: &mut [u32; WIDTH * HEIGHT]) -> FrameStatus {
+        // EXPERIMENTAL: a TV model shows the TV chip's picture, not the LCD.
+        if let Some(tv) = &self.io.lmax_tv {
+            tv.render_game(out);
+            return FrameStatus::Decoded { format: io::lmax_tv::FORMAT };
+        }
         decode_frame(self.bus.vram(), &self.io.lcd.regs, out)
     }
 
