@@ -38,6 +38,8 @@ fn main() {
     let (mut emu_t, mut draw_t, mut edges, mut passes, mut fixed) = (Duration::ZERO, Duration::ZERO, 0usize, 0usize, 0usize);
     let mut lcd = Box::new([0u32; WIDTH * HEIGHT]);
     let mut shot = 0;
+    let mut dumped = false;
+    let mut painters: std::collections::BTreeMap<u32, usize> = Default::default();
     for t in (0..total).step_by(16) {
         let start = Instant::now();
         let end = m.cpu.cycles + 16 * per_ms;
@@ -49,6 +51,20 @@ fn main() {
         if let (Some(c), Some(hd)) = (canvas.as_mut(), m.hd.as_mut()) {
             let start = Instant::now();
             for p in hd.take() {
+                for f in p.fills.values() {
+                    *painters.entry(f.painter).or_insert(0usize) += 1;
+                }
+                if !dumped {
+                    if let Some((a, _)) = p.fills.iter().find(|(_, f)| f.painter == 0x4005_4D24) {
+                        let raw: Vec<u8> = (0..0xC0).map(|i| m.bus.peek8(a + i).unwrap_or(0)).collect();
+                        let bmp = u32::from_le_bytes(raw[0x38..0x3C].try_into().unwrap());
+                        let braw: Vec<u8> = (0..0x20).map(|i| m.bus.peek8(bmp + i).unwrap_or(0)).collect();
+                        std::fs::write(format!("{prefix}fill.bin"), &raw).unwrap();
+                        std::fs::write(format!("{prefix}bitmap.bin"), &braw).unwrap();
+                        println!("bitmap fill {a:08x} at {t} ms, bitmap {bmp:08x}, rect {:?} scale {}", p.rect, p.scale);
+                        dumped = true;
+                    }
+                }
                 edges += p.edges.len();
                 passes += 1;
                 c.apply(&p, &lcd[..]);
@@ -70,6 +86,7 @@ fn main() {
         draw_t.as_secs_f64() * 1000.0 / secs
     );
     println!("blocks taken from the LCD: {fixed}");
+    println!("fills by painter: {painters:x?}");
     if let Some(hd) = &m.hd {
         println!("dropped passes: {}", hd.dropped);
     }
