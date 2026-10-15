@@ -6,6 +6,7 @@
 //! not emulate the Leapster as a whole.
 
 pub mod config;
+pub mod hd;
 pub mod io;
 pub mod zip;
 
@@ -310,6 +311,8 @@ pub struct Machine {
     pub batch_exits: [u64; 5],
     /// Debug option: first cycle at which each PC was executed (None = off).
     pub coverage: Option<std::collections::HashMap<u32, u64>>,
+    /// EXPERIMENTAL: HD capture from the BIOS's Flash rasterizer (hd.rs).
+    pub hd: Option<hd::HdCapture>,
     firmware: Firmware,
     cartridge: Option<Cartridge>,
 }
@@ -357,6 +360,7 @@ impl Machine {
             batch_stats: [0; 5],
             batch_exits: [0; 5],
             coverage: None,
+            hd: None,
             firmware,
             cartridge,
         };
@@ -396,6 +400,18 @@ impl Machine {
     /// The TV video chip and controller link are present (Leapster TV).
     pub fn is_leapster_tv(&self) -> bool {
         self.io.tv_link.is_some()
+    }
+
+    /// EXPERIMENTAL: starts recording the BIOS's Flash edges for HD
+    /// rendering (hd.rs). False if this BIOS's rasterizer is not recognised.
+    /// Observes only: emulation results are unchanged.
+    pub fn enable_hd_capture(&mut self) -> bool {
+        let Some(hooks) = hd::Hooks::find(self.firmware.data(), ribbit_memory::map::BIOS_MIRROR) else {
+            return false;
+        };
+        self.cpu.icache.set_stops(&[hooks.edge_ctor, hooks.scanline]);
+        self.hd = Some(hd::HdCapture::new(hooks));
+        true
     }
 
     pub fn experimental_touch_enabled(&self) -> bool {
@@ -559,6 +575,17 @@ impl Machine {
             let cycle = self.cpu.cycles;
             let from = self.cpu.pc;
             let result = self.step();
+            if let Some(hd) = &mut self.hd
+                && matches!(result, Ok(Step::Executed))
+            {
+                let bus = &self.bus;
+                let peek = |a: u32| bus.peek8(a).unwrap_or(0);
+                if from == hd.hooks.edge_ctor {
+                    hd.edge(self.cpu.regs[1], self.cpu.regs[2] as i32, peek);
+                } else if from == hd.hooks.scanline {
+                    hd.scanline(self.cpu.regs[14], peek);
+                }
+            }
             // `idle_track` only acts while probing or after a backward jump;
             // checking that here saves an out-of-line call on most steps.
             if self.idle_skip
@@ -910,6 +937,9 @@ impl Machine {
             self.bus.write32(dma.dest.wrapping_add(4 * i), v);
         }
         self.io.lcd.transfers += 1;
+        if let Some(hd) = &mut self.hd {
+            hd.end_pass();
+        }
         self.io.intc.raise(io::intc::FLAG_DMA);
     }
 

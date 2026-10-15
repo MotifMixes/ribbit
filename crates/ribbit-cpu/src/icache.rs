@@ -414,6 +414,8 @@ pub struct ICache {
     /// Per slot: the pre-digested form (tag included) and the full decode.
     hot: Vec<Hot>,
     instrs: Vec<Instr>,
+    /// Addresses whose cached form ends a batch before them (`set_stops`).
+    stops: Vec<u32>,
     /// Lookups that missed, and full-decode lookups that hit (`get`; the
     /// batched loop's hits are not counted).
     pub hits: u64,
@@ -453,6 +455,14 @@ impl ICache {
         self.hot.iter_mut().for_each(|e| *e = EMPTY);
     }
 
+    /// Makes `run_block` stop before each of `pcs` (in read-only ranges), so
+    /// the caller sees them executed by `step`. Free per instruction: the
+    /// flag is part of the cached form. Clears the cache.
+    pub fn set_stops(&mut self, pcs: &[u32]) {
+        self.stops = pcs.to_vec();
+        self.clear();
+    }
+
     #[inline(always)]
     fn cacheable(&self, pc: u32) -> bool {
         if self.pages.get((pc >> 16) as usize).is_some_and(|&p| p) {
@@ -478,6 +488,7 @@ impl ICache {
             self.misses += 1;
             let i = decode();
             self.hot[slot] = Hot::of(&i);
+            self.hot[slot].stop |= self.stops.contains(&pc);
             self.instrs[slot] = i;
         }
         Some(slot)
