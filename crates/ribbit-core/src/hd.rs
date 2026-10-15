@@ -136,8 +136,12 @@ pub struct HdCapture {
     /// Scanline of the last edge built (a lower one starts a new render).
     last_y: i32,
     /// Bitmaps decoded so far, by (data, palette, format, size, stride, sample).
-    images: HashMap<(u32, u32, u32, u32, u32, u64), Arc<Image>>,
+    images: HashMap<ImageKey, Arc<Image>>,
 }
+
+/// A bitmap's identity: data, palette, format, width | height << 16,
+/// stride and a content sample.
+type ImageKey = (u32, u32, u32, u32, u32, u64);
 
 /// More passes than this unconsumed means nobody is rendering; stop growing.
 const MAX_PENDING: usize = 64;
