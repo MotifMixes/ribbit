@@ -130,6 +130,10 @@ pub struct HdCapture {
     current: Pass,
     /// Finished passes, oldest first, for the renderer to take.
     pub done: Vec<Pass>,
+    /// Renders of the frame in progress: released to `done` together at
+    /// the frame's transfer to the LCD, so a renderer never has part of a
+    /// frame while the LCD still shows the previous one.
+    frame: Vec<Pass>,
     /// Passes dropped because no renderer took them (the HD picture may then
     /// be stale until the next full redraw).
     pub dropped: u64,
@@ -156,6 +160,7 @@ impl HdCapture {
             hooks,
             current: Pass::default(),
             done: vec![],
+            frame: vec![],
             dropped: 0,
             pending: Pass::default(),
             last_scan: 0,
@@ -237,21 +242,22 @@ impl HdCapture {
         }
     }
 
-    /// The frame went to the LCD: the render in progress is complete.
+    /// The frame went to the LCD: its renders are complete.
     pub fn end_pass(&mut self) {
         self.absorb_pending();
         self.finish();
+        if self.done.len() + self.frame.len() > MAX_PENDING {
+            self.dropped += self.done.len() as u64;
+            self.done.clear();
+        }
+        self.done.append(&mut self.frame);
     }
 
     fn finish(&mut self) {
         if self.current.edges.is_empty() && self.current.rect.is_none() {
             return;
         }
-        if self.done.len() >= MAX_PENDING {
-            self.done.remove(0);
-            self.dropped += 1;
-        }
-        self.done.push(std::mem::take(&mut self.current));
+        self.frame.push(std::mem::take(&mut self.current));
     }
 
     /// Takes the finished passes, oldest first.

@@ -71,6 +71,11 @@ fn main() {
                 edges += p.edges.len();
                 passes += 1;
                 c.apply(&p, &lcd[..]);
+                if let Ok(from) = std::env::var("RIBBIT_HD_EACH") {
+                    if t >= from.parse::<u64>().unwrap() {
+                        write(&format!("{prefix}each{t}_{passes}_{:?}.png", p.rect.unwrap_or_default()).replace(['[', ']', ' '], "").replace(',', "-"), &lcd, &c.pixels);
+                    }
+                }
             }
             fixed += c.reconcile(&lcd[..]);
             draw_t += start.elapsed();
