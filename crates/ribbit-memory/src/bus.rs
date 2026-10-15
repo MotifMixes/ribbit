@@ -17,6 +17,19 @@ pub trait Bus {
     fn write8(&mut self, addr: u32, value: u8);
     fn write16(&mut self, addr: u32, value: u16);
     fn write32(&mut self, addr: u32, value: u32);
+
+    /// The instruction about to execute (cycle count and address), for
+    /// buses that time-stamp accesses. Called by the CPU's batched loop
+    /// (`Cpu::run_block`) before every instruction.
+    #[inline(always)]
+    fn at(&mut self, _cycle: u64, _pc: u32) {}
+
+    /// True once an access has happened that the machine must handle before
+    /// the next instruction (a device register): ends a `Cpu::run_block`.
+    #[inline(always)]
+    fn block_exit(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +116,11 @@ impl SystemBus {
     #[inline(always)]
     pub fn decode(&self, addr: u32) -> Region {
         let in_window = |base: u32, size: u32| addr.wrapping_sub(base) < size;
+        // The windows are disjoint, so the order only affects speed: RAM
+        // (stack, data) first.
+        if in_window(RAM_BASE, RAM_SIZE) {
+            return Region::Ram((addr - RAM_BASE) as usize);
+        }
         if in_window(BIOS_BASE, BIOS_WINDOW) || in_window(BIOS_MIRROR, BIOS_WINDOW) {
             // The BIOS window is larger than a 2 MiB image; MAME reads the
             // remainder as zero. HYPOTHESIS: real hardware may mirror.
@@ -117,9 +135,6 @@ impl SystemBus {
         }
         if in_window(VRAM_BASE + VRAM_SIZE, VRAM_OVERRUN_END - VRAM_BASE - VRAM_SIZE) {
             return Region::VramOverrun;
-        }
-        if in_window(RAM_BASE, RAM_SIZE) {
-            return Region::Ram((addr - RAM_BASE) as usize);
         }
         if let Some(cart) = &self.cart
             && in_window(CART_BASE, cart.len() as u32)
@@ -330,6 +345,25 @@ mod tests {
         let fw = Firmware::from_bytes(bios).unwrap();
         let cart = cart.map(|c| Cartridge::from_bytes(c).unwrap());
         SystemBus::new(&fw, cart.as_ref())
+    }
+
+    #[test]
+    fn decoded_windows_are_disjoint() {
+        // `decode` tests RAM first for speed; that is only equivalent
+        // because no two windows overlap.
+        let w = [
+            (RAM_BASE, RAM_SIZE),
+            (BIOS_BASE, BIOS_WINDOW),
+            (BIOS_MIRROR, BIOS_WINDOW),
+            (MMIO_BASE, MMIO_SIZE),
+            (VRAM_BASE, VRAM_OVERRUN_END - VRAM_BASE),
+            (CART_BASE, CART_WINDOW),
+        ];
+        for (n, &(a, la)) in w.iter().enumerate() {
+            for &(b, lb) in &w[n + 1..] {
+                assert!(a as u64 + la as u64 <= b as u64 || b as u64 + lb as u64 <= a as u64, "{a:#x} {b:#x}");
+            }
+        }
     }
 
     #[test]

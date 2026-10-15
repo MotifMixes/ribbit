@@ -340,7 +340,9 @@ impl Gpu {
     pub fn lcd_rect(area: (f32, f32, f32, f32), display: Display) -> (f32, f32, f32, f32) {
         let (ax, ay, aw, ah) = area;
         let side = match display {
-            Display::Pixel => ((aw.min(ah) / WIDTH as f32).floor().max(1.0)) * WIDTH as f32,
+            // A pixel of tolerance: fractional display scaling can leave
+            // the area a fraction short of a whole multiple.
+            Display::Pixel => (((aw.min(ah) + 1.0) / WIDTH as f32).floor().max(1.0)) * WIDTH as f32,
             Display::Ai | Display::Sharp | Display::Lcd | Display::Smooth => aw.min(ah).max(1.0),
         };
         (ax + (aw - side) / 2.0, ay + (ah - side) / 2.0, side, side)

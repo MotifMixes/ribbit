@@ -22,6 +22,9 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 /// Rewind: a snapshot every half second of emulated time, 30 s kept.
 const REWIND_EVERY_CYCLES: u64 = 48_000_000;
+/// Frames spent sizing the window around the screen (the first frames can
+/// still be settling the menu bar's height).
+const FIT_TRIES: u8 = 6;
 const REWIND_KEEP: usize = 60;
 
 /// How Ribbit was started (command line / config file overrides).
@@ -78,6 +81,8 @@ pub struct App {
     mouse_down: bool,
     finger: Option<(u64, (f64, f64))>,
     lcd_px: (f32, f32, f32, f32),
+    /// Frames left to size the window around the screen (0 = done).
+    fit_window: u8,
     fatal: Option<anyhow::Error>,
     quit: bool,
 }
@@ -130,6 +135,7 @@ impl App {
             mouse_down: false,
             finger: None,
             lcd_px: (0.0, 0.0, 0.0, 0.0),
+            fit_window: 0,
             fatal: None,
             quit: false,
         };
@@ -320,10 +326,7 @@ impl App {
             Action::SetWindowScale(s) => {
                 self.settings.window_scale = s;
                 self.save_settings();
-                if let Some(g) = &self.gpu {
-                    let screen = g.window.current_monitor().map(|m| m.size());
-                    let _ = g.window.request_inner_size(Self::window_size(Self::fitting_scale(s, screen)));
-                }
+                self.fit_window = FIT_TRIES;
             }
             Action::SettingsChanged => self.save_settings(),
             Action::SaveState(slot) => self.save_state(slot),
@@ -338,7 +341,7 @@ impl App {
     /// `scale`, reduced until the window fits on `screen` (16x is 2560
     /// pixels, bigger than most screens).
     fn fitting_scale(scale: u32, screen: Option<PhysicalSize<u32>>) -> u32 {
-        let mut scale = scale.max(1);
+        let mut scale = if scale == 0 { 16 } else { scale };
         if let Some(screen) = screen {
             // Leave room for the title bar and the taskbar.
             while scale > 1 && (160 * scale > screen.width || 160 * scale + 56 + 120 > screen.height) {
@@ -346,6 +349,48 @@ impl App {
             }
         }
         scale
+    }
+
+    /// Sizes the window so the screen area (`area`, physical pixels) is
+    /// exactly a multiple of 160 pixels square: no bars around the picture,
+    /// whatever the menu and status bars measure at this display scaling.
+    /// `scale` 0 = the largest that fits the monitor, as a normal window
+    /// (never maximized), centred. Returns true once the area fits.
+    fn fit_window(window: &Window, scale: u32, area: (f32, f32)) -> bool {
+        if window.fullscreen().is_some() || window.is_maximized() || area.0 < 1.0 || area.1 < 1.0 {
+            return true;
+        }
+        let (inner, outer) = (window.inner_size(), window.outer_size());
+        // Rounded up: at fractional display scaling the bars can measure
+        // a fraction of a pixel, which would leave the area just short.
+        let chrome_w = inner.width.saturating_sub(area.0.floor() as u32);
+        let chrome_h = inner.height.saturating_sub(area.1.floor() as u32);
+        let frame = (outer.width.saturating_sub(inner.width), outer.height.saturating_sub(inner.height));
+        let Some(monitor) = window.current_monitor() else {
+            return true;
+        };
+        let (mon, at) = (monitor.size(), monitor.position());
+        // The taskbar (not reported by winit): 48 points plus a margin.
+        let taskbar = (56.0 * window.scale_factor()) as u32;
+        let room_w = mon.width.saturating_sub(frame.0 + chrome_w);
+        let room_h = mon.height.saturating_sub(frame.1 + chrome_h + taskbar);
+        // Fit screen leaves some breathing room (about a tenth of the height).
+        let room_h = if scale == 0 { room_h * 9 / 10 } else { room_h };
+        let most = (room_w.min(room_h) / 160).max(1);
+        let side = 160 * if scale == 0 { most } else { scale.min(most) };
+        let want = PhysicalSize::new(side + chrome_w, side + chrome_h);
+        tracing::debug!(target: "ribbit::window", ?inner, ?area, chrome_w, chrome_h, side, "fitting the window");
+        if want == inner {
+            return true;
+        }
+        let _ = window.request_inner_size(want);
+        if scale == 0 {
+            let (w, h) = ((want.width + frame.0) as i32, (want.height + frame.1) as i32);
+            let x = at.x + (mon.width as i32 - w) / 2;
+            let y = at.y + ((mon.height - taskbar) as i32 - h).max(0) / 2;
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
+        false
     }
 
     fn window_size(scale: u32) -> PhysicalSize<u32> {
@@ -487,7 +532,12 @@ impl App {
         if let Some(a) = &self.audio {
             a.set_enhance(self.settings.audio_enhance);
         }
-        s.emu.set_control(Control { running: !self.paused && !self.rewinding, speed, gain });
+        s.emu.set_control(Control {
+            running: !self.paused && !self.rewinding,
+            speed,
+            gain,
+            auto_calibrate: self.settings.auto_calibrate,
+        });
         if self.paused {
             return;
         }
@@ -687,6 +737,10 @@ impl App {
         self.emulate();
         if let Some(s) = &self.session {
             s.emu.lock().render_frame(&mut self.frame);
+            // Automatic calibration is hidden: black instead of its targets.
+            if self.settings.auto_calibrate && crate::calibrate::target(&self.frame).is_some() {
+                self.frame.fill(0);
+            }
         }
         let save_dir = self.save_dir().display().to_string();
         let slots = self.slot_times();
@@ -718,6 +772,12 @@ impl App {
         });
         state.handle_platform_output(&gpu.window, out.platform_output);
         let ppp = out.pixels_per_point;
+        if self.fit_window > 0 {
+            self.fit_window -= 1;
+            if Self::fit_window(&gpu.window, self.settings.window_scale, (area.width() * ppp, area.height() * ppp)) {
+                self.fit_window = 0;
+            }
+        }
         let display = self.settings.display;
         self.lcd_px =
             Gpu::lcd_rect((area.min.x * ppp, area.min.y * ppp, area.width() * ppp, area.height() * ppp), display);
@@ -760,6 +820,7 @@ impl ApplicationHandler for App {
         };
         match event_loop.create_window(attrs).context("creating window").and_then(|w| Gpu::new(Arc::new(w))) {
             Ok(gpu) => {
+                self.fit_window = FIT_TRIES;
                 let state = egui_winit::State::new(
                     self.egui_ctx.clone(),
                     egui::ViewportId::ROOT,

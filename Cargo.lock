@@ -2630,6 +2630,7 @@ dependencies = [
  "backtrace",
  "bincode",
  "miniz_oxide 0.8.9",
+ "png",
  "ribbit-audio",
  "ribbit-cpu",
  "ribbit-debug",

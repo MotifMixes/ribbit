@@ -371,12 +371,20 @@ impl Peripherals {
     }
 }
 
-/// The CPU's view of the machine for one step.
+/// The CPU's view of the machine for one step, or for a batch of
+/// instructions (`Cpu::run_block`).
 pub struct MachineBus<'a> {
     pub sys: &'a mut SystemBus,
     pub io: &'a mut Peripherals,
+    /// Cycle count and address of the executing instruction.
     pub cycle: u64,
     pub pc: u32,
+    /// For batches: the machine clock and the cycle up to which peripheral
+    /// time has been accounted. A device access first brings `deferred` and
+    /// the voice engine up to the start of the executing instruction, as
+    /// per-step execution would have. None for single steps (already current).
+    pub clock: Option<&'a mut Clock>,
+    pub synced: u64,
 }
 
 /// Registers whose reads have no side effects and whose values change only
@@ -386,11 +394,38 @@ fn idle_safe(addr: u32) -> bool {
     matches!(addr & !3, straps::CLOCK_ADDR | straps::ADDR | gpio::ADDR | intc::FLAGS_ADDR | intc::ENABLE_ADDR)
 }
 
+/// Registers whose reads have no side effects and whose values do not
+/// depend on device time: constants and latches that change only when
+/// written (or, for the buttons, between runs). Reading one needs neither a
+/// device catch-up nor an interrupt-line update afterwards (a catch-up is
+/// additive, so skipping it here changes nothing).
+fn time_independent(addr: u32) -> bool {
+    matches!(addr & !3, straps::CLOCK_ADDR | straps::ADDR | gpio::ADDR)
+}
+
 fn is_mmio(addr: u32) -> bool {
     addr.wrapping_sub(map::MMIO_BASE) < map::MMIO_SIZE
 }
 
 impl MachineBus<'_> {
+    pub fn new<'a>(sys: &'a mut SystemBus, io: &'a mut Peripherals, cycle: u64, pc: u32) -> MachineBus<'a> {
+        MachineBus { sys, io, cycle, pc, clock: None, synced: cycle }
+    }
+
+    /// Peripheral time up to the start of the executing instruction.
+    #[inline]
+    fn sync_time(&mut self) {
+        if let Some(clock) = self.clock.as_deref_mut()
+            && self.cycle > self.synced
+        {
+            let ticks = clock.ticks(self.cycle - self.synced);
+            self.synced = self.cycle;
+            self.io.deferred += ticks;
+            self.io.voices.advance(ticks, clock.peripheral_hz, self.sys);
+        }
+        self.io.catch_up();
+    }
+
     fn access(&mut self, addr: u32, width: u8, write: bool, value: u32, modelled: bool) {
         let stub = !write && !modelled && self.io.stubs.contains_key(&(addr & !3));
         let a = MmioAccess { cycle: self.cycle, pc: self.pc, addr, width, write, value, modelled, stub };
@@ -426,6 +461,18 @@ impl MachineBus<'_> {
 }
 
 impl Bus for MachineBus<'_> {
+    #[inline(always)]
+    fn at(&mut self, cycle: u64, pc: u32) {
+        self.cycle = cycle;
+        self.pc = pc;
+        self.sys.now = cycle;
+    }
+
+    #[inline(always)]
+    fn block_exit(&self) -> bool {
+        self.io.sync_needed
+    }
+
     #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
         if !is_mmio(addr) {
@@ -482,8 +529,10 @@ impl Bus for MachineBus<'_> {
 impl MachineBus<'_> {
     #[inline(never)]
     fn read8_mmio(&mut self, addr: u32) -> u8 {
-        self.io.catch_up();
-        self.io.sync_needed = true;
+        if !time_independent(addr) {
+            self.sync_time();
+            self.io.sync_needed = true;
+        }
         let (v, modelled) = self.narrow_read(addr, 1);
         self.access(addr, 1, false, v.unwrap_or(0), modelled);
         v.map_or_else(|| self.sys.read8(addr), |v| v as u8)
@@ -491,8 +540,10 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn read16_mmio(&mut self, addr: u32) -> u16 {
-        self.io.catch_up();
-        self.io.sync_needed = true;
+        if !time_independent(addr) {
+            self.sync_time();
+            self.io.sync_needed = true;
+        }
         let addr = addr & !1;
         let (v, modelled) = self.narrow_read(addr, 2);
         self.access(addr, 2, false, v.unwrap_or(0), modelled);
@@ -501,8 +552,10 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn read32_mmio(&mut self, addr: u32) -> u32 {
-        self.io.catch_up();
-        self.io.sync_needed = true;
+        if !time_independent(addr) {
+            self.sync_time();
+            self.io.sync_needed = true;
+        }
         let addr = addr & !3;
         let (v, modelled) = self.read_word(addr);
         self.access(addr, 4, false, v.unwrap_or(0), modelled);
@@ -511,7 +564,7 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn write8_mmio(&mut self, addr: u32, value: u8) {
-        self.io.catch_up();
+        self.sync_time();
         self.io.sync_needed = true;
         let handled = self.io.write_narrow(addr, value as u32);
         self.access(addr, 1, true, value as u32, handled);
@@ -522,7 +575,7 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn write16_mmio(&mut self, addr: u32, value: u16) {
-        self.io.catch_up();
+        self.sync_time();
         self.io.sync_needed = true;
         let addr = addr & !1;
         let handled = self.io.write_narrow(addr, value as u32);
@@ -534,7 +587,7 @@ impl MachineBus<'_> {
 
     #[inline(never)]
     fn write32_mmio(&mut self, addr: u32, value: u32) {
-        self.io.catch_up();
+        self.sync_time();
         self.io.sync_needed = true;
         let addr = addr & !3;
         let handled = self.io.write32(addr, value);
@@ -588,7 +641,7 @@ mod tests {
     fn timer_registers_are_reachable_through_the_bus_and_logged() {
         let mut sys = SystemBus::new(&Firmware::from_bytes(vec![0; 4]).unwrap(), None);
         let mut io = Peripherals::default();
-        let mut bus = MachineBus { sys: &mut sys, io: &mut io, cycle: 7, pc: 0x4000_0000 };
+        let mut bus = MachineBus::new(&mut sys, &mut io, 7, 0x4000_0000);
         bus.write32(0x0180_D808, 0xFFFF_FFFF);
         bus.write32(0x0180_D800, 0x1234_5678);
         assert_eq!(bus.read32(0x0180_D800), 0x1234_5678);
@@ -609,7 +662,7 @@ mod tests {
         let mut io = Peripherals::default();
         io.stubs.insert(0x0180_9004, 0x0020_0000);
         io.stubs.insert(0x0180_D800, 0xDEAD_BEEF); // timer 2 is modelled: ignored
-        let mut bus = MachineBus { sys: &mut sys, io: &mut io, cycle: 0, pc: 0 };
+        let mut bus = MachineBus::new(&mut sys, &mut io, 0, 0);
         assert_eq!(bus.read32(0x0180_9004), 0x0020_0000);
         assert_eq!(bus.read8(0x0180_9006), 0x20);
         assert_eq!(bus.read32(0x0180_D800), 0);
@@ -624,7 +677,7 @@ mod tests {
         let mut io = Peripherals::default();
         io.adc.push(0, 1);
         io.adc.push(0, 2);
-        let mut bus = MachineBus { sys: &mut sys, io: &mut io, cycle: 0, pc: 0 };
+        let mut bus = MachineBus::new(&mut sys, &mut io, 0, 0);
         assert_eq!(bus.read8(adc::DATA_ADDR), 1 << 5);
         assert_eq!(bus.read32(adc::DATA_ADDR), 2 << 5);
         assert_eq!(bus.read32(adc::STATUS_ADDR), adc::STATUS_EMPTY);
@@ -634,7 +687,7 @@ mod tests {
     fn subword_writes_to_device_registers_are_not_guessed() {
         let mut sys = SystemBus::new(&Firmware::from_bytes(vec![0; 4]).unwrap(), None);
         let mut io = Peripherals::default();
-        let mut bus = MachineBus { sys: &mut sys, io: &mut io, cycle: 0, pc: 0 };
+        let mut bus = MachineBus::new(&mut sys, &mut io, 0, 0);
         bus.write8(0x0180_D800, 0x55);
         assert_eq!(io.timers[2].count, 0);
         assert!(!io.mmio_tail.to_vec()[0].modelled);

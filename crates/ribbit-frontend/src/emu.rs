@@ -26,6 +26,8 @@ pub struct Control {
     pub speed: f64,
     /// Volume (0 = muted).
     pub gain: f32,
+    /// Press the touch-calibration targets automatically.
+    pub auto_calibrate: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -61,7 +63,7 @@ impl Emu {
     pub fn start(machine: Machine) -> Self {
         let shared = Arc::new(Shared {
             machine: Mutex::new(machine),
-            control: Mutex::new((Control { running: false, speed: 1.0, gain: 1.0 }, true)),
+            control: Mutex::new((Control { running: false, speed: 1.0, gain: 1.0, auto_calibrate: false }, true)),
             wake: Condvar::new(),
             sink: Mutex::new(None),
             stats: Mutex::new(Stats::default()),
@@ -151,6 +153,7 @@ fn run(s: &Shared) {
     let none = Breakpoints::default();
     let mut audio = Vec::new();
     let mut last_chunk = Instant::now();
+    let mut calibrate = crate::calibrate::AutoCalibrate::new();
     while !s.quit.load(Ordering::Relaxed) {
         let control = {
             let mut g = s.control.lock().unwrap();
@@ -173,7 +176,9 @@ fn run(s: &Shared) {
         let hz = m.clock.cpu_hz as f64;
         let now = Instant::now();
         let chunk = (CHUNK.as_secs_f64() * hz) as u64;
-        let steps = if control.speed.is_finite() {
+        // Calibrating automatically: hidden, so as fast as possible.
+        let calibrating = control.auto_calibrate && calibrate.busy(&m);
+        let steps = if control.speed.is_finite() && !calibrating {
             let (origin, base) = *pace.get_or_insert((now, m.cpu.cycles));
             let target = base + (now.duration_since(origin).as_secs_f64() * hz * control.speed) as u64;
             let behind = target.saturating_sub(m.cpu.cycles);
@@ -202,11 +207,15 @@ fn run(s: &Shared) {
             s.stats.lock().unwrap().stopped = Some(format!("{:?}", r.stop));
             s.control.lock().unwrap().0.running = false;
         }
+        if control.auto_calibrate {
+            calibrate.tick(&mut m);
+        }
         // Sound, at real-time speed only (no pitch-shifted audio).
         let out = &mut m.io.voices.output;
         audio.resize(out.len(), 0);
         out.pop_into(&mut audio);
         if control.speed == 1.0
+            && !calibrating
             && let Some(sink) = s.sink.lock().unwrap().as_mut()
         {
             sink.push(&audio, control.gain);

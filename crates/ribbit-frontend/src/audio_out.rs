@@ -11,6 +11,12 @@
 //! jitter buffer: playback starts once `START` is queued, and if the queue
 //! runs dry it fades out and waits to refill instead of playing a stream of
 //! one-sample gaps (which is what crackles).
+//!
+//! The emulator is paced by the system clock and the device plays by its
+//! own crystal; the two differ slightly (typically 0.01-0.1%), so at a fixed
+//! ratio the queue would slowly drain (a gap every few minutes) or overfill
+//! (dropped samples). `RateControl` nudges the resampling ratio, by at most
+//! `MAX_RATE_ADJUST` (inaudible), to hold the queue at `TARGET`.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
@@ -48,9 +54,44 @@ impl Enhance {
 const SOURCE_HZ: f64 = ribbit_audio::DAC_RATE_HZ as f64;
 /// Queue limit (a quarter second) before old samples are dropped.
 const MAX_QUEUE: usize = ribbit_audio::DAC_RATE_HZ as usize / 4;
-/// Queued audio needed before playback (re)starts: 120 ms, enough to ride
+/// Queued audio needed before playback (re)starts: 100 ms, enough to ride
 /// out short emulation stalls (e.g. other programs loading the CPU).
-const START: usize = ribbit_audio::DAC_RATE_HZ as usize * 120 / 1000;
+const START: usize = ribbit_audio::DAC_RATE_HZ as usize * 100 / 1000;
+/// Queue level the rate control holds while playing.
+const TARGET: f64 = START as f64;
+/// Largest resampling-ratio correction (0.5%: about 9 cents, below what
+/// listeners notice on program material).
+const MAX_RATE_ADJUST: f64 = 0.005;
+
+/// Keeps the queue near `TARGET` by adjusting the resampling ratio in
+/// proportion to the (smoothed) distance from it.
+#[derive(Debug, Clone, Copy)]
+struct RateControl {
+    /// Queue level, low-pass filtered (callbacks are bursty).
+    level: f64,
+}
+
+impl RateControl {
+    fn new() -> Self {
+        Self { level: TARGET }
+    }
+
+    /// Restart from the current level (playback (re)started).
+    fn reset(&mut self, queued: usize) {
+        self.level = queued as f64;
+    }
+
+    /// The ratio multiplier for one device callback, given the queue level
+    /// and the callback length in seconds.
+    fn factor(&mut self, queued: usize, seconds: f64) -> f64 {
+        // About a 0.5 s time constant.
+        let a = (seconds / 0.5).min(1.0);
+        self.level += (queued as f64 - self.level) * a;
+        // Full correction when the queue is 50% off target.
+        let error = (self.level - TARGET) / TARGET;
+        1.0 + (error * 2.0 * MAX_RATE_ADJUST).clamp(-MAX_RATE_ADJUST, MAX_RATE_ADJUST)
+    }
+}
 /// Fade length (device frames) when the queue runs dry.
 const FADE: f32 = 64.0;
 
@@ -219,6 +260,7 @@ where
     // position between them; `level` fades in/out around gaps.
     let (mut prev, mut next, mut frac) = (0.0f32, 0.0f32, 0.0f64);
     let mut level = 0.0f32;
+    let mut rate = RateControl::new();
     let mut remaster = Remaster::new(config.sample_rate as f32);
     let stream = device.build_output_stream(
         *config,
@@ -227,7 +269,10 @@ where
             let mut q = queue.lock().unwrap();
             if !q.playing && q.samples.len() >= START {
                 q.playing = true;
+                rate.reset(q.samples.len());
             }
+            let frames = data.len() / channels.max(1);
+            let step = step * rate.factor(q.samples.len(), frames as f64 * step / SOURCE_HZ);
             for frame in data.chunks_mut(channels) {
                 if q.playing {
                     frac += step;
@@ -269,6 +314,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A producer and a device whose clocks differ by 0.2%, with bursty
+    /// delivery (2 ms chunks in, 10 ms callbacks out): the queue settles
+    /// near the target and never runs dry or overflows.
+    #[test]
+    fn rate_control_absorbs_clock_drift() {
+        for drift in [-0.002, 0.0, 0.002] {
+            let device_hz = 48_000.0;
+            let base = SOURCE_HZ / device_hz;
+            let mut rate = RateControl::new();
+            let mut queued = START as f64;
+            let (mut lo, mut hi) = (f64::MAX, 0.0f64);
+            // 10 minutes of 10 ms callbacks.
+            for n in 0..60_000 {
+                // Five 2 ms producer chunks per callback, at the drifted rate.
+                queued += SOURCE_HZ * (1.0 + drift) * 0.010;
+                let step = base * rate.factor(queued as usize, 480.0 * base / SOURCE_HZ);
+                queued -= 480.0 * step;
+                if n > 6_000 {
+                    lo = lo.min(queued);
+                    hi = hi.max(queued);
+                }
+            }
+            assert!(lo > 0.5 * TARGET && hi < 1.5 * TARGET && hi < MAX_QUEUE as f64, "drift {drift}: {lo}..{hi}");
+        }
+    }
 
     #[test]
     fn remaster_is_bounded_and_mono_compatible() {

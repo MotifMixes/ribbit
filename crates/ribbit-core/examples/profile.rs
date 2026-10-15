@@ -29,6 +29,8 @@ fn main() {
     }
 
     m.record_trace_tail = std::env::var_os("RIBBIT_NO_TAIL").is_none();
+    // RIBBIT_NOSKIP=1: run every idle-loop iteration (profile busy code only).
+    m.idle_skip = std::env::var_os("RIBBIT_NOSKIP").is_none();
     let mut handle: HANDLE = std::ptr::null_mut();
     // SAFETY: plain Win32 calls on this process's own pseudo-handles.
     unsafe {

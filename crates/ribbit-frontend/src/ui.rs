@@ -226,6 +226,13 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             {
                 actions.push(Action::SettingsChanged);
             }
+            if ui
+                .checkbox(&mut settings.auto_calibrate, "Calibrate automatically")
+                .on_hover_text("Ribbit presses the calibration targets for you when the calibration screen appears.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
             ui.menu_button("Advanced (experimental)", |ui| {
                 ui.label(egui::RichText::new("Unverified guesses. Apply at the next start.").weak());
                 if ui
@@ -288,8 +295,9 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             });
             ui.separator();
             ui.menu_button("Window size", |ui| {
-                for s in [2, 3, 4, 16] {
-                    if ui.radio(settings.window_scale == s, format!("{s}x ({}x{})", 160 * s, 160 * s)).clicked() {
+                for s in [0, 2, 3, 4, 16] {
+                    let label = if s == 0 { "Fit screen".to_string() } else { format!("{s}x ({}x{})", 160 * s, 160 * s) };
+                    if ui.radio(settings.window_scale == s, label).clicked() {
                         actions.push(Action::SetWindowScale(s));
                         ui.close();
                     }

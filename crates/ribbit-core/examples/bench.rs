@@ -38,6 +38,16 @@ fn main() {
         r.stop,
         m.state_digest()
     );
+    println!(
+        "batches {:?} (batches, batched instructions, steps: not tried / no budget / stopped at once); first cart pc {:x?}",
+        m.batch_stats, m.first_cart_pc
+    );
+    if std::env::var_os("MMIO_TAIL").is_some() {
+        for a in m.io.mmio_tail.to_vec() {
+            println!("{a}");
+        }
+    }
+    println!("batch exits (budget, slow, bus, backward, error): {:?}", m.batch_exits);
     let c = &m.cpu.icache;
     println!(
         "decode cache: {} hits, {} misses, {} uncached fetches (exact with noskip)",

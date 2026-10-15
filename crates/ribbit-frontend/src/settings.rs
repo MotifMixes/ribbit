@@ -20,7 +20,8 @@ pub struct Settings {
     pub display: Display,
     /// AI upscaler style, quality and resolution (Display::Ai).
     pub ai: crate::upscale::AiSettings,
-    /// Window size as a multiple of 160 pixels.
+    /// Window size as a multiple of 160 pixels (0 = the largest that fits
+    /// the screen).
     pub window_scale: u32,
     pub volume: f32,
     /// Host-side sound effects (the hardware is mono, 8 kHz).
@@ -36,6 +37,8 @@ pub struct Settings {
     /// saved calibration instead of forcing calibration at every boot.
     /// Ribbit's machine default (a Leapster 2 measurement) has it clear.
     pub skip_boot_calibration: bool,
+    /// Press the calibration targets automatically (needs the touchscreen).
+    pub auto_calibrate: bool,
     /// CPU clock in MHz: 96 is the nominal figure, 48 is what MAME runs.
     pub cpu_mhz: u64,
     /// EXPERIMENTAL: MAME's workaround of reading every unresolved GPIO line
@@ -54,7 +57,7 @@ impl Default for Settings {
             recent_carts: Vec::new(),
             display: Display::Ai,
             ai: Default::default(),
-            window_scale: 4,
+            window_scale: 0,
             volume: 0.8,
             audio_enhance: Default::default(),
             muted: false,
@@ -62,6 +65,7 @@ impl Default for Settings {
             keys: default_keys(),
             experimental_touch: true,
             skip_boot_calibration: false,
+            auto_calibrate: true,
             cpu_mhz: 96,
             mame_gpio_lines: false,
             save_dir: None,
@@ -289,6 +293,6 @@ mod tests {
     #[test]
     fn partial_files_fill_in_defaults() {
         let s: Settings = toml::from_str("volume = 0.25").unwrap();
-        assert_eq!((s.volume, s.window_scale), (0.25, 4));
+        assert_eq!((s.volume, s.window_scale), (0.25, 0));
     }
 }

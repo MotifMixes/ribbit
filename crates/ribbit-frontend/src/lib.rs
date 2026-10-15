@@ -4,6 +4,7 @@
 
 pub mod app;
 mod audio_out;
+mod calibrate;
 mod emu;
 mod files;
 #[cfg(not(target_os = "android"))]

@@ -6,6 +6,7 @@
 
 use crate::decode::decode;
 use crate::disasm::disassemble;
+use crate::icache::{AluOp, DISCARD, Fast, Hot, LdKind};
 use crate::isa::*;
 use crate::{
     AuxAccess, AuxExt, AuxKind, Cpu, CpuError, HaltReason, IllegalPolicy, MmidMode, Step, Timer, debug, reg, status32,
@@ -20,12 +21,67 @@ const MACMODE_S1: u32 = 1 << 8;
 
 const UNMODELLED_AUX_LOG_LIMIT: usize = 256;
 
+/// What `Cpu::run_block` did.
+#[derive(Debug)]
+pub struct Block {
+    /// Instructions executed (one cycle each).
+    pub executed: u64,
+    pub exit: BlockExit,
+    /// Address of the last instruction executed (the start PC if none).
+    pub from: u32,
+}
+
+#[derive(Debug)]
+pub enum BlockExit {
+    /// The budget ran out.
+    Budget,
+    /// The next step needs `step_with` (interrupt pending, sleeping, halted,
+    /// or an instruction that changes interrupt state).
+    Slow,
+    /// The last instruction made the bus request an exit.
+    Bus,
+    /// The last instruction jumped backward to an address `watch` accepted.
+    Backward,
+    /// The next instruction failed, exactly as `step_with` would have; the
+    /// failed instruction did not execute.
+    Error(CpuError),
+}
+
 enum Flow {
     Next,
     Jump(u32),
     Halt(HaltReason),
     /// Take exception/interrupt `vector` with ILINK2 = next PC.
     Exception(u8),
+}
+
+fn kind_size(kind: LdKind) -> Size {
+    match kind {
+        LdKind::Word => Size::Word,
+        LdKind::Half | LdKind::HalfSigned => Size::Half,
+        LdKind::Byte | LdKind::ByteSigned => Size::Byte,
+    }
+}
+
+/// `.as` scaling (PRM Table 52), as `Cpu::address` applies it.
+#[inline(always)]
+fn scale_of(size: Size) -> u32 {
+    match size {
+        Size::Word => 2,
+        Size::Half => 1,
+        Size::Byte => 0,
+    }
+}
+
+#[inline(always)]
+fn load(bus: &mut impl Bus, kind: LdKind, addr: u32) -> u32 {
+    match kind {
+        LdKind::Word => bus.read32(addr),
+        LdKind::Half => bus.read16(addr) as u32,
+        LdKind::HalfSigned => bus.read16(addr) as i16 as i32 as u32,
+        LdKind::Byte => bus.read8(addr) as u32,
+        LdKind::ByteSigned => bus.read8(addr) as i8 as i32 as u32,
+    }
 }
 
 fn add(b: u32, c: u32, cin: bool) -> (u32, bool, bool) {
@@ -142,6 +198,317 @@ impl Cpu {
             self.last_instr = Some(i);
         }
         Ok(Step::Executed)
+    }
+
+    /// Executes up to `budget` instructions back to back, with exactly the
+    /// results of as many `step_with` calls, for a caller that knows nothing
+    /// time-driven happens meanwhile: no interrupt is pending (checked here),
+    /// no processor timer reaches LIMIT (`budget <= cycles_to_timer_event`,
+    /// checked) and the machine has no event due (the caller's part).
+    ///
+    /// Stops early, before executing it, at any instruction that can change
+    /// interrupt state or halt (LR/SR, FLAG, SLEEP, BRK, SWI, J.F, illegal
+    /// and unsupported encodings, a branch in a delay slot): `step_with`
+    /// runs those. Stops after an instruction for which the bus reports
+    /// `block_exit`, or after a backward jump that `watch(target, cycles)` accepts
+    /// (the machine's idle-loop detector), and before any instruction at or
+    /// above `fence`. `last_instr` is not kept.
+    pub fn run_block<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        ext: &mut impl AuxExt,
+        budget: u64,
+        fence: u32,
+        mut watch: impl FnMut(u32, u64) -> bool,
+    ) -> Block {
+        let budget = budget.min(self.cycles_to_timer_event());
+        let mut out = Block { executed: 0, exit: BlockExit::Budget, from: self.pc };
+        if self.halted() || self.sleeping || self.pending_interrupt().is_some() {
+            out.exit = BlockExit::Slow;
+            return out;
+        }
+        // Counters stay in locals in the loop and are written back after.
+        let (start, mut n) = (self.cycles, 0u64);
+        while n < budget {
+            let pc = self.pc;
+            if pc >= fence {
+                out.exit = BlockExit::Slow;
+                break;
+            }
+            // Cached (ROM) code: the pre-digested form. Elsewhere, decode now.
+            let mut uncached = None;
+            let hot = match self.icache.hot(pc, || decode(bus, pc)) {
+                Some(h) => h,
+                None => Hot::of(uncached.insert(decode(bus, pc))),
+            };
+            if hot.stop || (hot.branchy && self.delay_target.is_some()) {
+                out.exit = BlockExit::Slow;
+                break;
+            }
+            let flow = match hot.fast {
+                Fast::General => {
+                    let i = match uncached {
+                        Some(i) => i,
+                        None => self.icache.get(pc, || decode(bus, pc)),
+                    };
+                    self.cycles = start + n;
+                    bus.at(start + n, pc);
+                    match self.execute(&i, bus, ext) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            out.exit = BlockExit::Error(e);
+                            break;
+                        }
+                    }
+                }
+                f => {
+                    if f.accesses_memory() {
+                        bus.at(start + n, pc);
+                    }
+                    self.execute_fast(f, &hot, bus)
+                }
+            };
+            let delay_slot_of = self.delay_target.take();
+            match flow {
+                Flow::Jump(target) if hot.delay => {
+                    self.delay_target = Some(target);
+                    self.pc = hot.next;
+                }
+                Flow::Jump(target) => self.pc = target,
+                Flow::Next => {
+                    self.pc = match delay_slot_of {
+                        Some(target) => target,
+                        None => self.loop_end_check(hot.next),
+                    };
+                }
+                // Only produced by the instructions excluded above.
+                Flow::Halt(_) | Flow::Exception(_) => unreachable!("halt or exception in run_block at {pc:#x}"),
+            }
+            n += 1;
+            if bus.block_exit() {
+                out.from = pc;
+                out.exit = BlockExit::Bus;
+                break;
+            }
+            if self.pc <= pc && self.delay_target.is_none() && watch(self.pc, start + n) {
+                out.from = pc;
+                out.exit = BlockExit::Backward;
+                break;
+            }
+            out.from = pc;
+        }
+        self.cycles = start + n;
+        self.instructions_retired += n;
+        out.executed = n;
+        // No timer reached LIMIT (budget), so this is what `tick` did per step.
+        for t in &mut self.timers {
+            t.count = t.count.wrapping_add(out.executed as u32);
+        }
+        out
+    }
+
+    /// A pre-digested instruction (`icache::fast_form`): what `execute` does
+    /// for that shape, without its operand and condition decoding.
+    #[inline(always)]
+    fn execute_fast(&mut self, f: Fast, hot: &Hot, bus: &mut impl Bus) -> Flow {
+        // Fast forms only name r0-r31; the mask lets the compiler drop
+        // bounds checks.
+        let r = |n: u8| (n & 31) as usize;
+        match f {
+            Fast::General => unreachable!(),
+            Fast::Mov { d, s } => self.regs[r(d)] = self.regs[r(s)],
+            Fast::MovI { d, v } => self.regs[r(d)] = v,
+            Fast::Alu { op, d, b, c } => {
+                self.regs[r(d)] = op.apply(self.regs[r(b)], self.regs[r(c)], self.flag(status32::C))
+            }
+            Fast::AluI { op, d, b, v } => self.regs[r(d)] = op.apply(self.regs[r(b)], v, self.flag(status32::C)),
+            Fast::Ld { kind, d, b, off } => {
+                let v = load(bus, kind, self.regs[r(b)].wrapping_add(off));
+                self.regs[r(d)] = v;
+            }
+            Fast::LdR { kind, d, b, c } => {
+                let v = load(bus, kind, self.regs[r(b)].wrapping_add(self.regs[r(c)]));
+                self.regs[r(d)] = v;
+            }
+            Fast::St { size, s, b, off } => {
+                let (v, addr) = (self.regs[r(s)], self.regs[r(b)].wrapping_add(off));
+                match size {
+                    Size::Word => bus.write32(addr, v),
+                    Size::Half => bus.write16(addr, v as u16),
+                    Size::Byte => bus.write8(addr, v as u8),
+                }
+            }
+            Fast::Push { s } => {
+                let v = self.regs[r(s)];
+                let sp = self.regs[reg::SP].wrapping_sub(4);
+                self.regs[reg::SP] = sp;
+                bus.write32(sp, v);
+            }
+            Fast::Pop { d } => {
+                let sp = self.regs[reg::SP];
+                let v = bus.read32(sp);
+                self.regs[reg::SP] = sp.wrapping_add(4);
+                self.regs[r(d)] = v;
+            }
+            Fast::Br { cond, b, v } => {
+                if cond.holds(self.regs[r(b)], v) {
+                    return Flow::Jump(hot.target);
+                }
+            }
+            Fast::BrR { cond, b, c } => {
+                if cond.holds(self.regs[r(b)], self.regs[r(c)]) {
+                    return Flow::Jump(hot.target);
+                }
+            }
+            Fast::B { cc } => {
+                if self.cond(cc) {
+                    return Flow::Jump(hot.target);
+                }
+            }
+            Fast::Bl { cc } => {
+                if self.cond(cc) {
+                    self.regs[reg::BLINK] = hot.next;
+                    return Flow::Jump(hot.target);
+                }
+            }
+            Fast::J { s } => return Flow::Jump(self.regs[r(s)] & !1),
+            Fast::Cmp { b, c } => self.compare(self.regs[r(b)], self.regs[r(c)]),
+            Fast::CmpI { b, v } => self.compare(self.regs[r(b)], v),
+            Fast::AluCc { op, cc, d, b, c } => {
+                if self.cond(cc) {
+                    self.regs[r(d)] = op.apply(self.regs[r(b)], self.regs[r(c)], self.flag(status32::C));
+                }
+            }
+            Fast::AluCcI { op, cc, d, b, v } => {
+                if self.cond(cc) {
+                    self.regs[r(d)] = op.apply(self.regs[r(b)], v, self.flag(status32::C));
+                }
+            }
+            Fast::AluF { op, d, b, c } => self.alu_flags(op, d, self.regs[r(b)], self.regs[r(c)]),
+            Fast::AluFI { op, d, b, v } => self.alu_flags(op, d, self.regs[r(b)], v),
+            Fast::Un { op, d, c } => self.regs[r(d)] = op.apply(self.regs[r(c)]),
+            Fast::LdX { kind, wb, d, b, off } => {
+                let addr = self.write_back(wb, b, off, kind_size(kind));
+                let v = load(bus, kind, addr);
+                self.regs[r(d)] = v;
+            }
+            Fast::StX { size, wb, s, b, off } => {
+                let v = self.regs[r(s)];
+                let addr = self.write_back(wb, b, off, size);
+                match size {
+                    Size::Word => bus.write32(addr, v),
+                    Size::Half => bus.write16(addr, v as u16),
+                    Size::Byte => bus.write8(addr, v as u8),
+                }
+            }
+            Fast::BlD { cc } => {
+                if self.cond(cc) {
+                    self.regs[reg::BLINK] = self.after_slot(bus, hot.next);
+                    return Flow::Jump(hot.target);
+                }
+            }
+            Fast::Jcc { cc, s } => {
+                let target = self.regs[r(s)] & !1;
+                if self.cond(cc) {
+                    return Flow::Jump(target);
+                }
+            }
+        }
+        Flow::Next
+    }
+
+    /// Effective address of a fast load/store with base register `b` and
+    /// immediate offset, with the base write-back, as `address` does it.
+    #[inline(always)]
+    fn write_back(&mut self, wb: WriteBack, b: u8, off: u32, size: Size) -> u32 {
+        let b = (b & 31) as usize;
+        let base = self.regs[b];
+        match wb {
+            WriteBack::None => base.wrapping_add(off),
+            WriteBack::Pre => {
+                self.regs[b] = base.wrapping_add(off);
+                base.wrapping_add(off)
+            }
+            WriteBack::Post => {
+                self.regs[b] = base.wrapping_add(off);
+                base
+            }
+            WriteBack::Scaled => base.wrapping_add(off << scale_of(size)),
+        }
+    }
+
+    /// An ALU operation with .F, as `execute` does it: the result (unless
+    /// discarded), then Z/N and the operation's C/V.
+    #[inline(always)]
+    fn alu_flags(&mut self, op: AluOp, d: u8, b: u32, c: u32) {
+        let carry = self.flag(status32::C);
+        let shift_carry = |n: u32, bit: u32| if n == 0 { None } else { Some((b >> bit) & 1 != 0) };
+        let (r, cf, vf) = match op {
+            AluOp::Add | AluOp::Add1 | AluOp::Add2 | AluOp::Add3 => {
+                let k = match op {
+                    AluOp::Add1 => 1,
+                    AluOp::Add2 => 2,
+                    AluOp::Add3 => 3,
+                    _ => 0,
+                };
+                let (r, cy, v) = add(b, c << k, false);
+                (r, Some(cy), Some(v))
+            }
+            AluOp::Adc => {
+                let (r, cy, v) = add(b, c, carry);
+                (r, Some(cy), Some(v))
+            }
+            AluOp::Sub | AluOp::Sub1 | AluOp::Sub2 | AluOp::Sub3 => {
+                let k = match op {
+                    AluOp::Sub1 => 1,
+                    AluOp::Sub2 => 2,
+                    AluOp::Sub3 => 3,
+                    _ => 0,
+                };
+                let (r, bw, v) = sub(b, c << k, false);
+                (r, Some(bw), Some(v))
+            }
+            AluOp::Sbc => {
+                let (r, bw, v) = sub(b, c, carry);
+                (r, Some(bw), Some(v))
+            }
+            AluOp::Rsub => {
+                let (r, bw, v) = sub(c, b, false);
+                (r, Some(bw), Some(v))
+            }
+            AluOp::And => (b & c, None, None),
+            AluOp::Or => (b | c, None, None),
+            AluOp::Xor => (b ^ c, None, None),
+            AluOp::Bic => (b & !c, None, None),
+            AluOp::Asl => {
+                let n = c & 31;
+                (b << n, shift_carry(n, 32u32.wrapping_sub(n) & 31), None)
+            }
+            AluOp::Lsr => {
+                let n = c & 31;
+                (b >> n, shift_carry(n, n.wrapping_sub(1)), None)
+            }
+            AluOp::Asr => {
+                let n = c & 31;
+                (((b as i32) >> n) as u32, shift_carry(n, n.wrapping_sub(1)), None)
+            }
+        };
+        if d != DISCARD {
+            self.regs[(d & 31) as usize] = r;
+        }
+        self.flags(r, cf, vf);
+    }
+
+    /// Address of the instruction after the delay slot at `slot`.
+    fn after_slot(&mut self, bus: &mut impl Bus, slot: u32) -> u32 {
+        self.icache.get(slot, || decode(bus, slot)).next()
+    }
+
+    /// CMP's flags: Z, N, C and V of b - c.
+    #[inline(always)]
+    fn compare(&mut self, b: u32, c: u32) {
+        let (r, bw, v) = sub(b, c, false);
+        self.flags(r, Some(bw), Some(v));
     }
 
     // -----------------------------------------------------------------------

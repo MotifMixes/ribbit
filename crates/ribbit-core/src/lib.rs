@@ -149,6 +149,29 @@ struct State {
 
 const IDLE_PROBE_MAX_STEPS: u64 = 512;
 const IDLE_BACKOFF_STEPS: u64 = 20_000;
+/// A loop head whose probes keep failing (a busy loop, not an idle one) is
+/// left alone for twice as long after each failure, up to this many
+/// doublings (20,000 << 6 = 1.28 M steps, ~13 ms at 96 MHz).
+const IDLE_BACKOFF_MAX_SHIFT: u8 = 6;
+
+/// Hashes loop-head addresses (speed only: the default SipHash is costly on
+/// the hot path, and the keys are not attacker-controlled).
+#[derive(Default, Clone, Copy)]
+struct PcHasher(u64);
+
+impl std::hash::Hasher for PcHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.0 = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16;
+    }
+}
 
 #[derive(Default)]
 struct IdleTracker {
@@ -156,13 +179,41 @@ struct IdleTracker {
     recent: [u32; 8],
     recent_next: usize,
     probe: Option<IdleProbe>,
-    /// Loop heads that failed a probe, and the step count before which they
-    /// are not probed again.
-    backoff: std::collections::HashMap<u32, u64>,
+    /// Loop heads that failed a probe: the step count before which they are
+    /// not probed again, and how many times in a row they failed.
+    backoff: std::collections::HashMap<u32, (u64, u8), std::hash::BuildHasherDefault<PcHasher>>,
+    /// The probe write log's storage, kept between probes.
+    log_buf: Vec<(u32, u8)>,
     skipped_steps: u64,
     /// Probe outcomes, for diagnosis: started, interrupted/violated/too long,
     /// state differed, a device event happened, memory differed, no room, skipped.
     pub stats: [u64; 7],
+}
+
+impl IdleTracker {
+    /// After a backward jump to `pc` during a batch: true if `idle_track`
+    /// would start a probe here (the same bookkeeping, done inline).
+    #[inline]
+    fn watch(&mut self, pc: u32, cycles: u64) -> bool {
+        if !self.recent.contains(&pc) {
+            self.recent[self.recent_next] = pc;
+            self.recent_next = (self.recent_next + 1) % self.recent.len();
+            return false;
+        }
+        !self.backoff.get(&pc).is_some_and(|&(until, _)| cycles < until)
+    }
+
+    /// A probe of `head` failed at `cycles`.
+    fn back_off(&mut self, head: u32, cycles: u64) {
+        let e = self.backoff.entry(head).or_insert((0, 0));
+        // A failure long after the last one starts over.
+        let shift = if cycles > e.0 + (IDLE_BACKOFF_STEPS << IDLE_BACKOFF_MAX_SHIFT) {
+            0
+        } else {
+            (e.1 + 1).min(IDLE_BACKOFF_MAX_SHIFT)
+        };
+        *e = (cycles + (IDLE_BACKOFF_STEPS << shift), shift);
+    }
 }
 
 struct IdleProbe {
@@ -241,6 +292,12 @@ pub struct Machine {
     /// runs every iteration, for verification).
     pub idle_skip: bool,
     idle: IdleTracker,
+    /// Speed diagnostics: batches run, instructions run batched, and single
+    /// steps (by `run_batch` result: not attempted, budget too small, block
+    /// stopped at its first instruction).
+    pub batch_stats: [u64; 5],
+    /// Speed diagnostics: batch exits by reason (budget, slow, bus, backward, error).
+    pub batch_exits: [u64; 5],
     /// Debug option: first cycle at which each PC was executed (None = off).
     pub coverage: Option<std::collections::HashMap<u32, u64>>,
     firmware: Firmware,
@@ -287,6 +344,8 @@ impl Machine {
             first_cart_pc: None,
             idle_skip: true,
             idle: IdleTracker::default(),
+            batch_stats: [0; 5],
+            batch_exits: [0; 5],
             coverage: None,
             firmware,
             cartridge,
@@ -353,7 +412,7 @@ impl Machine {
         if self.cpu.pc >= ribbit_memory::map::CART_BASE && self.first_cart_pc.is_none() {
             self.first_cart_pc = Some((start, self.cpu.pc));
         }
-        let mut bus = MachineBus { sys: &mut self.bus, io: &mut self.io, cycle: start, pc: self.cpu.pc };
+        let mut bus = MachineBus::new(&mut self.bus, &mut self.io, start, self.cpu.pc);
         let result = self.cpu.step(&mut bus);
         if let Some(dma) = self.io.lcd.pending.take() {
             self.run_framebuffer_dma(dma);
@@ -427,10 +486,25 @@ impl Machine {
         self.io.gpio.buttons = self.buttons;
         // Device state may have been changed from outside since the last run.
         self.io.sync_needed = true;
+        // Batches need nothing observed per instruction.
+        let batch = breakpoints.is_empty() && self.trace_sink.is_none() && self.coverage.is_none() && !self.cpu.record_last;
         while report.steps < max_steps {
             if report.steps > 0 && breakpoints.hit(self.cpu.pc) {
                 report.stop = StopReason::Breakpoint { pc: self.cpu.pc };
                 break;
+            }
+            if !(batch && !self.io.sync_needed) {
+                self.batch_stats[2] += 1;
+            } else {
+                match self.run_batch(max_steps, &mut report) {
+                    None => {}
+                    Some(Ok(())) => continue,
+                    Some(Err(err)) => {
+                        tracing::info!(target: "ribbit::boot", pc = format_args!("{:#010x}", self.cpu.pc), %err, "cpu stopped");
+                        report.stop = StopReason::Cpu(err);
+                        break;
+                    }
+                }
             }
             let cycle = self.cpu.cycles;
             let from = self.cpu.pc;
@@ -484,6 +558,104 @@ impl Machine {
         report
     }
 
+    /// Batched execution (`Cpu::run_block`): instructions back to back up
+    /// to the next device event, voice sample, processor-timer event or the
+    /// step budget, or until an instruction needs `step`. Identical results
+    /// to stepping: devices only act at events and register accesses, and a
+    /// register access ends the batch after its instruction, which then gets
+    /// the same after-step handling as in `step`. None if nothing could run
+    /// batched (the caller steps instead).
+    fn run_batch(&mut self, max_steps: u64, report: &mut RunReport) -> Option<Result<(), CpuError>> {
+        let to_event = self.io.horizon.saturating_sub(self.io.deferred);
+        let mut budget = self.clock.max_cycles_below(to_event).min(max_steps - report.steps);
+        let to_sample = self.io.voices.ticks_to_next_sample(self.clock.peripheral_hz);
+        if to_sample != u64::MAX {
+            budget = budget.min(self.clock.max_cycles_below(to_sample));
+        }
+        // While an idle-loop probe runs: stop on returning to the loop head,
+        // and within the probe's step limit (`idle_track` then checks the
+        // last step as it would after a single step).
+        let probe_head = self.idle.probe.as_ref().map(|p| {
+            budget = budget.min((IDLE_PROBE_MAX_STEPS + 1).saturating_sub(p.steps));
+            p.head
+        });
+        if budget < 2 {
+            self.batch_stats[3] += 1;
+            return None;
+        }
+        let start = self.cpu.cycles;
+        let fence = if self.first_cart_pc.is_none() { ribbit_memory::map::CART_BASE } else { u32::MAX };
+        let (idle, skip) = (&mut self.idle, self.idle_skip);
+        let mut bus = MachineBus {
+            sys: &mut self.bus,
+            io: &mut self.io,
+            cycle: start,
+            pc: self.cpu.pc,
+            clock: Some(&mut self.clock),
+            synced: start,
+        };
+        let block = self.cpu.run_block(&mut bus, &mut ribbit_cpu::NoAuxExt, budget, fence, |pc, cycles| match probe_head {
+            Some(head) => pc == head,
+            None => skip && idle.watch(pc, cycles),
+        });
+        let synced = bus.synced;
+        if block.executed == 0 {
+            self.batch_stats[4] += 1;
+            return match block.exit {
+                ribbit_cpu::BlockExit::Error(e) => Some(Err(e)),
+                _ => None,
+            };
+        }
+        // The last instruction's after-step handling, as in `step` (earlier
+        // ones had nothing to do but time, accounted here or at a register
+        // access).
+        if let Some(dma) = self.io.lcd.pending.take() {
+            self.run_framebuffer_dma(dma);
+            self.io.sync_needed = true;
+        }
+        let ticks = self.clock.ticks(self.cpu.cycles - synced);
+        if self.io.voices.lfc_start_pending {
+            self.io.voices.start_lfc(&mut self.bus);
+        }
+        if ticks > 0 {
+            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+        }
+        self.io.deferred += ticks;
+        if self.io.sync_needed || self.io.deferred >= self.io.horizon {
+            if self.io.deferred >= self.io.horizon {
+                self.io.event_syncs += 1;
+            }
+            self.io.catch_up();
+            self.cpu.set_irq_lines(Peripherals::irq_mask(), self.io.irq_levels());
+            self.io.horizon = self.io.next_event();
+            self.io.sync_needed = false;
+        }
+        self.batch_stats[0] += 1;
+        self.batch_exits[match block.exit {
+            ribbit_cpu::BlockExit::Budget => 0,
+            ribbit_cpu::BlockExit::Slow => 1,
+            ribbit_cpu::BlockExit::Bus => 2,
+            ribbit_cpu::BlockExit::Backward => 3,
+            ribbit_cpu::BlockExit::Error(_) => 4,
+        }] += 1;
+        self.batch_stats[1] += block.executed;
+        report.steps += block.executed - 1;
+        report.instructions += block.executed;
+        if let Some(p) = &mut self.idle.probe {
+            // Steps before the last: none reached the head, touched a device
+            // register or exceeded the limit (each would have ended the block).
+            p.steps += block.executed - 1;
+        }
+        if self.idle.probe.is_some() || matches!(block.exit, ribbit_cpu::BlockExit::Backward) {
+            self.idle_track(true, block.from, max_steps, report);
+        }
+        report.steps += 1;
+        match block.exit {
+            ribbit_cpu::BlockExit::Error(e) => Some(Err(e)),
+            _ => Some(Ok(())),
+        }
+    }
+
     /// Idle-loop fast-forwarding, exact. After a backward jump to the same
     /// address twice in a row, one iteration is run as a probe; if it leaves
     /// the CPU state (except time), memory and devices exactly as they were,
@@ -516,7 +688,7 @@ impl Machine {
                     .as_ref()
                     .is_some_and(|log| log.iter().all(|&(a, old)| self.bus.peek8(a) == Some(old)));
             self.io.probe = false;
-            self.bus.write_log = None;
+            self.release_write_log();
             if !exact {
                 let snap = self.cpu.idle_snapshot() == p.snapshot;
                 let ev = self.io.event_syncs == p.event_syncs;
@@ -527,9 +699,10 @@ impl Machine {
                 } else {
                     4
                 }] += 1;
-                self.idle.backoff.insert(p.head, self.cpu.cycles + IDLE_BACKOFF_STEPS);
+                self.idle.back_off(p.head, self.cpu.cycles);
                 return;
             }
+            self.idle.backoff.remove(&p.head);
             // Every step (instruction, interrupt entry, sleep) is one cycle,
             // so the absolute cycle count measures the iteration even when
             // the probe spans several `run` calls.
@@ -569,7 +742,7 @@ impl Machine {
             self.idle.recent_next = (self.idle.recent_next + 1) % self.idle.recent.len();
             return;
         }
-        if self.idle.backoff.get(&pc).is_some_and(|&until| self.cpu.cycles < until) || self.io.sync_needed {
+        if self.idle.backoff.get(&pc).is_some_and(|&(until, _)| self.cpu.cycles < until) || self.io.sync_needed {
             return;
         }
         self.idle.stats[0] += 1;
@@ -583,15 +756,23 @@ impl Machine {
         });
         self.io.probe = true;
         self.io.probe_violation = false;
-        self.bus.write_log = Some(Vec::new());
+        self.bus.write_log = Some(std::mem::take(&mut self.idle.log_buf));
     }
 
     fn idle_end_probe(&mut self, _ok: bool) {
         if let Some(p) = self.idle.probe.take() {
-            self.idle.backoff.insert(p.head, self.cpu.cycles + IDLE_BACKOFF_STEPS);
+            self.idle.back_off(p.head, self.cpu.cycles);
         }
         self.io.probe = false;
-        self.bus.write_log = None;
+        self.release_write_log();
+    }
+
+    /// Ends write logging, keeping the buffer for the next probe.
+    fn release_write_log(&mut self) {
+        if let Some(mut log) = self.bus.write_log.take() {
+            log.clear();
+            self.idle.log_buf = log;
+        }
     }
 
     /// The complete machine state (CPU, memory, devices, time), compressed.
@@ -848,7 +1029,7 @@ mod tests {
         let mut m = machine(&[B_SELF[0], B_SELF[1]]);
         assert!(!m.experimental_touch_enabled());
         assert!(m.io.touch.is_none());
-        let mut bus = MachineBus { sys: &mut m.bus, io: &mut m.io, cycle: 0, pc: 0 };
+        let mut bus = MachineBus::new(&mut m.bus, &mut m.io, 0, 0);
         bus.write32(io::touch::CONTROL_BASE, io::touch::CHANNEL_ENABLE);
         assert_eq!(bus.read32(io::touch::CONTROL_BASE), 0, "unmodelled: reads 0");
         assert!(m.io.adc.fifo.is_empty());
@@ -864,7 +1045,7 @@ mod tests {
         m.enable_experimental_mame_touch(io::touch::MameTouchConfig::default());
         m.reset();
         assert!(m.experimental_touch_enabled() && m.io.touch.is_some(), "kept across reset");
-        let mut bus = MachineBus { sys: &mut m.bus, io: &mut m.io, cycle: 0, pc: 0 };
+        let mut bus = MachineBus::new(&mut m.bus, &mut m.io, 0, 0);
         bus.write32(io::touch::CONTROL_BASE, io::touch::CHANNEL_ENABLE);
         assert_eq!(bus.read32(io::touch::CONTROL_BASE), io::touch::CHANNEL_ENABLE);
         assert_eq!(m.io.adc.fifo.len(), io::touch::INIT_SAMPLES);

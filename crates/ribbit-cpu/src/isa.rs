@@ -260,6 +260,31 @@ impl Op {
     pub fn is_executable(self) -> bool {
         !matches!(self, Op::Muldw | Op::Macdw | Op::Msubdw | Op::Extension { .. })
     }
+
+    /// Operations `Cpu::run_block` leaves to `Cpu::step_with`: they can
+    /// change interrupt state (STATUS32, aux registers, sleep), halt, raise
+    /// an exception or stop with an error.
+    #[inline(always)]
+    pub fn block_unsafe(self) -> bool {
+        matches!(
+            self,
+            Op::Lr
+                | Op::Sr
+                | Op::Flag
+                | Op::Sleep
+                | Op::Brk
+                | Op::Swi
+                | Op::Unimp
+                | Op::Illegal(_)
+                | Op::Arc700Only(_)
+                | Op::Extension { .. }
+                | Op::Muldw
+                | Op::Macdw
+                | Op::Msubdw
+                | Op::Divaw
+                | Op::Rnd16
+        )
+    }
 }
 
 /// Register names used by GNU binutils.

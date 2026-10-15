@@ -18,6 +18,7 @@ pub mod idle;
 pub mod isa;
 pub mod xy;
 
+pub use exec::{Block, BlockExit};
 use isa::Instr;
 use std::fmt;
 use thiserror::Error;

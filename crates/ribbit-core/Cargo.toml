@@ -22,6 +22,7 @@ toml.workspace = true
 
 [dev-dependencies]
 backtrace = "0.3"
+png = "0.18"
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
