@@ -41,6 +41,10 @@ fn main() {
         m.io.lmax_tv = Some(Default::default());
     }
     m.record_trace_tail = false;
+    if let Ok(p) = std::env::var("RIBBIT_STATE") {
+        // Start from a save state (same BIOS and cartridge); <from_ms> is absolute.
+        m.load_state(&std::fs::read(p).unwrap()).unwrap();
+    }
     let none = Breakpoints::default();
     let ms = m.clock.cpu_hz / 1000;
     let target = from.parse::<u64>().unwrap() * ms;
@@ -76,7 +80,7 @@ fn main() {
     v.sort_by_key(|&(pc, n)| (std::cmp::Reverse(n), pc));
     let total: u64 = v.iter().map(|x| x.1).sum();
     println!("{total} steps; {} distinct addresses", v.len());
-    for (pc, n) in v.iter().take(60) {
+    for (pc, n) in v.iter().take(std::env::var("RIBBIT_TOP").map_or(60, |s| s.parse().unwrap())) {
         println!("{pc:08x} {n:>10} {:5.2}%", 100.0 * *n as f64 / total as f64);
     }
 }

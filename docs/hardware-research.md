@@ -751,3 +751,28 @@ range. Transmission is instant (no baud timing).
 * No GIODataIn reads: all buttons come from the controller.
 * Tested: SpongeBob SquarePants: Saves the Day boots to its title, name entry by stylus (typed "ABB", OK),
   then the intro, all at full speed.
+
+## The BIOS's Flash rasterizer, and HD rendering (2026-10-15)
+
+Owner's decision: HD comes from the real BIOS's own vector data (an "HD layer"), not from a separate Flash
+player. Evidence below is VERIFIED-FW on the US v2.1 BIOS (152-11265) by running it; other BIOSes have the
+same code at other addresses (not yet located).
+
+* The rasterizer is a scanline active-edge renderer working at **4x the LCD in each axis**: edge records hold
+  16-bit device coordinates in quarter pixels (a full-screen rectangle is 0..640), scanlines are quarter
+  scanlines, and the result is averaged down to 160x160 (anti-aliasing).
+* Edge constructor 0x4004_E0D8 (r0 edge object, r1 edge record, r2 current quarter scanline). Steppers:
+  lines 0x4004_DF64, quadratic curves 0x4004_DF78 (forward differencing, 16.16). Active edges are kept
+  sorted by x (0x4004_EBF8); the scanline driver is around 0x4005_0656.
+* Edge record: +0x08 / +0x0C fill-style pointers (two fills, Flash fill0/fill1 style), +0x10/+0x12 start,
+  +0x14/+0x16 control, +0x18/+0x1A end (i16), +0x1C straight-line flag, +0x1D rule (selects the
+  per-crossing handler), +0x1E direction.
+* Fill style: +0x08 next, +0x0C depth (high half), +0x18 type (low byte 1 for the solid fills seen),
+  +0x1C/+0x20 paint functions (solid: 0x4005_5728, 0x4005_544C), +0x24 colour as four u16: **B, G, R, A**,
+  +0x34 the colour pre-packed in the LCD's 12-bit format.
+* The BIOS only renders when something changes; one render pass ends with a framebuffer transfer.
+
+Proof of concept: `crates/ribbit-core/examples/hdframe.rs` captures one pass (1,435 edges, 36 fills in the
+SpongeBob intro), rasterizes it at 640x640 with even-odd toggling per fill and depth order, and matches the
+BIOS's frame in shape, layering and colour, at 4x the detail. Not decoded yet: gradient and bitmap fills,
+the rule byte, dirty-rectangle passes, clipping/masks, and the other BIOS revisions' addresses.

@@ -153,7 +153,11 @@ fn main() {
             Some("mem") => {
                 // mem ADDR LEN PATH: write emulated memory (RAM/ROM/VRAM) to a file.
                 let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).unwrap();
-                let (a, n) = (hex(w[1]), hex(w[2]));
+                let a = match w[1].strip_prefix('r') {
+                    Some(r) => m.cpu.regs[r.parse::<usize>().unwrap()], // "rN": the address in a register
+                    None => hex(w[1]),
+                };
+                let n = hex(w[2]);
                 let bytes: Vec<u8> = (0..n).map(|i| m.bus.peek8(a + i).unwrap_or(0)).collect();
                 std::fs::write(w[3], bytes).unwrap();
             }
