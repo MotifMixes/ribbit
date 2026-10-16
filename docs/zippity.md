@@ -96,7 +96,7 @@ Modelled from its driver in the bootloader:
 
 | Offset | Use |
 |---|---|
-| +0x000 | DMA control: bit 0 start (reads 1 while busy), bit 1 direction (1: memory to NAND). Ribbit keeps it busy 12 instructions a byte (about 5 MB/s): a recording's Mickey Mouse Clubhouse loading screen lasts 8.8 s for 14.2 MB, here 9.5 s (1 s with instant transfers); data from the NAND lands when the transfer ends |
+| +0x000 | DMA control: bit 0 start (reads 1 while busy), bit 1 direction (1: memory to NAND). Ribbit keeps it busy at 7.2 MB/s (fitted, UNVERIFIED): a recording's Mickey Mouse Clubhouse loading screen lasts 8.8 s for 14.2 MB, here 9.1 s; data from the NAND lands when the transfer ends |
 | +0x004 | DMA memory address |
 | +0x008 | DMA length in bytes |
 | +0x140 | Status: bit 15 ready. Drivers wait for it after each command (if it is set, they poll once more, then wait until it is set) |
@@ -488,8 +488,20 @@ UNVERIFIED on hardware.
   is interlaced, 30 whole frames a second. With bit 11 every field the
   start-up screens ran twice as fast as a recording of a real unit (warning
   2 s against 4, LeapFrog logo 1 s against 3, the mat 6 s against 11) and
-  the logos' animations were cut short; every second field they match
-  within a second. Their exact timing within the field is UNKNOWN.
+  the logos' animations were cut short; every second field the animations
+  keep the recording's pace (a new picture about every 5 frames). Their
+  exact timing within the field is UNKNOWN.
+- **CPU speed:** the screens that load the next one wait on the CPU, so the
+  instruction rate sets their length. Ribbit runs 18 million instructions a
+  second (fitted, UNVERIFIED; the clock and memory wait states are UNKNOWN):
+  LeapFrog logo 2.94 s against the recording's 3.07 s, credits 3.77 s
+  against 4.00 s, warning to Sign In 25.2 s against 26.4 s (at 60 million:
+  2.70 s, 2.70 s and 21.9 s). Still off: the Zippity logo forms about 0.4 s
+  late and stays about 0.5 s less (ears and logo together 2.06 s against
+  2.23 s); the mat demo is 10.1 s against 11.4 s; at the Sign In menu the
+  names come about 1 s after the buttons (0.1 s on the recording) and blink
+  every 1.0 s (0.6 s, with a fade). Neither the timer clock nor the sound
+  unit's beat counter changes those two.
 - **Video DMA (+0x1C0/+0x1C4/+0x1C8):** each frame the kernel copies its
   palette (0x400 words from 0x001BE540) and sprite list (0x31F words from
   0x002D314C) into the chip. Writing the count starts it; it reads 0 when done.

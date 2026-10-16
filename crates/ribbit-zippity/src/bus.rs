@@ -19,14 +19,21 @@ pub const SRAM_SIZE: usize = 0x20_0000;
 pub const IRAM_BASE: u32 = 0xF800_0000;
 pub const IRAM_SIZE: usize = 0x1_0000;
 
-/// Instructions between video frames (a stand-in: the CPU clock and the
-/// frame rate are UNKNOWN; about 60 Hz at 60 MIPS).
-pub const FRAME: u64 = 1_000_000;
+/// Instructions per video field (60 a second): 18 million instructions a
+/// second. The CPU clock and its memory wait states are UNKNOWN; this is
+/// fitted to a recording of a real unit starting up, whose screens wait on
+/// the CPU while it loads and decodes the next one: the LeapFrog logo 2.94 s
+/// here against 3.07 s, the credits 3.77 s against 4.00 s, the warning to
+/// the Sign In menu 25.2 s against 26.4 s. At 60 million (one per field
+/// before) these took 2.70 s, 2.70 s and 21.9 s, and at 15 million 3.30 s,
+/// 4.30 s and 27.2 s. Frame-timed animations are unaffected (the kernel is
+/// mostly idle, waiting for the next frame).
+pub const FRAME: u64 = 300_000;
 /// Instructions per second (FRAME a 60th of a second; a stand-in).
 pub const CLOCK: u64 = FRAME * 60;
 /// Instructions the power button stays held from power-on (the bootloader
 /// powers off unless it is held; the kernel enters a test mode if it still is).
-const POWER_HOLD: u64 = 20_000_000;
+const POWER_HOLD: u64 = 20 * FRAME;
 const IRQ_VIDEO: u32 = 27;
 const IRQ_DMA: u32 = 24;
 /// The timers' interrupt lines (timer 0 to 3).
@@ -50,11 +57,11 @@ const RX_FIFO: usize = 16;
 /// warns at 0x5BCB or less and gives up at 0x5928 or less). Full batteries'
 /// reading is UNKNOWN; this is comfortably above both.
 const ADC_BATTERY: u32 = 0x7000;
-/// Instructions a NAND DMA transfer keeps the controller busy per byte:
-/// about 5 MB/s (at CLOCK). Fitted to recordings of real units: Mickey
-/// Mouse Clubhouse's loading screen lasts 8.8 s (14.2 MB read); here 9.5 s
-/// with this, 1 s with instant transfers.
-const NAND_DMA_COST: u64 = 12;
+/// How fast a NAND DMA transfer goes (bytes a second). Fitted to recordings
+/// of real units: Mickey Mouse Clubhouse's loading screen lasts 8.8 s (14.2
+/// MB read, and the CPU's work on it); here 9.1 s, of which the CPU's
+/// share is about 3.3 s (estimated from runs at two CPU speeds).
+const NAND_DMA_RATE: u64 = 7_200_000;
 
 const SPU_WORDS: usize = 0x2000 / 4;
 const PPU_WORDS: usize = 0x8000 / 4;
@@ -453,7 +460,7 @@ impl Bus {
         let off = a.checked_sub(0xD090_0000).filter(|&o| o < 0x200)?;
         if off == 0 {
             // DMA: the controller reads busy (bit 0) for as long as the
-            // transfer takes (NAND_DMA_COST a byte); data read from the NAND
+            // transfer takes (NAND_DMA_RATE); data read from the NAND
             // lands in memory when it ends (the system starts loads into
             // sprite-cache memory a screen still shows, which on hardware
             // changes only once the transfer is through).
@@ -472,7 +479,7 @@ impl Bus {
                     let data = (0..len).map(|_| self.nand.read_data()).collect();
                     self.nand_pending = Some((addr, data));
                 }
-                self.nand_busy_until = self.now + len as u64 * NAND_DMA_COST;
+                self.nand_busy_until = self.now + len as u64 * CLOCK / NAND_DMA_RATE;
                 let dir = if to_nand { "to NAND" } else { "from NAND" };
                 self.nand.note(|| format!("DMA {dir} {len:#x} bytes at {addr:08x}"));
             }

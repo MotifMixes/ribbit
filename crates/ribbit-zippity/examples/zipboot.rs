@@ -8,7 +8,7 @@
 //! | Variable | Use |
 //! |---|---|
 //! | ZIPBOOT_DUMP=dir | Save RAM, on-chip RAM and the logs below at the end |
-//! | ZIPBOOT_FRAMES=n | Save the picture every n instructions (frame_<millions>.ppm) |
+//! | ZIPBOOT_FRAMES=n | Save the picture every n instructions (frame_<millions>.ppm; with ZIPBOOT_SEQ, numbered 1, 2, ...; with ZIPBOOT_IDLE, print the instructions skipped as idle so far at each) |
 //! | ZIPBOOT_EVERY=n | Save RAM every n instructions |
 //! | ZIPBOOT_SAVE=file:n, ZIPBOOT_LOAD=file | Save the machine after n instructions; carry on from such a file |
 //! | ZIPBOOT_PAD=state:from:to[;...] | The controllers' 10-bit state (hex) over instruction counts |
@@ -143,7 +143,11 @@ fn main() {
             && ran > 0
             && ran.is_multiple_of(n)
         {
-            save_ppm(&format!("{dir}/frame_{:04}.ppm", ran / 1_000_000), &z);
+            let num = if std::env::var("ZIPBOOT_SEQ").is_ok() { ran / n } else { ran / 1_000_000 };
+            save_ppm(&format!("{dir}/frame_{num:04}.ppm"), &z);
+            if std::env::var("ZIPBOOT_IDLE").is_ok() {
+                println!("idle {} {}", ran, z.skipped());
+            }
         }
         if let (Some(n), Some(dir)) = (every, &dump_dir)
             && ran > 0
