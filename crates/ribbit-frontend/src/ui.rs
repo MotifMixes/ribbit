@@ -68,6 +68,15 @@ pub struct Info {
     pub idle_left: Option<u32>,
 }
 
+/// Something that went wrong, as the error card shows it.
+#[derive(Clone)]
+pub struct Problem {
+    pub title: String,
+    pub explain: String,
+    /// The technical message (empty: no "Details").
+    pub details: String,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub menu_visible: bool,
@@ -79,7 +88,7 @@ pub struct UiState {
     pub capturing: Option<Button>,
     pub browser: Browser,
     toasts: Vec<(String, Instant)>,
-    pub error: Option<String>,
+    pub error: Option<Problem>,
     /// A Zippity dump holding a previous owner's players: asks whether to
     /// remove them from the file.
     pub zippity_clean: Option<PathBuf>,
@@ -107,6 +116,12 @@ const TOAST_TIME: Duration = Duration::from_millis(2500);
 impl UiState {
     pub fn new() -> Self {
         Self { menu_visible: true, ..Default::default() }
+    }
+
+    /// Shows an error card: a short title, what it means in plain words,
+    /// and the technical message folded away under "Details".
+    pub fn problem(&mut self, title: impl Into<String>, explain: impl Into<String>, details: impl Into<String>) {
+        self.error = Some(Problem { title: title.into(), explain: explain.into(), details: details.into() });
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
@@ -1248,22 +1263,80 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
         actions.push(a);
     }
 
-    if let Some(err) = st.error.clone() {
-        let mut close = false;
-        egui::Window::new("Problem")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(err);
-                if ui.button("OK").clicked() {
-                    close = true;
-                }
-            });
-        if close {
-            st.error = None;
-        }
+    if let Some(problem) = st.error.clone()
+        && problem_card(ctx, &problem)
+    {
+        st.error = None;
     }
+}
+
+/// The error card over the dimmed screen; true when dismissed (OK, Enter
+/// or Escape).
+fn problem_card(ctx: &egui::Context, p: &Problem) -> bool {
+    let accent = egui::Color32::from_rgb(232, 98, 82);
+    let screen = ctx.content_rect();
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("problem_dim")))
+        .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
+    let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter));
+    egui::Area::new(egui::Id::new("problem"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(24, 27, 30))
+                .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.45)))
+                .corner_radius(14)
+                .inner_margin(egui::Margin::symmetric(26, 22))
+                .shadow(egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(140) })
+                .show(ui, |ui| {
+                    let width = (screen.width() - 80.0).clamp(240.0, 400.0);
+                    ui.set_width(width);
+                    ui.horizontal(|ui| {
+                        // A round "!" badge beside the title.
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 15.0, accent.gamma_multiply(0.2));
+                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "!", egui::FontId::proportional(19.0), accent);
+                        ui.add_space(6.0);
+                        ui.add(egui::Label::new(egui::RichText::new(&p.title).size(19.0).strong().color(egui::Color32::WHITE)).wrap());
+                    });
+                    ui.add_space(10.0);
+                    ui.add(egui::Label::new(egui::RichText::new(&p.explain).size(14.0).color(egui::Color32::from_gray(195))).wrap());
+                    if !p.details.is_empty() {
+                        ui.add_space(10.0);
+                        egui::CollapsingHeader::new(egui::RichText::new("Details").size(13.0).color(egui::Color32::from_gray(150)))
+                            .id_salt("problem_details")
+                            .show(ui, |ui| {
+                                egui::Frame::NONE
+                                    .fill(egui::Color32::from_rgb(16, 18, 20))
+                                    .corner_radius(8)
+                                    .inner_margin(egui::Margin::same(10))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                                            ui.add(egui::Label::new(egui::RichText::new(&p.details).monospace().size(12.0).color(egui::Color32::from_gray(170))).wrap());
+                                        });
+                                    });
+                            });
+                    }
+                    ui.add_space(16.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if primary_button(ui, "OK", egui::vec2(90.0, 36.0)).clicked() {
+                            close = true;
+                        }
+                        if !p.details.is_empty() {
+                            let copy = egui::Button::new(egui::RichText::new("Copy details").color(egui::Color32::from_gray(200)))
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(70)))
+                                .corner_radius(8)
+                                .min_size(egui::vec2(0.0, 36.0));
+                            if ui.add(copy).on_hover_text("Copies the title and the technical message, for a bug report").clicked() {
+                                ui.ctx().copy_text(format!("{}\n{}\n\n{}", p.title, p.explain, p.details));
+                            }
+                        }
+                    });
+                });
+        });
+    close
 }
 
 /// Asks whether to clear a previous owner's players from a Zippity dump:

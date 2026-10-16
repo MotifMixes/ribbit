@@ -356,7 +356,11 @@ impl App {
                 self.ui.toast(format!("BIOS: {name}"));
                 self.rescan_library();
             }
-            Err(e) => self.ui.error = Some(format!("Not a usable BIOS: {e:#}")),
+            Err(e) => {
+                let e = anyhow::Error::from(e);
+                let (title, explain) = explain_load_error(&e);
+                self.ui.problem(title, explain, format!("{e:#}"));
+            }
         }
     }
 
@@ -402,20 +406,22 @@ impl App {
                     return self.start_zippity(nand, path);
                 }
                 Ok(bios) => self.next_bios = bios,
-                Err(msg) => {
-                    self.ui.error = Some(msg);
+                Err((title, explain)) => {
+                    self.ui.problem(title, explain, "");
                     return;
                 }
             }
         }
         if let Err(e) = self.boot(Some(path)) {
-            self.ui.error = Some(format!("{e:#}"));
+            let (title, explain) = explain_load_error(&e);
+            self.ui.problem(title, explain, format!("{e:#}"));
         }
     }
 
     /// The BIOS to play `path` on the chosen console with (None: the chosen
-    /// BIOS, for the original Leapster), or why it can't be played there.
-    fn console_bios(&self, path: &Path) -> std::result::Result<Option<PathBuf>, String> {
+    /// BIOS, for the original Leapster), or why it can't be played there
+    /// (a title and an explanation).
+    fn console_bios(&self, path: &Path) -> std::result::Result<Option<PathBuf>, (String, String)> {
         use crate::library::Family;
         use ribbit_memory::known::Hardware;
         let console = self.library.selected_console(&self.settings.library_console);
@@ -432,20 +438,31 @@ impl App {
                 [] => format!("It needs a {} BIOS in your games folder.", family.console().name()),
                 names => format!("Choose {} in the console menu next to Open Cartridge.", names.join(" or ")),
             };
-            return Err(format!("{title} is a {} game: it can't run on the {}. {choose}", family.name(), console.name()));
+            return Err((
+                "Wrong console for this game".to_string(),
+                format!("{title} is a {} game: it can't run on the {}. {choose}", family.name(), console.name()),
+            ));
         }
         match console {
-            Hardware::Zippity => self
-                .library
-                .bios_for(hw_zippity())
-                .map(|p| Some(p.to_path_buf()))
-                .ok_or_else(|| "No Zippity NAND dump found in your games folders.".to_string()),
+            Hardware::Zippity => self.library.bios_for(hw_zippity()).map(|p| Some(p.to_path_buf())).ok_or_else(|| {
+                (
+                    "No Zippity dump found".to_string(),
+                    "Zippity games need the console's own memory (its NAND dump) in one of your games folders. \
+                     Add the folder that holds it with \"Add games folder\"."
+                        .to_string(),
+                )
+            }),
             Hardware::Leapster => Ok(None),
-            hw => self
-                .library
-                .bios_for(hw)
-                .map(|p| Some(p.to_path_buf()))
-                .ok_or_else(|| format!("No {} BIOS found in your games folders.", hw.name())),
+            hw => self.library.bios_for(hw).map(|p| Some(p.to_path_buf())).ok_or_else(|| {
+                (
+                    format!("No {} BIOS found", hw.name()),
+                    format!(
+                        "Games on the {0} need a dump of the {0}'s own BIOS in one of your games folders. \
+                         Add the folder that holds it with \"Add games folder\", or choose another console.",
+                        hw.name()
+                    ),
+                )
+            }),
         }
     }
 
@@ -475,7 +492,11 @@ impl App {
                 }
                 self.update_title();
             }
-            Err(e) => self.ui.error = Some(format!("Couldn't start the Zippity: {e:#}")),
+            Err(e) => self.ui.problem(
+                "Couldn't start the Zippity",
+                format!("Ribbit couldn't load the Zippity's memory dump \"{}\". It may be damaged or not a full dump.", file_name(&nand)),
+                format!("{e:#}"),
+            ),
         }
     }
 
@@ -797,7 +818,11 @@ impl App {
         })();
         match result {
             Ok(()) => self.ui.toast(format!("State saved to slot {slot}")),
-            Err(e) => self.ui.error = Some(format!("Saving state failed: {e:#}")),
+            Err(e) => self.ui.problem(
+                "Couldn't save the state",
+                format!("Slot {slot} wasn't saved. Check that the save folder still exists and the disk has room."),
+                format!("{e:#}"),
+            ),
         }
     }
 
@@ -819,7 +844,11 @@ impl App {
                 }
                 self.ui.toast(format!("State loaded from slot {slot}"));
             }
-            Err(e) => self.ui.error = Some(format!("Loading state failed: {e:#}")),
+            Err(e) => self.ui.problem(
+                "Couldn't load the state",
+                format!("Slot {slot} couldn't be loaded. It may be empty, damaged, or saved from another game. The game carries on where it was."),
+                format!("{e:#}"),
+            ),
         }
     }
 
@@ -915,7 +944,11 @@ impl App {
         })();
         match result {
             Ok(()) => self.ui.toast(format!("Screenshot saved: {}", path.display())),
-            Err(e) => self.ui.error = Some(format!("Screenshot failed: {e:#}")),
+            Err(e) => self.ui.problem(
+                "Couldn't save the screenshot",
+                format!("Ribbit couldn't write {}. Check that the folder exists and the disk has room.", path.display()),
+                format!("{e:#}"),
+            ),
         }
     }
 
@@ -945,8 +978,8 @@ impl App {
                     self.rescan_library();
                     self.start_zippity(dump.clone(), dump);
                 }
-                Ok(Err(e)) => self.ui.error = Some(format!("Couldn't clean the Zippity dump: {e:#}")),
-                Err(_) => self.ui.error = Some("Couldn't clean the Zippity dump.".into()),
+                Ok(Err(e)) => self.ui.problem("Couldn't clear the old players", CLEAN_FAILED, format!("{e:#}")),
+                Err(_) => self.ui.problem("Couldn't clear the old players", CLEAN_FAILED, "The cleaning thread crashed."),
             }
         }
         if let Some(z) = &self.zippity {
@@ -1025,7 +1058,13 @@ impl App {
         if let Some(stop) = stats.stopped {
             s.emu.clear_stopped();
             self.paused = true;
-            self.ui.error = Some(format!("Emulation stopped: {stop}"));
+            self.ui.problem(
+                "The game stopped",
+                "The emulated console did something Ribbit can't handle yet, so the game is paused. \
+                 Reset (Emulation menu) or open another game. If it happens again at the same spot, \
+                 the details below help track it down.",
+                format!("{stop}"),
+            );
         }
     }
 
@@ -1470,5 +1509,61 @@ mod tests {
             "SpongeBob SquarePants - Saves the Day (USA, alt)"
         );
         assert_eq!(super::short_name("Plain"), "Plain");
+    }
+}
+
+/// What the Zippity cleaning failure means for the user's file.
+const CLEAN_FAILED: &str = "The players are still there. Nothing was lost: the dump is either unchanged or \
+                            kept beside it as a .with-saves.bak file.";
+
+/// A path's file name, for messages.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// A title and a plain explanation for a game or BIOS that didn't load.
+fn explain_load_error(e: &anyhow::Error) -> (String, String) {
+    use ribbit_core::LoadError;
+    use ribbit_memory::CartridgeError;
+    let Some(load) = e.downcast_ref::<LoadError>() else {
+        // Messages written for people already (such as "Choose a BIOS first").
+        return ("Couldn't start the game".to_string(), e.to_string());
+    };
+    match load {
+        LoadError::Cartridge { path, source } => {
+            let name = file_name(path);
+            let explain = match source {
+                CartridgeError::TooLarge { size, max } => format!(
+                    "\"{name}\" is {} MB, but a Leapster cartridge holds at most {} MB, so it isn't a Leapster game. \
+                     It may be a dump of something else, such as a console's own memory. \
+                     Games Ribbit recognises are listed in the library.",
+                    size.div_ceil(1 << 20),
+                    max >> 20
+                ),
+                CartridgeError::Empty => format!("\"{name}\" is empty. It may not have finished copying or downloading."),
+                CartridgeError::OddSize(_) => format!(
+                    "\"{name}\" has an odd number of bytes, so it can't be a whole cartridge dump. It may be cut short or damaged."
+                ),
+            };
+            ("This file isn't a Leapster game".to_string(), explain)
+        }
+        LoadError::Firmware { path, .. } => (
+            "This BIOS can't be used".to_string(),
+            format!(
+                "\"{}\" isn't a console BIOS dump Ribbit can use. Choose another one with File → Open BIOS….",
+                file_name(path)
+            ),
+        ),
+        LoadError::Io { path, .. } => (
+            "Couldn't read the file".to_string(),
+            format!(
+                "\"{}\" couldn't be opened. It may have been moved, renamed or deleted, or another program may be using it.",
+                file_name(path)
+            ),
+        ),
+        LoadError::Zip { path, .. } => (
+            "Couldn't unpack the zip file".to_string(),
+            format!("\"{}\" is a .zip archive Ribbit couldn't unpack. It may be damaged or hold no game.", file_name(path)),
+        ),
     }
 }
