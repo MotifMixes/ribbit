@@ -530,7 +530,9 @@ impl Machine {
         let Some(hooks) = hd::Hooks::find(self.firmware.data(), ribbit_memory::map::BIOS_MIRROR) else {
             return false;
         };
-        self.cpu.icache.set_stops(&[hooks.edge_ctor, hooks.scanline]);
+        let mut stops = vec![hooks.edge_ctor, hooks.scanline];
+        stops.extend(hooks.glyph);
+        self.cpu.icache.set_stops(&stops);
         self.hd = Some(hd::HdCapture::new(hooks));
         true
     }
@@ -842,6 +844,8 @@ impl Machine {
                     hd.edge(self.cpu.regs[1], peek);
                 } else if from == hd.hooks.scanline {
                     hd.scanline(self.cpu.regs[14], self.cpu.regs[17] as i32, peek);
+                } else if Some(from) == hd.hooks.glyph {
+                    hd.glyph(&self.cpu.regs, peek);
                 }
             }
             // `idle_track` only acts while probing or after a backward jump;

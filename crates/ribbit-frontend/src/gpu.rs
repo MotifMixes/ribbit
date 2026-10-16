@@ -12,8 +12,9 @@ use winit::window::Window;
 
 /// The HD picture over its fallback: the canvas (premultiplied, alpha =
 /// how much of each pixel it knows) where it knows and the mask allows,
-/// else the fallback (the AI-upscaled LCD, or the LCD itself). The mask is
-/// 160x160 and filtered, so fallback areas blend in without block edges.
+/// else the LCD's own pixels, exactly (no upscaling or smoothing: what HD
+/// cannot draw from the BIOS's vector data shows as the BIOS drew it). The
+/// mask is 160x160, one value per LCD pixel.
 const HD_SHADER: &str = r#"
 struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex
@@ -31,8 +32,10 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
 @fragment
 fn fs_hd(in: Out) -> @location(0) vec4<f32> {
     let c = textureSample(hd, smooth_samp, in.uv);
-    let f = textureSample(fallback, smooth_samp, in.uv).rgb;
-    let keep = 1.0 - textureSample(mask, smooth_samp, in.uv).r;
+    let fd = vec2<f32>(textureDimensions(fallback));
+    let f = textureLoad(fallback, vec2<i32>(clamp(in.uv * fd, vec2<f32>(0.0), fd - 1.0)), 0).rgb;
+    let md = vec2<f32>(textureDimensions(mask));
+    let keep = 1.0 - textureLoad(mask, vec2<i32>(clamp(in.uv * md, vec2<f32>(0.0), md - 1.0)), 0).r;
     let known = c.a * keep;
     return vec4<f32>(c.rgb * keep + f * (1.0 - known), 1.0);
 }
@@ -649,9 +652,9 @@ impl Gpu {
         // AI upscale, only when the picture or the chain changed.
         let mut ai_bind_group = None;
         let mut hd_bind_group = None;
+        // Not under HD: its fallback is the LCD's own pixels.
         let ai_for = |lcd: Option<LcdView>, show_hd: bool| match lcd {
             Some((rect, Display::Ai, ai)) if !show_hd => Some((rect, ai)),
-            Some((rect, _, ai)) if show_hd => Some((rect, ai)),
             _ => None,
         };
         let tv = self.show_tv.then_some(()).and(self.tv.as_ref()).map(|t| &t.2);
@@ -679,7 +682,7 @@ impl Gpu {
             }
         }
         if self.show_hd && hd_bind_group.is_none() {
-            // No AI upscaler on this GPU: the LCD itself is the fallback.
+            // The LCD's own pixels are the fallback.
             hd_bind_group =
                 Some(Self::hd_group(&self.device, &self.hd_bgl, &self.hd_texture, &self.linear, &self.lcd_view, &self.mask_texture));
         }

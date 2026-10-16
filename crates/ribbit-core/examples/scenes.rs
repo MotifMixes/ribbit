@@ -523,7 +523,7 @@ fn main() {
                 }
                 let mut v: Vec<_> = h.into_iter().collect();
                 v.sort_by_key(|a| std::cmp::Reverse(a.1));
-                for (pc, n) in v.iter().take(12) {
+                for (pc, n) in v.iter().take(std::env::var("PCHIST_TOP").map_or(12, |t| t.parse().unwrap())) {
                     println!("pchist {pc:#010x} {n}");
                 }
             }

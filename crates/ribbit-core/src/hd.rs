@@ -43,6 +43,21 @@ const BITMAP_PAINTER_SIG: [u8; 32] = [
 ];
 const BITMAP_PAINTER_SIG_AT: u32 = 0x32;
 
+/// The device-font text loop's call of its glyph blitter (US v2.1
+/// 0x4009_7220, `jl_s.d [r15]` with `mov r7, r23` in its delay slot): these
+/// 58 bytes start 0x32 before it. At the call r0 is the target surface, r1
+/// the glyph's coverage bitmap, r2 its bits per pixel, r3/r4 its width and
+/// height, r5/r6 its position, r23 the colour (bytes R G B). Device text
+/// (Flash text fields with device fonts, such as "Leapster Mono") is drawn
+/// this way, not by the shape rasterizer.
+const GLYPH_CALL_SIG: [u8; 58] = [
+    0x03, 0x14, 0xc0, 0x30, 0x02, 0x14, 0xc1, 0x30, 0xb8, 0x60, 0x2f, 0x25, 0x06, 0x00, 0x02, 0x23, 0x40, 0x20, 0x2f,
+    0x26, 0x06, 0x00, 0x08, 0x11, 0x00, 0x20, 0x01, 0x14, 0x8f, 0x30, 0x03, 0x80, 0x02, 0xc1, 0x27, 0xb8, 0x53, 0x20,
+    0xc3, 0x00, 0x70, 0x7a, 0x0a, 0x70, 0x20, 0xc3, 0x98, 0x77, 0x4a, 0x77, 0x60, 0x7f, 0x0a, 0x27, 0xc0, 0x05, 0x21,
+    0xc0,
+];
+const GLYPH_CALL_SIG_AT: u32 = 0x32;
+
 /// Where the hooks are in one BIOS image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hooks {
@@ -50,6 +65,9 @@ pub struct Hooks {
     pub scanline: u32,
     pub solid_painter: u32,
     pub bitmap_painter: u32,
+    /// The device-font glyph blit call (None: device text stays as the
+    /// LCD shows it).
+    pub glyph: Option<u32>,
 }
 
 impl Hooks {
@@ -64,6 +82,7 @@ impl Hooks {
             scanline: find(&SCANLINE_SIG)?,
             solid_painter: find(&SOLID_PAINTER_SIG)?,
             bitmap_painter: find(&BITMAP_PAINTER_SIG)? - BITMAP_PAINTER_SIG_AT,
+            glyph: find(&GLYPH_CALL_SIG).map(|a| a + GLYPH_CALL_SIG_AT),
         })
     }
 }
@@ -111,6 +130,23 @@ pub struct BitmapFill {
     pub image: Arc<Image>,
 }
 
+/// A device-font glyph drawn on the LCD's framebuffer (VERIFIED-FW, US v2.1
+/// blitter 0x4009_5BEC): its coverage per pixel (0-64, the BIOS's blend
+/// weights for 4-bit glyphs: 4-bit values, high nibble first, rows of
+/// whole bytes), where it goes and its clip rectangle (LCD pixels, x0 y0 x1
+/// y1 inclusive, the surface's +0x14), and the colour as the 12-bit LCD
+/// stores it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Glyph {
+    pub x: i32,
+    pub y: i32,
+    pub width: usize,
+    pub height: usize,
+    pub coverage: Vec<u8>,
+    pub clip: [i32; 4],
+    pub rgb: [u8; 3],
+}
+
 /// Everything one render pass drew.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pass {
@@ -126,6 +162,9 @@ pub struct Pass {
     pub renderer: u32,
     pub edges: Vec<Edge>,
     pub fills: HashMap<u32, Fill>,
+    /// Device-font glyphs drawn after the frame's shapes (in a pass of
+    /// their own, with no edges).
+    pub glyphs: Vec<Glyph>,
 }
 
 /// Recorder state, owned by the machine while HD capture is on.
@@ -150,6 +189,8 @@ pub struct HdCapture {
     last_scan: i32,
     /// Bitmaps decoded so far, by (data, palette, format, size, stride, sample).
     images: HashMap<ImageKey, Arc<Image>>,
+    /// Device-font glyphs of the frame in progress.
+    glyphs: Vec<Glyph>,
 }
 
 /// A bitmap's identity: data, palette, format, width | height << 16,
@@ -170,7 +211,41 @@ impl HdCapture {
             pending: Pass::default(),
             last_scan: 0,
             images: HashMap::new(),
+            glyphs: vec![],
         }
+    }
+
+    /// The device-font text loop is calling its glyph blitter (registers
+    /// as at `GLYPH_CALL_SIG`). Only 4-bit glyphs drawn on a 160x160
+    /// 12-bit surface (the LCD's framebuffer) are kept.
+    pub fn glyph(&mut self, regs: &[u32], peek: impl Fn(u32) -> u8) {
+        let w = |a: u32| u32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
+        let h = |a: u32| i16::from_le_bytes([peek(a), peek(a + 1)]) as i32;
+        let (surface, bitmap, bpp, width, height) = (regs[0], regs[1], regs[2], regs[3] as usize, regs[4] as usize);
+        if bpp != 4 || w(surface + 4) != 160 || w(surface + 8) != 160 || w(surface + 0x10) != 12 || width > 64 || height > 64 {
+            return;
+        }
+        let row = width.div_ceil(2) as u32;
+        let coverage = (0..height as u32)
+            .flat_map(|y| (0..width as u32).map(move |x| (y, x)))
+            .map(|(y, x)| {
+                let byte = peek(bitmap + y * row + x / 2);
+                let v = if x % 2 == 0 { byte >> 4 } else { byte & 15 } as u32;
+                // The BIOS's table: 0, 5, 9, 13, ... 60, 64.
+                ((v * 64 + 7) / 15) as u8
+            })
+            .collect();
+        let nib = |c: u32| ((c & 0xF0) | (c >> 4)) as u8;
+        let c = regs[23];
+        self.glyphs.push(Glyph {
+            x: regs[5] as i16 as i32,
+            y: regs[6] as i16 as i32,
+            width,
+            height,
+            coverage,
+            clip: [h(surface + 0x14), h(surface + 0x16), h(surface + 0x18), h(surface + 0x1A)],
+            rgb: [nib(c & 0xFF), nib((c >> 8) & 0xFF), nib((c >> 16) & 0xFF)],
+        });
     }
 
     /// The edge constructor was executed: `rec` is its edge record.
@@ -257,6 +332,9 @@ impl HdCapture {
     pub fn end_pass(&mut self) {
         self.absorb_pending();
         self.finish();
+        if !self.glyphs.is_empty() {
+            self.frame.push(Pass { scale: 4, glyphs: std::mem::take(&mut self.glyphs), ..Default::default() });
+        }
         if self.done.len() + self.frame.len() > MAX_PENDING {
             self.dropped += self.done.len() as u64;
             self.done.clear();
@@ -425,6 +503,12 @@ impl HdCanvas {
     /// Draws `pass` inside its redraw rectangle.
     pub fn apply(&mut self, pass: &Pass) {
         self.passes += 1;
+        if pass.edges.is_empty() && !pass.glyphs.is_empty() {
+            for g in &pass.glyphs {
+                self.draw_glyph(g);
+            }
+            return;
+        }
         // Pass units to canvas pixels (a pass with no rectangle seen is taken
         // as a full-quality full redraw).
         let units = match pass.scale {
@@ -520,6 +604,35 @@ impl HdCanvas {
         });
     }
 
+    /// Draws a device-font glyph as the BIOS does on the LCD, one block of
+    /// canvas pixels per glyph pixel: the colour over what is there, by the
+    /// pixel's coverage. The glyph exists only at the LCD's resolution (the
+    /// font is a pixel font), so this is its true shape.
+    fn draw_glyph(&mut self, g: &Glyph) {
+        let s = self.scale;
+        let [cx0, cy0, cx1, cy1] = g.clip;
+        for gy in 0..g.height {
+            for gx in 0..g.width {
+                let (x, y) = (g.x + gx as i32, g.y + gy as i32);
+                if x < cx0.max(0) || y < cy0.max(0) || x > cx1.min(159) || y > cy1.min(159) {
+                    continue;
+                }
+                let a = g.coverage[gy * g.width + gx] as u32;
+                if a == 0 {
+                    continue;
+                }
+                self.covered[y as usize * 160 + x as usize] = true;
+                for py in y as usize * s..(y as usize + 1) * s {
+                    for p in &mut self.pixels[py * self.size + x as usize * s..py * self.size + (x as usize + 1) * s] {
+                        let ch = |k: u32, c: u8| ((c as u32 * a + ((*p >> k) & 0xFF) * (64 - a)) / 64) << k;
+                        let alpha = (255 * a + (*p >> 24) * (64 - a)) / 64;
+                        *p = alpha << 24 | ch(16, g.rgb[0]) | ch(8, g.rgb[1]) | ch(0, g.rgb[2]);
+                    }
+                }
+            }
+        }
+    }
+
     /// Updates `mask` against the BIOS's frame `lcd` (160x160): a block is
     /// taken from the fallback where the canvas does not know it, where it
     /// differs from its LCD pixel by more than `AGREE` beyond its
@@ -581,28 +694,15 @@ impl HdCanvas {
     }
 
     /// The picture as shown, on the CPU (for saved pictures and tests):
-    /// canvas where known and unmasked, else the LCD smoothed (bilinear).
+    /// canvas where known and unmasked, else the LCD's own pixels (no
+    /// smoothing), as the GPU shows it.
     pub fn composed(&self, lcd: &[u32]) -> Vec<u32> {
         let (s, size) = (self.scale as f32, self.size);
         let lcd_at = |x: f32, y: f32| -> [f32; 3] {
-            let (fx, fy) = ((x / s - 0.5).clamp(0.0, 159.0), (y / s - 0.5).clamp(0.0, 159.0));
-            let (ix, iy) = (fx.floor() as usize, fy.floor() as usize);
-            let (ax, ay) = (fx - ix as f32, fy - iy as f32);
-            let px = |x: usize, y: usize| {
-                let p = lcd[y.min(159) * 160 + x.min(159)];
-                [(p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF].map(|c| c as f32)
-            };
-            let (a, b, c, d) = (px(ix, iy), px(ix + 1, iy), px(ix, iy + 1), px(ix + 1, iy + 1));
-            std::array::from_fn(|k| (a[k] * (1.0 - ax) + b[k] * ax) * (1.0 - ay) + (c[k] * (1.0 - ax) + d[k] * ax) * ay)
+            let p = lcd[((y / s) as usize).min(159) * 160 + ((x / s) as usize).min(159)];
+            [(p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF].map(|c| c as f32)
         };
-        // The mask, smoothed across block edges like the GPU's filtering.
-        let mask_at = |x: f32, y: f32| -> f32 {
-            let (fx, fy) = ((x / s - 0.5).clamp(0.0, 159.0), (y / s - 0.5).clamp(0.0, 159.0));
-            let (ix, iy) = (fx.floor() as usize, fy.floor() as usize);
-            let (ax, ay) = (fx - ix as f32, fy - iy as f32);
-            let m = |x: usize, y: usize| self.mask[y.min(159) * 160 + x.min(159)] as f32 / 255.0;
-            (m(ix, iy) * (1.0 - ax) + m(ix + 1, iy) * ax) * (1.0 - ay) + (m(ix, iy + 1) * (1.0 - ax) + m(ix + 1, iy + 1) * ax) * ay
-        };
+        let mask_at = |x: f32, y: f32| -> f32 { self.mask[((y / s) as usize).min(159) * 160 + ((x / s) as usize).min(159)] as f32 / 255.0 };
         let mut out = vec![0u32; size * size];
         for y in 0..size {
             for x in 0..size {
@@ -819,7 +919,8 @@ mod tests {
                 edge_ctor: 0x4000_0100,
                 scanline: 0x4000_0202,
                 solid_painter: 0x4000_0300,
-                bitmap_painter: 0x4000_0350
+                bitmap_painter: 0x4000_0350,
+                glyph: None
             })
         );
         assert_eq!(Hooks::find(&bios[..0x200], 0x4000_0000), None);
@@ -840,7 +941,7 @@ mod tests {
             put(&mut mem, 0x128 + 4 * i, &v.to_le_bytes());
         }
         let peek = |a: u32| mem[a as usize];
-        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1 });
+        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None });
         c.edge(0, peek); // built before its render's first scanline event
         c.scanline(0x100, 1, peek);
         c.scanline(0x100, 2, peek); // later scanlines of the same render
