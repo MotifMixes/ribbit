@@ -27,6 +27,24 @@ fn blend(over: u32, under: u32, alpha: u32, full: u32) -> u32 {
 }
 
 impl Bus {
+    /// `n` bytes of RAM, SRAM or on-chip RAM from `a` (None when they are
+    /// not all in one of them: callers then go byte by byte).
+    fn bytes(&self, a: u32, n: usize) -> Option<&[u8]> {
+        let a = a as usize;
+        if a + n <= crate::bus::RAM_SIZE {
+            return Some(&self.ram[a..a + n]);
+        }
+        let s = a.wrapping_sub(crate::bus::SRAM_BASE as usize);
+        if s.checked_add(n).is_some_and(|e| e <= crate::bus::SRAM_SIZE) {
+            return Some(&self.sram[s..s + n]);
+        }
+        let i = a.wrapping_sub(crate::bus::IRAM_BASE as usize);
+        if i.checked_add(n).is_some_and(|e| e <= crate::bus::IRAM_SIZE) {
+            return Some(&self.iram[i..i + n]);
+        }
+        None
+    }
+
     /// Pixel `i` of a picture of `bpp` bits per pixel at `addr`: the bits
     /// are one stream, most significant bit first (6-bit sprites show this).
     fn pixel(&self, addr: u32, bpp: u32, i: u32) -> u32 {
@@ -42,7 +60,7 @@ impl Bus {
     /// pixels). Attributes: bits 1-0 depth (only 8 bits decoded), 5-4 and
     /// 7-6 tile width and height (8 << n), 13-12 priority, 23-22 the
     /// palette's 256-colour bank.
-    fn draw_text(&self, img: &mut [u32], pal: &[u32], reg: u32, base_reg: u32) {
+    fn draw_text(&self, img: &mut [u32], pal: &[u32], rgb: &[u32], reg: u32, base_reg: u32) {
         let attr = self.latch(0xD050_0008 + reg);
         if self.latch(0xD050_000C + reg) & 8 == 0 || attr & 3 != 3 {
             return;
@@ -54,16 +72,28 @@ impl Bus {
         for y in 0..SCREEN_H as u32 {
             let py = (y + sy) % 512;
             let row = map + (py / th) * (1024 / tw) * 4;
-            for x in 0..SCREEN_W as u32 {
+            let line = &mut img[y as usize * SCREEN_W..(y as usize + 1) * SCREEN_W];
+            // A tile's run of pixels at a time (tiles never straddle the
+            // 1024-pixel wrap: 1024 is a multiple of their width).
+            let mut x = 0;
+            while x < SCREEN_W as u32 {
                 let px = (x + sx) % 1024;
+                let span = (tw - px % tw).min(SCREEN_W as u32 - x);
                 let entry = self.peek32(row + px / tw * 4);
-                if entry == 0 {
-                    continue;
+                if entry != 0 {
+                    let src = base + entry + (py % th) * tw + px % tw;
+                    let put = |line: &mut [u32], i: u32, v: u8| {
+                        let k = (bank + v as u32) as usize & 2047;
+                        if pal[k] & 0x8000 == 0 {
+                            line[(x + i) as usize] = rgb[k];
+                        }
+                    };
+                    match self.bytes(src, span as usize) {
+                        Some(run) => (0..span).for_each(|i| put(line, i, run[i as usize])),
+                        None => (0..span).for_each(|i| put(line, i, self.peek8(src + i))),
+                    }
                 }
-                let c = pal[(bank + self.peek8(base + entry + (py % th) * tw + px % tw) as u32) as usize & 2047];
-                if c & 0x8000 == 0 {
-                    img[y as usize * SCREEN_W + x as usize] = rgb555(c);
-                }
+                x += span;
             }
         }
     }
@@ -74,6 +104,7 @@ impl Bus {
         // Palette RAM (0xD0501000): 16-bit colours (0RRRRRGGGGGBBBBB, bit 15
         // transparent), two per word.
         let pal: Vec<u32> = (0..2048u32).map(|i| (self.latch(0xD050_1000 + i / 2 * 4) >> (16 * (i & 1))) & 0xFFFF).collect();
+        let rgb: Vec<u32> = pal.iter().map(|&c| rgb555(c)).collect();
 
         // Sprites (control +0x108: bit 0 on, bits 15-8 how many in fours):
         // entries of 32 bytes at 0xD0502000. Halfword 0 and byte 8 bits 6-0:
@@ -99,11 +130,11 @@ impl Bus {
         for d in 0..4 {
             for (reg, base_reg) in [(0x40, 0x80), (0x58, 0x84)] {
                 if (self.latch(0xD050_0008 + reg) >> 12) & 3 == d {
-                    self.draw_text(img, &pal, reg, base_reg);
+                    self.draw_text(img, &pal, &rgb, reg, base_reg);
                 }
             }
             for &(_, n) in order.iter().filter(|o| o.0 == d) {
-                self.draw_sprite(img, &pal, |k| half(n, k));
+                self.draw_sprite(img, &pal, &rgb, |k| half(n, k));
             }
         }
     }
@@ -127,7 +158,7 @@ impl Bus {
             .collect()
     }
 
-    fn draw_sprite(&self, img: &mut [u32], pal: &[u32], half: impl Fn(u32) -> u32) {
+    fn draw_sprite(&self, img: &mut [u32], pal: &[u32], rgb: &[u32], half: impl Fn(u32) -> u32) {
         let attr = half(3);
         let addr = (half(0) | (half(4) & 0x7F) << 16) * 2;
         let x0 = SCREEN_W as i32 / 2 + half(1) as i16 as i32;
@@ -163,6 +194,13 @@ impl Bus {
                 continue;
             }
             let py = sy * h / sh;
+            // The picture's row, when it is all in one memory (8 and 16 bits
+            // per pixel: a byte or halfword a pixel).
+            let row = match bpp {
+                8 => self.bytes(addr + py * w, w as usize),
+                16 => self.bytes(addr + py * w * 2, w as usize * 2),
+                _ => None,
+            };
             for sx in 0..sw {
                 let x = x0 + if attr & 4 != 0 { (sw - 1 - sx) as i32 } else { sx as i32 };
                 if x < 0 || x >= SCREEN_W as i32 {
@@ -171,13 +209,20 @@ impl Bus {
                 let px = sx * w / sw;
                 let o = y as usize * SCREEN_W + x as usize;
                 if !wide {
-                    let c = pal[(pal_base + self.pixel(addr, bpp, py * w + px)) as usize & 2047];
-                    if c & 0x8000 == 0 {
-                        img[o] = rgb555(c);
+                    let v = match row {
+                        Some(r) => r[px as usize] as u32,
+                        None => self.pixel(addr, bpp, py * w + px),
+                    };
+                    let k = (pal_base + v) as usize & 2047;
+                    if pal[k] & 0x8000 == 0 {
+                        img[o] = rgb[k];
                     }
                     continue;
                 }
-                let v = self.peek16(addr + (py * w + px) * 2);
+                let v = match row {
+                    Some(r) => u16::from_le_bytes([r[px as usize * 2], r[px as usize * 2 + 1]]) as u32,
+                    None => self.peek16(addr + (py * w + px) * 2),
+                };
                 if v & 0x4000 == 0 {
                     // Direct colour (bit 15 is set in some light pixels; its
                     // meaning is UNKNOWN).

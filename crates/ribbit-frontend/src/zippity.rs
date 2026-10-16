@@ -267,6 +267,7 @@ fn run(s: &Shared) {
     let mut resample = Resampler::default();
     let mut mono = Vec::new();
     let (mut counted_since, mut frames) = (Instant::now(), 0u32);
+    let mut skipped = 0;
     while !s.quit.load(Ordering::Relaxed) {
         if !s.running.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
@@ -289,6 +290,10 @@ fn run(s: &Shared) {
             next = Instant::now();
         }
         next += Duration::from_secs_f64(1.0 / FPS);
+        // Behind (a busy stretch, such as loading a player): skip drawing,
+        // at most four frames running, so the sound keeps up.
+        let draw = Instant::now() <= next || skipped >= 4;
+        skipped = if draw { 0 } else { skipped + 1 };
         let audio = {
             let mut z = s.z.lock().unwrap();
             // Standing on the home spot (the setting, or Pause held) puts
@@ -298,7 +303,9 @@ fn run(s: &Shared) {
             let feet = standing ^ s.moved.load(Ordering::Relaxed);
             z.set_pad(Pad::held(held & !FEET | feet));
             z.run_frame();
-            z.render(&mut img);
+            if draw {
+                z.render(&mut img);
+            }
             // The boot log says whether the system found saved players.
             if s.watch.load(Ordering::Relaxed) {
                 if z.log().contains("LD open OK: UI.SAV") {
@@ -310,7 +317,9 @@ fn run(s: &Shared) {
             }
             z.take_audio()
         };
-        s.frame.lock().unwrap().copy_from_slice(&img);
+        if draw {
+            s.frame.lock().unwrap().copy_from_slice(&img);
+        }
         mono.clear();
         resample.push(&audio, &mut mono);
         let gain = f32::from_bits(s.gain.load(Ordering::Relaxed));
