@@ -45,6 +45,12 @@ pub struct StartOptions {
 }
 
 struct Session {
+    /// Debug: RIBBIT_IDLE_TEST_SECS (see `check_idle_power_off`).
+    idle_test_secs: Option<u32>,
+    /// A save state from just before an idle power-off (for Resume).
+    idle_snapshot: Option<Vec<u8>>,
+    /// The cartridge played.
+    cart_path: Option<PathBuf>,
     /// EXPERIMENTAL HD picture, when HD vectors are on and this BIOS supports it.
     hd: Option<ribbit_core::hd::HdCanvas>,
     /// The machine, running on its own thread.
@@ -94,6 +100,8 @@ pub struct App {
     fit_window: u8,
     fatal: Option<anyhow::Error>,
     quit: bool,
+    /// The game closed for inactivity and its snapshot, for Resume.
+    idle_resume: Option<(PathBuf, Vec<u8>)>,
 }
 
 /// Runs the desktop app until the window closes.
@@ -150,6 +158,7 @@ impl App {
             discord: crate::discord::Discord::start(),
             fatal: None,
             quit: false,
+            idle_resume: None,
         };
         // A game given on the command line starts at once; otherwise the
         // game library shows.
@@ -202,6 +211,7 @@ impl App {
         if self.settings.hd_vectors && hd.is_none() {
             self.ui.toast("HD vectors are not available with this BIOS");
         }
+        machine.keep_awake = !self.settings.turn_off_when_idle;
         let mut saves = SavePaths::for_machine(&self.save_dir(), &machine);
         if let Some(p) = &self.opts.system_eeprom {
             saves.system = Some(p.clone());
@@ -227,6 +237,9 @@ impl App {
             None => format!("bios-{:08x}", machine.firmware().id().crc32),
         };
         self.session = Some(Session {
+            idle_test_secs: std::env::var("RIBBIT_IDLE_TEST_SECS").ok().and_then(|v| v.parse().ok()),
+            idle_snapshot: None,
+            cart_path: cart.clone(),
             hd,
             experimental_touch: machine.experimental_touch_enabled(),
             emu: {
@@ -374,7 +387,23 @@ impl App {
                 self.save_settings();
                 self.fit_window = FIT_TRIES;
             }
-            Action::SettingsChanged => self.save_settings(),
+            Action::SettingsChanged => {
+                self.save_settings();
+                if let Some(s) = &self.session {
+                    s.emu.lock().keep_awake = !self.settings.turn_off_when_idle;
+                }
+            }
+            Action::ResumeAfterIdle => self.resume_after_idle(),
+            Action::DismissIdleBanner => {
+                self.ui.idle_closed = None;
+                self.idle_resume = None;
+            }
+            Action::KeepAwake => {
+                self.settings.turn_off_when_idle = false;
+                self.save_settings();
+                self.ui.idle_closed = None;
+                self.ui.toast("The Leapster will stay on");
+            }
             Action::HdChanged => {
                 self.save_settings();
                 self.set_hd(self.settings.hd_vectors);
@@ -384,6 +413,66 @@ impl App {
             Action::Quit => {
                 self.quit = true;
                 event_loop.exit();
+            }
+        }
+    }
+
+    /// With "Turn off when idle" on: when the BIOS has turned the console off
+    /// for inactivity, close the game and say so. (Debug: RIBBIT_IDLE_TEST_SECS
+    /// keeps the BIOS's idle count at most that many seconds, to try this
+    /// without waiting.)
+    fn check_idle_power_off(&mut self) {
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        let mut m = s.emu.lock();
+        if let Some(secs) = s.idle_test_secs {
+            m.cap_idle_count(secs);
+        }
+        if !self.settings.turn_off_when_idle {
+            return;
+        }
+        // Keep a snapshot from just before the power-off, for Resume.
+        match m.idle_seconds_left() {
+            Some(left) if left <= 3 && left > 0 => {
+                if s.idle_snapshot.is_none() {
+                    s.idle_snapshot = Some(m.save_state());
+                }
+            }
+            Some(left) if left > 3 => s.idle_snapshot = None,
+            _ => {}
+        }
+        let off = m.idle_powered_off();
+        drop(m);
+        if off {
+            tracing::info!(target: "ribbit::boot", "the console turned itself off after inactivity: closing the game");
+            self.idle_resume = s.cart_path.clone().zip(s.idle_snapshot.take());
+            self.ui.idle_closed = Some(s.title.clone());
+            self.end_session();
+            self.update_title();
+            self.rescan_library();
+        }
+    }
+
+    /// Reopens the game closed for inactivity where it was (or from its
+    /// start if there is no snapshot), with a fresh idle timer.
+    fn resume_after_idle(&mut self) {
+        self.ui.idle_closed = None;
+        let Some((path, state)) = self.idle_resume.take() else {
+            return;
+        };
+        self.open_cart(path);
+        if let Some(s) = &self.session {
+            {
+                let mut m = s.emu.lock();
+                if let Err(e) = m.load_state(&state) {
+                    tracing::warn!(target: "ribbit::saves", "resume after inactivity: {e:#}");
+                }
+                m.reset_idle_count();
+            }
+            s.emu.resync();
+            if let Some(a) = &mut self.audio {
+                a.clear();
             }
         }
     }
@@ -807,6 +896,7 @@ impl App {
         #[cfg(not(target_os = "android"))]
         self.poll_pads();
         self.emulate();
+        self.check_idle_power_off();
         let mut hd_frame = false;
         if let Some(s) = &mut self.session {
             let passes = {

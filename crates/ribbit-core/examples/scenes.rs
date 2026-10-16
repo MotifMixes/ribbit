@@ -75,6 +75,7 @@ fn main() {
         // EXPERIMENTAL: the L-MAX's TV chip (see io/lmax_tv.rs).
         m.io.lmax_tv = Some(Default::default());
     }
+    m.keep_awake = std::env::var_os("RIBBIT_KEEP_AWAKE").is_some();
     if std::env::var_os("RIBBIT_MAME_GPIO").is_some() {
         // EXPERIMENTAL: unresolved GPIO lines read 1 (MAME's workaround).
         m.io.gpio.unresolved_lines = !ribbit_input::BUTTON_BITS;
@@ -149,6 +150,19 @@ fn main() {
                 for (i, r) in m.cpu.regs.iter().enumerate().take(32) {
                     print!("r{i}={r:08x}{}", if i % 8 == 7 { "\n" } else { " " });
                 }
+            }
+            Some("idletimer") => {
+                // The BIOS's inactivity timer (idle_timer.rs), if found.
+                let t = ribbit_core::idle_timer::IdleTimer::find(m.cpu.regs[26], |a| m.bus.peek8(a));
+                let w = |a: u32| (0..4).fold(0u32, |v, i| v | (m.bus.peek8(a + i).unwrap_or(0) as u32) << (8 * i));
+                match t {
+                    Some(t) => {
+                        let s = w(t.state_ptr);
+                        println!("idle timer {t:x?}: state {s:08x} reload {} count {}", w(s + t.reload_offset), w(s + t.count_offset));
+                    }
+                    None => println!("idle timer not found"),
+                }
+                println!("idle powered off: {}", m.idle_powered_off());
             }
             Some("hooktrace") => {
                 // hooktrace N: the next N HD hook events (US v2.1 addresses):

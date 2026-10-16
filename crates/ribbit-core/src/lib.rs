@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod hd;
+pub mod idle_timer;
 pub mod io;
 pub mod zip;
 
@@ -313,6 +314,13 @@ pub struct Machine {
     pub coverage: Option<std::collections::HashMap<u32, u64>>,
     /// EXPERIMENTAL: HD capture from the BIOS's Flash rasterizer (hd.rs).
     pub hd: Option<hd::HdCapture>,
+    /// Keep the console from turning itself off when idle: before each run,
+    /// the BIOS's idle count is set back to its reload value, as a game
+    /// calling LF_ResetIdleTimeout would (idle_timer.rs). Off by default
+    /// (the emulated BIOS behaves as on hardware).
+    pub keep_awake: bool,
+    /// The BIOS's idle timer, once found.
+    idle_timer: Option<idle_timer::IdleTimer>,
     firmware: Firmware,
     cartridge: Option<Cartridge>,
 }
@@ -361,6 +369,8 @@ impl Machine {
             batch_exits: [0; 5],
             coverage: None,
             hd: None,
+            keep_awake: false,
+            idle_timer: None,
             firmware,
             cartridge,
         };
@@ -412,6 +422,64 @@ impl Machine {
         self.cpu.icache.set_stops(&[hooks.edge_ctor, hooks.scanline]);
         self.hd = Some(hd::HdCapture::new(hooks));
         true
+    }
+
+    /// The idle count and its reload value, once the BIOS's timer is found.
+    fn idle_state(&mut self) -> Option<(u32, u32, u32)> {
+        if self.idle_timer.is_none() {
+            self.idle_timer = idle_timer::IdleTimer::find(self.cpu.regs[ribbit_cpu::reg::GP], |a| self.bus.peek8(a));
+        }
+        let t = self.idle_timer?;
+        let bus = &self.bus;
+        let word = |a: u32| Some(u32::from_le_bytes([bus.peek8(a)?, bus.peek8(a + 1)?, bus.peek8(a + 2)?, bus.peek8(a + 3)?]));
+        let state = word(t.state_ptr).filter(|&s| s != 0)?;
+        Some((state + t.count_offset, word(state + t.count_offset)?, word(state + t.reload_offset)?))
+    }
+
+    fn maintain_idle_timer(&mut self) {
+        if !self.keep_awake {
+            return;
+        }
+        if let Some((count_addr, count, reload)) = self.idle_state()
+            && reload != 0
+            && count < reload
+        {
+            use ribbit_memory::Bus as _;
+            self.bus.write32(count_addr, reload);
+        }
+    }
+
+    /// Debug: keeps the BIOS's idle count at most `secs` (to try the
+    /// power-off path without waiting).
+    pub fn cap_idle_count(&mut self, secs: u32) {
+        if let Some((count_addr, count, _)) = self.idle_state()
+            && count > secs
+        {
+            use ribbit_memory::Bus as _;
+            self.bus.write32(count_addr, secs);
+        }
+    }
+
+    /// Seconds left on the BIOS's idle timer (None: not found or disabled).
+    pub fn idle_seconds_left(&mut self) -> Option<u32> {
+        self.idle_state().filter(|&(_, _, reload)| reload != 0).map(|(_, count, _)| count)
+    }
+
+    /// Restarts the BIOS's idle timer, as a game calling LF_ResetIdleTimeout.
+    pub fn reset_idle_count(&mut self) {
+        if let Some((count_addr, _, reload)) = self.idle_state()
+            && reload != 0
+        {
+            use ribbit_memory::Bus as _;
+            self.bus.write32(count_addr, reload);
+        }
+    }
+
+    /// The BIOS turned the console off for inactivity: its idle count ran
+    /// out (with the timer enabled). The console then waits for its power
+    /// button, so a frontend should end the session.
+    pub fn idle_powered_off(&mut self) -> bool {
+        matches!(self.idle_state(), Some((_, 0, reload)) if reload != 0)
     }
 
     /// Stops HD capture (see `enable_hd_capture`).
@@ -556,6 +624,7 @@ impl Machine {
                 (px(x), px(y))
             });
         }
+        self.maintain_idle_timer();
         // Device state may have been changed from outside since the last run.
         self.io.sync_needed = true;
         // Batches need nothing observed per instruction.

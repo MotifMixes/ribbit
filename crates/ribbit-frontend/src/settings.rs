@@ -55,6 +55,10 @@ pub struct Settings {
     /// EXPERIMENTAL: redraw the BIOS's Flash vector art at 4x (640x640)
     /// instead of showing the 160x160 LCD (ribbit_core::hd).
     pub hd_vectors: bool,
+    /// Let the Leapster turn itself off when nothing is pressed for a while
+    /// (as the real console does); Ribbit then closes the game. Off by
+    /// default: Ribbit keeps it on.
+    pub turn_off_when_idle: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +84,7 @@ impl Default for Settings {
             save_dir: None,
             show_status_bar: true,
             hd_vectors: false,
+            turn_off_when_idle: false,
         }
     }
 }

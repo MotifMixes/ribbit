@@ -21,6 +21,12 @@ pub enum Action {
     ToggleFullscreen,
     SetWindowScale(u32),
     SettingsChanged,
+    /// Back into the game closed for inactivity, where it was.
+    ResumeAfterIdle,
+    /// Hide the "closed after inactivity" banner.
+    DismissIdleBanner,
+    /// "Don't turn off automatically" from the banner.
+    KeepAwake,
     /// The HD vectors setting changed (applies to the running game at once).
     HdChanged,
     SaveState(u8),
@@ -62,6 +68,9 @@ pub struct UiState {
     pub browser: Browser,
     toasts: Vec<(String, Instant)>,
     pub error: Option<String>,
+    /// The game (title) that was closed because the Leapster turned itself
+    /// off; shown above the library until dismissed.
+    pub idle_closed: Option<String>,
 }
 
 const TOAST_TIME: Duration = Duration::from_millis(2500);
@@ -99,7 +108,7 @@ pub fn draw(
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
         area = ui.max_rect();
         if !info.running && info.bios_name.is_some() {
-            library_screen(ui, settings, library, actions);
+            library_screen(ui, settings, library, st.idle_closed.as_deref(), actions);
         } else if !info.running {
             welcome(ui, settings, info, actions);
         } else if info.rewinding {
@@ -259,6 +268,13 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if ui
                 .checkbox(&mut settings.auto_calibrate, "Calibrate automatically")
                 .on_hover_text("Ribbit presses the calibration targets for you when the calibration screen appears.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+            if ui
+                .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
+                .on_hover_text("Like the real Leapster, turn off after a while with nothing pressed (about 15 minutes; 5 on the Leapster TV). Ribbit then closes the game. Off: Ribbit keeps it on.")
                 .changed()
             {
                 actions.push(Action::SettingsChanged);
@@ -443,7 +459,13 @@ const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(64, 196, 104);
 
 /// The game library: art and info for every game in the ROM folders;
 /// clicking a game plays it.
-fn library_screen(ui: &mut egui::Ui, settings: &Settings, library: &mut Library, actions: &mut Vec<Action>) {
+fn library_screen(
+    ui: &mut egui::Ui,
+    settings: &Settings,
+    library: &mut Library,
+    idle_closed: Option<&str>,
+    actions: &mut Vec<Action>,
+) {
     let ctx = ui.ctx().clone();
     for g in &mut library.games {
         if let Art::Image(img) = &g.art {
@@ -465,6 +487,10 @@ fn library_screen(ui: &mut egui::Ui, settings: &Settings, library: &mut Library,
                     actions.push(Action::Pick(Pick::RomFolder));
                 });
                 ui.add_space(18.0);
+            }
+            if let Some(title) = idle_closed {
+                idle_banner(ui, title, actions);
+                ui.add_space(14.0);
             }
             let last = settings.recent_carts.first();
             if let Some(game) = last.and_then(|p| library.games.iter().find(|g| &g.path == p)) {
@@ -560,6 +586,43 @@ fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Respo
         .corner_radius(8)
         .min_size(min);
     if min.x > 0.0 { ui.add_sized(min, b) } else { ui.add(b) }
+}
+
+/// Red banner: the last game was closed because the Leapster turned itself
+/// off after inactivity.
+fn idle_banner(ui: &mut egui::Ui, title: &str, actions: &mut Vec<Action>) {
+    const RED: egui::Color32 = egui::Color32::from_rgb(214, 64, 64);
+    const RED_HOVER: egui::Color32 = egui::Color32::from_rgb(232, 86, 86);
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgba_unmultiplied(214, 64, 64, 34))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(214, 64, 64, 110)))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("💤").size(16.0).color(RED_HOVER));
+                ui.label(egui::RichText::new(format!("{title} turned off after inactivity")).color(egui::Color32::from_gray(230)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Button::new("Dismiss").frame(false)).clicked() {
+                        actions.push(Action::DismissIdleBanner);
+                    }
+                    if ui.button("Don't turn off automatically").clicked() {
+                        actions.push(Action::KeepAwake);
+                    }
+                    let id = ui.next_auto_id();
+                    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+                    let resume = egui::Button::new(egui::RichText::new("▶  Resume").strong().color(egui::Color32::WHITE))
+                        .fill(if hovered { RED_HOVER } else { RED })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(8)
+                        .min_size(egui::vec2(0.0, 28.0));
+                    if ui.add(resume).on_hover_text("Back to where you were").clicked() {
+                        actions.push(Action::ResumeAfterIdle);
+                    }
+                });
+            });
+        });
 }
 
 fn notice(ui: &mut egui::Ui, text: &str, mut on_click: impl FnMut()) {
