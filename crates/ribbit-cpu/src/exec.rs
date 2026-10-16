@@ -7,6 +7,10 @@
 use crate::decode::decode;
 use crate::disasm::disassemble;
 use crate::icache::{AluOp, DISCARD, Fast, Hot, LdKind};
+use crate::isa::NO_LOAD;
+
+/// Most cycles one instruction can take (`Cpu::pipeline_cost`).
+const MAX_COST: u64 = 4;
 use crate::isa::*;
 use crate::{
     AuxAccess, AuxExt, AuxKind, Cpu, CpuError, HaltReason, IllegalPolicy, MmidMode, Step, Timer, debug, reg, status32,
@@ -167,6 +171,7 @@ impl Cpu {
         }
         let flow = self.execute(&i, bus, ext)?;
         self.instructions_retired += 1;
+        let cost = self.pipeline_cost(i.reg_reads(), i.load_dst(), matches!(flow, Flow::Jump(_)), i.delay, i.is_compare_branch());
         let delay_slot_of = self.delay_target.take();
         match flow {
             Flow::Halt(reason) => {
@@ -193,7 +198,7 @@ impl Cpu {
                 };
             }
         }
-        self.tick(1)?;
+        self.tick(cost)?;
         if self.record_last {
             self.last_instr = Some(i);
         }
@@ -221,15 +226,19 @@ impl Cpu {
         fence: u32,
         mut watch: impl FnMut(u32, u64) -> bool,
     ) -> Block {
-        let budget = budget.min(self.cycles_to_timer_event());
+        // An instruction costs at most MAX_COST cycles, and a block ends with
+        // the instruction that reaches `budget`: so no processor timer may
+        // reach LIMIT within MAX_COST - 1 cycles of the end (`tick` handles
+        // those, one step at a time).
+        let budget = budget.min(self.cycles_to_timer_event().saturating_sub(MAX_COST - 1));
         let mut out = Block { executed: 0, exit: BlockExit::Budget, from: self.pc };
         if self.halted() || self.sleeping || self.pending_interrupt().is_some() {
             out.exit = BlockExit::Slow;
             return out;
         }
         // Counters stay in locals in the loop and are written back after.
-        let (start, mut n) = (self.cycles, 0u64);
-        while n < budget {
+        let (start, mut n, mut spent) = (self.cycles, 0u64, 0u64);
+        while spent < budget {
             let pc = self.pc;
             if pc >= fence {
                 out.exit = BlockExit::Slow;
@@ -251,8 +260,8 @@ impl Cpu {
                         Some(i) => i,
                         None => self.icache.get(pc, || decode(bus, pc)),
                     };
-                    self.cycles = start + n;
-                    bus.at(start + n, pc);
+                    self.cycles = start + spent;
+                    bus.at(start + spent, pc);
                     match self.execute(&i, bus, ext) {
                         Ok(f) => f,
                         Err(e) => {
@@ -263,11 +272,12 @@ impl Cpu {
                 }
                 f => {
                     if f.accesses_memory() {
-                        bus.at(start + n, pc);
+                        bus.at(start + spent, pc);
                     }
                     self.execute_fast(f, &hot, bus)
                 }
             };
+            spent += self.pipeline_cost(hot.reads, hot.load_dst, matches!(flow, Flow::Jump(_)), hot.delay, hot.compare_branch);
             let delay_slot_of = self.delay_target.take();
             match flow {
                 Flow::Jump(target) if hot.delay => {
@@ -290,19 +300,19 @@ impl Cpu {
                 out.exit = BlockExit::Bus;
                 break;
             }
-            if self.pc <= pc && self.delay_target.is_none() && watch(self.pc, start + n) {
+            if self.pc <= pc && self.delay_target.is_none() && watch(self.pc, start + spent) {
                 out.from = pc;
                 out.exit = BlockExit::Backward;
                 break;
             }
             out.from = pc;
         }
-        self.cycles = start + n;
+        self.cycles = start + spent;
         self.instructions_retired += n;
         out.executed = n;
         // No timer reached LIMIT (budget), so this is what `tick` did per step.
         for t in &mut self.timers {
-            t.count = t.count.wrapping_add(out.executed as u32);
+            t.count = t.count.wrapping_add(spent as u32);
         }
         out
     }
@@ -550,6 +560,8 @@ impl Cpu {
     /// error) and level-2 IRQs use ILINK2 and mask both levels; level-1 IRQs
     /// use ILINK1 and mask level 1. ILINK holds the next PC.
     fn enter_interrupt(&mut self, vector: u8) {
+        // Taking an interrupt flushes the pipeline: no load is outstanding.
+        self.pending_load = NO_LOAD;
         let level2 = vector < 3 || self.aux_irq_lev & (1 << vector) != 0;
         if level2 {
             self.regs[reg::ILINK2] = self.pc;
@@ -580,6 +592,25 @@ impl Cpu {
         let count = self.regs[reg::LP_COUNT];
         self.regs[reg::LP_COUNT] = count.wrapping_sub(1);
         if count != 1 { self.lp_start } else { next }
+    }
+
+    /// Cycles an instruction takes (ARCompact PRM, ARCtangent-A5): one,
+    /// plus one if it reads the register the previous instruction loaded
+    /// ("the pipeline will stall until the register has been loaded"; a
+    /// cache hit returns the next cycle), plus one if it is a taken branch or
+    /// jump whose delay slot is not executed (".nd": the slot is killed),
+    /// plus one more for a taken BRcc/BBIT ("there are two delay slots ...
+    /// the second delay slot is always nullified if the branch is taken").
+    /// Not modelled: multiplier latency, cache misses, memory wait states
+    /// (UNKNOWN; see docs/hardware-research.md, "CPU timing").
+    #[inline(always)]
+    fn pipeline_cost(&mut self, reads: u64, load_dst: u8, taken: bool, delay: bool, compare_branch: bool) -> u64 {
+        if !self.config.pipeline_timing {
+            return 1;
+        }
+        let stall = self.pending_load != NO_LOAD && reads >> self.pending_load & 1 != 0;
+        self.pending_load = load_dst;
+        1 + stall as u64 + (taken && !delay) as u64 + (taken && compare_branch) as u64
     }
 
     fn tick(&mut self, cycles: u64) -> Result<(), CpuError> {

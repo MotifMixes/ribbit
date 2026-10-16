@@ -485,3 +485,42 @@ fn execution_is_deterministic() {
     assert_eq!(a.cpu, b.cpu);
     assert_eq!(a.cpu.cycles, a.cpu.instructions_retired, "placeholder timing: 1 cycle per instruction");
 }
+
+/// Pipeline timing (`CpuConfig::pipeline_timing`, ARCompact PRM costs for the
+/// ARCtangent-A5), on hand-encoded 16-bit instructions (checked against the
+/// decoder here and against Ribbit's disassembler).
+#[test]
+fn pipeline_costs_load_use_and_taken_compare_branch() {
+    let prog: [u16; 5] = [
+        0x8100, // ld_s r0,[r1,0]
+        0x7058, // mov_s r2,r0: reads the register just loaded
+        0xE802, // breq_s r0,0,+4: taken, no delay slot, compare-and-branch
+        0x78E0, // nop_s (skipped)
+        0x78E0, // nop_s
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let costs = |timing: bool| {
+        let mut config = CpuConfig::leapster();
+        config.pipeline_timing = timing;
+        let mut cpu = Cpu::new(config);
+        let mut bus = image_bus(&bytes);
+        cpu.pc = 0x4000_0000;
+        cpu.regs[1] = SP; // RAM, reads as 0
+        let mut out = vec![];
+        for _ in 0..4 {
+            let (before, pc) = (cpu.cycles, cpu.pc);
+            assert!(matches!(cpu.step(&mut bus), Ok(Step::Executed)), "{:?}", cpu);
+            out.push((pc, cpu.last_instr.unwrap().op, cpu.cycles - before));
+        }
+        out
+    };
+    let on = costs(true);
+    assert_eq!(on.iter().map(|c| (c.0, c.2)).collect::<Vec<_>>(), [
+        (0x4000_0000, 1),
+        (0x4000_0002, 2), // load-use stall
+        (0x4000_0004, 3), // killed delay slot + the A5's second slot
+        (0x4000_0008, 1),
+    ]);
+    assert!(matches!(on[0].1, Op::Ld) && matches!(on[1].1, Op::Mov) && matches!(on[2].1, Op::Br(_)), "{on:?}");
+    assert!(costs(false).iter().all(|c| c.2 == 1), "one cycle each without pipeline timing");
+}

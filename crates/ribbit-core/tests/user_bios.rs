@@ -188,8 +188,8 @@ fn v21_zero_straps_reports_missing_lcd_config() {
 use ribbit_core::io::touch::{MameTouchConfig, TouchPress};
 use ribbit_video::{HEIGHT, WIDTH};
 
-/// 96 MHz CPU, one cycle per step.
-const STEPS_PER_MS: u64 = 96_000;
+/// 96 MHz CPU.
+const CYCLES_PER_MS: u64 = 96_000;
 
 /// Raw ADC value for a pixel under MAME's crosshair mapping (0..=0x7F0 across
 /// 160 pixels). The real panel mapping is UNKNOWN; calibration measures it.
@@ -216,9 +216,12 @@ fn lit_pixels(m: &Machine) -> Vec<(usize, usize)> {
 }
 
 fn run_to_ms(m: &mut Machine, ms: u64) {
-    let target = ms * STEPS_PER_MS;
+    let target = ms * CYCLES_PER_MS;
     assert!(m.cpu.cycles <= target);
-    run_clean(m, target - m.cpu.cycles);
+    // A step takes 1 to 4 cycles (pipeline timing): approach the target.
+    while m.cpu.cycles < target {
+        run_clean(m, ((target - m.cpu.cycles) / 4).max(1));
+    }
 }
 
 /// A plus-shaped 9-pixel target centred on (x, y).
@@ -432,10 +435,11 @@ fn idle_skip_is_exact(name: &str) {
     assert_eq!((fast.0, fast.1, fast.2), (slow.0, slow.1, slow.2), "{name}: same state, cycles and instructions");
     // As the window runs it: one frame's worth of steps per call.
     let mut m = Machine::with_straps(fw.clone(), None, STRAPS_SKIP_CALIBRATION);
+    let mut steps = 0;
     for _ in 0..300_000_000 / 1_600_000 {
-        m.run(1_600_000, &Breakpoints::default());
+        steps += m.run(1_600_000, &Breakpoints::default()).steps;
     }
-    m.run(300_000_000 - m.cpu.cycles, &Breakpoints::default());
+    m.run(300_000_000 - steps, &Breakpoints::default());
     assert!(m.idle_skipped_steps() > 100_000_000, "{name}: chunked runs fast-forward too");
     assert_eq!((m.state_digest(), m.cpu.cycles), (slow.0, slow.1), "{name}: chunked runs identical");
 }

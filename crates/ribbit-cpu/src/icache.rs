@@ -244,6 +244,10 @@ pub struct Hot {
     pub stop: bool,
     /// A branch, jump or LP: unpredictable in a delay slot.
     pub branchy: bool,
+    /// Pipeline timing (`Instr::reg_reads`, `load_dst`, `is_compare_branch`).
+    pub reads: u64,
+    pub load_dst: u8,
+    pub compare_branch: bool,
 }
 
 impl Hot {
@@ -256,6 +260,9 @@ impl Hot {
             delay: i.delay,
             stop: i.op.block_unsafe() || (matches!(i.op, Op::J | Op::Jl) && i.set_flags),
             branchy: i.is_branch() || matches!(i.op, Op::Lp),
+            reads: i.reg_reads(),
+            load_dst: i.load_dst(),
+            compare_branch: i.is_compare_branch(),
         }
     }
 }
@@ -403,6 +410,9 @@ const EMPTY: Hot = Hot {
     delay: false,
     stop: false,
     branchy: false,
+    reads: 0,
+    load_dst: crate::isa::NO_LOAD,
+    compare_branch: false,
 };
 
 #[derive(Clone, Default)]

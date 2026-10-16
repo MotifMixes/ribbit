@@ -46,7 +46,7 @@ fn main() {
         let start = Instant::now();
         let end = m.cpu.cycles + 16 * per_ms;
         while m.cpu.cycles < end {
-            m.run(end - m.cpu.cycles, &Breakpoints::default());
+            m.run_cycles(end - m.cpu.cycles, &Breakpoints::default());
         }
         emu_t += start.elapsed();
         m.render_frame(&mut lcd);

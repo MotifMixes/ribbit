@@ -78,7 +78,7 @@ Ribbit follows the PRM. The test fails on any disagreement outside these classes
 | Barrel shift by 0 | C unchanged | PRM silent. MAME clears C for ROR only. **HYPOTHESIS** |
 | Misaligned access | Low address bits ignored (bus) | MAME, tested on a Leapster 2 only |
 | AUX_MACMODE bits (CS=1, S2=5, S1=8) | From MAME | PRM figure not legible. **HYPOTHESIS** |
-| Cycle timing | 1 cycle per step (instruction, interrupt entry, sleep) | Placeholder, not a model of the A5 pipeline |
+| Cycle timing | PRM pipeline costs (load-use +1, taken branch without .d +1, taken BRcc/BBIT +1 more); interrupt entry and sleep 1 cycle | Partial: memory system (caches, line fills, wait states, load latency > 1) not modelled; see hardware-research.md "CPU timing" |
 
 ## XY memory extension
 

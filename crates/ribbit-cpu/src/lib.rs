@@ -98,6 +98,18 @@ pub struct CpuConfig {
     /// XY memory / DSP extension (r32-r56, aux 0x80-0x9F). Present on the
     /// Leapster: its RTOS saves and restores r32-r59 per task.
     pub xy_extension: bool,
+    /// Charge the pipeline costs the PRM documents for the ARCtangent-A5
+    /// (`Cpu::pipeline_cost`); otherwise every instruction is one cycle.
+    #[serde(default = "pipeline_timing_default")]
+    pub pipeline_timing: bool,
+}
+
+fn pipeline_timing_default() -> bool {
+    true
+}
+
+fn no_load() -> u8 {
+    isa::NO_LOAD
 }
 
 impl CpuConfig {
@@ -108,6 +120,7 @@ impl CpuConfig {
             mmid: MmidMode::LowLeapster,
             illegal: IllegalPolicy::Stop,
             xy_extension: true,
+            pipeline_timing: true,
         }
     }
 }
@@ -251,6 +264,10 @@ pub struct Cpu {
     pub sleeping: bool,
     pub cycles: u64,
     pub instructions_retired: u64,
+    /// The register the previous instruction loaded (`isa::NO_LOAD` if
+    /// none): reading it next stalls (pipeline timing).
+    #[serde(default = "no_load")]
+    pub pending_load: u8,
     pub config: CpuConfig,
     #[serde(skip)]
     pub diag: Diagnostics,
@@ -296,6 +313,7 @@ impl Cpu {
             sleeping: false,
             cycles: 0,
             instructions_retired: 0,
+            pending_load: isa::NO_LOAD,
             config,
             diag: Diagnostics::default(),
             xy: None,
@@ -337,6 +355,7 @@ impl Cpu {
             sleeping: false,
             cycles: 0,
             instructions_retired: 0,
+            pending_load: isa::NO_LOAD,
             xy: config.xy_extension.then(xy::XyExtension::default),
             icache,
             last_instr: None,

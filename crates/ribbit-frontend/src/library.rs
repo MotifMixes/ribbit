@@ -395,10 +395,8 @@ impl Capture {
         let target = per_ms * ms;
         while self.m.cpu.cycles < target {
             let chunk = (self.m.cpu.cycles + per_ms * HD_DRAIN_MS).min(target);
-            while self.m.cpu.cycles < chunk {
-                if self.m.run(chunk - self.m.cpu.cycles, &none).stop != ribbit_core::StopReason::StepLimit {
-                    return false;
-                }
+            if self.m.run_cycles(chunk - self.m.cpu.cycles, &none).stop != ribbit_core::StopReason::StepLimit {
+                return false;
             }
             self.drain();
         }

@@ -115,13 +115,16 @@ impl RawState {
 }
 
 const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
-pub const STATE_VERSION: u32 = 1;
+/// Bumped whenever the machine state's layout changes (bincode is
+/// positional): 2 = UART transmit timing (divisor, busy) and CPU pipeline
+/// timing (pending load, config flag).
+pub const STATE_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error("not a Ribbit save state")]
     NotAState,
-    #[error("save state version {0} is not supported (this build reads version {STATE_VERSION})")]
+    #[error("save state version {0} is from another Ribbit version (this build reads version {STATE_VERSION})")]
     Version(u32),
     #[error("this save state is for a different BIOS or cartridge")]
     WrongImages,
@@ -608,6 +611,30 @@ impl Machine {
     /// Runs for at most `max_steps` CPU steps, stopping early at a breakpoint
     /// (checked before every step after the first) or when the CPU halts or
     /// errors. Deterministic: identical inputs give identical results.
+    /// Runs until at least `cycles` CPU cycles have passed (the last
+    /// instruction may end a few cycles later: one can take several), or
+    /// until a breakpoint or a stop. Emulated time, unlike `run`'s steps.
+    pub fn run_cycles(&mut self, cycles: u64, breakpoints: &Breakpoints) -> RunReport {
+        let target = self.cpu.cycles + cycles;
+        let mut total =
+            RunReport { steps: 0, instructions: 0, interrupts: 0, pc: self.cpu.pc, stop: StopReason::StepLimit };
+        while self.cpu.cycles < target {
+            // A step is at most 4 cycles, so this never passes the target by
+            // more than one instruction.
+            let r = self.run(((target - self.cpu.cycles) / 4).max(1), breakpoints);
+            total.steps += r.steps;
+            total.instructions += r.instructions;
+            total.interrupts += r.interrupts;
+            total.pc = r.pc;
+            let done = r.stop != StopReason::StepLimit;
+            total.stop = r.stop;
+            if done {
+                break;
+            }
+        }
+        total
+    }
+
     pub fn run(&mut self, max_steps: u64, breakpoints: &Breakpoints) -> RunReport {
         let mut report =
             RunReport { steps: 0, instructions: 0, interrupts: 0, pc: self.cpu.pc, stop: StopReason::StepLimit };
@@ -855,11 +882,12 @@ impl Machine {
                 return;
             }
             self.idle.backoff.remove(&p.head);
-            // Every step (instruction, interrupt entry, sleep) is one cycle,
-            // so the absolute cycle count measures the iteration even when
-            // the probe spans several `run` calls.
+            // One iteration: its cycles (absolute, so correct even when the
+            // probe spans several `run` calls) and its steps (instructions,
+            // interrupt entries, sleeps), which differ now that an instruction
+            // can take several cycles (pipeline timing).
             let cycles = self.cpu.cycles - p.cycles;
-            let steps = cycles;
+            let steps = p.steps;
             let instructions = self.cpu.instructions_retired - p.retired;
             if cycles == 0 || steps == 0 {
                 return;
@@ -1212,7 +1240,9 @@ mod tests {
         assert!(m.io.irq_outputs().any(|(line, level)| line == io::intc::ADC_IRQ_LINE && level));
         m.io.intc.write(io::intc::FLAGS_ADDR, io::intc::FLAG_ADC);
         assert!(!m.io.irq_outputs().any(|(line, level)| line == io::intc::ADC_IRQ_LINE && level), "ack drops it");
-        // 1/60 s = 1,600,002 cycles later (96 MHz, 1 cycle per step): 12 samples.
+        // 1/60 s = 1,600,002 cycles later (96 MHz; one cycle per step without
+        // pipeline timing, under which this `b .` costs two): 12 samples.
+        m.cpu.config.pipeline_timing = false;
         let r = m.run(1_600_002, &Breakpoints::default());
         assert_eq!(r.stop, StopReason::StepLimit);
         assert_eq!(m.io.adc.fifo.len(), io::touch::INIT_SAMPLES + 12);

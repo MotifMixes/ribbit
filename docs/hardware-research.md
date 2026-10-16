@@ -889,3 +889,27 @@ Needed next: the same measurement in Ribbit's Leapster TV mode, and a handheld r
   BIOS's clock function having an explicit 48 MHz mode (aux 0x56 bits 2-3 = 4). The board's actual aux 0x56
   value is UNKNOWN. To separate A from B: a second CPU-bound scene with a different memory profile, a handheld
   (non-TV) reference, or the real aux 0x56 value read on hardware.
+
+### Correction, and pipeline timing in Ribbit (2026-10-15, later)
+
+* **Hypothesis B is not implausible.** Nathan Farlow's leapster-emu (S10, below) models the memory system in
+  detail. A cartridge line fill costs roughly 11 + 63 cycles plus about 144 cycles of bus strobes at the default
+  chip-select setting. A first SDRAM data word from a line fill costs about 15 + 62. Loads land about 3 cycles
+  after the access. With those costs, Sonic X's measured mix gives a CPI of roughly 2.3-2.5 at 96 MHz, which
+  matches the video. Both A and B now fit the one measurement; B fits a detailed, apparently trace-derived
+  model. Ribbit keeps 96 MHz (the nominal clock; S10 also uses 96 MHz with timers at 1/6) and treats the memory
+  system as the open item.
+* **Implemented**: `CpuConfig::pipeline_timing` (on for the Leapster) charges the PRM costs above (load-use +1,
+  taken branch without `.d` +1, taken BRcc/BBIT +1 more). It is exact in both the single-step and block
+  interpreters, with idle skipping and with save states (tests `pipeline_costs_load_use_and_taken_compare_branch`,
+  `v15/v21_idle_skip_is_exact`, `v15/v21_save_state_is_exact`). Sonic X (handheld, running right): 49 -> 39
+  frames/s. Real hardware is about 18-20. The remaining factor (~2x) is memory: cache misses, line fills,
+  cartridge bus strobes, load latency beyond one cycle. None of it is modelled yet.
+* Save-state format version 2 (UART timing and pipeline state). Version 1 states are refused with a clear
+  message.
+* `Machine::run_cycles` runs for emulated time. The app's pacing, library art capture and research tools use
+  it, because one step no longer equals one cycle.
+
+| # | Source | License | Use in Ribbit |
+|---|---|---|---|
+| S10 | Nathan Farlow, `leapster-emu` (github.com/nathanfarlow/leapster-emu, first seen 2026-10-15; C++, "a small, accurate Leapster emulator", "coming soon: tests against hardware traces") | **None stated** (all rights reserved) | Read for facts only (timing structure and magnitudes, cited above). No code or tables copied. Ask the author before using more |

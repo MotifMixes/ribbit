@@ -356,6 +356,9 @@ pub enum Dst {
     Discard,
 }
 
+/// `Instr::load_dst` of an instruction that loads nothing.
+pub const NO_LOAD: u8 = 0xFF;
+
 /// A fully decoded instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instr {
@@ -392,6 +395,31 @@ impl Instr {
 
     pub fn is_branch(&self) -> bool {
         matches!(self.op, Op::B | Op::Bl | Op::Br(_) | Op::Bbit0 | Op::Bbit1 | Op::J | Op::Jl)
+    }
+
+    /// Compare-and-branch (BRcc, BBIT0/1): on the ARCtangent-A5 these branch
+    /// a cycle later than other branches (PRM, "Branch on Compare").
+    pub fn is_compare_branch(&self) -> bool {
+        matches!(self.op, Op::Br(_) | Op::Bbit0 | Op::Bbit1)
+    }
+
+    /// Core registers (r0-r63) the instruction reads, as a bit mask: its
+    /// register operands, and the stack pointer for PUSH_S/POP_S.
+    pub fn reg_reads(&self) -> u64 {
+        let bit = |s: Src| match s {
+            Src::Reg(r) if r < 64 => 1u64 << r,
+            _ => 0,
+        };
+        let sp = if matches!(self.op, Op::Push | Op::Pop) { 1 << 28 } else { 0 };
+        bit(self.src1) | bit(self.src2) | bit(self.data) | sp
+    }
+
+    /// The register a load (LD, POP_S) writes, or `NO_LOAD`.
+    pub fn load_dst(&self) -> u8 {
+        match (self.op, self.dst) {
+            (Op::Ld | Op::Pop, Dst::Reg(r)) if r < 64 => r,
+            _ => NO_LOAD,
+        }
     }
 }
 

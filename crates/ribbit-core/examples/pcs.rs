@@ -49,7 +49,7 @@ fn main() {
     let ms = m.clock.cpu_hz / 1000;
     let target = from.parse::<u64>().unwrap() * ms;
     while m.cpu.cycles < target {
-        m.run(target - m.cpu.cycles, &none);
+        m.run_cycles(target - m.cpu.cycles, &none);
     }
     m.idle_skip = false;
     let log_mmio = std::env::var_os("RIBBIT_MMIO").is_some();

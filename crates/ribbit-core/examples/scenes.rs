@@ -149,7 +149,7 @@ fn main() {
                     m.run(1, &Breakpoints::default()); // step off the last hit
                 }
                 while m.cpu.pc != pc && m.cpu.cycles < end {
-                    m.run(end - m.cpu.cycles, &bp);
+                    m.run_cycles(end - m.cpu.cycles, &bp);
                 }
                 println!("break {pc:08x} at {} ms: hit={}", m.cpu.cycles / (m.clock.cpu_hz / 1000), m.cpu.pc == pc);
                 for (i, r) in m.cpu.regs.iter().enumerate().take(32) {
@@ -193,7 +193,7 @@ fn main() {
                     if m.cpu.pc == ctor || m.cpu.pc == scan {
                         m.run(1, &Breakpoints::default());
                     }
-                    m.run(end - m.cpu.cycles, &bp);
+                    m.run_cycles(end - m.cpu.cycles, &bp);
                     let w = |a: u32| (0..4).fold(0u32, |v, i| v | (m.bus.peek8(a + i).unwrap_or(0) as u32) << (8 * i)) as i32;
                     let t = m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64;
                     if m.cpu.pc == ctor {
@@ -223,7 +223,7 @@ fn main() {
                     if m.cpu.pc == pc {
                         m.run(1, &Breakpoints::default());
                     }
-                    m.run(end - m.cpu.cycles, &bp);
+                    m.run_cycles(end - m.cpu.cycles, &bp);
                     if m.cpu.pc == pc {
                         hits += 1;
                         print!("{:10.3} ms", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64);
@@ -257,7 +257,7 @@ fn main() {
                     if m.cpu.pc == pc {
                         m.run(1, &Breakpoints::default());
                     }
-                    m.run(end - m.cpu.cycles, &bp);
+                    m.run_cycles(end - m.cpu.cycles, &bp);
                     if m.cpu.pc != pc {
                         continue;
                     }
@@ -384,7 +384,7 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
         left -= chunk;
         let skipped0 = m.idle_skipped_steps();
         let t = Instant::now();
-        let r = m.run(chunk * per_ms, &Breakpoints::default());
+        let r = m.run_cycles(chunk * per_ms, &Breakpoints::default());
         let wall = t.elapsed().as_secs_f64();
         assert_eq!(r.stop, ribbit_core::StopReason::StepLimit, "{r:?}");
         let speed = 100.0 * (chunk as f64 / 1000.0) / wall;

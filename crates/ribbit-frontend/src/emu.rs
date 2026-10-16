@@ -178,7 +178,7 @@ fn run(s: &Shared) {
         let chunk = (CHUNK.as_secs_f64() * hz) as u64;
         // Calibrating automatically: hidden, so as fast as possible.
         let calibrating = control.auto_calibrate && calibrate.busy(&m);
-        let steps = if control.speed.is_finite() && !calibrating {
+        let cycles = if control.speed.is_finite() && !calibrating {
             let (origin, base) = *pace.get_or_insert((now, m.cpu.cycles));
             let target = base + (now.duration_since(origin).as_secs_f64() * hz * control.speed) as u64;
             let behind = target.saturating_sub(m.cpu.cycles);
@@ -190,7 +190,7 @@ fn run(s: &Shared) {
             pace = None;
             chunk
         };
-        if steps < chunk / 4 {
+        if cycles < chunk / 4 {
             // Ahead of real time: wait for the next chunk to be due.
             drop(m);
             std::thread::sleep(Duration::from_micros(500));
@@ -200,7 +200,7 @@ fn run(s: &Shared) {
         if gap > Duration::from_millis(12) {
             tracing::debug!(target: "ribbit::emu", gap_ms = gap.as_secs_f64() * 1e3, "emulation thread stalled");
         }
-        let r = m.run(steps, &none);
+        let r = m.run_cycles(cycles, &none);
         last_chunk = Instant::now();
         if r.stop != StopReason::StepLimit {
             tracing::warn!(target: "ribbit::boot", ?r, "emulation stopped");
