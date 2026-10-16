@@ -342,10 +342,18 @@ impl Bus {
         (enabled && self.pending_irq() != 0, enabled && self.pending_fiq() != 0)
     }
 
-    /// A video frame: the frame interrupt's bits 0 and 11 (which edge each
-    /// is, and their spacing, are UNKNOWN).
+    /// A video field: the frame interrupt's bit 0, and bit 11 every second
+    /// field (see below).
     pub(crate) fn frame(&mut self) {
-        self.video_status |= 0x801;
+        // Bit 0 comes every field (60 a second) and bit 11, which counts
+        // frames shown and paces the kernel's main loop, every second one:
+        // the TV picture is interlaced, 30 whole frames a second. With bit
+        // 11 every field the start-up screens ran twice as fast as a
+        // recording of a real unit (warning 2 s against 4, the LeapFrog logo
+        // 1 s against 3, the mat 6 s against 11); with it every second field
+        // they match within a second. Which field is first is UNKNOWN.
+        let field = self.now / FRAME;
+        self.video_status |= if field % 2 == 1 { 0x801 } else { 0x001 };
         self.lines_dirty = true;
     }
 

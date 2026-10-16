@@ -483,9 +483,13 @@ UNVERIFIED on hardware.
   kernel enables 0xC31. In the 16-bit chip's terms, bit 0 is vertical blank,
   bits 4/5 text and sprite under-run, bit 10 frame-buffer under-run and bit 11
   TV frame end. The handler (line 27) programs the next frame on bit 0 and
-  counts frames shown on bit 11, which the main loop waits on. The research
-  tool raises bits 0 and 11 together once per frame; their real timing is
-  UNKNOWN.
+  counts frames shown on bit 11, which the main loop waits on. Ribbit raises
+  bit 0 every field (60 a second) and bit 11 every second field: the picture
+  is interlaced, 30 whole frames a second. With bit 11 every field the
+  start-up screens ran twice as fast as a recording of a real unit (warning
+  2 s against 4, LeapFrog logo 1 s against 3, the mat 6 s against 11) and
+  the logos' animations were cut short; every second field they match
+  within a second. Their exact timing within the field is UNKNOWN.
 - **Video DMA (+0x1C0/+0x1C4/+0x1C8):** each frame the kernel copies its
   palette (0x400 words from 0x001BE540) and sprite list (0x31F words from
   0x002D314C) into the chip. Writing the count starts it; it reads 0 when done.
