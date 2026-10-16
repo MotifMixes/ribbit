@@ -1017,21 +1017,30 @@ Result: with a cartridge it shows the seizure warning, then runs the cartridge (
      "Bad CSD_STRUCT number"). Sector I/O: CMD17 read, CMD24 write. Volumes are formatted FAT ("MSDOS5.0", labels
      "System Sd", "Leapster SD"). This is the path for the planned virtual SD card.
    * Model (2026-10-16, io/sd.rs): every 0.6/B5 unit has a card in this slot. Without one the base system (no
-     cartridge) stops at "SD Card Error: Not Inserted. Please call Customer Service". The card is a 128 MiB
-     standard-capacity card (size UNVERIFIED), commands complete at once, and a command the card does not answer
-     leaves status bit 0 clear: after every access the BIOS deselects with CMD7 and RCA 0 (0x400C_F12C), which
+     cartridge) stops at "SD Card Error: Not Inserted. Please call Customer Service". The card is a 1 GiB
+     standard-capacity card (size HYPOTHESIS, see below), commands complete at once, and a command the card does not
+     answer leaves status bit 0 clear: after every access the BIOS deselects with CMD7 and RCA 0 (0x400C_F12C), which
      cards do not answer, and with bit 0 set for it the driver gives the card up. The data-type bits: bit 0 = read,
-     bit 1 = write (CMD24 is 0x0A). It starts formatted (io/fat.rs): the FAT mount (0x400D_46E4) needs a partition
-     table whose first entry is active (0x80) or a boot sector at sector 0; 0.6 never formats the SD volume (only the
-     volatile RAM disk). The boot sector copies what B5's own formatter writes (media 0xF0, 8 sectors/track, 16
-     heads, serial 0x1BAD_CAFE, 2 FATs of 256 sectors, 512 root entries, label "Leapster SD").
-   * Result (0.6): with no cartridge the base system runs its first-time setup (country, name, Sign In) and the home
-     screen, and writes its profile log to the card ("Writing Log Header for User: 0"). The frontend saves the card's
-     written sectors as `sdcard-<bios crc>.img` (io/sparse.rs format; delete it for a freshly formatted card). Research: `scenes` commands `sdlog`, `sdsector N`, the FAT library's
-     logger 0x400D_3854 on B5 (`logtrace 400d3854 r0 MS`).
-   * Open (B5): B5 reformats the card at boot (even its own format) and then fails to create `b:\Leapster` ("No free
-     directory entry for new directory": its free-cluster search 0x400D_5250 returns 0 on an empty FAT); cause not
-     found yet. Its games run.
+     bit 1 = write (CMD24 is 0x0A). It starts formatted (io/fat.rs): 0.6 never formats the SD volume (only the
+     volatile RAM disk). The volume copies exactly what B5 writes when it formats a blank 1 GiB card: FAT32, no
+     partition table (both BIOSes mount a boot sector at sector 0: "There is no partition table, treat it as boot
+     sector"), 8 sectors per cluster, 32 reserved sectors, 2 FATs of 2046 sectors, FSInfo at 1, backup at 6, media
+     0xF0, 63 sectors/track, 255 heads, serial 0x1BAD_CAFE, label "Leapster SD".
+   * Card size (2026-10-16, VERIFIED-FW reasoning, size itself HYPOTHESIS). B5 checks at boot whether `b:\Leapster`
+     exists (0x400C_E8C4, "Buffer is ... b:\Leapster"); if not, it formats the SD volume (0x400C_E920) with 2 FATs,
+     **0 root directory entries**, serial 0x1BAD_CAFE and label "Leapster SD" (the RAM disk gets 256 entries and
+     serial 0x8BAD_BEEF). Its formatter (0x400D_2910) picks FAT12 below 8 MiB, FAT16 below 512 MiB and FAT32 above
+     (from the volume's size in KiB, 0x400D_295C); 0 root entries is valid only for FAT32. On the earlier 128 MiB card
+     B5 therefore made a FAT16 volume with no root directory, and its mkdir failed ("No free directory entryfor new
+     directory"). So the real card is larger than 512 MiB; 1 GiB is the size modelled. With it B5 formats FAT32,
+     creates `b:\Leapster` and runs its first-time setup like 0.6. (B5's FAT12/16 formatter also clears only the
+     first FAT's sectors twice, 0x400D_236A, leaving the second FAT's rest as found: a firmware quirk, harmless on
+     FAT32.)
+   * Result (0.6 and B5): with no cartridge the base system runs its first-time setup (country, name, Sign In) and
+     the home screen, and writes its profile log to the card ("Writing Log Header for User: 0"). The frontend saves
+     the card's written sectors as `sdcard-<bios crc>.img` (io/sparse.rs format; delete it for a freshly formatted
+     card). Research: `scenes` commands `sdlog`, `sdsector N`, the FAT library's logger 0x400D_3854 on B5
+     (`logtrace 400d3854 r0 MS`).
 5. **On-chip RAM at 0x0400_0000** (map::SRAM_BASE). The USB driver (strings "UsbMPI", "USB Device Init OK") creates
    its MQX memory pool with the constants `1 << 26` and `1 << 13` (0x400B_E964): 8 KiB at 0x0400_0000. Without it
    the pool header read 0, allocations returned 0 and the driver wrote its endpoint structures through null

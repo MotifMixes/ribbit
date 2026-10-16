@@ -1,95 +1,91 @@
-//! A freshly formatted SD card: a partition table, one FAT16 partition, empty root.
+//! A freshly formatted SD card: one FAT32 volume, as the Leapster 2's own
+//! firmware formats it.
 //!
-//! Why: the Leapster 2 BIOS (0.6) never formats its SD volume. Its FAT
-//! start-up (0x400D_0680 onwards) formats only volumes whose descriptor marks
-//! them volatile (the RAM disk, "Leapster RD"); for the SD volume it prints
-//! "Fat Volume %s (%s) not inserted" or uses it as found. On a blank card its
-//! base system then fails ("Failed trying to mkdir 'b:\Leapster'"), so real
-//! units ship with a formatted card. Layout: VERIFIED-FW, the BIOS's FAT mount
-//! (0x400D_46E4, messages at 0x4013_80D4-0x4013_8394) requires a partition
-//! table in sector 0 whose first entry is marked active (boot flag 0x80, read
-//! at 0x400D_4800) with a FAT type (1, 4, 6, 0x0B, 0x0C or 0x0E, checked at
-//! 0x400D_4684); a volume starting at sector 0 ("Partition table jump code or
-//! media type is not valid") or an inactive entry is not mounted. HYPOTHESIS:
-//! FAT16 with 2 KiB clusters, the partition at sector 32, and the BIOS's own
-//! label for this volume, "Leapster SD" (0x4013_6884). The factory card's
-//! contents are UNKNOWN.
+//! Why: the Leapster 2 BIOS 0.6 never formats its SD volume. Its FAT start-up
+//! (0x400D_0680 onwards) formats only volumes whose descriptor marks them
+//! volatile (the RAM disk, "Leapster RD"); for the SD volume it prints "Fat
+//! Volume %s (%s) not inserted" or uses it as found. On a blank card its base
+//! system then fails ("Failed trying to mkdir 'b:\Leapster'"), so real units
+//! ship with a formatted card.
+//!
+//! The layout copies what the Connected BIOS B5 writes to a blank 1 GiB card
+//! (VERIFIED-FW, captured with `scenes sdsector`; its formatter is
+//! 0x400D_243C, called from 0x400C_E920 with the SD volume's parameters: 2
+//! FATs, 0 root entries, serial 0x1BAD_CAFE, label "Leapster SD"). B5 picks
+//! FAT12 below 8 MiB, FAT16 below 512 MiB and FAT32 above (0x400D_295C); its
+//! "0 root entries" is valid only for FAT32, which is why the card is taken to
+//! be larger than 512 MiB (sd.rs). No partition table: the volume starts at
+//! sector 0, which both BIOSes mount ("There is no partition table, treat it
+//! as boot sector"). The factory card's contents are UNKNOWN.
 
-/// Sector of the partition's boot sector (HYPOTHESIS, a usual alignment).
-pub const PARTITION_START: u32 = 32;
 const SECTOR: usize = 512;
-const SECTORS_PER_CLUSTER: u32 = 4;
-const RESERVED: u32 = 1;
+const SECTORS_PER_CLUSTER: u32 = 8;
+const RESERVED: u32 = 32;
 const FATS: u32 = 2;
-const ROOT_ENTRIES: u32 = 512;
+const FSINFO: u32 = 1;
+const BACKUP_BOOT: u32 = 6;
+const ROOT_CLUSTER: u32 = 2;
 const LABEL: &[u8; 11] = b"Leapster SD";
 const MEDIA: u8 = 0xF0;
 
+/// FAT size in sectors, by the usual FAT32 formula (B5 gets 2046 for 1 GiB).
+fn fat_sectors(total: u32) -> u32 {
+    let per = (256 * SECTORS_PER_CLUSTER + FATS) / 2;
+    (total - RESERVED).div_ceil(per)
+}
+
+fn signed() -> Vec<u8> {
+    let mut s = vec![0u8; SECTOR];
+    s[510] = 0x55;
+    s[511] = 0xAA;
+    s
+}
+
 /// The non-zero sectors of a card of `total` sectors, freshly formatted.
-pub fn format_fat16(total: u32) -> Vec<(u32, Vec<u8>)> {
-    let part = total - PARTITION_START;
-    let root_sectors = ROOT_ENTRIES * 32 / SECTOR as u32;
-    // FAT size: enough 16-bit entries for every cluster that fits after it.
-    let mut fat = 1;
-    loop {
-        let clusters = (part - RESERVED - FATS * fat - root_sectors) / SECTORS_PER_CLUSTER;
-        let need = ((clusters + 2) * 2).div_ceil(SECTOR as u32);
-        if need <= fat {
-            break;
-        }
-        fat = need;
-    }
-    let mut out = Vec::new();
-
-    let mut mbr = vec![0u8; SECTOR];
-    let entry = &mut mbr[0x1BE..0x1CE];
-    entry[0] = 0x80; // active: the BIOS mounts only an active partition
-    entry[4] = 0x06; // FAT16 (> 32 MiB)
-    // CHS fields unused (LBA).
-    entry[1..4].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
-    entry[5..8].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
-    entry[8..12].copy_from_slice(&PARTITION_START.to_le_bytes());
-    entry[12..16].copy_from_slice(&part.to_le_bytes());
-    mbr[510] = 0x55;
-    mbr[511] = 0xAA;
-    out.push((0, mbr));
-
-    let mut b = vec![0u8; SECTOR];
-    b[0..3].copy_from_slice(&[0xEB, 0x3C, 0x90]);
+pub fn format_fat32(total: u32) -> Vec<(u32, Vec<u8>)> {
+    let fat = fat_sectors(total);
+    let mut b = signed();
+    b[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
     b[3..11].copy_from_slice(b"MSDOS5.0");
     b[11..13].copy_from_slice(&(SECTOR as u16).to_le_bytes());
     b[13] = SECTORS_PER_CLUSTER as u8;
     b[14..16].copy_from_slice(&(RESERVED as u16).to_le_bytes());
     b[16] = FATS as u8;
-    b[17..19].copy_from_slice(&(ROOT_ENTRIES as u16).to_le_bytes());
-    // Total sectors in the 32-bit field (more than 65535).
     b[21] = MEDIA;
-    b[22..24].copy_from_slice(&(fat as u16).to_le_bytes());
-    b[24..26].copy_from_slice(&8u16.to_le_bytes()); // sectors per track
-    b[26..28].copy_from_slice(&16u16.to_le_bytes()); // heads
-    b[28..32].copy_from_slice(&PARTITION_START.to_le_bytes());
-    b[32..36].copy_from_slice(&part.to_le_bytes());
-    b[36] = 0x80; // drive number
-    b[38] = 0x29; // extended boot signature
-    b[39..43].copy_from_slice(&0x1BAD_CAFEu32.to_le_bytes()); // serial
-    b[43..54].copy_from_slice(LABEL);
-    b[54..62].copy_from_slice(b"FAT16   ");
-    b[510] = 0x55;
-    b[511] = 0xAA;
-    out.push((PARTITION_START, b));
+    b[24..26].copy_from_slice(&63u16.to_le_bytes()); // sectors per track
+    b[26..28].copy_from_slice(&255u16.to_le_bytes()); // heads
+    b[32..36].copy_from_slice(&total.to_le_bytes());
+    b[36..40].copy_from_slice(&fat.to_le_bytes());
+    b[44..48].copy_from_slice(&ROOT_CLUSTER.to_le_bytes());
+    b[48..50].copy_from_slice(&(FSINFO as u16).to_le_bytes());
+    b[50..52].copy_from_slice(&(BACKUP_BOOT as u16).to_le_bytes());
+    b[64] = 0x80; // drive number
+    b[66] = 0x29; // extended boot signature
+    b[67..71].copy_from_slice(&0x1BAD_CAFEu32.to_le_bytes()); // serial
+    b[71..82].copy_from_slice(LABEL);
+    b[82..90].copy_from_slice(b"FAT32   ");
 
-    // Each FAT starts with the media byte and an end-of-chain entry.
+    // FSInfo: free count unknown (B5 writes 0xFFFFFFFF), next free cluster 3.
+    let mut info = signed();
+    info[0..4].copy_from_slice(b"RRaA");
+    info[484..488].copy_from_slice(b"rrAa");
+    info[488..492].copy_from_slice(&u32::MAX.to_le_bytes());
+    info[492..496].copy_from_slice(&3u32.to_le_bytes());
+
+    let mut out = Vec::new();
+    for base in [0, BACKUP_BOOT] {
+        out.push((base, b.clone()));
+        out.push((base + FSINFO, info.clone()));
+        out.push((base + 2, signed()));
+    }
+    // Each FAT: media entry, end-of-chain entry, and the root directory's
+    // cluster ended (B5 writes 0xFFFFFFFF; its allocator later 0x0FFFFFFF).
     for copy in 0..FATS {
         let mut f = vec![0u8; SECTOR];
-        f[0..4].copy_from_slice(&[MEDIA, 0xFF, 0xFF, 0xFF]);
-        out.push((PARTITION_START + RESERVED + copy * fat, f));
+        f[0..12].copy_from_slice(&[MEDIA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        out.push((RESERVED + copy * fat, f));
     }
-
-    // Root directory: the volume label.
-    let mut root = vec![0u8; SECTOR];
-    root[0..11].copy_from_slice(LABEL);
-    root[11] = 0x08;
-    out.push((PARTITION_START + RESERVED + FATS * fat, root));
+    // The root directory's cluster starts empty (no volume label entry).
     out
 }
 
@@ -98,23 +94,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_128_mib_card_gets_a_valid_fat16_volume() {
-        let total = 0x4_0000;
-        let s = format_fat16(total);
+    fn a_1_gib_card_gets_the_volume_b5_formats() {
+        let total = 0x20_0000;
+        let s = format_fat32(total);
         let sec = |n: u32| s.iter().find(|(k, _)| *k == n).map(|(_, v)| v.clone()).unwrap();
-        let mbr = sec(0);
-        assert_eq!((mbr[0x1BE], mbr[0x1C2], &mbr[510..]), (0x80, 0x06, &[0x55, 0xAA][..]));
-        let b = sec(PARTITION_START);
+        let b = sec(0);
+        // B5's boot sector, captured from a blank 1 GiB card (first 0x5A bytes).
+        let b5: [u8; 0x5A] = [
+            0xeb, 0x58, 0x90, 0x4d, 0x53, 0x44, 0x4f, 0x53, 0x35, 0x2e, 0x30, 0x00, 0x02, 0x08, 0x20, 0x00, //
+            0x02, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x3f, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x20, 0x00, 0xfe, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, //
+            0x01, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x80, 0x00, 0x29, 0xfe, 0xca, 0xad, 0x1b, 0x4c, 0x65, 0x61, 0x70, 0x73, 0x74, 0x65, 0x72, 0x20, //
+            0x53, 0x44, 0x46, 0x41, 0x54, 0x33, 0x32, 0x20, 0x20, 0x20,
+        ];
+        assert_eq!(&b[..0x5A], &b5[..]);
+        assert_eq!(&b[0x5A..510], &[0u8; 510 - 0x5A][..]);
         assert_eq!(&b[510..], &[0x55, 0xAA][..]);
-        let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as u32;
-        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
-        let fat = u16_at(22);
-        let data = RESERVED + FATS * fat + ROOT_ENTRIES * 32 / 512;
-        let clusters = (u32_at(32) - data) / b[13] as u32;
-        assert!((4085..65525).contains(&clusters), "FAT16 by cluster count: {clusters}");
-        assert!(fat * 256 >= clusters + 2, "the FAT covers every cluster");
-        assert_eq!(&b[43..54], b"Leapster SD");
-        assert_eq!(sec(PARTITION_START + 1)[..4], [0xF0, 0xFF, 0xFF, 0xFF]);
-        assert_eq!((fat, &b[39..43]), (256, &[0xFE, 0xCA, 0xAD, 0x1B][..]), "as the B5 BIOS formats it");
+        assert_eq!(sec(6), b, "backup boot sector");
+        assert_eq!(&sec(1)[484..496], &[0x72, 0x72, 0x41, 0x61, 0xff, 0xff, 0xff, 0xff, 3, 0, 0, 0][..]);
+        let fat = 2046;
+        assert_eq!(sec(RESERVED)[..12], sec(RESERVED + fat)[..12]);
+        assert_eq!(sec(RESERVED)[..4], [0xF0, 0xFF, 0xFF, 0xFF]);
+        let clusters = (total - RESERVED - FATS * fat) / SECTORS_PER_CLUSTER;
+        assert!(clusters >= 65525 && fat * 128 >= clusters + 2, "FAT32 by cluster count, FAT covers them");
     }
 }

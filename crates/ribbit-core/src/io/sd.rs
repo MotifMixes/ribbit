@@ -34,9 +34,13 @@
 //! CMD17 (read 512 bytes), CMD24 (write 512 bytes).
 //!
 //! Model: commands complete at once (timing UNKNOWN) and the card is never
-//! busy. The card is a 128 MiB standard-capacity SD card (UNVERIFIED: the size
-//! of a real Leapster 2's card is not known) that starts freshly formatted
-//! (fat.rs; the BIOS never formats it) and stores written sectors. Response CRCs are
+//! busy. The card is a 1 GiB standard-capacity SD card that starts freshly
+//! formatted (fat.rs; 0.6 never formats it) and stores written sectors. Size:
+//! HYPOTHESIS. The real card's size is not known, but it must be over 512
+//! MiB: B5 formats the SD volume with 0 root directory entries (0x400C_E920),
+//! valid only for FAT32, which it picks above 512 MiB (0x400D_295C). On a 128
+//! MiB card B5 made a FAT16 volume with no root directory and could not create
+//! `b:\Leapster`. Response CRCs are
 //! computed (the BIOS does not check them). The Leapster 2 0.6/B5 base system
 //! needs the card: with an empty slot it stops at "SD Card Error: Not
 //! Inserted. Please call Customer Service." The CIP3 board has NAND instead
@@ -64,8 +68,8 @@ const TYPE_WIDE: u8 = 1 << 6;
 const WRITE_CRC_OK: u16 = 0x2000;
 
 pub const SECTOR: usize = 512;
-/// 128 MiB.
-pub const CARD_SECTORS: u32 = 0x4_0000;
+/// 1 GiB (HYPOTHESIS; see above).
+pub const CARD_SECTORS: u32 = 0x20_0000;
 
 /// SD card states (card status bits 12:9).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -105,15 +109,15 @@ impl SdCard {
         with_crc(c)
     }
 
-    /// CSD version 1.0 for 128 MiB: READ_BL_LEN 9, C_SIZE 1023, C_SIZE_MULT 6.
+    /// CSD version 1.0 for 1 GiB: READ_BL_LEN 9, C_SIZE 4095, C_SIZE_MULT 7.
     fn csd() -> u128 {
         let mut c: u128 = 0;
         c |= 0x0E << 112; // TAAC
         c |= 0x32 << 96; // TRAN_SPEED 25 MHz
         c |= 0x5B5 << 84; // CCC
         c |= 9 << 80; // READ_BL_LEN
-        c |= 1023 << 62; // C_SIZE
-        c |= 6 << 47; // C_SIZE_MULT
+        c |= 4095 << 62; // C_SIZE
+        c |= 7 << 47; // C_SIZE_MULT
         c |= 1 << 46; // ERASE_BLK_EN
         c |= 0x7F << 39; // SECTOR_SIZE
         c |= 9 << 22; // WRITE_BL_LEN
@@ -252,7 +256,7 @@ fn index(addr: u32) -> Option<usize> {
 impl SdSlot {
     /// A slot with a freshly formatted card in it (fat.rs).
     pub fn with_card() -> Self {
-        let sectors = super::fat::format_fat16(CARD_SECTORS).into_iter().collect();
+        let sectors = super::fat::format_fat32(CARD_SECTORS).into_iter().collect();
         Self { card: Some(SdCard { sectors, ..Default::default() }), ..Default::default() }
     }
 
@@ -342,7 +346,7 @@ impl SdSlot {
         }
         bus.write16(d, status);
         bus.write8(d + 3, 0);
-        if self.log.len() < 4096 {
+        if self.log.len() < 1 << 16 {
             self.log.push((cmd, arg, status));
         }
     }
