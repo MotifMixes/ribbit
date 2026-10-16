@@ -744,11 +744,11 @@ impl Bus {
             } else {
                 (w, h)
             };
-            // 8 bits with palette bit 0 set: 16 bits per pixel. In bank 0x200
-            // (bit 15 set) bits 7-0 are a colour and bits 13-8 its opacity
-            // (0-63); otherwise the pixel is the colour itself, 0RRRRRGGGGG
-            // BBBBB, 0 transparent (bit 15 is set in some light pixels; its
-            // meaning is UNKNOWN).
+            // 8 bits with palette bit 0 set: 16 bits per pixel. A pixel with
+            // bit 14 set is a colour (bits 7-0, from the bank) and an
+            // opacity (below); otherwise it is the colour itself,
+            // RGB 5:5:5, 0 transparent (bit 15 is set in some light pixels;
+            // its meaning is UNKNOWN).
             let wide = attr & 3 == 3 && attr & 0x100 != 0;
             let bpp = if wide { 16 } else { 2 * ((attr & 3) + 1) };
             let bank = if attr & 0x8000 != 0 { 0x200 } else { 0x100 };
@@ -762,19 +762,33 @@ impl Bus {
                         continue;
                     }
                     let o = (y as usize * SCREEN_W + x as usize) * 3;
-                    if wide && bank == 0x100 {
-                        let a = addr + (py * w + px) * 2;
-                        let v = self.peek8(a) as u16 | (self.peek8(a + 1) as u16) << 8;
+                    let a = addr + (py * w + px) * 2;
+                    let v = if wide { self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8 } else { 0 };
+                    if wide && v & 0x4000 == 0 {
                         if v != 0 {
-                            img[o..o + 3].copy_from_slice(&rgb555(v & 0x7FFF));
+                            img[o..o + 3].copy_from_slice(&rgb555(v as u16 & 0x7FFF));
                         }
                     } else if wide {
-                        let a = addr + (py * w + px) * 2;
-                        let v = self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8;
-                        let alpha = (v >> 8) & 63;
-                        let c = rgb555(pal[(bank + (v & 0xFF)) as usize]);
+                        // The opacity's encoding depends on the bank: from 0x200,
+                        // bits 13-8 (0-63; the menus' background art, which
+                        // fades through it); from 0x100, opaque unless bit 13
+                        // is set, then bits 12-8 (0-31; the game pictures,
+                        // all 0x18 with bit 13 clear, are solid in
+                        // recordings). UNVERIFIED.
+                        let (alpha, full) = if bank == 0x200 {
+                            ((v >> 8) & 63, 63)
+                        } else if v & 0x2000 != 0 {
+                            ((v >> 8) & 31, 31)
+                        } else {
+                            (1, 1)
+                        };
+                        let raw = pal[(bank + (v & 0xFF)) as usize];
+                        if bank == 0x100 && raw & 0x8000 != 0 {
+                            continue;
+                        }
+                        let c = rgb555(raw);
                         for k in 0..3 {
-                            img[o + k] = ((c[k] as u32 * alpha + img[o + k] as u32 * (63 - alpha)) / 63) as u8;
+                            img[o + k] = ((c[k] as u32 * alpha + img[o + k] as u32 * (full - alpha)) / full) as u8;
                         }
                     } else {
                         let c = pal[(pal_base + self.pixel(addr, bpp, py * w + px)) as usize & 2047];
@@ -1013,7 +1027,7 @@ fn main() {
 ")).ok();
         std::fs::write(format!("{dir}/rwatch.log"), bus.rwatched.join("
 ")).ok();
-        std::fs::write(format!("{dir}/ram.bin"), &bus.ram[..0x100_0000]).unwrap();
+        std::fs::write(format!("{dir}/ram.bin"), &bus.ram).unwrap();
         std::fs::write(format!("{dir}/iram.bin"), &bus.iram).unwrap();
     }
     let mut hot: Vec<_> = hist.into_iter().collect();

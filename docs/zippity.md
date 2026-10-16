@@ -329,16 +329,25 @@ Sprite RAM entries are 32 bytes (the kernel keeps a copy of the list at
 - **Colours** are palette entry bank + palette x 16 (rounded down to the
   depth's size) + the pixel, where the bank is 0x200 if attribute bit 15 is
   set and 0x100 if not (the menu's blue buttons use 0x100).
-- **16-bit pixels:** a sprite of depth 8 with palette bit 0 set (0x99F3) has
-  16 bits per pixel: bits 7-0 a colour (entry bank + n), bits 13-8 its
-  opacity (0 to 63) and bit 14 always set. The menu's background art (a
-  64-pixel grid of these sprites) is blended over text layer 1 this way, and
-  recolouring entries 0x200-0x27F gives each screen its colour. Which
-  attribute bit really selects this mode is UNVERIFIED.
-- **Direct colour:** a 16-bit sprite in bank 0x100 (bit 15 clear, e.g.
-  0x33F3) holds colours, not indices: 0RRRRRGGGGGBBBBB, 0 transparent. Bit 15
-  is set in some light pixels; its meaning is UNKNOWN. The menu's panels and
-  buttons use it.
+- **16-bit pixels:** a sprite of depth 8 with palette bit 0 set (0x99F3,
+  0x29F3, 0x33F3) has 16 bits per pixel, decided pixel by pixel:
+  - **Bit 14 set:** bits 7-0 are a colour from the bank, with an opacity.
+    From bank 0x200 (attribute bit 15 set) the opacity is bits 13-8 (0 to
+    63): the menus' background art, a 64-pixel grid of these sprites, is
+    blended over text layer 1 this way, and recolouring entries 0x200-0x27F
+    gives each screen its colour. From bank 0x100 the pixel is solid unless
+    bit 13 is set, and then bits 12-8 (0 to 31) are the opacity: the game
+    pictures on the game-select ring are all 0x18 in bits 13-8 and look
+    solid in recordings. Colours whose palette entry has bit 15 set are
+    transparent.
+  - **Bit 14 clear:** the pixel is the colour itself, RGB 5:5:5, and 0 is
+    transparent. The menus' button panels use this. Bit 15 is set in some
+    light pixels; its meaning is UNKNOWN.
+
+  Which attribute bit selects 16-bit pixels, and the two opacity encodings,
+  are UNVERIFIED.
+- **Byte 8 bit 7** is set on some sprites (e.g. game pictures). It is not an
+  address bit (nothing is there); its meaning is UNKNOWN.
 - **Count:** only the first (control bits 15-8) x 4 entries are drawn; the
   rest of sprite RAM holds stale entries from earlier screens.
 - **Order:** priority 0 to 3, and within a priority later sprites on top.
@@ -360,6 +369,13 @@ recording shows: the name's button grows wide at the top, with Learning
 Path, back, cancel and OK below. (Earlier runs sent 0, every button held, and
 showed a large direct-colour panel instead; controller bit 4 still shows that
 panel, and whether it looks right is UNKNOWN.)
+
+Choosing OK on the player screen (right, then choose) logs "Already ran
+tutorial for player..." and goes on to the game-select screen as in the
+recording: the Zippity logo, the Playhouse Disney ears and a ring of game
+pictures in bubbles that turns. The pictures are shrunk through the corner
+converter (64x64 to 39x39 at the back of the ring). Still wrong: only the top
+part of each picture shows, and a patch next to the logo is noise.
 
 ## Research tool
 
