@@ -163,9 +163,61 @@ struct Bus {
     /// Text written to the serial port (0xC0060000).
     uart: String,
     nand: Nand,
+    /// Video interrupt status (0xD050018C; write 1s to clear): bits 0 and
+    /// 11 come each frame (bit 11 counts frames shown, at the kernel's +0x70).
+    video_status: u32,
+    /// DMA completion flags (0xD03001FC; write 1s to clear), one per channel.
+    dma_status: u32,
+    /// 0xD0800000 engine (2D graphics? UNKNOWN): operations started, and
+    /// the done flag (+0x7C bit 0, write 1 to clear).
+    gfx_ops: u64,
+    gfx_done: bool,
 }
 
+/// Instructions between video frames (a stand-in: the CPU clock and the
+/// frame rate are UNKNOWN; about 60 Hz at 60 MIPS).
+const FRAME: u64 = 1_000_000;
+/// Instructions the power button stays held from power-on.
+const POWER_HOLD: u64 = 20_000_000;
+/// The video interrupt's line on the interrupt controller.
+const IRQ_VIDEO: u32 = 27;
+/// The DMA controller's completion interrupt line.
+const IRQ_DMA: u32 = 24;
+/// The 0xD0800000 engine's completion interrupt line.
+const IRQ_GFX: u32 = 12;
+
 impl Bus {
+    fn latch(&self, a: u32) -> u32 {
+        self.io.get(&a).map_or(0, |e| e.last_write)
+    }
+
+    /// Interrupt lines raised (bit n for line n).
+    fn raised(&self) -> u64 {
+        let mut lines = 0u64;
+        if self.video_status != 0 {
+            lines |= 1 << IRQ_VIDEO;
+        }
+        if self.dma_status != 0 {
+            lines |= 1 << IRQ_DMA;
+        }
+        if self.gfx_done {
+            lines |= 1 << IRQ_GFX;
+        }
+        lines
+    }
+
+    /// The lowest raised line not masked (0xD0100030: bit 32-n masks line n).
+    fn pending_irq(&self) -> u32 {
+        let mask = self.latch(0xD010_0030);
+        (1..=32).find(|&n| self.raised() & (1 << n) != 0 && mask & (1u32 << (32 - n)) == 0).unwrap_or(0)
+    }
+
+    /// The CPU's IRQ input: a pending line, interrupts not disabled at the
+    /// controller (0xD0100038 bit 0).
+    fn irq_line(&self) -> bool {
+        self.pending_irq() != 0 && self.latch(0xD010_0038) & 1 == 0
+    }
+
     fn mem(&mut self, a: u32, n: usize) -> Option<&mut [u8]> {
         let a = a as usize;
         if a + n <= RAM_SIZE {
@@ -251,6 +303,7 @@ impl Bus {
         }
         let pc = self.pc;
         let e = self.io.entry(a).or_insert_with(|| Access { first_pc: pc, ..Default::default() });
+        let latched = e.last_write;
         let line = match write {
             Some(v) => {
                 e.writes += 1;
@@ -271,6 +324,83 @@ impl Bus {
                 self.uart.push(v as u8 as char);
                 0
             }
+            // Video DMA (0xD05001C0 source, 0x1C4 destination, 0x1C8 words
+            // minus 1): copies at once; the count reads 0 when done.
+            (0xD050_01C8, Some(v)) => {
+                let src = self.io.get(&0xD050_01C0).map_or(0, |e| e.last_write);
+                let dst = self.io.get(&0xD050_01C4).map_or(0, |e| e.last_write);
+                for i in 0..=v {
+                    let w = self.read32(src.wrapping_add(4 * i));
+                    self.write32(dst.wrapping_add(4 * i), w);
+                }
+                if let Some(e) = self.io.get_mut(&a) {
+                    e.last_write = 0;
+                }
+                0
+            }
+            // DMA controller, 4 channels at 0xD0300000 + 0x40 * n: +0 control
+            // (bit 0 start, bit 1 busy, bit 7 source fixed (a fill), bit 8
+            // interrupt?), +4 source, +8 destination, +C count. Bytes are
+            // assumed (a fill's source is an odd address). UNVERIFIED.
+            (0xD030_0000 | 0xD030_0040 | 0xD030_0080 | 0xD030_00C0, Some(v)) if v & 1 != 0 => {
+                let src = self.latch(a + 4);
+                let dst = self.latch(a + 8);
+                let count = self.latch(a + 12);
+                let fixed = v & 0x80 != 0;
+                for i in 0..count {
+                    let b = self.read8(if fixed { src } else { src.wrapping_add(i) });
+                    self.write8(dst.wrapping_add(i), b);
+                }
+                self.dma_status |= 1 << ((a >> 6) & 3);
+                if let Some(e) = self.io.get_mut(&a) {
+                    e.last_write = v & !3;
+                }
+                0
+            }
+            // 0xD0800000 engine: +0 control (bit 0 starts an operation; 0x901
+            // written), +4/+8/+C parameters, +0x7C done (bit 0). Operations
+            // finish at once and draw nothing yet.
+            (0xD080_0000, Some(v)) if v & 1 != 0 => {
+                self.gfx_ops += 1;
+                self.gfx_done = true;
+                0
+            }
+            (0xD080_007C, None) => self.gfx_done as u32,
+            (0xD080_007C, Some(v)) => {
+                if v & 1 != 0 {
+                    self.gfx_done = false;
+                }
+                0
+            }
+            (0xD030_01FC, None) => self.dma_status,
+            (0xD030_01FC, Some(v)) => {
+                self.dma_status &= !v;
+                0
+            }
+            // GPIO inputs (0xC0000000 port A, +0x20 B, +0x40 C; the kernel
+            // logs port C as R_IOC_I_DATA). Nothing pressed: port C bit 10 is
+            // the power button (low: held); A bit 6 and B bit 5 are read
+            // inverted too, A bit 4 as is (meanings UNKNOWN). Idle levels
+            // UNVERIFIED.
+            (0xC000_0000, None) => 0xFFEF,
+            (0xC000_0020, None) => 0xFFFF,
+            // The power button is held at power-on (the bootloader powers
+            // off unless it is), then released (the kernel enters a test
+            // mode if it is still held).
+            (0xC000_0040, None) => if self.now < POWER_HOLD { 0xFBFF } else { 0xFFFF },
+            // Interrupt controller: the pending IRQ's number (0: none).
+            (0xD010_0028, None) => self.pending_irq(),
+            (0xD010_002C, None) => 0,
+            (0xD050_018C, None) => self.video_status,
+            (0xD050_018C, Some(v)) => {
+                self.video_status &= !v;
+                0
+            }
+            // Serial status: always ready.
+            (0xC006_0010, None) => 0,
+            // Other registers read back what was last written (a latch:
+            // e.g. the interrupt controller's disable flag, 0xD0100038).
+            (_, None) => latched,
             _ => 0,
         }
     }
@@ -341,21 +471,44 @@ fn main() {
         log: Vec::new(),
     };
 
-    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand };
+    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false };
     bus.ram[..len].copy_from_slice(&data[start..start + len]);
     let mut cpu = Arm::new();
     cpu.reset();
 
     let mut hist: BTreeMap<u32, u64> = BTreeMap::new();
     let mut ran = 0u64;
+    // Jumps (from, to, times), the last JUMPS kept; consecutive repeats collapse.
+    const JUMPS: usize = 600;
+    let mut jumps: std::collections::VecDeque<(u32, u32, u32)> = std::collections::VecDeque::new();
+    let mut prev = 0u32;
     while ran < steps {
         bus.pc = cpu.r[15];
         bus.now = ran;
+        if ran % FRAME == FRAME - 1 {
+            // Bit 0 and bit 11 (0x800) each frame: which edge each is, and
+            // their spacing, are UNKNOWN.
+            bus.video_status |= 0x801;
+        }
+        cpu.irq_line = bus.irq_line();
         if !cpu.step(&mut bus) {
-            println!("waiting for an interrupt at {:08x} after {ran} instructions", cpu.r[15]);
-            break;
+            ran += 1;
+            continue;
         }
         ran += 1;
+        let next = prev.wrapping_add(if cpu.thumb() { 2 } else { 4 });
+        if cpu.current != next && cpu.current != prev {
+            match jumps.back_mut() {
+                Some(j) if (j.0, j.1) == (prev, cpu.current) => j.2 += 1,
+                _ => {
+                    jumps.push_back((prev, cpu.current, 1));
+                    if jumps.len() > JUMPS {
+                        jumps.pop_front();
+                    }
+                }
+            }
+        }
+        prev = cpu.current;
         if ran > steps.saturating_sub(200_000) {
             *hist.entry(cpu.current).or_default() += 1;
         }
@@ -364,6 +517,12 @@ fn main() {
         }
     }
 
+    if std::env::var_os("ZIPBOOT_JUMPS").is_some() {
+        println!("--- last jumps (from -> to, times) ---");
+        for (from, to, n) in &jumps {
+            println!("{from:08x} -> {to:08x}{}", if *n > 1 { format!("  x{n}") } else { String::new() });
+        }
+    }
     println!("--- first accesses ---");
     for l in &bus.log {
         println!("{l}");
@@ -372,6 +531,7 @@ fn main() {
     for l in bus.nand.log.iter().take(200) {
         println!("{l}");
     }
+    println!("--- 0xD0800000 operations: {} ---", bus.gfx_ops);
     println!("--- serial output ---
 {}
 --- end of serial output ---", bus.uart);

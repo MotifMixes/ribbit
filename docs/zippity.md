@@ -43,13 +43,31 @@ address 0 and starting there.
    column 0x800. Its strings name `a:\kernel.bin` (the system menu) and
    `b:\kernel.bin` (the cartridge), plus mmch/hm/mftp/le_kernel.bin variants,
    and "No kernel found. Listening for USB".
-3. **Kernel** (loaded to low RAM, entry near 0x12F00). It runs an RTOS and
-   prints "Free mem start initial: 2e33ec" and "SPRITE_CACHE_SIZE: 11358608".
-   It sets up the hardware at 0xD0500000 (about 6,700 addresses written; most
-   likely video memory). In Ribbit it then prints "SFS_API_EXIT" and stops:
-   its first task returns at once, the filesystem layer's user count drops to
-   0, and with bit 0 of 0xD0100038 clear it halts (loop at 0x41630). Why the
-   task returns is the next thing to find out.
+3. **Kernel** (loaded to low RAM, vectors at 0, entry near 0x12F00). It runs
+   an RTOS. Its log:
+
+   ```
+   Free mem start initial: 2e33ec
+   SPRITE_CACHE_SIZE: 11358608
+   v_ffs_fmount worked
+   Logging partition has 1927168 free bytes.
+   START L/S
+   LD open OK: UI.SAV
+   LD read OK: UI.SAV
+   END L/S
+   callee_param: 229
+   ```
+
+   It then waits for video frames and DMA and graphics-engine completions, and
+   checks the power button: if it is still held, it prints
+   "R_IOC_I_DATA = 0x0000 / PowerButton Still held down. Entering interactive
+   test mode...". With the hardware below modelled it reaches its main loop
+   (hundreds of graphics-engine operations; nothing is drawn yet).
+
+The power button must be held when power comes on: the bootloader reads it
+(port C bit 10, low = pressed) and otherwise prints "Debouncing..." and powers
+off. The power-off routine (0x00F11824 in the bootloader) shuts the devices
+down and jumps to the on-chip RAM at 0xF8000000, which ends in a loop.
 
 ## Memory map (as far as known)
 
@@ -57,10 +75,13 @@ address 0 and starting there.
 |---|---|
 | 0x00000000 | SDRAM (64 MB assumed, as in MAME's stub) |
 | 0x20000000 | SRAM (stage 1; size unknown, 2 MB assumed) |
-| 0xC0000000 | System control (clocks?): the bootloader reads and writes 0x00-0x4C, 0xA0-0xAC, 0x104/0x108 (read-modify-write), 0x124, 0x140 |
+| 0xC0000000 | GPIO: port A +0x00 (data in) / +0x04 (out) / +0x08 / +0x0C, port B +0x20.., port C +0x40.. (the kernel logs port C as R_IOC_I_DATA). Port C bit 10 is the power button (low: pressed); port A bit 6 and port B bit 5 are read active-low, port A bit 4 active-high (meanings UNKNOWN). Also clock or pad registers at 0xA0-0xAC, 0x104/0x108, 0x124, 0x140 |
 | 0xC0060000 | Serial port: +0x00 transmit byte, +0x08 control, +0x0C divisor? (0x7530 written), +0x10 status (reads 0: ready) |
-| 0xD0100030-38 | +0x38 bit 0: set at reset, cleared by the bootloader; the kernel halts on "SFS_API_EXIT" when it is clear (power hold? UNKNOWN) |
-| 0xD0500000 | Written heavily by the kernel (video memory?) |
+| 0xD0100000 | Interrupt controller (below) |
+| 0xD0300000 | DMA controller (below) |
+| 0xD0400000 | USB controller? (endpoint-like registers at 0xE00-0xEFC, 0x1000..) |
+| 0xD0500000 | Video: registers (interrupt enable +0x188, status +0x18C, copy engine +0x1C0-0x1C8, +0x1E0/0x1E8/0x1F0/0x1FC), tables at +0x400 and +0x800, palette? at +0x1000 |
+| 0xD0800000 | Graphics engine? (MAME's stub feeds +0x18 random values): +0x00 control (0x901 starts), +0x04/+0x08/+0x0C parameters, +0x7C done (bit 0, write 1 to clear); interrupt line 12 |
 | 0xD0900000 | NAND controller (below) |
 | 0xF8000000 | On-chip RAM (the bootloader runs code there; 64 KB assumed) |
 | 0xFF000000 | Cache controller: +0x00 control (bit 2: enabled), +0x18 maintenance operation (0x80000001/5/9/D), +0x1C/+0x20 range (address \| 0x80000002) |
@@ -90,3 +111,45 @@ table, where 0xDA means 2 Gbit with 2 KB pages. A read is: command 0x00, the
 column to +0x148, the row to +0x14C, command 0x30, wait for ready, then DMA
 or data-port reads. Large-page chips use the 0x30 confirm; small-page chips
 start reading on the address.
+
+## Interrupt controller (0xD0100000)
+
+From the kernel's IRQ and FIQ handlers (vectors at 0x18/0x1C jump through
+pointers at 0xFFFF74/0xFFFF78 in RAM):
+
+| Offset | Use |
+|---|---|
+| +0x28 | Read: the number (1-32) of the pending IRQ to serve, 0 if none. The handler calls table[n-1] and reads again until 0 |
+| +0x2C | Read: the pending FIQ's number (1-4), 0 if none |
+| +0x30 | IRQ mask: bit 32-n masks line n (all set at start, then cleared per line) |
+| +0x34 | 0xF written at start (the FIQ mask?) |
+| +0x38 | Bit 0: interrupts disabled. Read-write: the kernel's "disable" stores 1 and returns the old bit; "restore" writes it back |
+
+Lines with handlers: 6, 9, 12 (graphics engine), 14, 24 (DMA), 27 (video),
+28, 29, 30, 31.
+
+## Video (0xD0500000)
+
+- **+0x188:** interrupt enable (0xC31: bits 0, 4, 5, 10, 11).
+- **+0x18C:** interrupt status, write 1s to clear. The handler (line 27)
+  serves bit 0 (a frame: it programs the next frame's registers and counts
+  frames at +0x6C of its state), bit 11 (counts frames shown at +0x70, which
+  the main loop waits on), bit 10, bit 4 and bit 5 (counters). Ribbit's
+  research tool raises bits 0 and 11 together once per frame; their real
+  timing is UNKNOWN.
+- **+0x1C0 / +0x1C4 / +0x1C8:** a copy engine: source, destination, and the
+  count of 32-bit words minus 1. Writing +0x1C8 starts the copy; it reads 0
+  when done. It is used to load the tables at +0x400 (240 words, one per
+  line?) and +0x800 (480 words), and 0x400 words to +0x1000.
+
+## DMA controller (0xD0300000)
+
+Four channels at +0x00, +0x40, +0x80 and +0xC0:
+
+| Offset | Use |
+|---|---|
+| +0x0 | Control: bit 1 busy (waited on before starting); 0x200 is written first, then 0x109 or 0x189 to start (bit 0 start, bit 7 source fixed: a fill, bit 8 interrupt?) |
+| +0x4 | Source |
+| +0x8 | Destination |
+| +0xC | Count (bytes assumed: a fill's source is an odd address) |
+| +0x1FC | Completion flags, one bit per channel, write 1s to clear; interrupt line 24 |
