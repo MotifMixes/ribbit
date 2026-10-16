@@ -9,7 +9,6 @@ use crate::sound::{RAMP_FRAMES, Voice};
 use ribbit_arm::ArmBus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::hash::{BuildHasherDefault, Hasher};
 
 /// SDRAM (64 MB assumed, as in MAME's stub).
 pub const RAM_SIZE: usize = 64 << 20;
@@ -73,25 +72,80 @@ fn block(a: u32) -> Option<(bool, usize)> {
     None
 }
 
-/// A cheap hasher for register addresses.
-#[derive(Default, Clone, Copy)]
-pub struct AddrHasher(u64);
+/// What each I/O register last had written. The I/O space (0xC0000000-
+/// 0xDFFFFFFF) is looked up directly in 4 KB pages made when first written,
+/// as registers are read many times a frame; anything else (rare) goes to a
+/// map. Saved as a map of address to value (unwritten registers left out).
+#[derive(Default)]
+pub struct Regs {
+    /// Page number (from 0xC0000000) to 1 + its index in `pages` (0: none).
+    page_of: Vec<u32>,
+    pages: Vec<Box<[u32; 1024]>>,
+    other: HashMap<u32, u32>,
+}
 
-impl Hasher for AddrHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for b in bytes {
-            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0100_0000_01B3);
+const IO_BASE: u32 = 0xC000_0000;
+const IO_PAGES: usize = 0x2_0000;
+
+impl Regs {
+    #[inline]
+    pub fn get(&self, a: u32) -> u32 {
+        let page = (a.wrapping_sub(IO_BASE) >> 12) as usize;
+        if page < IO_PAGES && a & 3 == 0 {
+            match self.page_of.get(page) {
+                Some(&i) if i != 0 => self.pages[i as usize - 1][(a as usize >> 2) & 0x3FF],
+                _ => 0,
+            }
+        } else {
+            self.other.get(&a).copied().unwrap_or(0)
         }
     }
-    fn write_u32(&mut self, n: u32) {
-        self.0 = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16;
+
+    /// Registers are words: an address's bits 1-0 are kept apart only in
+    /// the map (byte and halfword registers off a word boundary).
+    pub fn insert(&mut self, a: u32, v: u32) {
+        let page = (a.wrapping_sub(IO_BASE) >> 12) as usize;
+        if page >= IO_PAGES || a & 3 != 0 {
+            self.other.insert(a, v);
+            return;
+        }
+        if self.page_of.is_empty() {
+            self.page_of = vec![0; IO_PAGES];
+        }
+        if self.page_of[page] == 0 {
+            self.pages.push(Box::new([0; 1024]));
+            self.page_of[page] = self.pages.len() as u32;
+        }
+        self.pages[self.page_of[page] as usize - 1][(a as usize >> 2) & 0x3FF] = v;
+    }
+
+    fn entries(&self) -> Vec<(u32, u32)> {
+        let mut all: Vec<(u32, u32)> = self.other.iter().map(|(&a, &v)| (a, v)).collect();
+        for (page, &i) in self.page_of.iter().enumerate().filter(|e| *e.1 != 0) {
+            let base = IO_BASE + ((page as u32) << 12);
+            all.extend(self.pages[i as usize - 1].iter().enumerate().filter(|e| *e.1 != 0).map(|(k, &v)| (base + 4 * k as u32, v)));
+        }
+        all.sort_unstable();
+        all
     }
 }
 
-pub type Regs = HashMap<u32, u32, BuildHasherDefault<AddrHasher>>;
+impl Serialize for Regs {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.entries())
+    }
+}
+
+impl<'de> Deserialize<'de> for Regs {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let map: HashMap<u32, u32> = HashMap::deserialize(d)?;
+        let mut r = Regs::default();
+        for (a, v) in map {
+            r.insert(a, v);
+        }
+        Ok(r)
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
@@ -197,7 +251,7 @@ impl Bus {
         match block(a) {
             Some((true, i)) => self.spu_regs[i],
             Some((false, i)) => self.ppu_regs[i],
-            None => self.regs.get(&a).copied().unwrap_or(0),
+            None => self.regs.get(a),
         }
     }
 
