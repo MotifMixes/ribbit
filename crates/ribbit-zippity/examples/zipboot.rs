@@ -21,6 +21,7 @@
 //! | ZIPBOOT_POWER_HOLD=n | Hold the power button for n instructions (the test mode) |
 //! | ZIPBOOT_RESET | Clear the user data first (`Zippity::factory_reset`) |
 //! | ZIPBOOT_SPRITES | Print the sprites in use at the end |
+//! | ZIPBOOT_POKE=addr:byte[;...] | Write RAM bytes (hex) after loading, e.g. a game's debug flag |
 //! | ZIPBOOT_CART=file | Put a cartridge (a raw dump of its NAND) in the slot |
 
 use ribbit_zippity::{OUTPUT_RATE, SCREEN_H, SCREEN_W, Zippity};
@@ -77,6 +78,13 @@ fn main() {
     }
     if let Ok(path) = std::env::var("ZIPBOOT_LOAD") {
         z.load_state(&std::fs::read(&path).expect("read the state")).expect("a state");
+    }
+    if let Ok(pokes) = std::env::var("ZIPBOOT_POKE") {
+        for p in pokes.split(';') {
+            let (a, v) = p.split_once(':').expect("addr:byte");
+            let a = usize::from_str_radix(a, 16).expect("a hex address");
+            z.ram_mut()[a] = u8::from_str_radix(v, 16).expect("a hex byte");
+        }
     }
     let save: Option<(String, u64)> = std::env::var("ZIPBOOT_SAVE").ok().map(|s| {
         let (p, n) = s.rsplit_once(':').expect("ZIPBOOT_SAVE=file:n");

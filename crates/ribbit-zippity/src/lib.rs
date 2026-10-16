@@ -314,6 +314,11 @@ impl Zippity {
         &self.bus.ram
     }
 
+    /// Research: writes RAM (e.g. to turn on a game's debug flags).
+    pub fn ram_mut(&mut self) -> &mut [u8] {
+        &mut self.bus.ram
+    }
+
     pub fn iram(&self) -> &[u8] {
         &self.bus.iram
     }

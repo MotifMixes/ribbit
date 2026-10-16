@@ -25,7 +25,11 @@ use std::time::{Duration, Instant};
 /// mat's spots are red and green to the sides and blue (the "Zippity" oval)
 /// in front of the home spot, two footprints the child stands on; the
 /// Pause/Home button is on the main unit, by the bopper (the joystick).
-pub const CONTROLS: [(Button, u16, &str); 9] = [
+/// The feet keys (the Leapster's volume buttons, which the Zippity has no
+/// use for: LB and RB on a gamepad) move one foot: lifted while standing on
+/// the home spot, put down while not. Mickey Says starts with "march in
+/// place", left and right in turn.
+pub const CONTROLS: [(Button, u16, &str); 11] = [
     (Button::Up, Pad::UP, "Bopper up (away from you)"),
     (Button::Down, Pad::DOWN, "Bopper down (towards you)"),
     (Button::Left, Pad::LEFT, "Bopper left"),
@@ -35,7 +39,11 @@ pub const CONTROLS: [(Button, u16, &str); 9] = [
     (Button::Hint, Pad::BLUE, "Blue spot"),
     (Button::Home, Pad::HOME, "Pause/Home button"),
     (Button::Pause, Pad::LEFT_FOOT | Pad::RIGHT_FOOT, "Stand on the home spot"),
+    (Button::VolumeDown, Pad::LEFT_FOOT, "Left foot (lift / step)"),
+    (Button::VolumeUp, Pad::RIGHT_FOOT, "Right foot (lift / step)"),
 ];
+
+const FEET: u16 = Pad::LEFT_FOOT | Pad::RIGHT_FOOT;
 
 /// Frames a second (the model's stand-in timing: FRAME instructions each).
 const FPS: f64 = 60.0;
@@ -50,6 +58,9 @@ struct Shared {
     quit: AtomicBool,
     /// Buttons held (Pad bits).
     held: AtomicU16,
+    /// Feet keys held (Pad foot bits): each moves its foot from where
+    /// standing (or not) on the home spot puts it.
+    moved: AtomicU16,
     /// Standing on the home spot (the footprints held) as well.
     on_home: AtomicBool,
     /// Volume, as f32 bits.
@@ -113,6 +124,7 @@ impl ZipSession {
             running: AtomicBool::new(true),
             quit: AtomicBool::new(false),
             held: AtomicU16::new(0),
+            moved: AtomicU16::new(0),
             on_home: AtomicBool::new(false),
             gain: AtomicU32::new(1f32.to_bits()),
             speed: AtomicU32::new(100f32.to_bits()),
@@ -163,6 +175,14 @@ impl ZipSession {
     /// A Leapster button, as the Zippity input it stands for (`CONTROLS`).
     pub fn set_button(&self, b: Button, pressed: bool) {
         let Some(&(_, bits, _)) = CONTROLS.iter().find(|c| c.0 == b) else { return };
+        if matches!(b, Button::VolumeDown | Button::VolumeUp) {
+            if pressed {
+                self.shared.moved.fetch_or(bits, Ordering::Relaxed);
+            } else {
+                self.shared.moved.fetch_and(!bits, Ordering::Relaxed);
+            }
+            return;
+        }
         if pressed {
             self.shared.held.fetch_or(bits, Ordering::Relaxed);
         } else {
@@ -271,8 +291,12 @@ fn run(s: &Shared) {
         next += Duration::from_secs_f64(1.0 / FPS);
         let audio = {
             let mut z = s.z.lock().unwrap();
-            let feet = if s.on_home.load(Ordering::Relaxed) { Pad::LEFT_FOOT | Pad::RIGHT_FOOT } else { 0 };
-            z.set_pad(Pad::held(s.held.load(Ordering::Relaxed) | feet));
+            // Standing on the home spot (the setting, or Pause held) puts
+            // both feet down; a foot key moves its foot from there.
+            let held = s.held.load(Ordering::Relaxed);
+            let standing = if s.on_home.load(Ordering::Relaxed) { FEET } else { held & FEET };
+            let feet = standing ^ s.moved.load(Ordering::Relaxed);
+            z.set_pad(Pad::held(held & !FEET | feet));
             z.run_frame();
             z.render(&mut img);
             // The boot log says whether the system found saved players.

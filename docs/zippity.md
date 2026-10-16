@@ -301,10 +301,31 @@ in the slot for a cartridge, on its own thread at 60 frames a second; the TV
 picture is 640 x 480 and the window keeps 4:3. Controls (the Leapster's five action buttons for the
 Zippity's five other inputs; Help > Controls (F1) lists them): D-pad = bopper, A
 = green spot (choose), B = red spot, Hint = blue spot, Home = the Pause/Home
-button, Pause = standing on the home spot. Input > "Zippity: stand on
-the home spot" (or Shift, while a Zippity runs) keeps the home spot's
-footprints pressed, as a child standing on it does: Mickey Says and others
-wait for it. What the system saves goes to `<save folder>/<dump
+button, Pause = standing on the home spot, Volume - / + (LB / RB on a
+gamepad) = the left / right foot. Input > "Zippity: stand on the home spot"
+(or Shift, while a Zippity runs) keeps the home spot's footprints pressed,
+as a child standing on it does: Mickey Says and others wait for it. A foot
+key moves its foot from there: lifted while standing on the home spot, put
+down while not, so marching in place is LB and RB in turn.
+
+### Mickey Says
+
+The game (its own kernel, `mmch_kernel`: "LK file found, size is
+0X0023BD10") reads the controllers through the same packet decoder as the
+system and turns state changes into "pressed" and "released" masks each
+frame (0x2C270; queries at 0x2B884 "held" and 0x2B8A8 "pressed"). Its pad
+handler (0x12208) lights the pad stepped on for 15 frames. Its command types,
+from its debug strings: COLORED_SPOT, MARCH_IN_PLACE, NUM_SPOT, NUM_BOPPER,
+SPOT_COUNT_UP, SPOT_W_NUM_AFTER_X, MARCH_X_TIMES, BOPPER_X_TIMES,
+SPOT_W_NUM_BEFORE_X, SPOT_W_HIGHEST_NUM, SPOT_W_LOWEST_NUM,
+ALL_SPOTS_MORE_THAN_X and ALL_SPOTS_LESS_THAN_X. Played in Ribbit from a
+saved state: the first command is marching in place (the feet lifted in
+turn: 0 to 2 points), the second stepping on green (2 to 4), as in the
+recording of a real unit (the score rising by 2 or 3 a command). It first
+shows the mat and waits for the player to step onto the home spot.
+A cheat mode ("MMCH: CHEAT MODE ON", 0x1B81C) is turned on by the launch
+parameter the system passes in on-chip RAM (0xF800000E); what turns it on
+is UNKNOWN. What the system saves goes to `<save folder>/<dump
 name>.nandpages` (the pages that differ from the dump); the dump file is not
 changed.
 
