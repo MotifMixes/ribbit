@@ -19,6 +19,21 @@
 //!   at a time, between system memory at aux 0x99 and X (bit 29 clear) or Y
 //!   memory from word aux 0x9A; bit 30 set copies into XY memory, clear copies
 //!   out of it. Synchronous, so XYCONFIG's busy bit reads clear. SOURCED.
+//! * Halfword order (Ribbit, not MAME): XY memory holds the lower-addressed
+//!   halfword in the HIGH half of a word. A burst moves the halfword at
+//!   system address a+0 to bits 31:16 and a+2 to bits 15:0 (and back), and
+//!   in 16-bit mode an even halfword address selects the high half. MAME
+//!   copies words as they are and maps even addresses to the low half.
+//!   HYPOTHESIS, from the Leapster TV and Leapster 2 BIOSes (docs/
+//!   hardware-research.md, "XY memory halfword order"): their PCM high-pass
+//!   (0.6 0x4003_E098) filters each word's high half before its low half,
+//!   and only this order makes it, the resampler (0x4003_E36C, 16-bit
+//!   ports) and the bursts of address-ordered sample buffers agree; with
+//!   MAME's order the filter scrambles every sample pair (an image of the
+//!   sound mirrored about 16 kHz). The one routine that implies MAME's order
+//!   (0.6 0x4003_E7A8, a 4x upsampler) is never called by any BIOS. Pipelines
+//!   that treat both halves alike (original Leapster 2.1, L-MAX) give the
+//!   same output either way.
 
 /// Aux register block: 0x80 + offset.
 pub const AUX_BASE: u32 = 0x80;
@@ -85,6 +100,12 @@ fn port(reg: u8) -> (usize, usize, bool) {
     }
 }
 
+/// 16-bit mode: the bit position of halfword `address` within its word (an
+/// even address is the high half; module notes, "Halfword order").
+fn half_shift(address: u32) -> u32 {
+    if address & 1 == 0 { 16 } else { 0 }
+}
+
 pub fn is_port(reg: u8) -> bool {
     (32..56).contains(&reg)
 }
@@ -114,7 +135,7 @@ impl XyExtension {
         let (bank, xy) = self.location(index);
         let memory = &self.mem[bank][xy];
         let value = if modifier & (1 << 29) != 0 {
-            ((memory[(address as usize / 2) % WORDS] >> ((address & 1) * 16)) & 0xFFFF) << 16
+            ((memory[(address as usize / 2) % WORDS] >> half_shift(address)) & 0xFFFF) << 16
         } else {
             memory[address as usize % WORDS]
         };
@@ -131,7 +152,7 @@ impl XyExtension {
         let (bank, xy) = self.location(index);
         let memory = &mut self.mem[bank][xy];
         if modifier & (1 << 29) != 0 {
-            let shift = (address & 1) * 16;
+            let shift = half_shift(address);
             let word = &mut memory[(address as usize / 2) % WORDS];
             *word = (*word & !(0xFFFF << shift)) | ((data >> 16) << shift);
         } else {
@@ -166,10 +187,12 @@ impl XyExtension {
         let memory = &mut self.mem[bank][((value >> 29) & 1) as usize];
         for i in (0..size).step_by(4) {
             let word = &mut memory[(xy + i as usize / 4) % WORDS];
+            // The halfword at the lower system address is the high half
+            // (module notes, "Halfword order").
             if value & (1 << 30) != 0 {
-                *word = bus.read32(system.wrapping_add(i));
+                *word = bus.read32(system.wrapping_add(i)).rotate_left(16);
             } else {
-                bus.write32(system.wrapping_add(i), *word);
+                bus.write32(system.wrapping_add(i), word.rotate_left(16));
             }
         }
     }
@@ -178,6 +201,7 @@ impl XyExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ribbit_memory::Bus;
 
     #[test]
     fn ports_follow_binutils_numbering() {
@@ -228,9 +252,12 @@ mod tests {
     fn sixteen_bit_format_uses_upper_half() {
         let mut xy = XyExtension::default();
         xy.aux[8] = 1 << 29;
-        xy.aux[0] = 3; // odd halfword of word 1
+        xy.aux[0] = 3; // odd halfword of word 1: its low half
         xy.write(32, 0x1234_0000);
-        assert_eq!(xy.mem[0][0][1], 0x1234_0000);
+        assert_eq!(xy.mem[0][0][1], 0x0000_1234);
+        xy.aux[0] = 4; // halfword 4: word 2's high half
+        xy.write(32, 0x5678_0000);
+        assert_eq!(xy.mem[0][0][2], 0x5678_0000);
         xy.aux[0] = 3;
         assert_eq!(xy.read(48), 0x1234_0000, "x0_nu shares MX00's format bit");
     }
@@ -261,20 +288,43 @@ mod tests {
     }
 
     #[test]
+    fn burst_then_sixteen_bit_ports_keep_address_order() {
+        // Samples s0, s1, s2, s3 at ascending system addresses come back
+        // through a 16-bit port in that order, and a filter reading 32-bit
+        // words sees each pair's earlier sample in the high half.
+        let mut xy = XyExtension::default();
+        let mut ram = Ram(vec![0; 0x100]);
+        ram.write16(0x40, 10);
+        ram.write16(0x42, 11);
+        ram.write16(0x44, 12);
+        ram.write16(0x46, 13);
+        xy.aux_write(0x99, 0x40, &mut ram);
+        xy.aux_write(0x9A, 0, &mut ram);
+        xy.aux_write(0x9B, (1 << 30) | 7, &mut ram); // 8 bytes into X
+        assert_eq!(xy.mem[0][0][0], (10 << 16) | 11);
+        xy.aux[8] = (1 << 29) | 1; // 16-bit, +1
+        let read: Vec<u32> = (0..4).map(|_| xy.read(32) >> 16).collect();
+        assert_eq!(read, [10, 11, 12, 13]);
+        xy.aux_write(0x99, 0x80, &mut ram);
+        xy.aux_write(0x9B, 7, &mut ram); // and back out
+        assert_eq!((ram.read16(0x80), ram.read16(0x82), ram.read16(0x86)), (10, 11, 13));
+    }
+
+    #[test]
     fn burst_copies_into_and_out_of_xy_memory() {
         let mut xy = XyExtension::default();
         let mut ram = Ram((0..0x4000).collect());
         xy.aux_write(0x99, 0x100, &mut ram); // system address (word 0x40)
         xy.aux_write(0x9A, 5, &mut ram); // XY word 5
         xy.aux_write(0x9B, (1 << 30) | (1 << 29) | 11, &mut ram); // 12 bytes into Y
-        assert_eq!(&xy.mem[0][1][5..8], &[0x40, 0x41, 0x42]);
+        assert_eq!(&xy.mem[0][1][5..8], &[0x40 << 16, 0x41 << 16, 0x42 << 16], "lower halfword high");
         assert_eq!(xy.mem[0][1][8], 0, "only the burst's size");
         assert_eq!(xy.mem[0][0][5], 0, "X untouched");
         xy.mem[0][0][2] = 0xDEAD_BEEF;
         xy.aux_write(0x9A, 2, &mut ram);
         xy.aux_write(0x99, 0x200, &mut ram);
         xy.aux_write(0x9B, 3, &mut ram); // 4 bytes out of X
-        assert_eq!(ram.0[0x80], 0xDEAD_BEEF);
+        assert_eq!(ram.0[0x80], 0xBEEF_DEAD);
         xy.aux_write(0x98, 0x11, &mut ram);
         assert_eq!(xy.aux_read(0x98), 0x01, "busy bit reads clear");
     }

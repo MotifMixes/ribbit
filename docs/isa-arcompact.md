@@ -89,15 +89,14 @@ Implemented in `crates/ribbit-cpu/src/xy.rs`; enabled by `CpuConfig::leapster()`
 | Register names | r32-r47 = `x0_u0, x0_u1, x1_u0, ... y3_u1`; r48-r55 = `x0_nu ... y3_nu`; aux 0x80-0x87 `ax0-ax3, ay0-ay3`, 0x88-0x97 `mx00 ... my31`, 0x98 `xyconfig` | GNU binutils register tables: names only |
 | Port access | Reads/writes the word at the generator's AX/AY address; u0/u1 then add the signed low 16 bits of MXnm / MYnm (post-modify); nu does not modify | MAME `arcompact.cpp`. SOURCED |
 | Modulo addressing | Length in modifier bits 27:16, 0 = linear | MAME. SOURCED |
-| 16-bit data | Modifier bit 29: data in the top half of the register | MAME. SOURCED |
+| 16-bit data | Modifier bit 29: data in the top half of the register; an even halfword address is the high half of its word | Top half: MAME, SOURCED. Halfword order: HYPOTHESIS from the Leapster 2 / TV BIOS PCM filter (docs/hardware-research.md, "XY memory halfword order"); MAME uses the low half |
 | Memory | 2 banks x {X, Y} x 1024 words; bank = XYCONFIG bit 0 | MAME. SOURCED; real size UNKNOWN |
-| r56 | Plain storage | Saved/restored by the BIOS context switch; meaning UNKNOWN |
-| Burst registers (aux 0x99-0x9E) | Stored; a write to 0x9B (burst size) stops with Unsupported | No specification |
+| r56 | The dual MAC's high-lane accumulator (see MULDW) | VERIFIED-FW (Leapster 2 PCM filter) |
+| Bursts (aux 0x99-0x9B) | A write to 0x9B copies (size + 1) bytes between system memory (0x99) and X or Y memory (word 0x9A), the halfword at the lower system address in the high half | Copy: MAME, SOURCED. Halfword order: HYPOTHESIS, as for 16-bit data |
 | Extension absent | Accessing r32+ reports "extension core register" (test `extension_register_is_reported_when_xy_extension_is_absent`) | PRM |
 
-Tests: `xy::tests` (6), `tests/exec.rs` `xy_port_reads_y_memory_through_its_address_generator`. The BIOS reaches no
-code that uses the ports for computation yet, only the context save/restore, so the post-modify and modulo
-semantics are not exercised by real firmware.
+Tests: `xy::tests` (8), `tests/exec.rs` `xy_port_reads_y_memory_through_its_address_generator`. The Leapster 2
+and Leapster TV BIOSes compute with the ports in their PCM path (post-modify, modulo rings, 16-bit mode, bursts).
 
 ## Instruction status
 

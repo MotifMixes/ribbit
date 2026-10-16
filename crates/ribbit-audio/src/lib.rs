@@ -82,12 +82,12 @@ impl Upsample4x {
 /// (Blackman window) with its cutoff at 8.5 kHz, flat to about 7.5 kHz and
 /// below -70 dB from about 9.5 kHz. Delay: 47 samples (1.5 ms).
 ///
-/// Why: the Leapster 2's 32 kHz PCM stream, as Ribbit emulates the BIOS's
-/// mixer, carries a mirror image of its content (at 32 kHz - f, 10-16 kHz
-/// for The Talking Words Factory, about 2% of the energy). Whether real
-/// hardware outputs it is UNKNOWN (no recording of a Leapster 2's own sound
-/// has been found); the frontend offers the stream filtered (default) or as
-/// emulated. Not part of the emulation.
+/// Why: the Leapster 2's 32 kHz PCM stream carried a mirror image of its
+/// content (10-16 kHz, about 2% of the energy). That turned out to be an
+/// emulation fault (XY memory's halfword order, ribbit-cpu xy.rs), now
+/// fixed, so the emulated stream has almost nothing above 8 kHz and this
+/// filter changes little; the frontend still offers it (default) or the
+/// stream exactly as emulated. Not part of the emulation.
 #[derive(Debug, Clone)]
 pub struct LowPass32k {
     taps: Vec<f64>,

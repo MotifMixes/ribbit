@@ -539,7 +539,7 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 }
             });
             ui.label(
-                egui::RichText::new("Clean audio removes a 10-16 kHz mirror image in the 32 kHz sound; real units may not have it.")
+                egui::RichText::new("Clean audio filters the 32 kHz sound above 8.5 kHz; unfiltered plays it exactly as emulated.")
                     .weak(),
             );
         });

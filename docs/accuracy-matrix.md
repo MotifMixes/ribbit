@@ -33,7 +33,7 @@ hardware-research.md, "Phase 4" and "Phase 4b".
 | CPU state/registers | Partial | PRM ch. 3 | `tests/exec.rs` | Reset state per PRM Fig. 83; IDENTITY value UNKNOWN |
 | CPU decoder + disassembler | Matches reference | PRM ch. 6-7, GNU objdump | `tests/objdump_oracle.rs` (277 corpus, 23,708 random; full sweeps of v1.5, 764,950 lines, and v2.1, 3,162,386 lines) | Documented disagreements in isa-arcompact.md (incl. MUL64 A field, SWI/BRK operand field) |
 | CPU execution | Partial | PRM ch. 9 | 43 execution tests on GNU-assembled programs | No independent execution oracle yet (MAME/hardware traces); DSP/XMAC instructions, DIVAW, RND16 unsupported |
-| XY memory extension (r32-r55, aux 0x80-0x9F) | Partial | binutils names + MAME semantics + BIOS context switch | `xy::tests`, `tests/exec.rs` | Semantics SOURCED from MAME only; burst transfers (aux 0x9B) unsupported; memory size from MAME |
+| XY memory extension (r32-r55, aux 0x80-0x9F) | Partial | binutils names + MAME semantics + BIOS context switch | `xy::tests`, `tests/exec.rs` | Semantics SOURCED from MAME, except the halfword order (HYPOTHESIS from the Leapster 2 / TV PCM filter); memory size from MAME |
 | Interrupts/exceptions | Partial | PRM ch. 4 | entry/return, priority, masking, SWI, sleep wake | Leapster sources: timers 0x19/0x1A/0x1E, DMA 0x12, voice acknowledge 0x1D, ADC 0x10 (experimental model only); UART 0x1B, voice status 0x15, vector 0x18 device not raised |
 | ARC processor timers 0/1 | Partial | PRM | timer 0 IRQ test | Leapster MMIO timers (0x0180_D000) not started |
 | UART (debug console) | Partial | MAME + BIOS putc | `io::uart::tests` | TX captured, status always ready; TX interrupt 0x1B not raised, so the BIOS's interrupt-driven printf sends only one byte |

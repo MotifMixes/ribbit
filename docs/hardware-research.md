@@ -386,6 +386,36 @@ See docs/isa-arcompact.md, "XY memory extension". Evidence that it exists on thi
 save at 0x4007_3CA0 stores r32-r59 to sp+140..248 and the restore at 0x4007_3D74 loads them back. That restore
 also uses the saved MMID as a low word, more evidence for the MMID quirk.
 
+#### XY memory halfword order (2026-10-16)
+
+HYPOTHESIS, modelled (`xy.rs`): XY memory keeps the lower-addressed halfword in the HIGH half of a word. A burst
+(aux 0x9B) moves the halfword at system address a+0 to bits 31:16 and a+2 to bits 15:0, in both directions, and
+in 16-bit mode (modifier bit 29) an even halfword address selects the high half. MAME, which Ribbit followed
+before, copies words unchanged and maps even addresses to the low half. The evidence is the PCM path that the
+Leapster TV and Leapster 2 BIOSes share (0.6 addresses; B5, m9 and the TV BIOS have the same code):
+
+* 0x4003_E36C, the resampler, reads its source, written by the CPU one sample at a time in address order
+  (0x400A_F886) and burst into X memory, through a 16-bit port, and writes its output through another.
+* 0x4003_DF0C bursts in the 32 kHz voice mix that PCM channel 0 wrote, adds it lane by lane to the resampler's
+  output, then runs a second-order high-pass (coefficients 0x1CCA, 0xC66D, 0x1CCA / 0x7750, 0xC817, stored
+  halved) and a DC blocker over the 64 words, and bursts the result out for channel 1. VERIFIED-FW: the high-pass
+  computes each word's high half first (its first step multiplies the high half by b0 and the previous word's
+  low half by b1) and keeps its delay line as (older << 16 | newer) words.
+* With MAME's order the filter therefore sees every sample pair reversed: Ribbit's output zig-zagged by pair
+  (344 392 | 312 360 | 280 336 ...), the two sample phases differed in level by 16%, and 2-4% of the energy
+  was an image mirrored about 16 kHz (10-16 kHz). Fitting a linear filter to one call's input and output left a
+  residual of 51 (of 1325 RMS). With the high-half-first order the residual is 4.6 (rounding), the image is
+  0.0000 on all three Leapster 2 BIOSes and the Leapster TV, and the original Leapster 2.1 and L-MAX BIOSes,
+  whose pipelines treat both halves alike, give bit-identical sound.
+* Swapping only the PCM channels' halfword order fixes channel 0's path but not the resampler's (its source
+  is in address order), so the order belongs to XY memory, not to the PCM DMA.
+* Against it: 0.6 0x4003_E7A8 (4x upsampler; also in B5, m9 and the TV BIOS) loads samples with `ld` and
+  reads them both as 32-bit words and through a 16-bit port, consistent only with MAME's order. No BIOS calls
+  it or holds its address, so it is taken as dead code.
+
+What a burst does with 32-bit data that is not two samples (it would come out with its halves swapped) is
+UNKNOWN; no BIOS bursts such data.
+
 ### ADC FIFO (0x0180_00A0 / 0x0180_00A8)
 
 * SOURCED (MAME) + VERIFIED-FW: reading 0x0180_00A0 pops a sample; bit 8 of 0x0180_00A8 = FIFO empty. Drain loops:
