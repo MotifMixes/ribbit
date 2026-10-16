@@ -47,6 +47,8 @@ pub struct ZipSession {
     shared: Arc<Shared>,
     thread: Option<std::thread::JoinHandle<()>>,
     pub title: String,
+    /// When play started (Unix seconds), for Discord's timer.
+    pub started: u64,
     /// The dump file.
     pub nand: PathBuf,
     /// The dump as loaded, and where the system's changes to it are kept.
@@ -88,7 +90,8 @@ impl ZipSession {
             crate::perf::raise_thread_priority();
             run(&s)
         })?;
-        Ok(Self { shared, thread: Some(thread), title: "Zippity".into(), nand: nand.to_path_buf(), original, save_path })
+        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        Ok(Self { shared, thread: Some(thread), title: "Zippity".into(), started, nand: nand.to_path_buf(), original, save_path })
     }
 
     /// Copies the latest picture into `out` (SCREEN_W x SCREEN_H).

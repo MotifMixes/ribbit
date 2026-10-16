@@ -1252,8 +1252,10 @@ impl App {
         self.discord.set(match &self.session {
             _ if !self.settings.discord_presence => crate::discord::Presence::Off,
             Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
-            None if self.zippity.is_some() => crate::discord::Presence::playing("Zippity", "Zippity", 0),
-            None => crate::discord::Presence::Browsing,
+            None => match &self.zippity {
+                Some(z) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
+                None => crate::discord::Presence::Browsing,
+            },
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
         let out = self.egui_ctx.run_ui(raw, |ui| {
