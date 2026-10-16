@@ -712,8 +712,8 @@ impl Cpu {
                 return Ok(xy.read(r));
             }
             if r == 56 {
-                // Saved/restored by the Leapster RTOS like a plain register;
-                // its function is UNKNOWN (MAME also stores it plainly).
+                // The dual MAC's high-lane accumulator (see MULDW); the
+                // Leapster RTOS saves and restores it per task.
                 return Ok(self.regs[56]);
             }
         }
@@ -783,6 +783,11 @@ impl Cpu {
         if let Dst::Reg(r) = d {
             if (57..=59).contains(&r) {
                 self.diag.mul_result_writes += 1;
+            }
+            // r56/r57 are also the dual MAC's accumulators (see MULDW): the
+            // RTOS restores them per task.
+            if let 56 | 57 = r {
+                self.mac_acc[57 - r as usize] = v as i32 as i64;
             }
             self.regs[r as usize] = v;
         }
@@ -1245,27 +1250,44 @@ impl Cpu {
                 // Each lane (low = channel 2, high = channel 1) multiplies the
                 // signed 16-bit halves; MULDW sets the lane's accumulator, MACDW
                 // adds to it, MSUBDW subtracts. The lane's result is the
-                // accumulator plus 0x4000 if AUX_MACMODE bit 2 is set, shifted
-                // right by 15 (bit 3 set) or 16, saturated to 16 bits (sticky
-                // S2 / S1 on saturation). The Leapster 2 BIOS runs them in its
-                // XY-memory filter loops (0.6 0x4003_E604 onwards).
+                // accumulator plus a rounding half (AUX_MACMODE bit 2) shifted
+                // right by 16, saturated to 16 bits (sticky S2 / S1). In
+                // fractional mode (AUX_MACMODE bit 3) each product is doubled
+                // (Q15 x Q15 -> Q31); MAME instead shifts the sum right by 15,
+                // which gives the same lane results.
+                //
+                // The accumulators are readable as r56 (high lane) and r57 (low
+                // lane). VERIFIED-FW: the Leapster 2 BIOS 0.6's PCM filter
+                // (0x4003_E0A4, AUX_MACMODE 0x12C) reads them right after its
+                // MACs (`adds r9,r56,r57`, then `rnd16`, a residual fed back,
+                // and the result doubled with `adds r10,r10,r10`). Its
+                // coefficients are stored halved (0x7EA6 / 0xC115 = poles at
+                // 0.99, a DC-blocking high-pass), which needs the doubled Q31
+                // products: read as Q30 the filter's poles move and the output
+                // carried 17% of its energy above 12 kHz (hiss); unread, it
+                // saturated at +/-32767. Reading an accumulator beyond 32 bits
+                // gives it saturated (UNVERIFIED).
                 let mut r = 0u32;
                 let mut sat = [false; 2];
                 for (lane, saturated) in sat.iter_mut().enumerate() {
-                    let product = (b >> (16 * lane)) as u16 as i16 as i64 * (c >> (16 * lane)) as u16 as i16 as i64;
+                    let fractional = self.macmode & (1 << 3) != 0;
+                    let product = ((b >> (16 * lane)) as u16 as i16 as i64 * (c >> (16 * lane)) as u16 as i16 as i64)
+                        << fractional as u32;
                     let acc = &mut self.mac_acc[lane];
                     *acc = match i.op {
                         Op::Muldw => product,
                         Op::Macdw => acc.wrapping_add(product),
                         _ => acc.wrapping_sub(product),
                     };
-                    let round = if self.macmode & (1 << 2) != 0 { 0x4000 } else { 0 };
-                    let scaled = (*acc + round) >> if self.macmode & (1 << 3) != 0 { 15 } else { 16 };
+                    let round = if self.macmode & (1 << 2) != 0 { 0x4000 << fractional as u32 } else { 0 };
+                    let scaled = (*acc + round) >> 16;
                     let out = scaled.clamp(i16::MIN as i64, i16::MAX as i64);
                     *saturated = out != scaled;
                     r |= (out as u16 as u32) << (16 * lane);
                 }
                 self.sticky_saturation(sat[1], sat[0]);
+                self.regs[56] = sat32(self.mac_acc[1]).0;
+                self.regs[57] = sat32(self.mac_acc[0]).0;
                 (Some(r), None, None)
             }
             Op::Asls | Op::Asrs => {

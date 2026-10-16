@@ -20,6 +20,8 @@
 //!   bptrace PC MS [rN..] print registers (default r0-r3, blink) each time PC runs
 //!   logtrace PC rF MS   print a printf-style debug log call (format in rF, args after)
 //!   tvdump PATH         write the L-MAX TV chip's memory (RIBBIT_LMAX_TV=1)
+//!   record / wav PREFIX record the host sound, then write it as the frontend
+//!                       plays it with Leapster 2 PCM at 32 kHz and at 8 kHz
 //! RIBBIT_MAME_GPIO=1 reads unresolved GPIO lines as 1 (MAME's workaround);
 //! RIBBIT_GPIO_LINES=hex sets them; RIBBIT_BATTERY=hex sets the ADC battery input.
 //! Every 250 ms of emulated time prints the speed (percent of real time at
@@ -39,6 +41,62 @@ struct Meter {
     worst: f64,
     worst_label: String,
     rows: Vec<(String, f64, f64)>,
+    /// `record`: the host sound as the frontend plays it, both ways (32 kHz).
+    rec: Option<Recording>,
+}
+
+/// The frontend's two PCM choices (Audio menu), recorded side by side: per
+/// 16 ms frame, the Leapster 2's 32 kHz DAC stream when it plays (else the
+/// 8 kHz mix upsampled), and always the 8 kHz mix upsampled.
+#[derive(Default)]
+struct Recording {
+    pcm32: Vec<i16>,
+    pcm8: Vec<i16>,
+    history: [f64; 16],
+    dac_frames: u64,
+    frames: u64,
+}
+
+impl Recording {
+    fn take(&mut self, m: &mut Machine) {
+        let mut low = vec![0i16; m.io.voices.output.len()];
+        m.io.voices.output.pop_into(&mut low);
+        let mut dac = vec![0i16; m.io.voices.dac_output.len()];
+        m.io.voices.dac_output.pop_into(&mut dac);
+        let mut up = Vec::with_capacity(low.len() * 4);
+        for &x in &low {
+            up.extend_from_slice(&ribbit_audio::upsample4x(&mut self.history, x));
+        }
+        self.frames += 1;
+        if dac.is_empty() {
+            self.pcm32.extend_from_slice(&up);
+        } else {
+            self.dac_frames += 1;
+            self.pcm32.extend_from_slice(&dac);
+        }
+        self.pcm8.extend_from_slice(&up);
+    }
+}
+
+fn write_wav(path: &str, samples: &[i16], hz: u32) {
+    let mut b = Vec::with_capacity(44 + samples.len() * 2);
+    let data = samples.len() as u32 * 2;
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    b.extend_from_slice(&1u16.to_le_bytes()); // mono
+    b.extend_from_slice(&hz.to_le_bytes());
+    b.extend_from_slice(&(hz * 2).to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data.to_le_bytes());
+    for s in samples {
+        b.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, b).unwrap();
 }
 
 fn main() {
@@ -104,7 +162,7 @@ fn main() {
         m.clock = ribbit_core::Clock::new(mhz.parse::<u64>().unwrap() * 1_000_000, m.clock.peripheral_hz);
     }
     let mut kept: Vec<Box<[u32; WIDTH * HEIGHT]>> = vec![];
-    let mut meter = Meter { label: "boot".into(), worst: f64::MAX, worst_label: String::new(), rows: vec![] };
+    let mut meter = Meter { label: "boot".into(), worst: f64::MAX, worst_label: String::new(), rows: vec![], rec: None };
     for line in std::fs::read_to_string(script).unwrap().lines() {
         let line = line.split('#').next().unwrap().trim();
         let w: Vec<&str> = line.split_whitespace().collect();
@@ -133,6 +191,28 @@ fn main() {
                 m.buttons.set(b, false);
             }
             Some("shot") => shot(&m, w[1]),
+            Some("pcm") => {
+                // pcm: the Leapster 2 PCM DMA channels and the first samples of each buffer.
+                let p = &m.io.voices.pcm;
+                for ch in 0..2 {
+                    let rd = |a: u32| (m.bus.peek8(a).unwrap_or(0) as u16 | (m.bus.peek8(a + 1).unwrap_or(0) as u16) << 8) as i16;
+                    let words: Vec<String> = (0..16).map(|i| format!("{}", rd(p.base[ch] + 2 * i))).collect();
+                    println!("pcm ch{ch} control {:#x} base {:#x} pos {:#x} (macmode {:#x}): {}", p.control[ch], p.base[ch], p.position[ch], m.cpu.macmode, words.join(" "));
+                }
+            }
+            Some("record") => {
+                // record: start recording the host sound (see `Recording`).
+                m.io.voices.output.pop_into(&mut vec![0; m.io.voices.output.len()]);
+                m.io.voices.dac_output.pop_into(&mut vec![0; m.io.voices.dac_output.len()]);
+                meter.rec = Some(Recording::default());
+            }
+            Some("wav") => {
+                // wav PREFIX: write PREFIX-32k.wav and PREFIX-8k.wav (both 32 kHz files).
+                let r = meter.rec.take().expect("no `record`");
+                write_wav(&format!("{}-32k.wav", w[1]), &r.pcm32, 32_000);
+                write_wav(&format!("{}-8k.wav", w[1]), &r.pcm8, 32_000);
+                println!("wav: {} frames, {} with the 32 kHz DAC stream, {:.1} s", r.frames, r.dac_frames, r.pcm8.len() as f64 / 32_000.0);
+            }
             Some("snap") => kept.push(frame(&m)),
             Some("tvsnap") => {
                 // tvsnap: keep the TV chip's picture (L-MAX / Leapster TV) for `sheet`.
@@ -510,7 +590,7 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
     let per_ms = m.clock.cpu_hz / 1000;
     let mut left = ms;
     while left > 0 {
-        let chunk = left.min(WINDOW_MS);
+        let chunk = left.min(if meter.rec.is_some() { 16 } else { WINDOW_MS });
         left -= chunk;
         let skipped0 = m.idle_skipped_steps();
         let t = Instant::now();
@@ -519,6 +599,9 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
         assert_eq!(r.stop, ribbit_core::StopReason::StepLimit, "{r:?}");
         let speed = 100.0 * (chunk as f64 / 1000.0) / wall;
         let idle = 100.0 * (m.idle_skipped_steps() - skipped0) as f64 / r.steps as f64;
+        if let Some(rec) = meter.rec.as_mut() {
+            rec.take(m);
+        }
         if chunk == WINDOW_MS {
             let t_ms = m.cpu.cycles / per_ms;
             if speed < meter.worst {

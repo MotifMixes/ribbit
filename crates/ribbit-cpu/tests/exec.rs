@@ -428,6 +428,26 @@ fn dual_16x16_multiply_accumulate() {
     // RND16 (PRM instruction page): 0x1234_8000 rounds up to 0x1235; near the
     // top it saturates first (0x7FFF_FFFF) and gives 0x7FFF.
     assert_eq!((r.r(11), r.r(12)), (0x1235, 0x7FFF));
+    // The accumulators read as r56 (high lane) / r57 (low lane), VERIFIED-FW
+    // use (exec.rs, MULDW). After the last MULDW (AUX_MACMODE 0, integer):
+    // 0x7FFF^2 and -0x8000 * 0x7FFF.
+    assert_eq!((r.r(56), r.r(57)), (0x3FFF_0001, 0xC000_8000));
+}
+
+#[test]
+fn dual_mac_accumulators_read_back_in_fractional_mode() {
+    // AUX_MACMODE = 8 (fractional): products are doubled (Q31). Stop right
+    // after `muldw r3,r1,r2` (0x4000 * 0x2000 per lane).
+    let mut r = Rig::at("t_dsp");
+    while r.r(3) != 0x1000_1000 {
+        r.cpu.step(&mut r.bus).unwrap();
+    }
+    assert_eq!((r.r(56), r.r(57)), (0x1000_0000, 0x1000_0000), "2 * 2^27");
+    // A write to r57 sets the low lane's accumulator: MACDW adds to it.
+    r.cpu.regs[57] = 0;
+    r.cpu.mac_acc[0] = 0;
+    r.cpu.step(&mut r.bus).unwrap(); // macdw r4,r1,r2
+    assert_eq!((r.r(4), r.r(57)), (0x2000_1000, 0x1000_0000), "low lane restarted from 0");
 }
 
 // ---- diagnostics: nothing silently becomes a no-op ---------------------------

@@ -132,6 +132,16 @@ error is **not** proof that they are correct.
 2 BIOS runs both in XY-memory filter loops (0x4003_E080-0x4003_E6D4) for The Talking Words Factory. Tests:
 `dual_16x16_multiply_accumulate` (vector `t_dsp`).
 
+**Accumulators as r56/r57 (2026-10-16, VERIFIED-FW use, details UNVERIFIED):** the BIOS's PCM output filter
+(0.6 0x4003_E0A4, AUX_MACMODE 0x12C) reads the two lanes' accumulators as `adds r9,r56,r57` right after its MACs,
+rounds with RND16, feeds the residual back and doubles the result (`adds r10,r10,r10`). r56 is the high lane, r57
+the low lane (summed, so the order is not observable here); r57 is also MLO. The filter's coefficients are stored
+halved (poles at about 0.99: a DC-blocking high-pass), which only works if fractional mode (bit 3) doubles each
+product, so Ribbit keeps the accumulator in Q31 (the lane results are unchanged from MAME's `>> 15`). Before this,
+r56/r57 read stale values and The Talking Words Factory's 32 kHz stream sat at +/-32767; read as Q30 it carried 17%
+of its energy above 12 kHz. Writes to r56/r57 set the accumulators (the RTOS restores them per task). Reads of an
+accumulator beyond 32 bits saturate (UNVERIFIED). Test: `dual_mac_accumulators_read_back_in_fractional_mode`.
+
 **Unsupported (stop with a diagnostic):** DIVAW (PRM does not state signedness), all other DSP/XMAC extension
 instructions, XY burst transfers (aux 0x9B), extension
 core registers r32-r56 when the XY extension is not configured, r61, writes to PCL, timer watchdog reset, any undefined major-0x05-0x0B extension.
