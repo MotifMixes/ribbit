@@ -13,6 +13,7 @@
 //!   save PATH / load PATH   save state
 //!   label TEXT          name the following part of the report
 //!   digest [NAME]       print the machine state digest (for comparing builds)
+//!   lcdrate MS N        N times: run MS, print LCD frames/s and the idle-skipped share
 //!   watch ADDR MS       single-step MS, printing each change of the word at ADDR and the PC
 //!   bptrace PC MS [rN..] print registers (default r0-r3, blink) each time PC runs
 //!   logtrace PC rF MS   print a printf-style debug log call (format in rF, args after)
@@ -284,6 +285,22 @@ fn main() {
                         }
                     }
                     println!("{:10.3} ms  {}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, out.trim_end());
+                }
+            }
+            Some("lcdrate") => {
+                // lcdrate MS N: N times, run MS and print the LCD transfers
+                // (frames sent to the screen) per second and the share of steps idle-skipped.
+                for _ in 0..num(2, 10) {
+                    let (t0, c0, i0) = (m.io.lcd.transfers, m.cpu.cycles, m.idle_skipped_steps());
+                    run_ms(&mut m, num(1, 1000), &mut meter);
+                    let secs = (m.cpu.cycles - c0) as f64 / m.clock.cpu_hz as f64;
+                    let idle = (m.idle_skipped_steps() - i0) as f64 / (m.cpu.cycles - c0) as f64;
+                    println!(
+                        "{:10.1} ms  {:5.1} frames/s  idle-skipped {:4.1}%",
+                        m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64,
+                        (m.io.lcd.transfers - t0) as f64 / secs,
+                        100.0 * idle
+                    );
                 }
             }
             Some("watch") => {
