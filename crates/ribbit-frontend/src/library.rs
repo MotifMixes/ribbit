@@ -191,6 +191,8 @@ pub struct Game {
     pub subtitle: String,
     /// Label, value pairs for the details tooltip.
     pub details: Vec<(&'static str, String)>,
+    /// Badges shown with the game ("Internal": built into the console).
+    pub tags: Vec<&'static str>,
     key: String,
     pub art: Art,
 }
@@ -360,6 +362,7 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
     let mut seen_paths = HashSet::new();
     let mut seen_games = HashSet::new();
     let mut todo = Vec::new();
+    let mut zippity_todo = Vec::new();
     for path in files {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
         if !seen_paths.insert(canonical) {
@@ -369,6 +372,25 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
             Some(Found::Cart(c)) => c,
             Some(Found::Bios(hw)) => {
                 if tx.send(Msg::Bios(hw, path.clone())).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Some(Found::ZippityNand(mut game)) => {
+                if tx.send(Msg::Bios(Hardware::Zippity, path.clone())).is_err() {
+                    return;
+                }
+                if !seen_games.insert(game.key.clone()) {
+                    continue;
+                }
+                match load_png(&art_file(art_dir, &game.key)) {
+                    Some(img) => game.art = Art::Image(img),
+                    None => {
+                        game.art = Art::Pending;
+                        zippity_todo.push((game.key.clone(), path.clone()));
+                    }
+                }
+                if tx.send(Msg::Game(game)).is_err() {
                     return;
                 }
                 continue;
@@ -396,6 +418,19 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
         }
     }
     let _ = tx.send(Msg::Scanned);
+    // The Zippity's built-in games: a picture from the console itself.
+    for (key, path) in zippity_todo {
+        let image = make_zippity_art(&path);
+        if let Some(img) = &image {
+            let _ = std::fs::create_dir_all(art_dir);
+            if let Err(e) = save_png(&art_file(art_dir, &key), img) {
+                tracing::warn!(target: "ribbit::library", "saving art: {e:#}");
+            }
+        }
+        if tx.send(Msg::Art(key, image.as_ref().map(to_image))).is_err() {
+            return;
+        }
+    }
     if let Some(src) = art {
         let todo = std::sync::Mutex::new(todo);
         std::thread::scope(|scope| {
@@ -451,6 +486,8 @@ enum Found {
     /// A BIOS or system image of this console.
     Bios(Hardware),
     Zippity(Game),
+    /// The Zippity's system NAND: the console, and its built-in games.
+    ZippityNand(Game),
 }
 
 /// Zippity images: the system NAND (with spare area) and cartridges.
@@ -469,7 +506,8 @@ fn classify(path: &Path) -> Option<Found> {
     }
     use ribbit_memory::known;
     if data.len() == ZIPPITY_NAND_SIZE && data.starts_with(b"PGandnand") {
-        return Some(Found::Bios(Hardware::Zippity));
+        let id = ribbit_memory::ImageId::of(&data);
+        return Some(Found::ZippityNand(describe_zippity_nand(path, known::lookup(known::ZIPPITY_SYSTEM, &id), &id)));
     }
     if data.len() == ZIPPITY_CART_SIZE && &data[0x36..0x3B] == b"FAT16" {
         let id = ribbit_memory::ImageId::of(&data);
@@ -489,9 +527,14 @@ pub fn family_of(path: &Path) -> Option<Family> {
     match classify(path)? {
         Found::Cart(c) if c.known().is_some_and(|k| LEAPSTER2_ONLY.contains(&k.crc32)) => Some(Family::Leapster2),
         Found::Cart(_) => Some(Family::Leapster),
-        Found::Zippity(_) => Some(Family::Zippity),
+        Found::Zippity(_) | Found::ZippityNand(_) => Some(Family::Zippity),
         Found::Bios(_) => None,
     }
+}
+
+/// Whether a file is a console's built-in games (the Zippity's NAND).
+pub fn is_internal(path: &Path) -> bool {
+    matches!(classify(path), Some(Found::ZippityNand(_)))
 }
 
 /// A Leapster cartridge image, or None for anything else.
@@ -520,7 +563,37 @@ fn describe_zippity(path: &Path, known: Option<&ribbit_memory::known::KnownImage
     details.push(("Size", size));
     details.push(("CRC32", key.clone()));
     details.push(("File", path.display().to_string()));
-    Game { path: path.to_path_buf(), family: Family::Zippity, title, subtitle, details, key, art: Art::Missing }
+    Game { path: path.to_path_buf(), family: Family::Zippity, title, subtitle, details, tags: Vec::new(), key, art: Art::Missing }
+}
+
+/// The games built into a Zippity (its system NAND), as a library entry
+/// tagged "Internal".
+fn describe_zippity_nand(path: &Path, known: Option<&ribbit_memory::known::KnownImage>, id: &ribbit_memory::ImageId) -> Game {
+    // "Zippity (US) NAND" -> "US".
+    let region = known.and_then(|k| k.name.split_once('(')).and_then(|(_, r)| r.split_once(')')).map(|(r, _)| r);
+    let title = match region {
+        Some(r) => format!("Zippity Built-in Games ({r})"),
+        None => "Zippity Built-in Games".to_string(),
+    };
+    let key = format!("{:08x}", id.crc32);
+    let details = vec![
+        ("System", "Zippity".to_string()),
+        ("Games", "built into the console (system NAND)".to_string()),
+        ("Dump", if known.is_some() { "verified (known checksum)" } else { "not in Ribbit's list" }.into()),
+        ("Size", format!("{} MB", id.size.div_ceil(1 << 20))),
+        ("CRC32", key.clone()),
+        ("File", path.display().to_string()),
+    ];
+    Game {
+        path: path.to_path_buf(),
+        family: Family::Zippity,
+        title,
+        subtitle: "Mickey Mouse Clubhouse, Pooh, Little Einsteins and more".into(),
+        details,
+        tags: vec!["Internal"],
+        key,
+        art: Art::Missing,
+    }
 }
 
 fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
@@ -565,7 +638,7 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     details.push(("CRC32", key.clone()));
     details.push(("File", path.display().to_string()));
     let family = if known.is_some_and(|k| LEAPSTER2_ONLY.contains(&k.crc32)) { Family::Leapster2 } else { Family::Leapster };
-    Game { path: path.to_path_buf(), family, title, subtitle, details, key, art }
+    Game { path: path.to_path_buf(), family, title, subtitle, details, tags: Vec::new(), key, art }
 }
 
 /// Boots the game unseen and returns its most colourful early screen.
@@ -673,6 +746,24 @@ fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Shot> {
     let best = best.map(|(_, colours, shot)| (colours, shot));
     // A blank or near-blank screen is no art.
     best.filter(|b| b.0 >= 16).map(|b| b.1)
+}
+
+/// Art for the Zippity's built-in games: its start-up, run to the Zippity
+/// logo, the middle 480x480 of the 640x480 picture.
+fn make_zippity_art(nand: &Path) -> Option<Shot> {
+    use ribbit_zippity::{SCREEN_H, SCREEN_W};
+    /// Frames from power-on to the Zippity logo.
+    const LOGO_FRAMES: usize = 330;
+    let mut z = ribbit_zippity::Zippity::new(ribbit_core::read_image(nand).ok()?);
+    for _ in 0..LOGO_FRAMES {
+        z.run_frame();
+        z.take_audio();
+    }
+    let mut frame = vec![0u32; SCREEN_W * SCREEN_H];
+    z.render(&mut frame);
+    let x0 = (SCREEN_W - SCREEN_H) / 2;
+    let pixels = (0..SCREEN_H).flat_map(|y| frame[y * SCREEN_W + x0..y * SCREEN_W + x0 + SCREEN_H].to_vec()).collect();
+    Some(Shot { size: SCREEN_H, pixels })
 }
 
 /// Distinct colours on screen: high for title art, low for logos and menus.

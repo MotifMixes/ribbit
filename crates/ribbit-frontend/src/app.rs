@@ -80,6 +80,12 @@ pub struct App {
     settings: Settings,
     settings_path: PathBuf,
     session: Option<Session>,
+    /// A Zippity being played (instead of `session`'s Leapster).
+    zippity: Option<crate::zippity::ZipSession>,
+    /// Its latest picture.
+    tv_frame: Vec<u32>,
+    /// Removing the saved players from a Zippity dump (the cleaned dump).
+    zippity_cleaning: Option<std::thread::JoinHandle<anyhow::Result<PathBuf>>>,
     gpu: Option<Gpu>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
@@ -118,6 +124,10 @@ pub struct App {
     idle_resume: Option<(PathBuf, Vec<u8>)>,
 }
 
+fn hw_zippity() -> ribbit_memory::known::Hardware {
+    ribbit_memory::known::Hardware::Zippity
+}
+
 /// Runs the desktop app until the window closes.
 pub fn run(opts: StartOptions) -> Result<()> {
     let event_loop = EventLoop::new().context("creating event loop")?;
@@ -149,6 +159,9 @@ impl App {
             settings,
             settings_path,
             session: None,
+            zippity: None,
+            tv_frame: Vec::new(),
+            zippity_cleaning: None,
             gpu: None,
             egui_ctx: {
                 let ctx = egui::Context::default();
@@ -307,6 +320,11 @@ impl App {
     }
 
     fn end_session(&mut self) {
+        if let Some(z) = self.zippity.take() {
+            z.stop();
+            // Back to the Leapster's square screen.
+            self.fit_window = FIT_TRIES;
+        }
         if let Some(s) = self.session.take() {
             let mut machine = s.emu.stop();
             if let Err(e) = s.saves.flush(&mut machine) {
@@ -364,8 +382,16 @@ impl App {
     /// Plays a game on the console chosen in the library's console menu
     /// (unless a BIOS was given on the command line).
     fn open_cart(&mut self, path: PathBuf) {
+        // A console's built-in games (the Zippity's NAND): that console.
+        let listed = self.library.games.iter().any(|g| g.path == path && g.tags.contains(&"Internal"));
+        if listed || crate::library::is_internal(&path) {
+            return self.start_zippity(path.clone(), path);
+        }
         if self.opts.firmware.is_none() {
             match self.console_bios(&path) {
+                Ok(Some(nand)) if self.library.selected_console(&self.settings.library_console) == ribbit_memory::known::Hardware::Zippity => {
+                    return self.start_zippity(nand, path);
+                }
                 Ok(bios) => self.next_bios = bios,
                 Err(msg) => {
                     self.ui.error = Some(msg);
@@ -400,13 +426,47 @@ impl App {
             return Err(format!("{title} is a {} game: it can't run on the {}. {choose}", family.name(), console.name()));
         }
         match console {
-            Hardware::Zippity => Err("Zippity emulation is in progress: Zippity games can't run yet.".into()),
+            Hardware::Zippity => self
+                .library
+                .bios_for(hw_zippity())
+                .map(|p| Some(p.to_path_buf()))
+                .ok_or_else(|| "No Zippity NAND dump found in your games folders.".to_string()),
             Hardware::Leapster => Ok(None),
             hw => self
                 .library
                 .bios_for(hw)
                 .map(|p| Some(p.to_path_buf()))
                 .ok_or_else(|| format!("No {} BIOS found in your games folders.", hw.name())),
+        }
+    }
+
+    /// Plays a Zippity: its system (from the NAND dump `nand`) with its
+    /// built-in games. Cartridges cannot be read yet: opening one starts the
+    /// system and says so.
+    fn start_zippity(&mut self, nand: PathBuf, game: PathBuf) {
+        self.end_session();
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::zippity::ZipSession::start(&nand, &self.save_dir(), sink) {
+            Ok(mut z) => {
+                // The TV's 4:3 picture.
+                self.fit_window = FIT_TRIES;
+                if game != nand {
+                    self.ui.toast("Zippity cartridges can't be read yet: the console's built-in games are playable");
+                }
+                z.title = self
+                    .library
+                    .games
+                    .iter()
+                    .find(|g| g.path == nand && g.tags.contains(&"Internal"))
+                    .map_or_else(|| "Zippity Built-in Games".to_string(), |g| g.title.clone());
+                self.zippity = Some(z);
+                self.paused = false;
+                if let Some(a) = &mut self.audio {
+                    a.clear();
+                }
+                self.update_title();
+            }
+            Err(e) => self.ui.error = Some(format!("Couldn't start the Zippity: {e:#}")),
         }
     }
 
@@ -432,9 +492,10 @@ impl App {
 
     fn update_title(&self) {
         if let Some(g) = &self.gpu {
-            let t = match &self.session {
-                Some(s) if self.paused => format!("{APP_NAME} - {} (paused)", s.title),
-                Some(s) => format!("{APP_NAME} - {}", s.title),
+            let title = self.session.as_ref().map(|s| &s.title).or(self.zippity.as_ref().map(|z| &z.title));
+            let t = match title {
+                Some(t) if self.paused => format!("{APP_NAME} - {t} (paused)"),
+                Some(t) => format!("{APP_NAME} - {t}"),
                 None => APP_NAME.to_string(),
             };
             g.window.set_title(&t);
@@ -469,6 +530,17 @@ impl App {
             Action::RemakeArt(p) => {
                 self.library.forget_art(&p);
                 self.rescan_library();
+            }
+            Action::CleanZippityDump(path) => {
+                self.end_session();
+                // Our saves were made on top of the old players: drop them.
+                let _ = std::fs::remove_file(crate::zippity::save_file(&path, &self.save_dir()));
+                self.ui.toast("Removing the saved players from the Zippity dump...");
+                self.zippity_cleaning = Some(std::thread::spawn(move || crate::zippity::clean_dump(&path)));
+            }
+            Action::KeepZippitySaves(path) => {
+                self.settings.zippity_keep_saves.push(path);
+                self.save_settings();
             }
             Action::Reset => self.reset(),
             Action::TogglePause => self.toggle_pause(),
@@ -626,11 +698,12 @@ impl App {
     }
 
     /// Sizes the window so the screen area (`area`, physical pixels) is
-    /// exactly a multiple of 160 pixels square: no bars around the picture,
-    /// whatever the menu and status bars measure at this display scaling.
-    /// `scale` 0 = the largest that fits the monitor, as a normal window
-    /// (never maximized), centred. Returns true once the area fits.
-    fn fit_window(window: &Window, scale: u32, area: (f32, f32)) -> bool {
+    /// exactly a multiple of `unit` (160 x 160 for the Leapster's screen,
+    /// 160 x 120 for a TV's 4:3): no bars around the picture, whatever the
+    /// menu and status bars measure at this display scaling. `scale` 0 =
+    /// the largest that fits the monitor, as a normal window (never
+    /// maximized), centred. Returns true once the area fits.
+    fn fit_window(window: &Window, scale: u32, area: (f32, f32), unit: (u32, u32)) -> bool {
         if window.fullscreen().is_some() || window.is_maximized() || area.0 < 1.0 || area.1 < 1.0 {
             return true;
         }
@@ -650,10 +723,10 @@ impl App {
         let room_h = mon.height.saturating_sub(frame.1 + chrome_h + taskbar);
         // Fit screen leaves some breathing room (about a tenth of the height).
         let room_h = if scale == 0 { room_h * 9 / 10 } else { room_h };
-        let most = (room_w.min(room_h) / 160).max(1);
-        let side = 160 * if scale == 0 { most } else { scale.min(most) };
-        let want = PhysicalSize::new(side + chrome_w, side + chrome_h);
-        tracing::debug!(target: "ribbit::window", ?inner, ?area, chrome_w, chrome_h, side, "fitting the window");
+        let most = (room_w / unit.0).min(room_h / unit.1).max(1);
+        let times = if scale == 0 { most } else { scale.min(most) };
+        let want = PhysicalSize::new(unit.0 * times + chrome_w, unit.1 * times + chrome_h);
+        tracing::debug!(target: "ribbit::window", ?inner, ?area, chrome_w, chrome_h, times, "fitting the window");
         if want == inner {
             return true;
         }
@@ -673,8 +746,12 @@ impl App {
     }
 
     fn state_path(&self, slot: u8) -> Option<PathBuf> {
-        let s = self.session.as_ref()?;
-        Some(self.opts.data_dir.join("states").join(format!("{}-slot{slot}.state", s.state_key)))
+        let key = match (&self.session, &self.zippity) {
+            (Some(s), _) => s.state_key.clone(),
+            (None, Some(_)) => "zippity".to_string(),
+            (None, None) => return None,
+        };
+        Some(self.opts.data_dir.join("states").join(format!("{key}-slot{slot}.state")))
     }
 
     /// When each slot was saved, for the menus.
@@ -694,10 +771,14 @@ impl App {
     }
 
     fn save_state(&mut self, slot: u8) {
-        let (Some(path), Some(s)) = (self.state_path(slot), &self.session) else {
+        let Some(path) = self.state_path(slot) else {
             return;
         };
-        let bytes = s.emu.lock().save_state();
+        let bytes = match (&self.session, &self.zippity) {
+            (Some(s), _) => s.emu.lock().save_state(),
+            (None, Some(z)) => z.save_state(),
+            (None, None) => return,
+        };
         let result = (|| -> Result<()> {
             std::fs::create_dir_all(path.parent().unwrap())?;
             let tmp = path.with_extension("tmp");
@@ -715,13 +796,15 @@ impl App {
         let Some(path) = self.state_path(slot) else {
             return;
         };
-        let result = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|bytes| {
-            self.session.as_ref().unwrap().emu.lock().load_state(&bytes).map_err(anyhow::Error::from)
+        let result = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|bytes| match &self.session {
+            Some(s) => s.emu.lock().load_state(&bytes).map_err(anyhow::Error::from),
+            None => self.zippity.as_ref().map_or(Ok(()), |z| z.load_state(&bytes).map_err(anyhow::Error::msg)),
         });
         match result {
             Ok(()) => {
-                let emu = &self.session.as_ref().unwrap().emu;
-                emu.resync();
+                if let Some(s) = &self.session {
+                    s.emu.resync();
+                }
                 if let Some(a) = &mut self.audio {
                     a.clear();
                 }
@@ -732,6 +815,10 @@ impl App {
     }
 
     fn reset(&mut self) {
+        if let Some(z) = &self.zippity {
+            z.reset();
+            self.ui.toast("Reset");
+        }
         if let Some(s) = &mut self.session {
             {
                 let mut m = s.emu.lock();
@@ -744,6 +831,13 @@ impl App {
     }
 
     fn toggle_pause(&mut self) {
+        if self.zippity.is_some() {
+            self.paused = !self.paused;
+            if let Some(a) = &mut self.audio {
+                a.clear();
+            }
+            self.update_title();
+        }
         if let Some(s) = &self.session {
             self.paused = !self.paused;
             s.emu.resync();
@@ -816,10 +910,46 @@ impl App {
         }
     }
 
+    /// Logs (every 5 s) how often the sound ran out.
+    fn log_underruns(audio: Option<&AudioOut>, log: &mut (Instant, u64), speed_percent: f64) {
+        let now = Instant::now();
+        let Some(a) = audio else {
+            return;
+        };
+        if now.duration_since(log.0).as_secs() >= 5 {
+            let n = a.underruns();
+            if n > log.1 {
+                tracing::info!(target: "ribbit::audio", gaps = n - log.1, speed = speed_percent, "audio ran dry (last 5 s)");
+            }
+            *log = (now, n);
+        }
+    }
+
     /// Per frame: tells the emulation thread whether and how fast to run,
     /// and does the UI-side work (rewind, sound, autosave, speed meter).
     fn emulate(&mut self) {
         let halted = self.halted();
+        if self.zippity_cleaning.as_ref().is_some_and(|h| h.is_finished()) {
+            match self.zippity_cleaning.take().unwrap().join() {
+                Ok(Ok(dump)) => {
+                    self.ui.toast("Saved players removed: the Zippity starts like a new one");
+                    self.rescan_library();
+                    self.start_zippity(dump.clone(), dump);
+                }
+                Ok(Err(e)) => self.ui.error = Some(format!("Couldn't clean the Zippity dump: {e:#}")),
+                Err(_) => self.ui.error = Some("Couldn't clean the Zippity dump.".into()),
+            }
+        }
+        if let Some(z) = &self.zippity {
+            if z.take_user_data() && !self.settings.zippity_keep_saves.contains(&z.nand) {
+                self.ui.zippity_clean = Some(z.nand.clone());
+            }
+            z.set_running(!halted);
+            z.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+            self.speed_percent = z.speed_percent();
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
         let Some(s) = &mut self.session else {
             return;
         };
@@ -881,15 +1011,7 @@ impl App {
         }
         let stats = s.emu.stats();
         self.speed_percent = stats.speed_percent;
-        if let Some(a) = &self.audio
-            && now.duration_since(self.audio_log.0).as_secs() >= 5
-        {
-            let n = a.underruns();
-            if n > self.audio_log.1 {
-                tracing::info!(target: "ribbit::audio", gaps = n - self.audio_log.1, speed = self.speed_percent, "audio ran dry (last 5 s)");
-            }
-            self.audio_log = (now, n);
-        }
+        Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
         if let Some(stop) = stats.stopped {
             s.emu.clear_stopped();
             self.paused = true;
@@ -972,6 +1094,9 @@ impl App {
         if let (Some(b), Some(s)) = (self.settings.button_for(code), &self.session) {
             s.emu.lock().buttons.set(b, pressed);
         }
+        if let (Some(b), Some(z)) = (self.settings.button_for(code), &self.zippity) {
+            z.set_button(b, pressed);
+        }
     }
 
     /// Android gamepad buttons (winit reports them as raw key codes; the
@@ -1001,6 +1126,9 @@ impl App {
         if let Some(s) = &self.session {
             s.emu.lock().buttons.set(button, pressed);
         }
+        if let Some(z) = &self.zippity {
+            z.set_button(button, pressed);
+        }
     }
 
     /// Applies controller input (desktop; Android pads arrive as keys).
@@ -1018,10 +1146,13 @@ impl App {
                     if let Some(s) = &self.session {
                         s.emu.lock().buttons.set(b, pressed);
                     }
+                    if let Some(z) = &self.zippity {
+                        z.set_button(b, pressed);
+                    }
                 }
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
-                    if self.session.is_some() && !self.paused {
+                    if (self.session.is_some() || self.zippity.is_some()) && !self.paused {
                         self.toggle_pause();
                     }
                 }
@@ -1071,6 +1202,9 @@ impl App {
                 hd_frame = true;
             }
         }
+        if let Some(z) = &self.zippity {
+            z.frame(&mut self.tv_frame);
+        }
         let halted = self.halted();
         let save_dir = self.save_dir().display().to_string();
         let slots = self.slot_times();
@@ -1079,6 +1213,10 @@ impl App {
         };
         gpu.upload(&self.frame);
         gpu.show_hd = hd_frame;
+        gpu.show_tv = self.zippity.is_some();
+        if self.zippity.is_some() {
+            gpu.upload_tv(&self.tv_frame, (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H));
+        }
         if let Some(c) = self.session.as_ref().and_then(|s| s.hd.as_ref()).filter(|_| hd_frame) {
             if hd_dirty {
                 gpu.upload_hd(&c.pixels, c.size);
@@ -1088,11 +1226,16 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some(),
+                running: self.session.is_some() || self.zippity.is_some(),
                 paused: halted,
                 background: !self.paused && halted,
                 idle_left: self.idle_left,
-                title: self.session.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
+                title: self
+                    .session
+                    .as_ref()
+                    .map(|s| s.title.clone())
+                    .or(self.zippity.as_ref().map(|z| z.title.clone()))
+                    .unwrap_or_default(),
                 speed: self.speed_percent,
                 bios_name: self.settings.bios.as_ref().map(|p| {
                     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
@@ -1109,6 +1252,7 @@ impl App {
         self.discord.set(match &self.session {
             _ if !self.settings.discord_presence => crate::discord::Presence::Off,
             Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
+            None if self.zippity.is_some() => crate::discord::Presence::playing("Zippity", "Zippity", 0),
             None => crate::discord::Presence::Browsing,
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
@@ -1119,15 +1263,20 @@ impl App {
         let ppp = out.pixels_per_point;
         if self.fit_window > 0 {
             self.fit_window -= 1;
-            if Self::fit_window(&gpu.window, self.settings.window_scale, (area.width() * ppp, area.height() * ppp)) {
+            let unit = if self.zippity.is_some() { (160, 120) } else { (160, 160) };
+            if Self::fit_window(&gpu.window, self.settings.window_scale, (area.width() * ppp, area.height() * ppp), unit) {
                 self.fit_window = 0;
             }
         }
         let display = self.settings.display;
-        self.lcd_px =
-            Gpu::lcd_rect((area.min.x * ppp, area.min.y * ppp, area.width() * ppp, area.height() * ppp), display);
+        let px_area = (area.min.x * ppp, area.min.y * ppp, area.width() * ppp, area.height() * ppp);
+        self.lcd_px = if self.zippity.is_some() {
+            Gpu::tv_rect(px_area, (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
+        } else {
+            Gpu::lcd_rect(px_area, display)
+        };
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = self.session.is_some().then_some((self.lcd_px, display, self.settings.ai));
+        let lcd = (self.session.is_some() || self.zippity.is_some()).then_some((self.lcd_px, display, self.settings.ai));
         if let Err(e) = gpu.render(lcd, &jobs, &out.textures_delta, ppp) {
             self.fatal = Some(e);
             event_loop.exit();

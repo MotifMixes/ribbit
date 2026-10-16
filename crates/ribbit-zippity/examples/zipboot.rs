@@ -18,6 +18,9 @@
 //! | ZIPBOOT_JUMPS[=n] | Print the last n jumps (600) |
 //! | ZIPBOOT_WAV=file | Save the sound as a WAV file |
 //! | ZIPBOOT_SPULOG | Print each sound channel start |
+//! | ZIPBOOT_POWER_HOLD=n | Hold the power button for n instructions (the test mode) |
+//! | ZIPBOOT_RESET | Clear the user data first (`Zippity::factory_reset`) |
+//! | ZIPBOOT_SPRITES | Print the sprites in use at the end |
 
 use ribbit_zippity::{OUTPUT_RATE, SCREEN_H, SCREEN_W, Zippity};
 use std::collections::{BTreeMap, VecDeque};
@@ -62,7 +65,10 @@ fn save_wav(path: &str, samples: &[i16], rate: u32) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let flash = std::fs::read(&args[1]).expect("read the NAND image");
+    let mut flash = std::fs::read(&args[1]).expect("read the NAND image");
+    if std::env::var_os("ZIPBOOT_RESET").is_some() {
+        flash = Zippity::factory_reset(flash).expect("the factory reset");
+    }
     let steps: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
     let mut z = Zippity::new(flash);
     if let Ok(path) = std::env::var("ZIPBOOT_LOAD") {
@@ -79,6 +85,7 @@ fn main() {
         p.watch_from = std::env::var("ZIPBOOT_WATCH_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         p.rwatch = range("ZIPBOOT_RWATCH");
         p.spu_log = std::env::var_os("ZIPBOOT_SPULOG").is_some();
+        p.power_hold = std::env::var("ZIPBOOT_POWER_HOLD").ok().and_then(|s| s.parse().ok());
         if let Ok(s) = std::env::var("ZIPBOOT_PAD") {
             for item in s.split(';') {
                 let f: Vec<&str> = item.split(':').collect();
@@ -185,6 +192,10 @@ fn main() {
     for l in nand_log.iter().take(200) {
         println!("{l}");
     }
+    println!("--- NAND writes and erases ---");
+    for l in nand_log.iter().filter(|l| l.starts_with("program") || l.starts_with("erase")) {
+        println!("{l}");
+    }
     println!("--- 0xD0800000 operations: {} ---", z.probe().gfx_ops);
     println!("--- serial output ---\n{}\n--- end of serial output ---", z.log());
     let stats = std::mem::take(&mut z.probe().stats);
@@ -194,6 +205,12 @@ fn main() {
             "{a:08x}  reads {:>8}  writes {:>8}  last {:08x}  first pc {:08x}",
             e.reads, e.writes, e.last_write, e.first_pc
         );
+    }
+    if std::env::var_os("ZIPBOOT_SPRITES").is_some() {
+        println!("--- sprites ---");
+        for l in z.sprite_list() {
+            println!("{l}");
+        }
     }
     let cpu = z.cpu();
     println!("--- state after {} instructions ---", z.instructions());

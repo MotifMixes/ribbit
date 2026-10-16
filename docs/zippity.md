@@ -155,8 +155,8 @@ have handlers.
 | +0x0C, +0x14 | Cleared at start |
 
 The kernel warns at a reading of 0x5BCB or less and gives up at 0x5928 or
-less. What full batteries read is UNKNOWN; Ribbit's research tool returns
-0x7000 at once.
+less. What full batteries read is UNKNOWN; Ribbit returns 0x7000 at once,
+which the test mode (below) shows as "ADC: 28672, 5490mV".
 
 ## Timers (0xC0020000)
 
@@ -213,9 +213,66 @@ Found by pressing each bit on the menus:
 | 7 | Choose | "Sign In": chooses the player, and the player screen follows as in the recording (the name at the top; Learning Path, back, cancel and OK) |
 | 8, 9 | The mat's foot pads | Mickey Says' "stand on the mat" screen (the mat with its pads lighting up) goes on to the game when either or both are held; the kernel also tests them together (0x300) |
 
-The kernel tests bits 5-7 together (0xE0) and bits 0-3 together (0xF). A
-guess (UNVERIFIED) is that bits 5-7 are the mat's red, blue and green pads
-and bit 4 the button on top of the joystick.
+The kernel tests bits 5-7 together (0xE0) and bits 0-3 together (0xF). The
+test mode's menu (below) names them by colour: bit 5 red (starts its
+cartridge test), bit 7 green (clears the user data). Bit 6 is probably blue
+(its button test; pressing it there showed nothing in the log). So bits 5-7
+are likely the mat's red, blue and green pads, with green doubling as Choose
+on the menus, and bit 4 the button on top of the joystick (UNVERIFIED).
+
+## Test mode and the user data
+
+Holding the power button (port C bit 10 low) at power-on with port B bit 5
+low makes the kernel print `R_IOC_I_DATA = 0xfbff` and "PowerButton Still
+held down. Entering interactive test mode...". Its screen offers "Red =
+Cartridge Test, Blue = Button Test, Green = Clear User Log, Home = Back" and
+shows the battery reading and "Base Software ID 152-12300". (Dispatcher state
+36 runs the test function 0x2BC0; the flag is read at 0x2BC74.)
+
+Green (bit 7) deletes every file the system and games saved: UI.SAV (the
+players), the games' progress (`MMCH.P01`..., one per game and player) and the
+parent reports (`MAE*.LPD`, `MAE.LPI`), then prints "Erased all user data."
+and shows "User Data Clear: OK" (the result flag is RAM 0xAB660). A system
+started afterwards logs "LoadData could not open: UI.SAV", asks for the
+language, then shows "Sign In" with three empty players.
+
+The file system ("OSIA NFlash File...", blocks near the end of the NAND,
+pages 0x1DF80-0x1E5xx in the US dump) only unlinks the files. A block it does
+not rewrite keeps the old data: in the US dump block 1924 (page 0x1E100) still
+held the players' names and a parent report after the clear. The system
+erases that block itself the next time it needs room, so erasing it at once
+changes nothing it relies on. `Zippity::factory_reset` does the test mode's
+clear and then erases every block between the lowest and highest one the
+clear wrote that the clear left alone. Checked on the US dump only: the result
+boots the same, makes a player and saves it as before (UNVERIFIED as a rule
+for other dumps). The two blocks at the very end (pages 0x1FF80-0x1FFFF) are
+untouched (probably the bad block table).
+
+The `zipclean` example writes such a cleaned copy of a dump. The US dump
+cleaned this way is in Ribbit's list of known dumps as "Zippity (US) NAND,
+user data cleared" (CRC32 de80d788).
+
+## In the Ribbit app
+
+The library lists a Zippity NAND dump as "Zippity Built-in Games (US)",
+tagged "Internal". Playing it (or a Zippity cartridge, which can't be read
+yet) starts the system on its own thread at 60 frames a second; the TV
+picture is 640 x 480 and the window keeps 4:3. Controls: D-pad = joystick,
+A = Choose (green), B = bit 4, Hint = both foot pads, Home = bit 5 (red),
+Pause = bit 6. What the system saves goes to `<save folder>/<dump
+name>.nandpages` (the pages that differ from the dump); the dump file is not
+changed.
+
+When the system loads saved players from a dump it is playing for the first
+time ("LD open OK: UI.SAV" in its log), the app offers to clear them from the
+dump file itself ("Start fresh?"). Clearing keeps the original next to it as
+`<name>.with-saves.bak`; "Keep" is remembered (settings
+`zippity_keep_saves`).
+
+The emulation runs about 1.4 times faster than real time on a free P-core
+(about 85 million instructions a second against an assumed 60 million). With
+every core busy it drops to about 83% and the sound runs dry several times
+a second, so a faster CPU core is still wanted.
 
 ## Sound unit (0xD0400000)
 
@@ -370,6 +427,10 @@ Sprite RAM entries are 32 bytes (the kernel keeps a copy of the list at
 
 - **Pixels** are one bit stream, most significant bit first: the 6-bit Zippity
   logo only comes out right this way.
+- **Picture number 0** (bytes 0-1 zero) is no sprite, whatever byte 8 holds,
+  as in the GPL162xx. The kernel leaves old entries at the end of the list
+  with bytes 0-1 cleared but byte 8 kept. Drawing them put pink boxes on the
+  controller screen and specks under the LeapFrog logo and beside the sock.
 - **Colours** are palette entry 0x100 x bank + palette x 16 (rounded down
   to the depth's size) + the pixel. The bank is two bits: attribute bit 15
   and byte 8 bit 7. Found by matching recordings: the menus' background art
@@ -459,3 +520,8 @@ environment variables:
 | `ZIPBOOT_JUMPS[=n]` | Print the last n jumps (600) |
 | `ZIPBOOT_WAV=file` | Save the sound as a WAV file |
 | `ZIPBOOT_SPULOG` | Print each sound channel start (mode, address, phase, volume) |
+| `ZIPBOOT_POWER_HOLD=n` | Hold the power button for n instructions (with `ZIPBOOT_PRESS=b:20:...`: the test mode) |
+| `ZIPBOOT_RESET` | Clear the user data first (`Zippity::factory_reset`) |
+| `ZIPBOOT_SPRITES` | Print the sprites in use at the end |
+
+`zipclean <nand> <out>` writes a copy of a dump with the user data cleared.

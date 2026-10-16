@@ -14,6 +14,7 @@ ribbit-video.workspace = true
 ribbit-input.workspace = true
 ribbit-audio.workspace = true
 ribbit-debug.workspace = true
+ribbit-zippity.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde.workspace = true

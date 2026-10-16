@@ -19,6 +19,9 @@ pub struct Settings {
     pub recent_carts: Vec<PathBuf>,
     /// Folders the game library scans for cartridges.
     pub rom_folders: Vec<PathBuf>,
+    /// Zippity dumps whose saved players the user chose to keep (not asked
+    /// about again).
+    pub zippity_keep_saves: Vec<PathBuf>,
     pub display: Display,
     /// AI upscaler style, quality and resolution (Display::Ai).
     pub ai: crate::upscale::AiSettings,
@@ -78,6 +81,7 @@ impl Default for Settings {
             bios: None,
             recent_carts: Vec::new(),
             rom_folders: Vec::new(),
+            zippity_keep_saves: Vec::new(),
             display: Display::Pixel,
             ai: Default::default(),
             window_scale: 0,

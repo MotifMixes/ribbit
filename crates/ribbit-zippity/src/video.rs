@@ -85,8 +85,11 @@ impl Bus {
         let control = self.latch(0xD050_0108);
         let count = if control & 1 != 0 { ((control >> 8) & 0xFF) * 4 } else { 0 };
         let half = |n: u32, k: u32| (self.latch(0xD050_2000 + n * 32 + k / 2 * 4) >> (16 * (k & 1))) & 0xFFFF;
+        // Picture number 0 (halfword 0) is no sprite, whatever the address
+        // bits in byte 8 (as in the GPL162xx; left-over entries keep them
+        // and drew pink boxes on the controller screen).
         let mut order: Vec<(u32, u32)> = (0..count.min(512))
-            .filter(|&n| half(n, 0) != 0 || half(n, 4) & 0x7F != 0)
+            .filter(|&n| half(n, 0) != 0)
             .map(|n| ((half(n, 3) >> 12) & 3, n))
             .collect();
         order.sort_unstable();
@@ -103,6 +106,25 @@ impl Bus {
                 self.draw_sprite(img, &pal, |k| half(n, k));
             }
         }
+    }
+
+    /// Research: the sprites in use, one line each (number, the eight
+    /// halfwords of the entry's first 16 bytes, where it lands on screen).
+    pub(crate) fn sprite_list(&self) -> Vec<String> {
+        let control = self.latch(0xD050_0108);
+        let count = if control & 1 != 0 { ((control >> 8) & 0xFF) * 4 } else { 0 };
+        let half = |n: u32, k: u32| (self.latch(0xD050_2000 + n * 32 + k / 2 * 4) >> (16 * (k & 1))) & 0xFFFF;
+        (0..count.min(512))
+            .filter(|&n| half(n, 0) != 0)
+            .map(|n| {
+                let h: Vec<String> = (0..16).map(|k| format!("{:04x}", half(n, k))).collect();
+                let attr = half(n, 3);
+                let x0 = SCREEN_W as i32 / 2 + half(n, 1) as i16 as i32;
+                let y0 = SCREEN_H as i32 / 2 - half(n, 2) as i16 as i32;
+                let (w, hh) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
+                format!("{n:3} {}  at ({x0},{y0}) {w}x{hh} depth {} pal {} prio {}", h.join(" "), attr & 3, (attr >> 8) & 15, (attr >> 12) & 3)
+            })
+            .collect()
     }
 
     fn draw_sprite(&self, img: &mut [u32], pal: &[u32], half: impl Fn(u32) -> u32) {

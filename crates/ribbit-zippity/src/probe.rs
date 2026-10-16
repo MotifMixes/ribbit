@@ -37,6 +37,9 @@ pub struct Probe {
     pub spu_log: bool,
     /// Operations started on the 0xD0800000 engine.
     pub gfx_ops: u64,
+    /// Hold the power button this many instructions from power-on instead
+    /// of the usual (long enough: the kernel enters its test mode).
+    pub power_hold: Option<u64>,
 }
 
 impl Probe {

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 /// A page with its spare bytes, and its data part.
 pub const PAGE: usize = 0x840;
 pub const PAGE_DATA: usize = 0x800;
-const PAGES_PER_BLOCK: usize = 64;
+pub const PAGES_PER_BLOCK: usize = 64;
 const NAND_ID: [u8; 5] = [0x2C, 0xDA, 0x80, 0x15, 0x50];
 
 #[derive(PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -39,6 +39,9 @@ pub struct Nand {
     /// Set when the kernel programs or erases the flash.
     #[serde(skip)]
     pub dirty: bool,
+    /// The blocks programmed or erased since power-on.
+    #[serde(skip)]
+    pub touched: std::collections::BTreeSet<usize>,
     port: Port,
     column: u32,
     row: u32,
@@ -60,6 +63,7 @@ impl Nand {
         Self {
             flash,
             dirty: false,
+            touched: Default::default(),
             port: Port::Idle,
             column: 0,
             row: 0,
@@ -111,6 +115,7 @@ impl Nand {
                     }
                 }
                 self.dirty = true;
+                self.touched.insert(self.row as usize / PAGES_PER_BLOCK);
                 let row = self.row;
                 self.note(|| format!("program page {row:#07x}"));
                 self.port = Port::Idle;
@@ -123,6 +128,7 @@ impl Nand {
                     b.fill(0xFF);
                 }
                 self.dirty = true;
+                self.touched.insert(row / PAGES_PER_BLOCK);
                 self.note(|| format!("erase block of row {row:#07x}"));
             }
             _ => self.note(|| format!("NAND command {c:#04x}?")),

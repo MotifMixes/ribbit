@@ -2711,6 +2711,7 @@ dependencies = [
  "ribbit-input",
  "ribbit-memory",
  "ribbit-video",
+ "ribbit-zippity",
  "serde",
  "toml",
  "tracing",

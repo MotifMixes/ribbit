@@ -39,6 +39,10 @@ pub enum Action {
     RescanLibrary,
     /// Forget a game's art and make it again.
     RemakeArt(PathBuf),
+    /// Remove the saved players from this Zippity dump file.
+    CleanZippityDump(PathBuf),
+    /// Keep them (and don't ask again).
+    KeepZippitySaves(PathBuf),
     Quit,
 }
 
@@ -76,6 +80,9 @@ pub struct UiState {
     pub browser: Browser,
     toasts: Vec<(String, Instant)>,
     pub error: Option<String>,
+    /// A Zippity dump holding a previous owner's players: asks whether to
+    /// remove them from the file.
+    pub zippity_clean: Option<PathBuf>,
     /// The library's page and search.
     pub library: LibraryView,
     /// The game (title) that was closed because the Leapster turned itself
@@ -998,6 +1005,9 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
                     if let Some(r) = region {
                         badge(ui, r);
                     }
+                    for t in &game.tags {
+                        badge(ui, t);
+                    }
                     ui.label(egui::RichText::new(&game.subtitle).weak());
                 });
                 ui.add_space(14.0);
@@ -1075,7 +1085,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
     p.galley(at, title, egui::Color32::WHITE);
     let mut x = at.x;
     let y = at.y + two_lines + 6.0;
-    if let Some(r) = region {
+    for r in region.into_iter().chain(game.tags.iter().copied()) {
         let g = p.layout_no_wrap(r.to_string(), egui::FontId::proportional(11.0), egui::Color32::from_gray(200));
         let b = egui::Rect::from_min_size(egui::pos2(x, y), g.size() + egui::vec2(12.0, 4.0));
         p.rect_filled(b, 5, egui::Color32::from_white_alpha(14));
@@ -1220,6 +1230,13 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
         },
     );
 
+    if let Some(path) = st.zippity_clean.clone()
+        && let Some(a) = zippity_clean_prompt(ctx, &path)
+    {
+        st.zippity_clean = None;
+        actions.push(a);
+    }
+
     if let Some(err) = st.error.clone() {
         let mut close = false;
         egui::Window::new("Problem")
@@ -1236,6 +1253,52 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
             st.error = None;
         }
     }
+}
+
+/// Asks whether to clear a previous owner's players from a Zippity dump:
+/// a small card over the dimmed screen.
+fn zippity_clean_prompt(ctx: &egui::Context, path: &std::path::Path) -> Option<Action> {
+    let screen = ctx.content_rect();
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("zippity_clean_dim")))
+        .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
+    let mut answer = None;
+    egui::Area::new(egui::Id::new("zippity_clean"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(24, 27, 30))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(46, 170, 82, 90)))
+                .corner_radius(14)
+                .inner_margin(egui::Margin::symmetric(26, 22))
+                .shadow(egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(140) })
+                .show(ui, |ui| {
+                    ui.set_width(300.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("Start fresh?").size(20.0).strong().color(egui::Color32::WHITE));
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Old players are still saved on this Zippity.").size(14.0).color(egui::Color32::from_gray(185)));
+                        ui.add_space(18.0);
+                        ui.horizontal(|ui| {
+                            // Centre the two buttons.
+                            let (clear, keep) = (egui::vec2(150.0, 38.0), egui::vec2(90.0, 38.0));
+                            ui.add_space((ui.available_width() - clear.x - keep.x - ui.spacing().item_spacing.x) / 2.0);
+                            if primary_button(ui, "Clear them", clear).on_hover_text("The original file is kept as a .bak").clicked() {
+                                answer = Some(Action::CleanZippityDump(path.to_path_buf()));
+                            }
+                            let keep_button = egui::Button::new(egui::RichText::new("Keep").color(egui::Color32::from_gray(200)))
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(70)))
+                                .corner_radius(8)
+                                .min_size(keep);
+                            if ui.add_sized(keep, keep_button).clicked() {
+                                answer = Some(Action::KeepZippitySaves(path.to_path_buf()));
+                            }
+                        });
+                    });
+                });
+        });
+    answer
 }
 
 fn toasts(ctx: &egui::Context, st: &mut UiState) {

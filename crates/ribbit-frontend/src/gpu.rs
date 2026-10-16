@@ -222,6 +222,10 @@ pub struct Gpu {
     hd_pipeline: wgpu::RenderPipeline,
     linear: wgpu::Sampler,
     pub show_hd: bool,
+    /// A TV console's picture (the Zippity: 640x480), shown instead of the
+    /// LCD while `show_tv` is set: its texture, size and bind group.
+    tv: Option<(wgpu::Texture, (u32, u32), wgpu::BindGroup)>,
+    pub show_tv: bool,
     pixel: wgpu::RenderPipeline,
     sharp: wgpu::RenderPipeline,
     lcd: wgpu::RenderPipeline,
@@ -429,6 +433,8 @@ impl Gpu {
             hd_pipeline,
             linear,
             show_hd: false,
+            tv: None,
+            show_tv: false,
             lcd_view: view,
             bgl,
             sampler,
@@ -464,6 +470,57 @@ impl Gpu {
             Display::Ai | Display::Sharp | Display::Lcd | Display::Smooth => aw.min(ah).max(1.0),
         };
         (ax + (aw - side) / 2.0, ay + (ah - side) / 2.0, side, side)
+    }
+
+    /// Where a TV picture of `size` goes inside `area`: as large as fits
+    /// with its shape kept.
+    pub fn tv_rect(area: (f32, f32, f32, f32), size: (usize, usize)) -> (f32, f32, f32, f32) {
+        let (ax, ay, aw, ah) = area;
+        let (tw, th) = (size.0 as f32, size.1 as f32);
+        // Not whole multiples even for Pixel: a 640 x 480 TV picture is fine
+        // at any size, and rounding down would leave bars.
+        let scale = (aw / tw).min(ah / th).max(0.01);
+        let (w, h) = (tw * scale, th * scale);
+        (ax + (aw - w) / 2.0, ay + (ah - h) / 2.0, w, h)
+    }
+
+    /// A TV picture (0x00RRGGBB), `size` pixels.
+    pub fn upload_tv(&mut self, pixels: &[u32], size: (usize, usize)) {
+        let (w, h) = (size.0 as u32, size.1 as u32);
+        if self.tv.as_ref().is_none_or(|t| t.1 != (w, h)) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tv"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("tv"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.tv = Some((texture, (w, h), group));
+        }
+        let rgba: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 0xFF]).collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.tv.as_ref().unwrap().0,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: None },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
     }
 
     pub fn upload(&mut self, frame: &[u32; WIDTH * HEIGHT]) {
@@ -597,7 +654,8 @@ impl Gpu {
             Some((rect, _, ai)) if show_hd => Some((rect, ai)),
             _ => None,
         };
-        if let (Some(((_, _, w, h), ai)), Some(up)) = (ai_for(lcd, self.show_hd), &mut self.upscaler) {
+        let tv = self.show_tv.then_some(()).and(self.tv.as_ref()).map(|t| &t.2);
+        if let (Some(((_, _, w, h), ai)), Some(up), None) = (ai_for(lcd, self.show_hd), &mut self.upscaler, tv) {
             let size = WIDTH as u32;
             let chain = ai.chain(size, ai.resolution.target(size, w.min(h)));
             let view = if self.frame_dirty || chain != self.last_chain || up.output().is_none() {
@@ -648,6 +706,16 @@ impl Gpu {
                 if w >= 1.0 && h >= 1.0 {
                     pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
                     match (&ai_bind_group, display) {
+                        // A TV picture: drawn as it is (the AI networks are
+                        // trained for the 160x160 LCD; Ai shows as Sharp).
+                        _ if tv.is_some() => {
+                            pass.set_pipeline(match display {
+                                Display::Pixel => &self.pixel,
+                                Display::Ai | Display::Sharp | Display::Lcd => &self.sharp,
+                                Display::Smooth => &self.smooth,
+                            });
+                            pass.set_bind_group(0, tv.unwrap(), &[]);
+                        }
                         _ if hd_bind_group.is_some() => {
                             pass.set_pipeline(&self.hd_pipeline);
                             pass.set_bind_group(0, hd_bind_group.as_ref().unwrap(), &[]);

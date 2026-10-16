@@ -23,7 +23,7 @@ mod sound;
 mod video;
 
 pub use bus::{CLOCK, FRAME};
-pub use nand::{PAGE, PAGE_DATA};
+pub use nand::{PAGE, PAGE_DATA, PAGES_PER_BLOCK};
 pub use sound::OUTPUT_RATE;
 pub use video::{SCREEN_H, SCREEN_W};
 
@@ -47,10 +47,10 @@ impl Pad {
     /// Brings up a panel with a forward arrow (which button is UNKNOWN; the
     /// button on top of the joystick?).
     pub const BIT4: u16 = 1 << 4;
-    /// UNKNOWN (the mat's colour pads?).
+    /// UNKNOWN (the mat's colour pads?). The test menu calls it red.
     pub const BIT5: u16 = 1 << 5;
     pub const BIT6: u16 = 1 << 6;
-    /// Chooses on the menus.
+    /// Chooses on the menus (green, the test menu says).
     pub const CHOOSE: u16 = 1 << 7;
     /// The mat's foot pads (standing on the mat starts Mickey Says).
     pub const LEFT_FOOT: u16 = 1 << 8;
@@ -88,6 +88,59 @@ impl Zippity {
         let mut cpu = Arm::new();
         cpu.reset();
         Self { cpu, bus }
+    }
+
+    /// Clears what users have saved (players, progress, the play log), as
+    /// the system's own test mode does: power on holding the power button
+    /// with port B bit 5 low, then press green (CHOOSE) on the test menu.
+    /// Returns the NAND afterwards, or why the system did not finish.
+    ///
+    /// The system only unlinks the files: blocks of its file system it does
+    /// not rewrite keep the old data (players' names, the parent report)
+    /// until it needs the room and erases them itself. Those are erased here
+    /// too: blocks among the ones the clear rewrote (from the lowest to the
+    /// highest) that it left alone. UNVERIFIED as a rule (one dump checked:
+    /// it boots, makes a player and saves as before; docs/zippity.md).
+    pub fn factory_reset(nand: Vec<u8>) -> Result<Vec<u8>, String> {
+        /// How long to wait for each step, in frames.
+        const LIMIT: u32 = 600;
+        let mut z = Zippity::new(nand);
+        z.bus.probe.power_hold = Some(u64::MAX);
+        z.bus.probe.presses.push((0xC000_0020, 0x20, 0, u64::MAX));
+        z.run_until("Entering interactive test mode", LIMIT)?;
+        z.bus.probe.power_hold = Some(0);
+        z.bus.probe.presses.clear();
+        // The test menu draws, then takes the press.
+        for _ in 0..60 {
+            z.run_frame();
+        }
+        z.set_pad(Pad::held(Pad::CHOOSE));
+        for _ in 0..15 {
+            z.run_frame();
+        }
+        z.set_pad(Pad::IDLE);
+        z.run_until("Erased all user data.", LIMIT)?;
+        let nand = &mut z.bus.nand;
+        if let (Some(&lo), Some(&hi)) = (nand.touched.first(), nand.touched.last()) {
+            for block in (lo..=hi).filter(|b| !nand.touched.contains(b)) {
+                let at = block * PAGES_PER_BLOCK * PAGE;
+                if let Some(b) = nand.flash.get_mut(at..at + PAGES_PER_BLOCK * PAGE) {
+                    b.fill(0xFF);
+                }
+            }
+        }
+        Ok(std::mem::take(&mut nand.flash))
+    }
+
+    /// Runs frames until the system's log shows `text` (at most `limit`).
+    fn run_until(&mut self, text: &str, limit: u32) -> Result<(), String> {
+        for _ in 0..limit {
+            if self.log().contains(text) {
+                return Ok(());
+            }
+            self.run_frame();
+        }
+        Err(format!("the system did not log \"{text}\""))
     }
 
     /// Instructions run since power-on.
@@ -149,6 +202,11 @@ impl Zippity {
     /// OUTPUT_RATE samples a second.
     pub fn take_audio(&mut self) -> Vec<i16> {
         std::mem::take(&mut self.bus.audio)
+    }
+
+    /// Research: the sprites in use, one line each.
+    pub fn sprite_list(&self) -> Vec<String> {
+        self.bus.sprite_list()
     }
 
     /// What the system has written to its serial port (its log).

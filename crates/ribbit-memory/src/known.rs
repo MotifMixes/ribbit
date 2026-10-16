@@ -168,6 +168,16 @@ pub const ZIPPITY_SYSTEM: &[KnownImage] = &[
         "9ade19d7aa28fba13581e6879b39e3a7702260b0",
         false,
     ),
+    // The US dump with the previous owner's players and log removed
+    // (ribbit-zippity's zipclean example: Zippity::factory_reset).
+    fw(
+        "Zippity (US) NAND, user data cleared",
+        Hardware::Zippity,
+        0x1080_0000,
+        0xde80_d788,
+        "ed503f6416aacc85bc64cd8fa596361823bf01e1",
+        false,
+    ),
 ];
 
 /// Zippity cartridges (MAME software list `leapfrog_zippity_cart`, CC0).

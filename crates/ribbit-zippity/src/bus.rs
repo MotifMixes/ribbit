@@ -506,7 +506,7 @@ impl Bus {
                 let idle = match a {
                     0xC000_0000 => 0xFFEF,
                     0xC000_0020 => 0xFFFF,
-                    _ if self.now < POWER_HOLD => 0xFBFF,
+                    _ if self.now < self.probe.power_hold.unwrap_or(POWER_HOLD) => 0xFBFF,
                     _ => 0xFFFF,
                 };
                 let now = self.now;
