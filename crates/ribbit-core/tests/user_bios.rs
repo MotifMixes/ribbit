@@ -98,18 +98,16 @@ fn check_display_boot(m: &mut Machine, lcd_init: std::ops::Range<u64>, format3: 
     assert!(format3.contains(&c), "format 3 switch at cycle {c}");
     assert_eq!(m.io.lcd.regs.stride, 0xA0);
 
-    // All three MMIO timer vectors and the DMA vector have been taken.
-    for v in [0x12, 0x19, 0x1A, 0x1E] {
+    // All three MMIO timer vectors, the DMA vector and the ADC vector (battery
+    // and untouched-panel conversions, io/adc.rs) have been taken.
+    for v in [0x10, 0x12, 0x19, 0x1A, 0x1E] {
         assert!(m.interrupt_counts[v] > 0, "vector {v:#x} never taken: {:?}", &m.interrupt_counts[..32]);
     }
     let unexpected: Vec<usize> =
-        (0..64).filter(|&v| m.interrupt_counts[v] > 0 && ![0x12, 0x19, 0x1A, 0x1E].contains(&v)).collect();
+        (0..64).filter(|&v| m.interrupt_counts[v] > 0 && ![0x10, 0x12, 0x19, 0x1A, 0x1E].contains(&v)).collect();
     assert!(unexpected.is_empty(), "unexpected vectors {unexpected:x?}");
-    // Next blocker (docs/hardware-research.md): the BIOS enables ADC channels
-    // 0 and 2 and waits for conversions; no ADC samples are generated.
-    assert!(m.io.touch.is_none() && !m.experimental_touch_enabled(), "experimental touch is opt-in");
-    assert!(m.io.adc.fifo.is_empty());
-    assert_eq!(m.interrupt_counts[0x10], 0, "no ADC interrupt by default");
+    assert!(m.io.touch.is_none() && !m.experimental_touch_enabled(), "no stylus attached by default");
+    assert_eq!(m.io.adc.dropped, 0);
 }
 
 #[test]
@@ -182,9 +180,9 @@ fn v21_zero_straps_reports_missing_lcd_config() {
 }
 
 // ---------------------------------------------------------------------------
-// EXPERIMENTAL, UNVERIFIED: MAME's guessed touchscreen model (io/touch.rs).
-// These tests pin what each BIOS does when fed MAME-style samples; they are
-// regression markers for that experiment, not evidence of hardware accuracy.
+// Touchscreen: the resistive panel model (io/touch.rs, component values
+// UNVERIFIED) read through the ADC (io/adc.rs). Each BIOS's own calibration
+// has to accept presses at its five targets.
 
 use ribbit_core::io::touch::{MameTouchConfig, TouchPress};
 use ribbit_video::{HEIGHT, WIDTH};
@@ -192,8 +190,8 @@ use ribbit_video::{HEIGHT, WIDTH};
 /// 96 MHz CPU.
 const CYCLES_PER_MS: u64 = 96_000;
 
-/// Raw ADC value for a pixel under MAME's crosshair mapping (0..=0x7F0 across
-/// 160 pixels). The real panel mapping is UNKNOWN; calibration measures it.
+/// Raw pen units for a pixel (0..=0x7F0 across 160 pixels, as the frontends
+/// use). The real panel mapping is UNKNOWN; calibration measures it.
 fn raw(px: u32) -> u32 {
     (px * 0x7F0 + 159 / 2) / 159
 }
@@ -235,8 +233,8 @@ fn assert_target_at(m: &Machine, x: usize, y: usize) {
     assert_eq!(lit, want, "calibration target at ({x},{y})");
 }
 
-/// Common part: calibration under the experimental model. Returns the machine
-/// at 8.0 s, after the fifth press (6.9 s) has been handled.
+/// Common part: calibration with a stylus. Returns the machine at 8.3 s,
+/// after the fifth press (7.2 s) has been handled.
 fn experimental_calibration(name: &str) -> Option<Machine> {
     let mut m = bios(name)?;
     m.enable_experimental_mame_touch(MameTouchConfig { presses: calibration_presses() });
@@ -254,9 +252,7 @@ fn experimental_calibration(name: &str) -> Option<Machine> {
     }
     run_to_ms(&mut m, 8300);
     assert_eq!(m.io.lcd.regs.format, 0x8000_0004, "calibration finished: back to 12 bpp");
-    let t = m.io.touch.as_ref().unwrap();
-    assert_eq!(t.touched_updates, 5 * 18, "each 300 ms press covers 18 updates");
-    assert_eq!(t.dropped_samples, 0);
+    assert_eq!(m.io.adc.dropped, 0, "the ISR keeps up with the conversions");
     assert_eq!(m.io.adc.empty_reads, 1, "only the boot-time drain reads an empty FIFO");
     Some(m)
 }
@@ -271,20 +267,21 @@ fn power_off_requested(m: &Machine, name: &str) -> bool {
 }
 
 #[test]
-fn v15_experimental_touch_calibration_then_power_off_request() {
-    let Some(m) = experimental_calibration(V15) else {
+fn v15_touch_calibration_then_splash_screen() {
+    let Some(mut m) = experimental_calibration(V15) else {
         eprintln!("RIBBIT_BIOS_DIR not set; skipping");
         return;
     };
-    // Current blocker (docs/hardware-research.md): 0x0180_004C bit 11 reads 0
-    // (unmodelled), which v1.5's SysMgr treats as an active-low shutdown
-    // request (reason 4 at ~1.94 s), so after calibration it powers off.
-    assert!(power_off_requested(&m, V15), "v1.5 requests power-off");
-    assert_eq!(m.io.lcd.transfers, 1, "no splash screen is drawn");
+    // GIODataIn bit 11 (the battery-monitor resource's line C, active low)
+    // reads 1, so v1.5 no longer takes the power-off path (it did while the
+    // bit read 0, before io/gpio.rs modelled the board lines).
+    run_to_ms(&mut m, 9500);
+    assert!(!power_off_requested(&m, V15), "v1.5 does not take the power-off path");
+    assert!(m.io.lcd.transfers > 3, "post-calibration screens are DMA'd ({} transfers)", m.io.lcd.transfers);
 }
 
 #[test]
-fn v21_experimental_touch_calibration_then_splash_screen() {
+fn v21_touch_calibration_then_splash_screen() {
     let Some(mut m) = experimental_calibration(V21) else {
         eprintln!("RIBBIT_BIOS_DIR not set; skipping");
         return;
@@ -354,12 +351,16 @@ fn v21_voice_command_is_acknowledged_and_master_stop_audio_is_answered() {
 // shutdown line (bit 11) active and requests power-off; v2.1 does not.
 
 #[test]
-fn v15_buttons_read_released_and_unresolved_bit_11_still_requests_power_off() {
+fn v15_power_off_request_follows_board_line_bit_11() {
     let mut m = bios_or_skip!(audio_machine(V15));
     run_to_ms(&mut m, 4200);
     assert!(m.io.gpio.reads > 0, "the BIOS polls 0x0180_004C");
-    assert_eq!(m.io.gpio.unresolved_lines, 0);
-    assert!(power_off_requested(&m, V15), "bit 11 left unresolved: v1.5 powers off (~4.07 s)");
+    assert!(!power_off_requested(&m, V15), "bit 11 high: no power-off request");
+    // Line C is active low: with bit 11 at 0, v1.5 powers off (~4.07 s).
+    let mut m = bios_or_skip!(audio_machine(V15));
+    m.io.gpio.board_lines &= !ribbit_core::io::gpio::NO_POWER_OFF_REQUEST;
+    run_to_ms(&mut m, 4200);
+    assert!(power_off_requested(&m, V15), "bit 11 low: v1.5 requests power-off");
 }
 
 #[test]

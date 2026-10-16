@@ -97,10 +97,10 @@ taken from MAME's default) and are recorded.
 | Address | Name / purpose | Notes |
 |---|---|---|
 | `0180_0030-003F` | EEPROM command interface | Word 0 = command (`addr<<16 \| bank<<8 \| data`), word 1 = 2 starts a write, word 2 reads data. Bank `0x26` selects the system EEPROM; otherwise the cart. MAME calls its own bank selection "hacky" |
-| `0180_004C` | **GIODataIn** (official name) | Buttons, active-low, plus power/dock bits (Leapster 2 also has flash data) |
+| `0180_004C` | **GIODataIn** (official name) | Buttons, active-low; board lines bit 30 = battery OK, bit 12 = ordinary batteries, bit 11 = v1.5 power-off request (active low): VERIFIED-FW, see "ADC, touch panel and board lines"; Leapster 2 SPI flash data on bit 18 |
 | `0180_0080` | Interrupt flag / ack | Write 1 to clear. Bit 7 = EEPROM ready (MAME forces it on) |
 | `0180_0084` | Interrupt enable | |
-| `0180_0090-00AB` | ADC | 4 channel controls; `+0x10` FIFO data (`channel<<16 \| data<<5`); `+0x18` status (bit 8 = FIFO empty). Ch0 touchscreen, ch2 LCD-related, ch3 battery? |
+| `0180_0090-00AF` | ADC | 4 slot controls (bit 15 run, bits 16-17 mode, bits 0-2 input); `+0x10` FIFO data (`slot<<16 \| data<<5`); `+0x14` configuration; `+0x18` status (bit 8 = FIFO empty). Slot 0 touch panel, slot 2 battery (input 6). VERIFIED-FW, see "ADC, touch panel and board lines" (MAME's "ch0 touch, ch2 LCD, ch3 battery?" superseded) |
 | `0180_1000-101B` | Unknown reads | MAME returns 0 |
 | `0180_2070` | Audio voice command | `cmd<<3 \| voice`; IRQ 0x1D acks |
 | `0180_2078` | Active-voice bitmap | |
@@ -211,7 +211,7 @@ From S2 (SOURCED; MAME states that fixed-point behaviour and timing are unverifi
 |---|---|---|
 | Buttons on GIODataIn (`0x0180_004C`), active-low. Bit masks are in `ribbit-input` | SOURCED | S1 |
 | Up, Down, Left, Right, A, B, Hint, Home, Pause, Volume ±. Brightness ± and Contrast on internal lines | SOURCED | S1 |
-| Touchscreen read via ADC channel 0 FIFO. The BIOS discards the first 17 samples after enabling. Each report is 12 samples (pressure, pressure, X, Y, pressure, pressure) ×2 | SOURCED; MAME's own model is partly guessed | S1 |
+| Touchscreen: a 4-wire resistive panel on GPIO pins 20-23 read through ADC slot 0, six measurements per report (see "ADC, touch panel and board lines"). MAME's "17 samples, then 12 per report" was a guess fitted to the BIOS | VERIFIED-FW (2026-10-16); MAME's model superseded | S1, firmware |
 | 11-bit ADC range, about 0x000-0x7F0 | SOURCED | S1 |
 | Touch calibration is stored in the system EEPROM. MAME ships a "calibrated defaults" 0x200-byte NVRAM | SOURCED | S1 |
 
@@ -451,8 +451,9 @@ Q11 and Q20.
 
 ## Phase 4b: experimental touch model, and what follows calibration (2026-10-13)
 
-Everything in this section that involves touch samples was produced with the **EXPERIMENTAL, UNVERIFIED** MAME
-touch model (`--experimental-mame-touch`, off by default). It shows what the BIOS code does when fed MAME-style
+(Superseded 2026-10-16 by the resistive panel model in "ADC, touch panel and board lines"; kept as the record
+of the MAME-model experiments.) Everything in this section that involves touch samples was produced with the
+**EXPERIMENTAL, UNVERIFIED** MAME touch model (`--experimental-mame-touch`, off by default). It shows what the BIOS code does when fed MAME-style
 samples; it is not evidence about the hardware. Times are emulated time at Ribbit's placeholder 96 MHz / 1 cycle
 per step, with the SpongeBob cartridge inserted unless stated.
 
@@ -520,7 +521,8 @@ instead. The start-up screens are BIOS artwork (LeapFrog logo); frames are kept 
 * Diagnosis check (DEBUG ONLY, not emulation): with `--mmio-stub 0x0180004C=0xFFFFFFFF` v1.5 does not power off,
   draws its LeapFrog start-up screen (23 DMAs) and reaches PlayMovie on the cartridge at 12.39 s.
 * What bit 11 is on the board (power switch? battery? lid?) and the idle values of the other non-button bits are
-  UNKNOWN (Q22). v2.1 also reads 0x0180_004C but its SysMgr did not request power-off in 20 s.
+  UNKNOWN (Q22). **Resolved 2026-10-16** (behaviour, not wiring): bit 11 is line C of v1.5's battery-monitor
+  resource, active low; on a running console it reads 1. See "ADC, touch panel and board lines". v2.1 also reads 0x0180_004C but its SysMgr did not request power-off in 20 s.
 * 0x0180_B000 bit 8 is presumably a power-off control; UNKNOWN, unmodelled (MAME does not model writes either).
 
 ### Blocker 2, both: the audio unit
@@ -982,12 +984,150 @@ VERIFIED-FW (BIOS 0.6 unless stated). The boot problems, in the order they were 
 
 Result: with a cartridge it shows the seizure warning, then runs the cartridge (Sonic X reaches name entry).
 
+4. **SD card slot** (`io/sd.rs`; BIOS 0.6 and Connected B5, not CIP3). The SD driver names itself in its strings
+   ("gSDDMAContextPtr", "ResetAndGetToStandbyState", "SectorRead1", "cmd17 (Read) Failed..."). Before this, the
+   card-detect input read 0, which the driver takes as "card inserted", so it ran SD commands on a controller that
+   never answered: those were the "Cmd=0 DMA Active bit still set" / "GetToStandbyState Failed" messages.
+   * Pin block 0x0180_00E0-00F8: 0x0180_00EC is the pin input register. Bit 6 = card absent (card detect
+     0x400C_ED54 returns `(EC >> 6 & 1) ^ 1`); bit 1 = DAT0 (the write-busy poll 0x400C_F766 waits for it high and
+     reports "Card Ejected during write poll" if bit 6 rises). 0x0180_00F0 = 0x7F, or 0x7D around the busy poll
+     (bit 1 released). E0/E4/E8/F4/F8: written at init and power-down, meaning UNKNOWN.
+   * SD host controller: 0x0180_E400 = start (write 1) / busy (polled until 0, at most 100,000 reads),
+     0x0180_E404 = address of a command descriptor in RAM, 0x0180_E408 = clock/bus mode (0x7700_0001 during card
+     identification, 1 or 0x0100_0001 afterwards; HYPOTHESIS: slow clock, fast clock, 4-bit bus).
+   * Command descriptor (no-data form, built at 0x400C_E970): +0 u16 status (0xFFFF before; bit 0 = error after),
+     +2 u8 response type (0 none, 8 short 48-bit, 4 long R2), +3 u8 0x80 = active (the engine clears it; still set
+     after completion = "DMA Active bit still set"), +4 u16 `(0x40 | cmd) << 8 | arg[31:24]`, +6 u16 0xFFFF, +8 u32
+     `arg[23:0] << 8`, +0x10 a self pointer, +0x14/+0x15 two bytes from helpers (CRC?), +0x18-0x27 the response,
+     right-aligned as a big-endian 128-bit number stored in little-endian words (R1/R6/R7 byte 1 at +0x20,
+     bytes 2-5 at +0x27..+0x24: the CMD8 echo is read at +0x25/+0x26, the ACMD41 busy bit at +0x20 bit 7, the RCA
+     as `[+0x20] & 0xFF << 8 | [+0x24] >> 24`). The data form (0x400C_EA84) adds a length (+0xC), a buffer
+     address (+0x10) and moves the self pointer to +0x18 and the response to +0x20.
+   * Identification sequence (0x400C_ED94): CMD0, CMD8 (0x1AA), then CMD55 + ACMD41 (HCS bit 30 when CMD8 was
+     answered, voltage window bit 20) until busy clears, CMD2, CMD3, then QueryCardParameters (CSD:
+     "Bad CSD_STRUCT number"). Sector I/O: CMD17 read, CMD24 write. Volumes are formatted FAT ("MSDOS5.0", labels
+     "System Sd", "Leapster SD"). This is the path for the planned virtual SD card.
+   * Model: an empty slot. EC reads bit 6 = 1, bit 1 = 1. The BIOS prints "!! Card Not Inserted !!" and, from the
+     media layer, "GetToStandbyState Failed" (expected with no card).
+5. **On-chip RAM at 0x0400_0000** (map::SRAM_BASE). The USB driver (strings "UsbMPI", "USB Device Init OK") creates
+   its MQX memory pool with the constants `1 << 26` and `1 << 13` (0x400B_E964): 8 KiB at 0x0400_0000. Without it
+   the pool header read 0, allocations returned 0 and the driver wrote its endpoint structures through null
+   pointers (writes to 0x0000_0000-0x7A at 714 ms); boot was 0% idle. Modelled as 8 KiB of RAM (Leapster 2 only),
+   timed like VRAM (UNVERIFIED); beyond 8 KiB UNKNOWN. In save states since format 5. The USB device controller
+   itself is at 0x0180_F000-F01C (unmodelled).
+6. **CIP3 board (BIOS "Leapster 2x CIP3 Baserom m9", 152-12659): NAND flash** (`io/nand.rs`). m9 has no SD driver
+   and a NAND driver with a flash file system ("FFS_Flash_Format", "eb %d, page %d") under FAT. Without the chip
+   it printed "unknown device / mcode: 0 / dcode: 0" and showed a black screen in every game; with it, Sonic X
+   reaches name entry as on 0.6. Interface (0x400D_BE90-0x400D_C4F0): one port at 0xE000_0000; a write with bit 24
+   latches a command, bit 25 an address byte, otherwise data; reads return data; 8-bit bus. Commands 0x90 (ID,
+   accepted 0x98 0xD1 or 0x20 0xF1), 0x00/0x30 (read page, 2 column + 2 row address bytes), 0x80/0x10 (program),
+   0x60/0xD0 (erase block), 0x70 (status, bit 0 = fail), 0xFF (reset). Geometry for either ID: 2048 + 64 bytes per
+   page, 64 pages per block, 1024 blocks (1 Gbit). Ready/busy: write 0x84 to 0x0180_0018 and wait for bit 7 to
+   clear, then wait for 0x0180_00EC bit 1 = 1 (the pin block above; on CIP3 bits 1-2 of E4/E8/F0/F4/F8 are set up
+   for the NAND at 0x400D_BF08, and 0x0180_100C = 0x0100_0000). Model: ST-style ID 0x20 0xF1 0x00 0x1D
+   (UNVERIFIED which chip), instant operations, erased when new, sparse storage. NOT YET persistent between runs
+   (needs a frontend change): every boot formats the NAND, like a factory-fresh unit.
+7. **Delay counters 0x0180_0010 / 0014 / 0018** (every model, original included): the BIOS writes a count with
+   bit 7 set and polls until bit 7 clears (LCD reset 158 x 0xFF at 0x400B_18FA; 0x400B_79B8; NAND waits 0x84).
+   Unmodelled: they read 0, so every such delay ends at once. Their clock is UNKNOWN (open question).
+8. **A BIOS null-object bug** (0.6 0x4008_3BB0, also on m9 and the original): a function reads `[[obj+0x18]+4]`
+   with `[obj+0x18] = 0`, i.e. the BIOS word at 4 through the mirror at 0 (0xFE40_4003), then reads 0xFE40_404C.
+   Real hardware does the same; what that address returns is UNKNOWN (Ribbit: 0, reported as unmapped).
+9. **Boot-image scan**: at 8 ms the BIOS compares 18 bytes at several addresses, among them 0xE000_0100, with a
+   signature (0x4005_28A4). Nothing is there on a retail unit; reads return 0.
+
 Open (Leapster 2):
-* **Touch**: the touch driver (around 0x400B_5400) is table-driven. Configuration resources give the GPIO pins
-  that switch the panel's X/Y drive between ADC conversions (0x0180_0040/0048 toggled per sample; ADC FIFO
-  0x0180_00A0/A8 and channel control 0x0180_0090 as on the original). The MAME-derived touch model ignores the
-  pins, so calibration never accepts a press. "Skip calibration at boot" avoids the calibration screen.
-* "!ASSERT: FlashPlayer: imageBuf format [6] unsupported" (an LCD/image format 6), "Cmd=0 DMA Active bit
-  still set" / "GetToStandbyState Failed" (a DMA engine, maybe USB), "No Cartridge Long Term Memory found"
-  (with no cartridge).
+* "!ASSERT: FlashPlayer: imageBuf format [6] unsupported" (on the calibration screen), "No Cartridge Long Term
+  Memory found" (with no cartridge).
+* "Invalid User ID" / "Log not opened yet" from games' APEX logging: no LeapFrog Connect user profile exists (a
+  fresh console); UNVERIFIED whether a real unit prints the same.
+* The USB controller (0x0180_F000), the SD host controller (for a card), NAND persistence, the delay counters.
 * The Leapster 2 debug UART log (`scenes uart`) is the main source; keep reading it.
+
+## ADC, touch panel and board lines (2026-10-16)
+
+All models use the same ADC driver (v1.5 0x4007_CC6A, US v2.1 0x4008_EB78, L-MAX v2.2 0x4009_28A0, Leapster 2
+0.6 0x400B_3854-0x400B_3BAC, read in full on the Leapster 2). Code: `io/adc.rs`, `io/touch.rs`, `io/gpio.rs`.
+This replaces MAME's guessed touch sample stream: the ADC now converts what its inputs see, and the touch panel is
+a resistor network driven by the BIOS's own GPIO settings.
+
+### ADC registers (VERIFIED-FW)
+
+| Register | Meaning |
+|---|---|
+| 0x0180_0090 + 4n | Slot n (0-3): bit 15 = running (start 0x400B_3B40, stop 0x400B_3B78); bits 16-17 = mode (set at registration, 0x400B_3810); bits 0-2 = analog input (0x400B_3A5C) |
+| 0x0180_00A0 | FIFO data `slot << 16 \| value << 5` (11-bit value). The ISR (0x400B_3854) dispatches each sample to the slot's callback |
+| 0x0180_00A4 | Configuration: 0, then 0xFFFF_FF81 at init; setter 0x400B_3AAC writes 12-bit fields at bits 8-19 / 20-31 (never called at boot) |
+| 0x0180_00A8 | Status: bit 8 = FIFO empty |
+| 0x0180_00AC | Written 0 at init |
+
+Each sample raises interrupt flag bit 8 (line 0x10). Slots at boot, identical on every BIOS: slot 2 = input 6,
+mode 1, the battery (callback v2.1 0x4002_7E60 / Leapster 2 0x400E_2B6C: drop the first sample, average 8, stop;
+outside 0x98..0x7D3 the BIOS substitutes 0x490); slot 3 = input 0, mode 1, registered at boot, started at ~10 s
+(meaning UNKNOWN); slot 0 = the touch panel, mode 0, input 7 for 16 samples (an average stored and never read),
+then the touch state machine, which never stops the slot.
+
+Model (HYPOTHESIS for timing): while any slot runs, the converter samples the running slots in turn, one
+conversion every (A4 bits 8-19) + 1 = 4096 ticks of 16 MHz (256 us, ~3.9 kHz). The rate is inferred from the
+register field only. MAME's model gave the touch slot 720 samples/s in bursts. Cost in Ribbit: Sonic X on US v2.1
+on one pinned P-core runs at 129-218% of real time (147-232% before), because the ISR now runs as on hardware.
+
+### Touch panel (VERIFIED-FW layout; component values UNVERIFIED)
+
+The touch driver's context holds six drive configurations (Leapster 2: GIODire at +0x18, GIODataOut at +0x30, ADC
+input at +0x48; v2.1 drives the same pins). After every sample the driver discharges pins 20-23 (all low and
+driven, then released) and sets up the next configuration:
+
+| Entry | Driven low, high | Input → pin | Measures |
+|---|---|---|---|
+| 4 | 21, 23 (X layer) | 2 → pin 22 (Y layer) | X position |
+| 5 | 20, 22 (Y layer) | 1 → pin 23 (X layer) | Y position |
+| 2 | 20, 21 | 1 → pin 23 | pressure, high side (full scale with the pen up) |
+| 0 | 22, 23 | 3 → pin 21 | pressure, high side |
+| 3, 1 | as 2, 0 | 2 → pin 22, 4 → pin 20 | pressure, low side (unused by this driver) |
+
+Evidence: the touch task copies the averages of entries 4 and 5 (+0xB6/+0xB8 → +0xC0/+0xC4, 0x400B_653E) into the
+calibration transform (0x400B_5764, matrix cm0-cm6 at +0x78..+0x90 divided by +0x78), so those are the
+positions. The cycle (states 0-5, 0x400B_4F8C) is entries 0, 2, 5, 4, 0, 2; the pen counts as up when entries 0
+and 2 both read above 0x7F0 (+0x98/+0x9A, 0x400B_50AC and 0x400B_54F6), which a high-side pressure pin does with no
+contact between the layers. With the pen up the driver skips entries 5 and 4 (no drive) and stores 0 and 0x7FF as
+their averages. Samples are averaged over two cycles and dropped if consecutive readings differ by more than 0x40
+(positions) or 0x29 (pressures) (+0x9C-0xA2). A report wakes the touch task (0x400B_2314 sets event bit 2).
+
+An earlier reading in this session (positions on entries 0/2, a pull-up on the ADC input) made the BIOS refuse
+presses near the bottom-right calibration target: one pressure configuration read near full scale there. The
+assignment above has no such corner and needs no pull-up.
+
+Model: X layer 400 ohm from pin 21 (left) to 23 (right), Y layer 400 ohm from pin 20 (top) to 22 (bottom), 200 ohm
+between the layers at the pen, solved by nodal analysis; an undriven node with no path to a driven pin reads 0.
+Orientation and values UNVERIFIED (the BIOS's calibration absorbs orientation). Inputs 0, 5, 7 read 0 (UNKNOWN).
+
+Results: the Leapster 2 (0.6) accepts all five calibration targets in order and Sonic X's name entry types the
+tapped letter and accepts OK (previously no press was ever accepted). US v2.1 and v1.5 calibrate as before
+(tests `v15_touch_calibration_then_splash_screen`, `v21_touch_calibration_then_splash_screen`).
+
+### Board lines on GIODataIn (VERIFIED-FW)
+
+Every BIOS's SysMgr loads a battery-monitor resource (`kSysMgrRsrcBatteryMonitorConfig`, ID 0x100B_0003):
+
+| BIOS | Address | Line A | Line B | Line C | Thresholds (type 1 / type 2) |
+|---|---|---|---|---|---|
+| v1.5 | 0x4008_E12C | bit 30, pol 1 | bit 12, pol 1 | bit 11, pol 0 | 0x26B 0x2A5 0x3C9 / same |
+| US v2.1 (also UK, Spanish, L-MAX, TV) | 0x400F_D480 | bit 30, pol 1 | bit 12, pol 1 | none | 0x26B 0x2A5 0x3C9 / 0x270 0x2B0 0x3C9 |
+| Leapster 2 (0.6, m9, B5) | 0x4013_E514 | bit 30, pol 1 | bit 12, pol 1 | none | 0x35B 0x397 0x4C0 / 0x360 0x3A3 0x3D2 |
+
+The SysMgr makes these pins inputs (pull-ups on B and C), then polls them with a debounce (Leapster 2
+0x4005_4E98-0x4005_4FB6):
+
+* Line A (bit 30) at 0 posts a power event 0x1002_0002 and starts a 10-step countdown: a low-battery warning
+  icon, then power-off. Seen in Ribbit on US v2.1 with Sonic X at ~9.5 s once battery samples were delivered
+  (before the ADC model no battery sample completed, so the SysMgr never evaluated it). So 1 = battery OK.
+* Line B (bit 12) sets the battery type: 1 → type 1, 0 → type 2; type 2 picks the second threshold table and is
+  what `LF_IsBatteryRechargeable` (Leapster 2 0x400A_0364) reports. So 1 = ordinary batteries.
+* Line C (bit 11, v1.5 only) active low is the power-off request found in Phase 4b; 1 on a running console.
+
+Battery level (Leapster 2 0x4005_4FE4): above the third threshold = level 3, above the second = 2, at or above the
+first = 1, below = power-off path (0x4005_525C). Model: board lines default to 1 (`gpio::BOARD_LINES`), battery
+input 6 reads 0x600 (`touch::BATTERY_LEVEL`, a fresh set: above every table; the real scale is UNKNOWN). Both are
+machine settings (`io.gpio.board_lines`, `io.battery`), so low batteries can be emulated. Resolves Q22 for v1.5:
+v1.5 now gets past calibration to its start-up screens without the MAME GPIO workaround.

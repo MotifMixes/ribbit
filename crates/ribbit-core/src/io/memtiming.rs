@@ -77,6 +77,8 @@ fn fill_cost(addr: u32) -> u64 {
     match addr >> 24 {
         0x3C..=0x3F => cost::FILL_RAM,
         0x03 => cost::FILL_SRAM,
+        // Leapster 2 on-chip RAM (USB buffers): UNVERIFIED, costed as VRAM.
+        0x04 => cost::FILL_SRAM,
         _ => cost::FILL_ROM,
     }
 }

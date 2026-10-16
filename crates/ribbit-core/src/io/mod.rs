@@ -18,6 +18,8 @@ pub mod straps;
 pub mod timer;
 pub mod touch;
 pub mod memtiming;
+pub mod nand;
+pub mod sd;
 pub mod spiflash;
 pub mod uart;
 pub mod voices;
@@ -32,7 +34,6 @@ use ribbit_debug::TraceRing;
 use ribbit_memory::{Bus, SystemBus, map};
 use straps::{ClockControl, Straps};
 use timer::{MmioTimer, TIMER_IRQS};
-use touch::MameTouch;
 use uart::DebugUart;
 use voices::VoiceEngine;
 
@@ -170,9 +171,18 @@ pub struct Peripherals {
     /// Leapster 2: values of the power-controller status registers
     /// 0x0180_B004 and 0x0180_B008 (None on other models).
     pub leapster2_power: Option<[u32; 2]>,
-    /// EXPERIMENTAL, UNVERIFIED MAME-derived touch/ADC sample source. None
-    /// (the default) = no ADC conversions and channel controls unmodelled.
-    pub touch: Option<MameTouch>,
+    /// Leapster 2: the SD card slot's pins (sd.rs; None on other models).
+    #[serde(default)]
+    pub sd: Option<sd::SdSlot>,
+    /// Leapster 2 CIP3: NAND flash at 0xE000_0000 (nand.rs).
+    #[serde(default)]
+    pub nand: Option<nand::Nand>,
+    /// The level the ADC reads on its battery input (touch.rs).
+    #[serde(default = "default_battery")]
+    pub battery: u32,
+    /// The stylus on the touchscreen (touch.rs). None = no stylus attached:
+    /// the panel reads as untouched.
+    pub touch: Option<touch::Stylus>,
     /// EXPERIMENTAL: the L-MAX's TV chip (None = absent, as on a Leapster).
     #[serde(default)]
     pub lmax_tv: Option<lmax_tv::LmaxTv>,
@@ -213,6 +223,10 @@ pub struct Peripherals {
     pub probe_violation: bool,
 }
 
+fn default_battery() -> u32 {
+    touch::BATTERY_LEVEL
+}
+
 fn default_mmio_tail() -> TraceRing<MmioAccess> {
     TraceRing::new(MMIO_TAIL)
 }
@@ -234,6 +248,9 @@ impl Default for Peripherals {
             mem: memtiming::MemTiming::default(),
             spi_flash: None,
             leapster2_power: None,
+            sd: None,
+            nand: None,
+            battery: touch::BATTERY_LEVEL,
             touch: None,
             lmax_tv: None,
             tv_link: None,
@@ -286,8 +303,8 @@ impl Peripherals {
             .or_else(|| self.gpio.read(addr))
             .or_else(|| self.eeprom.read(addr))
             .or_else(|| self.voices.read(addr))
-            .or_else(|| self.touch.as_ref().and_then(|t| t.read(addr)))
             .or_else(|| self.tv_link.as_mut().and_then(|l| l.read(addr)))
+            .or_else(|| self.sd.as_ref().and_then(|s| s.read(addr)))
     }
 
     /// 32-bit register write; `false` if no device implements `addr`.
@@ -303,11 +320,12 @@ impl Peripherals {
                     || self.uart.write(addr, value)
                     || self.lcd.write(addr, value)
                     || self.clock_control.write(addr, value)
-                    || self.touch_write(addr, value)
+                    || self.adc.write(addr, value)
                     || self.audio_write(addr, value)
                     || self.eeprom.write(addr, value, &mut self.intc)
                     || self.voices.write(addr, value)
                     || self.tv_link.as_mut().is_some_and(|l| l.write(addr, value))
+                    || self.sd.as_mut().is_some_and(|s| s.write(addr, value))
             }
         }
     }
@@ -316,7 +334,6 @@ impl Peripherals {
     pub fn write_narrow(&mut self, addr: u32, value: u32) -> bool {
         self.uart.write(addr, value)
             || self.lcd.write(addr, value)
-            || self.touch_write(addr, value)
             || self.audio_write(addr, value)
             || self.voices.write(addr, value)
             || self.tv_link.as_mut().is_some_and(|l| l.write(addr, value))
@@ -345,13 +362,6 @@ impl Peripherals {
         true
     }
 
-    fn touch_write(&mut self, addr: u32, value: u32) -> bool {
-        match &mut self.touch {
-            Some(t) => t.write(addr, value, &mut self.adc, &mut self.intc),
-            None => false,
-        }
-    }
-
     /// Applies the deferred ticks (the CPU was running during all of them).
     pub fn catch_up(&mut self) {
         if self.deferred > 0 {
@@ -361,11 +371,10 @@ impl Peripherals {
     }
 
     /// Ticks from now until the earliest device event that can change an
-    /// interrupt line: a timer wrap or a touch-model update.
+    /// interrupt line: a timer wrap, an ADC conversion or a UART transfer.
     pub fn next_event(&self) -> u64 {
         let timers = self.timers.iter().map(|t| t.ticks_to_wrap()).min().unwrap_or(u64::MAX);
-        let touch = self.touch.as_ref().map_or(u64::MAX, |t| t.ticks_to_next_update());
-        timers.min(touch).min(self.uart.ticks_to_ready())
+        timers.min(self.adc.ticks_to_next()).min(self.uart.ticks_to_ready())
     }
 
     /// Advances all devices by `ticks` peripheral-clock counts.
@@ -375,8 +384,15 @@ impl Peripherals {
         }
         self.uart.advance(ticks);
         if let Some(t) = &mut self.touch {
-            t.advance(ticks, &mut self.adc, &mut self.intc);
+            t.ticks += ticks;
         }
+        let analog = touch::Analog {
+            data_out: self.gpio.outputs[0],
+            dire: self.gpio.outputs[2],
+            pen: self.touch.as_ref().and_then(|t| t.pen()),
+            battery: self.battery,
+        };
+        self.adc.advance(ticks, &analog, &mut self.intc);
     }
 
     /// Every CPU line `irq_outputs` drives, as a mask.
@@ -472,7 +488,7 @@ fn time_independent(addr: u32) -> bool {
 }
 
 fn is_mmio(addr: u32) -> bool {
-    addr.wrapping_sub(map::MMIO_BASE) < map::MMIO_SIZE || lmax_tv::contains(addr)
+    addr.wrapping_sub(map::MMIO_BASE) < map::MMIO_SIZE || lmax_tv::contains(addr) || nand::contains(addr)
 }
 
 impl MachineBus<'_> {
@@ -534,6 +550,7 @@ impl Bus for MachineBus<'_> {
         self.cycle = cycle;
         self.pc = pc;
         self.sys.now = cycle;
+        self.sys.pc = pc;
     }
 
     #[inline(always)]
@@ -632,6 +649,11 @@ impl MachineBus<'_> {
         {
             return tv.read(addr, 1, self.pc) as u8;
         }
+        if let Some(n) = self.io.nand.as_mut()
+            && nand::contains(addr)
+        {
+            return n.read() as u8;
+        }
         if !time_independent(addr) {
             self.sync_time();
             self.io.sync_needed = true;
@@ -647,6 +669,11 @@ impl MachineBus<'_> {
             && lmax_tv::contains(addr)
         {
             return tv.read(addr, 2, self.pc) as u16;
+        }
+        if let Some(n) = self.io.nand.as_mut()
+            && nand::contains(addr)
+        {
+            return n.read() as u16;
         }
         if !time_independent(addr) {
             self.sync_time();
@@ -664,6 +691,11 @@ impl MachineBus<'_> {
             && lmax_tv::contains(addr)
         {
             return tv.read(addr, 4, self.pc);
+        }
+        if let Some(n) = self.io.nand.as_mut()
+            && nand::contains(addr)
+        {
+            return n.read();
         }
         if !time_independent(addr) {
             self.sync_time();
@@ -714,6 +746,11 @@ impl MachineBus<'_> {
             && lmax_tv::contains(addr)
         {
             return tv.write(addr, value, 4, self.pc);
+        }
+        if let Some(n) = self.io.nand.as_mut()
+            && nand::contains(addr)
+        {
+            return n.write(value);
         }
         self.sync_time();
         self.io.sync_needed = true;

@@ -20,7 +20,8 @@
 //!   bptrace PC MS [rN..] print registers (default r0-r3, blink) each time PC runs
 //!   logtrace PC rF MS   print a printf-style debug log call (format in rF, args after)
 //!   tvdump PATH         write the L-MAX TV chip's memory (RIBBIT_LMAX_TV=1)
-//! RIBBIT_MAME_GPIO=1 reads unresolved GPIO lines as 1 (MAME's workaround).
+//! RIBBIT_MAME_GPIO=1 reads unresolved GPIO lines as 1 (MAME's workaround);
+//! RIBBIT_GPIO_LINES=hex sets them; RIBBIT_BATTERY=hex sets the ADC battery input.
 //! Every 250 ms of emulated time prints the speed (percent of real time at
 //! the CPU clock) and how much was idle-skipped.
 
@@ -86,9 +87,17 @@ fn main() {
         m.io.lmax_tv = Some(Default::default());
     }
     m.keep_awake = std::env::var_os("RIBBIT_KEEP_AWAKE").is_some();
+    if let Ok(v) = std::env::var("RIBBIT_BATTERY") {
+        // Research: the ADC's battery input level (hex, 0..=0x7FF).
+        m.io.battery = u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap();
+    }
     if std::env::var_os("RIBBIT_MAME_GPIO").is_some() {
         // EXPERIMENTAL: unresolved GPIO lines read 1 (MAME's workaround).
         m.io.gpio.unresolved_lines = !ribbit_input::BUTTON_BITS;
+    }
+    if let Ok(v) = std::env::var("RIBBIT_GPIO_LINES") {
+        // Research: the value of the non-button GIODataIn bits (hex).
+        m.io.gpio.unresolved_lines = u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap();
     }
     if let Ok(mhz) = std::env::var("RIBBIT_MHZ") {
         m.clock = ribbit_core::Clock::new(mhz.parse::<u64>().unwrap() * 1_000_000, m.clock.peripheral_hz);
@@ -338,6 +347,28 @@ fn main() {
                 // unmapped: distinct accesses to unmapped addresses so far.
                 for ((addr, width, kind), s) in m.bus.unmapped_summary() {
                     println!("unmapped {addr:#010x} w{width} {kind:?} {s:?}");
+                }
+            }
+            Some("unmappedtrace") => {
+                // unmappedtrace MS [N]: single-step MS; at each of the first N
+                // (default 20) accesses to an unmapped address, print the PC
+                // and registers r0-r4, r13-r25, blink.
+                let end = m.cpu.cycles + num(1, 1000) * (m.clock.cpu_hz / 1000);
+                let (mut left, none) = (num(2, 20), Breakpoints::default());
+                let mut seen = m.bus.unmapped_total();
+                while m.cpu.cycles < end && left > 0 {
+                    let pc = m.cpu.pc;
+                    let regs = m.cpu.regs;
+                    m.run(1, &none);
+                    if m.bus.unmapped_total() != seen {
+                        seen = m.bus.unmapped_total();
+                        left -= 1;
+                        print!("{:10.3} ms pc {pc:08x}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64);
+                        for r in (0..5).chain(13..26).chain([31]) {
+                            print!(" r{r}={:x}", regs[r]);
+                        }
+                        println!();
+                    }
                 }
             }
             Some("lcdregs") => {

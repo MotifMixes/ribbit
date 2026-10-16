@@ -118,8 +118,9 @@ const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 /// Bumped whenever the machine state's layout changes (bincode is
 /// positional): 2 = UART transmit timing (divisor, busy) and CPU pipeline
 /// timing (pending load, config flag); 3 = memory timing (caches, register
-/// ready times, load latency); 4 = GPIO output latches, Leapster 2 flash.
-pub const STATE_VERSION: u32 = 4;
+/// ready times, load latency); 4 = GPIO output latches, Leapster 2 flash;
+/// 5 = Leapster 2 on-chip RAM and SD slot.
+pub const STATE_VERSION: u32 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -140,6 +141,7 @@ struct StateRef<'a> {
     cpu: &'a Cpu,
     ram: &'a [u8],
     vram: &'a [u8],
+    sram: &'a [u8],
     buttons: &'a Buttons,
     io: &'a Peripherals,
     clock: &'a Clock,
@@ -155,6 +157,7 @@ struct State {
     cpu: Cpu,
     ram: Vec<u8>,
     vram: Vec<u8>,
+    sram: Vec<u8>,
     buttons: Buttons,
     io: Peripherals,
     clock: Clock,
@@ -342,18 +345,7 @@ impl Machine {
         let bus = SystemBus::new(&firmware, cartridge.as_ref());
         let mut io = Peripherals::default();
         io.straps = Some(io::straps::Straps::new(straps, cartridge.is_some()));
-        if firmware.known().is_some_and(|k| k.hardware == ribbit_memory::known::Hardware::Leapster2) {
-            // EXPERIMENTAL: the Leapster 2's internal flash and power status.
-            io.spi_flash = Some(Default::default());
-            // B008 bits 1-2 select what boots (BIOS 0.6 0x4005_35D4, strings at
-            // 0x400F_F8D0): 00 "Base selected", 01 "Cart selected", 10 a
-            // developer load from SD, 11 "USB Attach Reboot". HYPOTHESIS: the
-            // power controller reports a cartridge as 01 (with 00, Sonic X
-            // never starts and the base system shows its LeapFrog Connect
-            // screen; with 01 it boots). B004 MAME's 0xFFFF_FFFF.
-            let selection = if cartridge.is_some() { 0b011 } else { 0b001 };
-            io.leapster2_power = Some([0xFFFF_FFFF, selection]);
-        }
+        Self::install_leapster2(&mut io, &firmware, cartridge.is_some());
         if cartridge.is_some() {
             io.eeprom.insert_cart(None);
         }
@@ -398,11 +390,36 @@ impl Machine {
         m
     }
 
-    /// EXPERIMENTAL, UNVERIFIED: feeds ADC channel 0 with MAME's guessed
-    /// touchscreen samples (io/touch.rs). Empty `presses` = stylus never down.
-    /// Off unless called; every report produced with it on must say so.
+    /// EXPERIMENTAL: the Leapster 2's own devices, for a known Leapster 2 BIOS.
+    fn install_leapster2(io: &mut Peripherals, firmware: &Firmware, cart_present: bool) {
+        if !firmware.known().is_some_and(|k| k.hardware == ribbit_memory::known::Hardware::Leapster2) {
+            return;
+        }
+        // Internal SPI flash (io/spiflash.rs).
+        io.spi_flash = Some(Default::default());
+        // B008 bits 1-2 select what boots (BIOS 0.6 0x4005_35D4, strings at
+        // 0x400F_F8D0): 00 "Base selected", 01 "Cart selected", 10 a
+        // developer load from SD, 11 "USB Attach Reboot". HYPOTHESIS: the
+        // power controller reports a cartridge as 01 (with 00, Sonic X
+        // never starts and the base system shows its LeapFrog Connect
+        // screen; with 01 it boots). B004 MAME's 0xFFFF_FFFF.
+        let selection = if cart_present { 0b011 } else { 0b001 };
+        io.leapster2_power = Some([0xFFFF_FFFF, selection]);
+        // The pin block of the SD slot (empty) or, on CIP3, the NAND's
+        // ready/busy line (io/sd.rs).
+        io.sd = Some(Default::default());
+        if firmware.leapster2_nand() {
+            io.nand = Some(Default::default());
+        }
+    }
+
+    /// Attaches a stylus to the touchscreen (io/touch.rs): `io.touch.live`
+    /// and the scripted `presses` then press the panel. Without it the panel
+    /// is never touched. The panel's component values are UNVERIFIED, so
+    /// reports made with a stylus must say the touch model is experimental.
+    /// (The name is kept from the former MAME-derived sample generator.)
     pub fn enable_experimental_mame_touch(&mut self, config: io::touch::MameTouchConfig) {
-        tracing::warn!(target: "ribbit::boot", "EXPERIMENTAL: MAME-derived touchscreen/ADC model enabled (unverified, not hardware behaviour)");
+        tracing::warn!(target: "ribbit::boot", "EXPERIMENTAL: stylus on the resistive touch panel model (component values unverified)");
         self.touch_config = Some(config);
         self.install_touch();
     }
@@ -519,7 +536,7 @@ impl Machine {
     }
 
     fn install_touch(&mut self) {
-        self.io.touch = self.touch_config.clone().map(|c| io::touch::MameTouch::new(c, self.clock.peripheral_hz));
+        self.io.touch = self.touch_config.clone().map(io::touch::Stylus::new);
         self.io.sync_needed = true;
     }
 
@@ -539,13 +556,26 @@ impl Machine {
         self.interrupt_counts = [0; 64];
         self.first_cart_pc = None;
         self.idle = IdleTracker::default();
-        let (straps, lines) = (self.io.straps, self.io.gpio.unresolved_lines);
+        let (straps, lines, board) = (self.io.straps, self.io.gpio.unresolved_lines, self.io.gpio.board_lines);
+        let battery = self.io.battery;
         // Non-volatile: the EEPROM keeps its contents across a power cycle.
         let eeprom = std::mem::take(&mut self.io.eeprom.data);
         let cart_save = self.io.eeprom.cart.take();
+        // The Leapster 2's internal flashes are non-volatile too.
+        let flash = self.io.spi_flash.take();
+        let nand = self.io.nand.take();
         self.io = Peripherals::default();
+        Self::install_leapster2(&mut self.io, &self.firmware, self.cartridge.is_some());
+        if let (Some(f), Some(slot)) = (flash, self.io.spi_flash.as_mut()) {
+            slot.load(&f.data);
+        }
+        if nand.is_some() {
+            self.io.nand = nand;
+        }
         self.io.straps = straps;
         self.io.gpio.unresolved_lines = lines;
+        self.io.gpio.board_lines = board;
+        self.io.battery = battery;
         self.io.eeprom.load(&eeprom);
         if let Some(save) = cart_save {
             self.io.eeprom.insert_cart(Some(&save));
@@ -992,6 +1022,7 @@ impl Machine {
             cpu: &self.cpu,
             ram: self.bus.ram(),
             vram: self.bus.vram(),
+            sram: self.bus.sram(),
             buttons: &self.buttons,
             io: &self.io,
             clock: &self.clock,
@@ -1025,7 +1056,7 @@ impl Machine {
         if s.interrupt_counts.len() != self.interrupt_counts.len() {
             return Err(StateError::Damaged("interrupt counters".into()));
         }
-        if !self.bus.restore_memory(&s.ram, &s.vram) {
+        if !self.bus.restore_memory(&s.ram, &s.vram, &s.sram) {
             return Err(StateError::Damaged("memory size".into()));
         }
         // The ROM is the same, so the decode cache stays valid.
@@ -1237,41 +1268,43 @@ mod tests {
     }
 
     #[test]
-    fn experimental_touch_is_off_by_default_and_channel_controls_stay_unmodelled() {
+    fn untouched_panel_samples_full_scale_and_raises_line_0x10() {
         use ribbit_memory::Bus as _;
         let mut m = machine(&[B_SELF[0], B_SELF[1]]);
-        assert!(!m.experimental_touch_enabled());
-        assert!(m.io.touch.is_none());
+        assert!(!m.experimental_touch_enabled() && m.io.touch.is_none(), "no stylus by default");
         let mut bus = MachineBus::new(&mut m.bus, &mut m.io, 0, 0);
-        bus.write32(io::touch::CONTROL_BASE, io::touch::CHANNEL_ENABLE);
-        assert_eq!(bus.read32(io::touch::CONTROL_BASE), 0, "unmodelled: reads 0");
-        assert!(m.io.adc.fifo.is_empty());
-        assert!(m.bus.unmapped_summary().keys().any(|&(a, _, _)| a == io::touch::CONTROL_BASE), "reported as unmapped");
-        m.run(1_000_000, &Breakpoints::default());
-        assert_eq!(m.interrupt_counts[io::intc::ADC_IRQ_LINE as usize], 0);
+        bus.write32(io::adc::CONFIG_ADDR, 0xFFFF_FF81);
+        // The touch driver's pen-up check (entry 2): pins 20 low, 21 high, input 1.
+        bus.write32(io::gpio::DATA_OUT, 0x0020_0000);
+        bus.write32(io::gpio::DIRE, 0x0030_0000);
+        bus.write32(io::adc::CONTROL_BASE, io::adc::RUNNING | 1);
+        assert_eq!(bus.read32(io::adc::CONTROL_BASE), io::adc::RUNNING | 1);
+        // 4096 ticks of 16 MHz = 24,576 cycles at 96 MHz (one per step here).
+        m.cpu.config.pipeline_timing = false;
+        m.run(24_576, &Breakpoints::default());
+        assert_eq!(m.io.adc.fifo.len(), 1);
+        assert!(m.io.adc.fifo[0] >> 5 & 0x7FF > 0x7F0, "pen up reads full scale");
+        assert!(m.io.irq_outputs().any(|(line, level)| line == io::intc::ADC_IRQ_LINE && level));
     }
 
     #[test]
-    fn experimental_touch_feeds_the_fifo_and_raises_line_0x10_and_survives_reset() {
+    fn stylus_survives_reset_and_presses_the_panel() {
         use ribbit_memory::Bus as _;
         let mut m = machine(&[B_SELF[0], B_SELF[1]]);
         m.enable_experimental_mame_touch(io::touch::MameTouchConfig::default());
         m.reset();
         assert!(m.experimental_touch_enabled() && m.io.touch.is_some(), "kept across reset");
+        m.io.touch.as_mut().unwrap().live = Some((0x200, 0x600));
         let mut bus = MachineBus::new(&mut m.bus, &mut m.io, 0, 0);
-        bus.write32(io::touch::CONTROL_BASE, io::touch::CHANNEL_ENABLE);
-        assert_eq!(bus.read32(io::touch::CONTROL_BASE), io::touch::CHANNEL_ENABLE);
-        assert_eq!(m.io.adc.fifo.len(), io::touch::INIT_SAMPLES);
-        assert!(m.io.irq_outputs().any(|(line, level)| line == io::intc::ADC_IRQ_LINE && level));
-        m.io.intc.write(io::intc::FLAGS_ADDR, io::intc::FLAG_ADC);
-        assert!(!m.io.irq_outputs().any(|(line, level)| line == io::intc::ADC_IRQ_LINE && level), "ack drops it");
-        // 1/60 s = 1,600,002 cycles later (96 MHz; one cycle per step without
-        // pipeline timing, under which this `b .` costs two): 12 samples.
+        bus.write32(io::adc::CONFIG_ADDR, 0xFFFF_FF81);
+        // The X measurement (entry 4): pins 21 low and 23 high, input 2.
+        bus.write32(io::gpio::DATA_OUT, 0x0080_0000);
+        bus.write32(io::gpio::DIRE, 0x00A0_0000);
+        bus.write32(io::adc::CONTROL_BASE, io::adc::RUNNING | 2);
         m.cpu.config.pipeline_timing = false;
-        let r = m.run(1_600_002, &Breakpoints::default());
-        assert_eq!(r.stop, StopReason::StepLimit);
-        assert_eq!(m.io.adc.fifo.len(), io::touch::INIT_SAMPLES + 12);
-        assert_eq!(m.io.intc.flags & io::intc::FLAG_ADC, io::intc::FLAG_ADC);
+        m.run(24_576, &Breakpoints::default());
+        let x = m.io.adc.fifo[0] >> 5 & 0x7FF;
+        assert!(x.abs_diff(0x200) < 0x20, "{x:#x}");
     }
 
     #[test]

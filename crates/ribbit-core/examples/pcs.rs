@@ -5,6 +5,7 @@
 //! RIBBIT_MMIO=1 also lists every device-register access in the window,
 //! except the idle loop's clock-register polling. RIBBIT_CALLS=1 lists every
 //! call (a change of BLINK) with its time in ms, caller and target.
+//! RIBBIT_STRAPS sets the straps register (hex).
 
 use ribbit_core::Machine;
 use ribbit_debug::Breakpoints;
@@ -18,7 +19,9 @@ fn main() {
     // Research tool: any model's BIOS (Leapster TV, L-MAX, Leapster 2 too).
     let fw = ribbit_memory::Firmware::from_bytes_any_model(ribbit_core::read_image(bios).unwrap()).unwrap();
     let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap();
-    let mut m = Machine::with_straps(fw, Some(cart), 0x63FF_FFFF);
+    // RIBBIT_STRAPS (hex): the straps value (default 0x63FF_FFFF, no forced calibration).
+    let straps = std::env::var("RIBBIT_STRAPS").map_or(0x63FF_FFFF, |s| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap());
+    let mut m = Machine::with_straps(fw, Some(cart), straps);
     if let Some(p) = rest.first() {
         m.io.eeprom.load(&std::fs::read(p).unwrap());
     }

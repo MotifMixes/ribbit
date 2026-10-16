@@ -110,12 +110,12 @@ enum Command {
         /// Hex-dump emulated memory after the run, e.g. 0x0300ff00:0x100.
         #[arg(long, value_parser = parse_range)]
         dump_mem: Vec<(u32, u32)>,
-        /// EXPERIMENTAL, UNVERIFIED: generate touchscreen ADC samples with
-        /// MAME's guessed model (stylus up unless --touch-press is given).
+        /// EXPERIMENTAL: attach a stylus to the resistive touch panel model
+        /// (component values unverified; up unless --touch-press is given).
         #[arg(long)]
         experimental_mame_touch: bool,
         /// Scripted stylus press for --experimental-mame-touch:
-        /// START_MS,DURATION_MS,X,Y (emulated ms; X/Y raw ADC units 0..=0x7F0).
+        /// START_MS,DURATION_MS,X,Y (emulated ms; X/Y raw units 0..=0x7F0 across the screen).
         #[arg(long, requires = "experimental_mame_touch")]
         touch_press: Vec<ribbit_core::io::touch::TouchPress>,
         /// Scripted button press: NAME,START_MS,DURATION_MS (emulated time),
@@ -330,8 +330,8 @@ fn real_main() -> Result<ExitCode> {
 fn print_report(machine: &Machine, report: &RunReport, tail: usize) {
     println!("\n== run report");
     if machine.experimental_touch_enabled() {
-        println!("!! EXPERIMENTAL: MAME-derived touchscreen/ADC model was ON. Unverified guesswork, not hardware");
-        println!("!! behaviour: results from this run are not evidence of Leapster compatibility.");
+        println!("!! EXPERIMENTAL: a stylus was attached to the touch panel model (resistances and orientation");
+        println!("!! unverified): touch results from this run are not hardware evidence.");
     }
     println!("steps: {}  instructions: {}  interrupts: {}", report.steps, report.instructions, report.interrupts);
     println!("pc: {:#010x}", report.pc);
@@ -393,19 +393,18 @@ fn print_report(machine: &Machine, report: &RunReport, tail: usize) {
     let au = &machine.io.audio;
     println!("  audio: {} voice commands acknowledged (no playback), last {:?}", au.commands, au.last_command);
     let a = &machine.io.adc;
-    println!("  adc fifo: {} queued, {} reads while empty", a.fifo.len(), a.empty_reads);
+    println!(
+        "  adc: slots {:x?} config {:#x}, {} conversions, {} queued, {} dropped, {} reads while empty",
+        a.controls,
+        a.config,
+        a.conversions,
+        a.fifo.len(),
+        a.dropped,
+        a.empty_reads
+    );
     match &machine.io.touch {
-        Some(t) => println!(
-            "  EXPERIMENTAL mame touch: controls={:x?} started={} running={} updates={} (stylus down in {}) dropped={} t={} ms",
-            t.channel_control,
-            t.initted,
-            t.running,
-            t.updates,
-            t.touched_updates,
-            t.dropped_samples,
-            t.now_ms()
-        ),
-        None => println!("  touch/ADC conversions: not emulated (default)"),
+        Some(t) => println!("  EXPERIMENTAL stylus: {:?} at t={} ms", t.pen(), t.now_ms()),
+        None => println!("  stylus: none attached (panel untouched)"),
     }
     if let Some(s) = machine.io.straps {
         println!("  straps (0x01809004) = {:#010x} (LCD key {:#010x})", s.value, s.lcd_key());
@@ -552,7 +551,7 @@ fn build_machine(images: &Images, config: &Config) -> Result<Machine> {
         machine.io.gpio.unresolved_lines = lines;
     }
     if config.experimental_mame_touch {
-        eprintln!("warning: EXPERIMENTAL MAME-derived touchscreen model enabled (unverified guesswork)");
+        eprintln!("warning: EXPERIMENTAL stylus on the touch panel model (component values unverified)");
         machine.enable_experimental_mame_touch(Default::default());
     }
     Ok(machine)

@@ -1,57 +1,69 @@
-//! EXPERIMENTAL, UNVERIFIED: MAME's guessed touchscreen/ADC sample source.
+//! The touchscreen: a 4-wire resistive panel on GPIO pins 20-23, read
+//! through the ADC (adc.rs), and the analog inputs the ADC converts.
 //!
-//! Off by default. When off, the ADC channel controls stay unmodelled and no
-//! samples are ever produced (see adc.rs). When on, this reproduces MAME's
-//! model so the BIOS can be followed past touch calibration. Nothing here is
-//! known to match hardware; every run that uses it is labelled.
+//! VERIFIED-FW (Leapster 2 BIOS 0.6 touch driver 0x400B_4F48-0x400B_56E6 and
+//! touch task 0x400B_5ABE-0x400B_665C; the original's US v2.1 driver
+//! 0x4009_0030-0x4009_05DC drives the same pins and inputs). After every sample
+//! the driver discharges the panel (GIODataOut bits 20-23 low, then GIODire
+//! bits 20-23 set, then cleared), drives one of these configurations, and
+//! selects an ADC input. The configurations are a table in the driver's
+//! context (Leapster 2: GIODire at +0x18, GIODataOut at +0x30, input at +0x48):
 //!
-//! Source: MAME `src/mame/leapfrog/leapster.cpp`, master at commit da56c5ac
-//! (2026-10-07), `leapster_adc_w`, `leapster_touch_adc_update`, ports
-//! TOUCHX/TOUCHY/TOUCH (BSD-3; behaviour reimplemented, no code copied).
-//! What MAME does, and how sure it is (its own comments):
-//!
-//! | Behaviour | MAME | Status |
+//! | Entry | Driven low, high | Input |
 //! |---|---|---|
-//! | 0x0180_0090-009C are 4 channel controls; reads return the last write | stores/returns them | MAME, no stated evidence |
-//! | Channel 0 = touchscreen, 2 = "something to do with the LCD", 3 = "power / battery?", 1 = "unused?" | comment only; only channel 0 produces samples | guess |
-//! | Writing ch0 control with bit 15 set starts conversions; clearing it stops them | yes | MAME |
-//! | First start: 17 samples of 0 on channel 0 and an ADC interrupt | "whatever these are, they're never used" | guess (BIOS waits for 17 packets) |
-//! | Then every 1/60 s: 12 samples P,P,X,Y,P,P,P,P,X,Y,P,P on channel 0, then the interrupt | "not sure what the intended frequency is, so I've just set it at 60"; P "pressure or something?" | guess |
-//! | P = 0x7FF when not touched, 0 when touched | an average > 0x7F0 "will get interpreted as there not being a touch" | guess |
-//! | X/Y = raw position, 0..0x7F0, idle 0x3DF | input-port range and default | MAME's choice |
-//! | ADC interrupt: flag bit 8 + CPU line 0x10, not gated by the enable register | yes; MAME clears its pending bit on entry | MAME |
-//! | FIFO depth 0x10000, overflow is fatal | "not sure what the depth ... is" | guess |
+//! | 0, 1 | 22, 23 | 3, 4 |
+//! | 2, 3 | 20, 21 | 1, 2 |
+//! | 4 | 21, 23 | 2 |
+//! | 5 | 20, 22 | 1 |
 //!
-//! Ribbit differences, all forced by its design and documented: line 0x10 is
-//! a level (flag bit 8), dropped when the BIOS acknowledges bit 8, instead of
-//! MAME's clear-on-entry; FIFO overflow drops the sample and is counted
-//! instead of aborting; time is the 16 MHz peripheral clock (MAME uses
-//! emulated wall time with its CPU at 48 MHz, Ribbit 96 MHz nominal).
-//! Channel 2 produces nothing, as in MAME.
+//! These are the measurements of a 4-wire resistive panel with one layer
+//! between pins 21 and 23 (X) and the other between pins 20 and 22 (Y), the
+//! analog inputs being 1 = pin 23, 2 = pin 22, 3 = pin 21, 4 = pin 20:
+//!
+//! | Entry | Drives | Senses | Measures |
+//! |---|---|---|---|
+//! | 4 | X layer (21 low, 23 high) | pin 22, on Y | X position |
+//! | 5 | Y layer (20 low, 22 high) | pin 23, on X | Y position |
+//! | 2, 0 | across the layers | pin 23 / 21, on the high-driven X layer | pressure (full scale with the pen up) |
+//! | 3, 1 | across the layers | pin 22 / 20, on the low-driven Y layer | pressure (0 with the pen up) |
+//!
+//! Evidence for the assignment: the touch task converts the averages of
+//! entries 4 and 5 (context +0xB6/+0xB8, copied to +0xC0/+0xC4 at 0x400B_653E)
+//! to screen coordinates with the calibration matrix (0x400B_5764), so those
+//! are the positions, and each drives one layer and senses the other. The
+//! driver's cycle (states 0-5) uses entries 0, 2, 5, 4, 0, 2 and calls the pen
+//! up when both of entries 0 and 2 read above 0x7F0 (context +0x98/+0x9A,
+//! 0x400B_50AC and 0x400B_54F6): with no contact between the layers their
+//! sensed pins sit on the X layer, which is driven high at one end. Every
+//! entry senses a pin it does not drive. Which screen edge each pin is on is
+//! UNVERIFIED: here X runs from pin 21 at the left to pin 23 at the right and
+//! Y from pin 20 at the top to pin 22 at the bottom (the BIOS's calibration
+//! maps whatever the orientation is to the screen).
+//!
+//! Model (component values UNVERIFIED, typical for such panels): layers of
+//! 400 ohm, 200 ohm between the layers where the pen presses, solved as a
+//! resistor network for the selected input; a node with no path to a driven
+//! pin reads 0. Other inputs: 6 = battery (adc.rs), others read 0 (UNKNOWN;
+//! input 7 is averaged once by the touch driver and the result is not used
+//! elsewhere).
+//!
+//! The pen comes from a frontend (`live`, in "raw" units 0..=0x7F0 across the
+//! screen, the units Ribbit's frontends and MAME use) or from scripted
+//! presses (`TouchPress`).
 
-use super::adc::Adc;
-use super::intc::{FLAG_ADC, IntFlags};
+use super::adc::{AnalogInputs, FULL_SCALE};
 
-pub const CONTROL_BASE: u32 = 0x0180_0090;
-pub const CONTROL_END: u32 = 0x0180_009C;
-pub const CHANNEL_ENABLE: u32 = 0x8000;
-pub const TOUCH_CHANNEL: u32 = 0;
-/// MAME's update rate (a guess).
-pub const UPDATE_HZ: u64 = 60;
-/// MAME's init burst.
-pub const INIT_SAMPLES: usize = 17;
-/// MAME's "pressure" values.
-pub const PRESSURE_UP: u32 = 0x7FF;
-pub const PRESSURE_DOWN: u32 = 0;
-/// MAME's X/Y input-port range and default (idle) value.
+/// Raw pen units across the screen (MAME's input-port range).
 pub const POSITION_MAX: u32 = 0x7F0;
-pub const POSITION_IDLE: u32 = 0x3DF;
-/// MAME's FIFO depth.
-pub const FIFO_CAPACITY: usize = 0x10000;
+const LAYER_X_OHMS: f64 = 400.0;
+const LAYER_Y_OHMS: f64 = 400.0;
+const CONTACT_OHMS: f64 = 200.0;
+/// HYPOTHESIS: a fresh set of batteries. The BIOS accepts 0x98..0x7D3
+/// (0x400E_2BA6) and grades the reading against a table (SysMgr 0x4005_4FE4).
+pub const BATTERY_LEVEL: u32 = 0x600;
 
-/// A scripted stylus press, in emulated time since reset. X/Y are raw ADC
-/// values in MAME's input-port units (0..=0x7F0); how they map to pixels on a
-/// real panel is UNKNOWN (that is what calibration measures).
+/// A scripted stylus press, in emulated time since reset. X/Y are raw units
+/// (0..=0x7F0 across the screen).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TouchPress {
     pub start_ms: u64,
@@ -63,7 +75,7 @@ pub struct TouchPress {
 impl std::str::FromStr for TouchPress {
     type Err = String;
 
-    /// `START_MS,DURATION_MS,X,Y` (X/Y decimal or 0x-hex raw ADC units).
+    /// `START_MS,DURATION_MS,X,Y` (X/Y decimal or 0x-hex raw units).
     fn from_str(s: &str) -> Result<Self, String> {
         let parts: Vec<&str> = s.split(',').map(str::trim).collect();
         let [a, b, c, d] = parts[..] else {
@@ -78,281 +90,209 @@ impl std::str::FromStr for TouchPress {
         };
         let (x, y) = (num(c)?, num(d)?);
         if x > POSITION_MAX as u64 || y > POSITION_MAX as u64 {
-            return Err(format!("X/Y must be 0..={POSITION_MAX:#x} (MAME's range)"));
+            return Err(format!("X/Y must be 0..={POSITION_MAX:#x}"));
         }
         Ok(Self { start_ms: num(a)?, duration_ms: num(b)?, x: x as u32, y: y as u32 })
     }
 }
 
-/// Configuration of the experimental model; kept across machine resets.
+/// Scripted presses; kept across machine resets.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct MameTouchConfig {
-    /// Empty = no-touch mode (stylus always up).
+pub struct TouchConfig {
+    /// Empty = the pen stays up unless a frontend sets `live`.
     pub presses: Vec<TouchPress>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct MameTouch {
-    pub config: MameTouchConfig,
-    peripheral_hz: u64,
-    pub channel_control: [u32; 4],
-    pub initted: bool,
-    pub running: bool,
-    /// Elapsed time in peripheral ticks x UPDATE_HZ (exact 60 Hz arithmetic).
-    now: u128,
-    /// When the next update is due, same units.
-    due: u128,
-    /// 60 Hz updates delivered, and how many of them saw the stylus down.
-    pub updates: u64,
-    pub touched_updates: u64,
-    pub dropped_samples: u64,
-    /// Live stylus from a frontend (raw X/Y, MAME units); overrides the script.
+/// Former name (the touch model used to be MAME's).
+pub type MameTouchConfig = TouchConfig;
+
+/// The stylus.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stylus {
+    pub config: TouchConfig,
+    /// Peripheral ticks since reset (for scripted presses).
+    pub ticks: u64,
+    /// Live stylus from a frontend (raw units); overrides the script.
     pub live: Option<(u32, u32)>,
 }
 
-impl MameTouch {
-    pub fn new(config: MameTouchConfig, peripheral_hz: u64) -> Self {
-        assert!(peripheral_hz > 0);
-        Self {
-            config,
-            peripheral_hz,
-            channel_control: [0; 4],
-            initted: false,
-            running: false,
-            now: 0,
-            due: 0,
-            updates: 0,
-            touched_updates: 0,
-            dropped_samples: 0,
-            live: None,
-        }
+impl Stylus {
+    pub fn new(config: TouchConfig) -> Self {
+        Self { config, ..Default::default() }
     }
 
-    fn period(&self) -> u128 {
-        self.peripheral_hz as u128
-    }
-
-    /// Emulated milliseconds since reset.
     pub fn now_ms(&self) -> u64 {
-        self.ms_at(self.now)
+        self.ticks / (super::Clock::PERIPHERAL_HZ / 1000)
     }
 
-    pub fn read(&self, addr: u32) -> Option<u32> {
-        Self::channel(addr).map(|ch| self.channel_control[ch])
+    /// The pen position (raw units) if it is down now.
+    pub fn pen(&self) -> Option<(u32, u32)> {
+        if self.live.is_some() {
+            return self.live;
+        }
+        let ms = self.now_ms();
+        self.config.presses.iter().find(|p| (p.start_ms..p.start_ms + p.duration_ms).contains(&ms)).map(|p| (p.x, p.y))
     }
+}
 
-    fn channel(addr: u32) -> Option<usize> {
-        ((CONTROL_BASE..=CONTROL_END).contains(&addr) && addr.is_multiple_of(4))
-            .then(|| ((addr - CONTROL_BASE) / 4) as usize)
-    }
+/// What the ADC's inputs see: the panel's drive pins, the pen and the battery.
+pub struct Analog {
+    /// GIODataOut and GIODire.
+    pub data_out: u32,
+    pub dire: u32,
+    pub pen: Option<(u32, u32)>,
+    /// The battery input's level (`Peripherals::battery`).
+    pub battery: u32,
+}
 
-    pub fn write(&mut self, addr: u32, value: u32, adc: &mut Adc, intc: &mut IntFlags) -> bool {
-        let Some(ch) = Self::channel(addr) else {
-            return false;
+impl Analog {
+    /// The level at panel pin 20-23 when the ADC senses it.
+    pub fn pin(&self, sensed: u32) -> u32 {
+        // Nodes 0-3 = pins 20-23, 4 = the pen's contact point on the X layer
+        // (pins 21-23), 5 = on the Y layer (pins 20-22).
+        const N: usize = 6;
+        let driven = |n: usize| -> Option<f64> {
+            (n < 4 && self.dire >> (20 + n) & 1 != 0).then(|| (self.data_out >> (20 + n) & 1) as f64)
         };
-        if ch == TOUCH_CHANNEL as usize {
-            if value & CHANNEL_ENABLE != 0 {
-                if self.initted && !self.running && self.due < self.now {
-                    // MAME's timer keeps its expiry while disabled, so a late
-                    // re-enable fires at once, then every 1/60 s from then.
-                    self.due = self.now;
-                }
-                self.running = true;
-                if !self.initted {
-                    for _ in 0..INIT_SAMPLES {
-                        self.push(adc, 0);
+        let s = (sensed - 20) as usize;
+        if let Some(v) = driven(s) {
+            return (v * FULL_SCALE as f64).round() as u32;
+        }
+        let frac = |r: u32| r.min(POSITION_MAX) as f64 / POSITION_MAX as f64;
+        let (u, v) = self.pen.map_or((0.5, 0.5), |(x, y)| (frac(x), frac(y)));
+        let mut edges = vec![
+            (1, 4, LAYER_X_OHMS * u),
+            (4, 3, LAYER_X_OHMS * (1.0 - u)),
+            (0, 5, LAYER_Y_OHMS * v),
+            (5, 2, LAYER_Y_OHMS * (1.0 - v)),
+        ];
+        if self.pen.is_some() {
+            edges.push((4, 5, CONTACT_OHMS));
+        }
+        // Nodal analysis over the undriven nodes. Every node leaks a little to
+        // ground, so a node with no path to a driven pin reads 0.
+        let mut g = [[0.0f64; N]; N];
+        let mut i = [0.0f64; N];
+        for (n, row) in g.iter_mut().enumerate() {
+            row[n] += 1e-9;
+        }
+        for &(a, b, ohms) in &edges {
+            let c = 1.0 / ohms.max(1.0);
+            for (p, q) in [(a, b), (b, a)] {
+                match (driven(p), driven(q)) {
+                    (Some(_), _) => {}
+                    (None, Some(vq)) => {
+                        g[p][p] += c;
+                        i[p] += c * vq;
                     }
-                    intc.raise(FLAG_ADC);
-                    self.initted = true;
-                    self.due = self.now + self.period();
+                    (None, None) => {
+                        g[p][p] += c;
+                        g[p][q] -= c;
+                    }
                 }
-            } else {
-                self.running = false;
             }
         }
-        self.channel_control[ch] = value;
-        true
-    }
-
-    fn push(&mut self, adc: &mut Adc, data: u32) {
-        if adc.fifo.len() >= FIFO_CAPACITY {
-            self.dropped_samples += 1;
-        } else {
-            adc.push(TOUCH_CHANNEL, data);
-        }
-    }
-
-    /// Emulated milliseconds at time `t` (internal units).
-    fn ms_at(&self, t: u128) -> u64 {
-        (t * 1000 / (self.peripheral_hz as u128 * UPDATE_HZ as u128)) as u64
-    }
-
-    /// The scripted press active at the current time, if any.
-    pub fn active_press(&self) -> Option<TouchPress> {
-        self.press_at(self.now_ms())
-    }
-
-    fn press_at(&self, ms: u64) -> Option<TouchPress> {
-        if let Some((x, y)) = self.live {
-            return Some(TouchPress { start_ms: ms, duration_ms: 1, x, y });
-        }
-        self.config.presses.iter().copied().find(|p| (p.start_ms..p.start_ms + p.duration_ms).contains(&ms))
-    }
-
-    /// Peripheral ticks until the next update can happen (u64::MAX if none).
-    pub fn ticks_to_next_update(&self) -> u64 {
-        if !self.running {
-            return u64::MAX;
-        }
-        let gap = self.due.saturating_sub(self.now);
-        gap.div_ceil(UPDATE_HZ as u128).min(u64::MAX as u128) as u64
-    }
-
-    pub fn advance(&mut self, ticks: u64, adc: &mut Adc, intc: &mut IntFlags) {
-        self.now += ticks as u128 * UPDATE_HZ as u128;
-        while self.running && self.now >= self.due {
-            self.update(self.ms_at(self.due), adc, intc);
-            self.due += self.period();
-        }
-    }
-
-    fn update(&mut self, ms: u64, adc: &mut Adc, intc: &mut IntFlags) {
-        let (pressure, x, y) = match self.press_at(ms) {
-            Some(p) => {
-                self.touched_updates += 1;
-                (PRESSURE_DOWN, p.x, p.y)
+        let free: Vec<usize> = (0..N).filter(|&n| driven(n).is_none()).collect();
+        let m = free.len();
+        let mut a = vec![vec![0.0f64; m + 1]; m];
+        for (r, &p) in free.iter().enumerate() {
+            for (c, &q) in free.iter().enumerate() {
+                a[r][c] = g[p][q];
             }
-            None => (PRESSURE_UP, POSITION_IDLE, POSITION_IDLE),
-        };
-        for _ in 0..2 {
-            for v in [pressure, pressure, x, y, pressure, pressure] {
-                self.push(adc, v);
+            a[r][m] = i[p];
+        }
+        for col in 0..m {
+            let piv = (col..m).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs())).unwrap();
+            a.swap(col, piv);
+            let pivot = a[col].clone();
+            for (r, row) in a.iter_mut().enumerate() {
+                if r != col {
+                    let f = row[col] / pivot[col];
+                    for (x, p) in row[col..].iter_mut().zip(&pivot[col..]) {
+                        *x -= f * p;
+                    }
+                }
             }
         }
-        intc.raise(FLAG_ADC);
-        self.updates += 1;
+        let row = free.iter().position(|&n| n == s).unwrap();
+        let volts = (a[row][m] / a[row][row]).clamp(0.0, 1.0);
+        (volts * FULL_SCALE as f64).round() as u32
+    }
+}
+
+impl AnalogInputs for Analog {
+    fn level(&self, input: u32) -> u32 {
+        match input {
+            1 => self.pin(23),
+            2 => self.pin(22),
+            3 => self.pin(21),
+            4 => self.pin(20),
+            6 => self.battery,
+            _ => 0,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::adc::{DATA_ADDR, STATUS_ADDR, STATUS_EMPTY};
 
-    const HZ: u64 = 16_000_000;
-    /// 1/60 s is 266,666 2/3 ticks; an update lands on tick 266,667.
-    const PERIOD_CEIL: u64 = 266_667;
+    /// The Leapster 2 driver's table entries: (GIODire, GIODataOut, input).
+    const ENTRY: [(u32, u32, u32); 6] = [
+        (0x00C0_0000, 0x0080_0000, 3),
+        (0x00C0_0000, 0x0080_0000, 4),
+        (0x0030_0000, 0x0020_0000, 1),
+        (0x0030_0000, 0x0020_0000, 2),
+        (0x00A0_0000, 0x0080_0000, 2),
+        (0x0050_0000, 0x0040_0000, 1),
+    ];
 
-    fn setup(presses: Vec<TouchPress>) -> (MameTouch, Adc, IntFlags) {
-        (MameTouch::new(MameTouchConfig { presses }, HZ), Adc::default(), IntFlags::default())
+    fn read(pen: Option<(u32, u32)>, entry: usize) -> u32 {
+        let (dire, data_out, input) = ENTRY[entry];
+        Analog { data_out, dire, pen, battery: BATTERY_LEVEL }.level(input)
     }
 
-    fn drain(adc: &mut Adc) -> Vec<u32> {
-        let mut out = Vec::new();
-        while adc.read(STATUS_ADDR).unwrap() & STATUS_EMPTY == 0 {
-            out.push(adc.read(DATA_ADDR).unwrap());
+    #[test]
+    fn pen_up_reads_full_scale_on_the_pen_up_check_entries() {
+        // The driver calls the pen up when entries 0 and 2 both exceed 0x7F0.
+        assert!(read(None, 0) > 0x7F0 && read(None, 2) > 0x7F0);
+        assert_eq!((read(None, 1), read(None, 3)), (0, 0), "low-side pressure");
+    }
+
+    #[test]
+    fn the_pen_is_seen_down_everywhere() {
+        for x in (0..=0x7F0).step_by(0x7F) {
+            for y in (0..=0x7F0).step_by(0x7F) {
+                let p = Some((x, y));
+                assert!(read(p, 0) <= 0x7F0 || read(p, 2) <= 0x7F0, "({x:#x}, {y:#x})");
+            }
         }
-        out
-    }
-
-    /// The BIOS ISR's decode (v1.5 0x4007_CBB0).
-    fn decode(word: u32) -> (u32, u32) {
-        ((word >> 16) & 3, (word & 0xFFFF) >> 5)
     }
 
     #[test]
-    fn channel_controls_read_back() {
-        let (mut t, mut adc, mut intc) = setup(vec![]);
-        assert!(t.write(0x0180_0098, 0x8000, &mut adc, &mut intc));
-        assert_eq!(t.read(0x0180_0098), Some(0x8000));
-        assert_eq!(t.read(0x0180_00A0), None, "data/status belong to the FIFO");
-        assert!(!t.write(0x0180_00A4, 1, &mut adc, &mut intc));
-        assert!(adc.fifo.is_empty(), "channel 2 produces nothing (as in MAME)");
-        assert_eq!(intc.flags, 0);
+    fn positions_follow_the_pen() {
+        for (x, y) in [(0x100, 0x700), (0x3F8, 0x3F8), (0x7F0, 0), (0, 0x7F0)] {
+            let (rx, ry) = (read(Some((x, y)), 4), read(Some((x, y)), 5));
+            assert!(rx.abs_diff(x) < 0x10, "x {x:#x} read {rx:#x}");
+            assert!(ry.abs_diff(y) < 0x10, "y {y:#x} read {ry:#x}");
+        }
     }
 
     #[test]
-    fn first_enable_pushes_17_zero_samples_and_interrupts() {
-        let (mut t, mut adc, mut intc) = setup(vec![]);
-        t.write(CONTROL_BASE, CHANNEL_ENABLE, &mut adc, &mut intc);
-        assert_eq!(intc.flags, FLAG_ADC);
-        assert_eq!(drain(&mut adc), vec![0; INIT_SAMPLES]);
-        // Re-enabling does not repeat the burst.
-        t.write(CONTROL_BASE, 0, &mut adc, &mut intc);
-        t.write(CONTROL_BASE, CHANNEL_ENABLE, &mut adc, &mut intc);
-        assert!(adc.fifo.is_empty());
+    fn a_driven_pin_reads_its_level() {
+        // Pins 20 low and 21 high: input 3 (pin 21) and input 4 (pin 20).
+        let a = Analog { data_out: 0x0020_0000, dire: 0x0030_0000, pen: None, battery: BATTERY_LEVEL };
+        assert_eq!((a.level(3), a.level(4)), (FULL_SCALE, 0));
     }
 
     #[test]
-    fn no_touch_update_format_and_rate() {
-        let (mut t, mut adc, mut intc) = setup(vec![]);
-        t.write(CONTROL_BASE, CHANNEL_ENABLE, &mut adc, &mut intc);
-        drain(&mut adc);
-        intc.write(super::super::intc::FLAGS_ADDR, FLAG_ADC);
-        t.advance(PERIOD_CEIL - 1, &mut adc, &mut intc);
-        assert!(adc.fifo.is_empty(), "nothing before 1/60 s");
-        t.advance(1, &mut adc, &mut intc);
-        let words = drain(&mut adc);
-        let (p, i) = (PRESSURE_UP, POSITION_IDLE);
-        let expect: Vec<(u32, u32)> = [p, p, i, i, p, p, p, p, i, i, p, p].iter().map(|&v| (0, v)).collect();
-        assert_eq!(words.iter().map(|&w| decode(w)).collect::<Vec<_>>(), expect);
-        assert_eq!(words[0], 0x7FF << 5, "value in bits 15:5, channel 0 in bits 17:16");
-        assert_eq!(intc.flags, FLAG_ADC);
-        // One more simulated second = exactly 60 more updates (no drift).
-        t.advance(HZ, &mut adc, &mut intc);
-        assert_eq!(t.updates, 61);
-    }
-
-    #[test]
-    fn scripted_press_reports_position_and_zero_pressure() {
-        let press = TouchPress { start_ms: 105, duration_ms: 50, x: 0x100, y: 0x700 };
-        let (mut t, mut adc, mut intc) = setup(vec![press]);
-        t.write(CONTROL_BASE, CHANNEL_ENABLE, &mut adc, &mut intc);
-        drain(&mut adc);
-        t.advance(HZ / 10, &mut adc, &mut intc); // to 100 ms: 6 untouched updates
-        assert_eq!((t.updates, t.touched_updates), (6, 0));
-        drain(&mut adc);
-        t.advance(PERIOD_CEIL, &mut adc, &mut intc); // 116.7 ms
-        let v: Vec<u32> = drain(&mut adc).iter().map(|&w| decode(w).1).collect();
-        assert_eq!(v, [0, 0, 0x100, 0x700, 0, 0, 0, 0, 0x100, 0x700, 0, 0]);
-        t.advance(HZ / 10, &mut adc, &mut intc); // past the press
-        let v: Vec<u32> = drain(&mut adc).iter().map(|&w| decode(w).1).collect();
-        assert_eq!(
-            &v[v.len() - 12..],
-            [0x7FF, 0x7FF, 0x3DF, 0x3DF, 0x7FF, 0x7FF, 0x7FF, 0x7FF, 0x3DF, 0x3DF, 0x7FF, 0x7FF]
-        );
-        assert_eq!(t.touched_updates, 3, "updates at 116.7, 133.3 and 150 ms fall in 105..155 ms");
-    }
-
-    #[test]
-    fn disabling_stops_updates_and_late_reenable_fires_once() {
-        let (mut t, mut adc, mut intc) = setup(vec![]);
-        t.write(CONTROL_BASE, CHANNEL_ENABLE, &mut adc, &mut intc);
-        t.write(CONTROL_BASE, 0, &mut adc, &mut intc);
-        t.advance(HZ, &mut adc, &mut intc);
-        assert_eq!(t.updates, 0);
-        t.write(CONTROL_BASE, CHANNEL_ENABLE, &mut adc, &mut intc);
-        t.advance(1, &mut adc, &mut intc);
-        assert_eq!(t.updates, 1, "overdue update fires at once");
-        // The next one is 1/60 s after the enable write (1 tick already gone).
-        t.advance(PERIOD_CEIL - 2, &mut adc, &mut intc);
-        assert_eq!(t.updates, 1);
-        t.advance(1, &mut adc, &mut intc);
-        assert_eq!(t.updates, 2);
-    }
-
-    #[test]
-    fn live_stylus_overrides_the_script() {
-        let (mut t, mut adc, mut intc) = setup(vec![]);
-        t.write(CONTROL_BASE, CHANNEL_ENABLE, &mut adc, &mut intc);
-        drain(&mut adc);
-        t.live = Some((0x123, 0x456));
-        t.advance(PERIOD_CEIL, &mut adc, &mut intc);
-        let v: Vec<u32> = drain(&mut adc).iter().map(|&w| decode(w).1).collect();
-        assert_eq!(&v[..6], [0, 0, 0x123, 0x456, 0, 0]);
-        t.live = None;
-        t.advance(PERIOD_CEIL, &mut adc, &mut intc);
-        assert_eq!(decode(drain(&mut adc)[0]).1, PRESSURE_UP);
+    fn stylus_script_and_live() {
+        let mut s = Stylus::new(TouchConfig { presses: vec![TouchPress { start_ms: 10, duration_ms: 5, x: 1, y: 2 }] });
+        assert_eq!(s.pen(), None);
+        s.ticks = 12 * 16_000;
+        assert_eq!(s.pen(), Some((1, 2)));
+        s.live = Some((3, 4));
+        assert_eq!(s.pen(), Some((3, 4)));
     }
 
     #[test]

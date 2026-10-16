@@ -35,6 +35,14 @@ pub const RAM_SIZE_LEAPSTER2: u32 = 0x0100_0000;
 /// Largest RAM window (the decode window for any model).
 pub const RAM_WINDOW: u32 = RAM_SIZE_LEAPSTER2;
 
+/// Leapster 2: on-chip RAM used by the USB driver. VERIFIED-FW (BIOS 0.6,
+/// 0x400B_E964): the driver creates its MQX memory pool with the constants
+/// `1 << 26` and `1 << 13`, i.e. 8 KiB at 0x0400_0000, and allocates its
+/// endpoint buffers there. What lies beyond 8 KiB, and whether it mirrors,
+/// is UNKNOWN (only the BIOS's use is modelled).
+pub const SRAM_BASE: u32 = 0x0400_0000;
+pub const SRAM_SIZE_LEAPSTER2: u32 = 0x2000;
+
 /// Cartridge ROM window. Retail carts are 4, 8 or 16 MiB.
 pub const CART_BASE: u32 = 0x8000_0000;
 pub const CART_WINDOW: u32 = 0x0100_0000;

@@ -59,6 +59,8 @@ pub enum Region {
     /// Discarded writes past VRAM (see `map::VRAM_OVERRUN_END`).
     VramOverrun,
     Ram(usize),
+    /// Leapster 2 on-chip RAM (`map::SRAM_BASE`).
+    Sram(usize),
     Cart(usize),
     Unmapped,
 }
@@ -87,6 +89,8 @@ pub struct UnmappedStat {
     pub count: u64,
     /// `SystemBus::now` at the first occurrence.
     pub first_cycle: u64,
+    /// `SystemBus::pc` at the first occurrence.
+    pub first_pc: u32,
 }
 
 pub struct SystemBus {
@@ -94,11 +98,14 @@ pub struct SystemBus {
     cart: Option<Vec<u8>>,
     ram: Vec<u8>,
     vram: Vec<u8>,
+    sram: Vec<u8>,
     unmapped: Vec<UnmappedAccess>,
     unmapped_total: u64,
     unmapped_summary: std::collections::BTreeMap<(u32, u8, AccessKind), UnmappedStat>,
     /// Time stamp for diagnostics (the machine sets the CPU cycle count).
     pub now: u64,
+    /// Address of the executing instruction, for diagnostics (set with `now`).
+    pub pc: u32,
     /// Byte reads from the cartridge window (fetches included) and the first
     /// one as (cycle, address).
     pub cart_reads: u64,
@@ -120,10 +127,12 @@ impl SystemBus {
             // deterministic. HYPOTHESIS: firmware does not depend on them.
             ram: vec![0; firmware.ram_size() as usize],
             vram: vec![0; VRAM_SIZE as usize],
+            sram: vec![0; firmware.sram_size() as usize],
             unmapped: Vec::new(),
             unmapped_total: 0,
             unmapped_summary: Default::default(),
             now: 0,
+            pc: 0,
             cart_reads: 0,
             first_cart_read: None,
             cart_read_buckets: vec![0; cart.map_or(0, |c| c.rom().len().div_ceil(0x1_0000))],
@@ -160,6 +169,9 @@ impl SystemBus {
         {
             return Region::Cart((addr - CART_BASE) as usize);
         }
+        if in_window(SRAM_BASE, self.sram.len() as u32) {
+            return Region::Sram((addr - SRAM_BASE) as usize);
+        }
         Region::Unmapped
     }
 
@@ -176,14 +188,19 @@ impl SystemBus {
         &self.unmapped_summary
     }
 
-    /// Restores RAM and VRAM (save states); false if the sizes differ.
-    pub fn restore_memory(&mut self, ram: &[u8], vram: &[u8]) -> bool {
-        if ram.len() != self.ram.len() || vram.len() != self.vram.len() {
+    /// Restores RAM, VRAM and on-chip RAM (save states); false if the sizes differ.
+    pub fn restore_memory(&mut self, ram: &[u8], vram: &[u8], sram: &[u8]) -> bool {
+        if ram.len() != self.ram.len() || vram.len() != self.vram.len() || sram.len() != self.sram.len() {
             return false;
         }
         self.ram.copy_from_slice(ram);
         self.vram.copy_from_slice(vram);
+        self.sram.copy_from_slice(sram);
         true
+    }
+
+    pub fn sram(&self) -> &[u8] {
+        &self.sram
     }
 
     /// RAM/VRAM/ROM byte without side effects (no logging); None elsewhere.
@@ -192,6 +209,7 @@ impl SystemBus {
             Region::Bios(o) => self.bios.get(o).copied(),
             Region::Ram(o) => self.ram.get(o).copied(),
             Region::Vram(o) => self.vram.get(o).copied(),
+            Region::Sram(o) => self.sram.get(o).copied(),
             Region::Cart(o) => self.cart.as_ref().and_then(|c| c.get(o).copied()),
             _ => None,
         }
@@ -207,10 +225,10 @@ impl SystemBus {
 
     fn record(&mut self, addr: u32, width: u8, kind: AccessKind, value: u32) {
         self.unmapped_total += 1;
-        let now = self.now;
+        let (now, pc) = (self.now, self.pc);
         self.unmapped_summary
             .entry((addr, width, kind))
-            .or_insert(UnmappedStat { count: 0, first_cycle: now })
+            .or_insert(UnmappedStat { count: 0, first_cycle: now, first_pc: pc })
             .count += 1;
         if self.unmapped.len() < UNMAPPED_LOG_LIMIT {
             self.unmapped.push(UnmappedAccess { addr, width, kind, value });
@@ -223,6 +241,7 @@ impl SystemBus {
             Region::Bios(o) => Some(self.bios[o]),
             Region::Vram(o) => Some(self.vram[o]),
             Region::Ram(o) => Some(self.ram[o]),
+            Region::Sram(o) => Some(self.sram[o]),
             Region::Cart(o) => {
                 self.cart_reads += 1;
                 self.first_cart_read.get_or_insert((self.now, addr));
@@ -246,6 +265,7 @@ impl SystemBus {
             Region::Bios(o) => self.bios.get(o..o + w),
             Region::Ram(o) => self.ram.get(o..o + w),
             Region::Vram(o) => self.vram.get(o..o + w),
+            Region::Sram(o) => self.sram.get(o..o + w),
             Region::Cart(o) => {
                 if let Some(bytes) = self.cart.as_ref().and_then(|c| c.get(o..o + w)) {
                     let mut buf = [0u8; 4];
@@ -312,6 +332,7 @@ impl SystemBus {
                     }
                     self.ram[o + i] = byte
                 }
+                Region::Sram(o) if o + i < self.sram.len() => self.sram[o + i] = byte,
                 Region::VramOverrun => {}
                 Region::Bios(_) | Region::Cart(_) => {
                     self.record(addr, width, AccessKind::RomWrite, value);

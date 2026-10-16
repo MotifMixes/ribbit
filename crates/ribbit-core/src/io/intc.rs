@@ -7,8 +7,8 @@
 //! register before initialising the ADC, consistent with write-1-to-clear.
 //!
 //! Bit 7 is EEPROM command completion, raised by eeprom.rs (MAME instead
-//! forces it on in every read). Framebuffer DMA raises bit 14; only the opt-in
-//! experimental touch model (touch.rs) raises the ADC bit 8.
+//! forces it on in every read). Framebuffer DMA raises bit 14; each ADC
+//! sample (adc.rs) raises bit 8.
 
 pub const FLAGS_ADDR: u32 = 0x0180_0080;
 pub const ENABLE_ADDR: u32 = 0x0180_0084;
@@ -18,7 +18,7 @@ pub const FLAG_ADC: u32 = 1 << 8;
 /// before a command and polls bit 7 (see eeprom.rs).
 pub const FLAG_EEPROM_DONE: u32 = 1 << 7;
 /// ADC interrupt line (MAME: vector 0x10; VERIFIED-FW: the BIOS installs its
-/// ADC handler there). Only the experimental touch model raises FLAG_ADC.
+/// ADC handler there). Raised by every ADC sample (adc.rs).
 pub const ADC_IRQ_LINE: u8 = 0x10;
 /// PCM DMA half-buffer flags (MAME); routed to CPU line 0x13 when enabled.
 pub const FLAG_PCM: u32 = (1 << 20) | (1 << 21);

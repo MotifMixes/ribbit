@@ -17,11 +17,12 @@ pub struct Config {
     /// System configuration register 0x0180_9004 (board straps). Default:
     /// MAME's Leapster 2 measurement 0x63FF_BFFF; bit 26 follows cart presence.
     pub straps: Option<u32>,
-    /// EXPERIMENTAL, UNVERIFIED: MAME's guessed touchscreen ADC model
-    /// (io/touch.rs), stylus up. Off by default.
+    /// EXPERIMENTAL: attach a stylus to the touch panel model (io/touch.rs),
+    /// stylus up. Off by default.
     pub experimental_mame_touch: bool,
-    /// Value of the non-button bits of GPIO input 0x0180_004C (UNKNOWN on
-    /// hardware; default 0). An explicit experiment setting, like `straps`.
+    /// Value of the unknown non-button bits of GPIO input 0x0180_004C (default
+    /// 0; the board lines 30/12/11 are separate, io/gpio.rs). An explicit
+    /// experiment setting, like `straps`.
     pub input_lines: Option<u32>,
     /// File holding the system EEPROM (calibration, player data). Loaded at
     /// start if it exists, written back when it changed. Your own data.

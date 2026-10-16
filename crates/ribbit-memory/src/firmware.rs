@@ -75,6 +75,22 @@ impl Firmware {
         }
     }
 
+    /// On-chip RAM at `map::SRAM_BASE` for this firmware's model (8 KiB on
+    /// a known Leapster 2; none elsewhere).
+    pub fn sram_size(&self) -> u32 {
+        match self.known.map(|k| k.hardware) {
+            Some(Hardware::Leapster2) => map::SRAM_SIZE_LEAPSTER2,
+            _ => 0,
+        }
+    }
+
+    /// A Leapster 2 "CIP3" board BIOS (m9, `152-12659`): its board has a NAND
+    /// flash at 0xE000_0000 and no SD card slot. VERIFIED-FW: m9 carries a
+    /// NAND driver and no SD driver; 0.6 and Connected B5 the reverse.
+    pub fn leapster2_nand(&self) -> bool {
+        self.known.is_some_and(|k| k.sha1 == "4b5eaac1e40bc605eb4cf6d4ad212343334762fd")
+    }
+
     /// A known Leapster TV BIOS: the machine needs the TV video chip and
     /// controller link (EXPERIMENTAL).
     pub fn is_leapster_tv(&self) -> bool {
