@@ -208,15 +208,14 @@ Found by pressing each bit on the menus:
 | 1 | Joystick down | "Sign In": the highlight moves down |
 | 2 | Joystick left | Player screen: the highlight moves left (to the cancel button) |
 | 3 | Joystick right | Player screen: the highlight moves right (to OK) |
-| 4 | UNKNOWN | Shows a panel with a forward arrow over the menu |
-| 5, 6 | UNKNOWN | No effect on these two screens |
+| 4 | UNKNOWN | Shows a panel with a forward arrow over the menu and over the "stand on the mat" screen |
+| 5, 6 | UNKNOWN | No effect on the menus or the "stand on the mat" screen |
 | 7 | Choose | "Sign In": chooses the player, and the player screen follows as in the recording (the name at the top; Learning Path, back, cancel and OK) |
-| 8, 9 | UNKNOWN | No effect; only ever tested as held, alone or together (0x300) |
+| 8, 9 | The mat's foot pads | Mickey Says' "stand on the mat" screen (the mat with its pads lighting up) goes on to the game when either or both are held; the kernel also tests them together (0x300) |
 
 The kernel tests bits 5-7 together (0xE0) and bits 0-3 together (0xF). A
-guess (UNVERIFIED) is that bits 5-7 are the mat's red, green and blue pads,
-bits 8 and 9 its two foot pads (both held: standing on the mat), and bit 4
-the button on top of the joystick.
+guess (UNVERIFIED) is that bits 5-7 are the mat's red, blue and green pads
+and bit 4 the button on top of the joystick.
 
 ## Sound unit (0xD0400000)
 
@@ -430,6 +429,17 @@ player's save (MMCH.P01: "MMCH: player_name: [MATTHEW]") and shows the game's
 menu: Mickey, Minnie and Goofy in the clubhouse with "Mickey Says", back and
 "Goofy's Fancy Dancing", and the player's score. The research tool draws it
 as a recording of a real unit shows it.
+
+Mickey Says (choose, then Level 1) shows the mat and waits for the player to
+stand on it (foot bits 8/9), then "LOADING...", then the game: Mickey on his
+pedestal in the clubhouse, the mat drawn at the bottom and the score, which
+matches the recording closely (apart from a thin black line across the left
+window). Its scripted opening (Mickey talks, another load, Minnie comes in)
+runs without input.
+
+Speed: the research tool runs about 37 million instructions a second on one
+core of an i9-13900K, with its jump log and per-register bookkeeping; the
+real CPU clock is UNKNOWN (the tool assumes 60 million a second).
 
 ## Research tool
 
