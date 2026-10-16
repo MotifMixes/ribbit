@@ -170,7 +170,11 @@ impl App {
         // A game given on the command line starts at once; otherwise the
         // game library shows.
         match app.opts.cartridge.clone() {
-            Some(cart) => app.open_cart(cart),
+            Some(cart) => {
+                // The library loads meanwhile, ready for when the game closes.
+                app.rescan_library();
+                app.open_cart(cart)
+            }
             None => app.rescan_library(),
         }
         app

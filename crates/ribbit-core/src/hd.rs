@@ -119,6 +119,9 @@ pub struct Pass {
     /// Units per LCD pixel (renderer +0x00): 4 at the BIOS's highest
     /// quality, 2 at medium (games choose, e.g. LF_SetMovieQuality).
     pub scale: i32,
+    /// Scanlines this render swept, first and last + 1, in the pass's units
+    /// (the BIOS may draw one rectangle in several sweeps).
+    pub rows: Option<(i32, i32)>,
     pub edges: Vec<Edge>,
     pub fills: HashMap<u32, Fill>,
 }
@@ -229,6 +232,11 @@ impl HdCapture {
             self.finish();
         }
         self.last_scan = y;
+        // r17 runs one ahead of the scanline being drawn.
+        self.current.rows = Some(match self.current.rows {
+            Some((a, _)) => (a, y),
+            None => (y - 1, y),
+        });
         self.current.rect = rect;
         self.current.scale = scale;
         self.absorb_pending();
@@ -372,7 +380,10 @@ impl HdCanvas {
             1 | 2 | 4 => (Q as i32) / pass.scale,
             _ => 1,
         };
-        let [x0, x1, y0, y1] = pass.rect.map_or([0, HD_SIZE as i32, 0, HD_SIZE as i32], |r| r.map(|v| v * k));
+        let [x0, x1, mut y0, mut y1] = pass.rect.map_or([0, HD_SIZE as i32, 0, HD_SIZE as i32], |r| r.map(|v| v * k));
+        if let Some((a, b)) = pass.rows {
+            (y0, y1) = (y0.max(a * k), y1.min(b * k));
+        }
         let clamp = |v: i32| v.clamp(0, HD_SIZE as i32) as usize;
         let (x0, x1, y0, y1) = (clamp(x0), clamp(x1), clamp(y0), clamp(y1));
         if x0 >= x1 || y0 >= y1 {
@@ -666,7 +677,7 @@ mod tests {
         let passes = c.take();
         assert_eq!(passes.len(), 1);
         let p = &passes[0];
-        assert_eq!((p.rect, p.scale), (Some([40, 106, 208, 256]), 2));
+        assert_eq!((p.rect, p.scale, p.rows), (Some([40, 106, 208, 256]), 2, Some((0, 2))));
         assert_eq!(p.edges[0].p, [(4, 8), (12, 16), (20, 24)]);
         assert!(p.edges[0].line);
         assert_eq!(

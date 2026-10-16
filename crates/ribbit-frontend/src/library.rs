@@ -142,18 +142,22 @@ pub struct Library {
     pub making_art: bool,
     art_dir: PathBuf,
     rx: Option<Receiver<Msg>>,
+    /// A rescan's games, collected while the previous list stays on show
+    /// (so the library never goes blank); swapped in once listed.
+    incoming: Option<Vec<Game>>,
 }
 
 impl Library {
     pub fn new(data_dir: &Path) -> Self {
-        Self { games: Vec::new(), scanning: false, making_art: false, art_dir: data_dir.join("art"), rx: None }
+        Self { games: Vec::new(), scanning: false, making_art: false, art_dir: data_dir.join("art"), rx: None, incoming: None }
     }
 
     /// Rescans `folders` (plus `extra` files, e.g. recent games) in the
     /// background. Without `art`, games without cached art show none.
     pub fn scan(&mut self, folders: &[PathBuf], extra: &[PathBuf], art: Option<ArtSource>) {
         let (tx, rx) = channel();
-        self.games.clear();
+        // The first scan fills the list as it goes; later ones replace it whole.
+        self.incoming = (!self.games.is_empty()).then(Vec::new);
         self.scanning = true;
         self.making_art = false;
         self.rx = Some(rx); // a running older scan sees its receiver gone and stops
@@ -174,19 +178,27 @@ impl Library {
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 Msg::Game(g) => {
-                    let at = self.games.partition_point(|o| o.title.to_lowercase() <= g.title.to_lowercase());
-                    self.games.insert(at, g);
+                    let list = self.incoming.as_mut().unwrap_or(&mut self.games);
+                    let at = list.partition_point(|o| o.title.to_lowercase() <= g.title.to_lowercase());
+                    list.insert(at, g);
                 }
                 Msg::Art(key, image) => {
-                    for g in self.games.iter_mut().filter(|g| g.key == key) {
+                    let lists = self.games.iter_mut().chain(self.incoming.iter_mut().flatten());
+                    for g in lists.filter(|g| g.key == key) {
                         g.art = image.clone().map_or(Art::Missing, Art::Image);
                     }
                 }
                 Msg::Scanned => {
+                    if let Some(list) = self.incoming.take() {
+                        self.games = list;
+                    }
                     self.scanning = false;
                     self.making_art = self.games.iter().any(|g| matches!(g.art, Art::Pending));
                 }
                 Msg::Done => {
+                    if let Some(list) = self.incoming.take() {
+                        self.games = list;
+                    }
                     self.scanning = false;
                     self.making_art = false;
                     for g in &mut self.games {
