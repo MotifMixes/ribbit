@@ -94,6 +94,13 @@ pub struct Edge {
     pub p: [(i16, i16); 3],
     pub line: bool,
     pub fills: [u32; 2],
+    /// How a crossing changes the fills (record +0x1D; VERIFIED-FW, US v2.1
+    /// handlers 0x4005_0178, 0x4005_02F0, 0x4005_03B8): 0 flips both
+    /// fills, 1 flips the first, 2 adds `dir` to the first fill's winding
+    /// count (on while non-zero: strokes, whose pieces overlap).
+    pub rule: u8,
+    /// The edge's direction, +1 or -1 (record +0x1E, signed).
+    pub dir: i8,
 }
 
 /// A fill style, keyed by its address in the pass.
@@ -257,6 +264,8 @@ impl HdCapture {
             p: [(h(0x10), h(0x12)), (h(0x14), h(0x16)), (h(0x18), h(0x1A))],
             line: b(0x1C) != 0,
             fills: [w(rec + 0x08), w(rec + 0x0C)],
+            rule: b(0x1D),
+            dir: b(0x1E) as i8,
         };
         for f in e.fills {
             if f != 0 && !self.pending.fills.contains_key(&f) {
@@ -437,6 +446,8 @@ struct Seg {
     x1: f32,
     y1: f32,
     fills: [i32; 2],
+    rule: u8,
+    dir: i8,
 }
 
 /// The HD picture, kept across passes like the BIOS keeps its framebuffer
@@ -567,7 +578,7 @@ impl HdCanvas {
             for i in 1..=n {
                 let q = if i == n { p[2] } else { at(i as f32 / n as f32) };
                 if prev.1 != q.1 {
-                    segs.push(Seg { x0: prev.0, y0: prev.1, x1: q.0, y1: q.1, fills });
+                    segs.push(Seg { x0: prev.0, y0: prev.1, x1: q.0, y1: q.1, fills, rule: e.rule, dir: e.dir });
                 }
                 prev = q;
             }
@@ -739,8 +750,10 @@ impl Raster<'_> {
         let mut acc = vec![[0f32; 3]; w];
         let mut unknown_w = vec![0f32; w];
         let mut keep_w = vec![0f32; w];
-        let mut xs: Vec<(f32, [i32; 2])> = vec![];
+        let mut xs: Vec<(f32, u32)> = vec![];
         let mut active = vec![false; self.paints.len()];
+        // Per fill: parity (rules 0 and 1) or winding count (rule 2).
+        let mut count = vec![0i32; self.paints.len()];
         for (r, list) in lists.iter().enumerate() {
             let y = first + r;
             acc.iter_mut().for_each(|a| *a = [0.0; 3]);
@@ -753,22 +766,39 @@ impl Raster<'_> {
                     let s = self.segs[i as usize];
                     let (lo, hi) = if s.y0 < s.y1 { ((s.x0, s.y0), (s.x1, s.y1)) } else { ((s.x1, s.y1), (s.x0, s.y0)) };
                     if sy >= lo.1 && sy < hi.1 {
-                        xs.push((lo.0 + (sy - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0), s.fills));
+                        xs.push((lo.0 + (sy - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0), i));
                     }
                 }
                 xs.sort_by(|a, b| a.0.total_cmp(&b.0));
                 active.iter_mut().for_each(|a| *a = false);
+                count.iter_mut().for_each(|c| *c = 0);
                 let mut from = x0 as f32;
                 let mut look = composite(&active, self.paints);
                 let mut sink = Sink { acc: &mut acc, unknown_w: &mut unknown_w, keep_w: &mut keep_w, x0, sy, scale: self.scale };
-                for &(x, fills) in &xs {
+                for &(x, i) in &xs {
                     let to = x.min(x1 as f32);
                     if to > from {
                         sink.span((from, to), &look, self.paints);
                     }
-                    for f in fills {
+                    let s = &self.segs[i as usize];
+                    let mut flip = |f: i32| {
                         if f >= 0 {
-                            active[f as usize] ^= true;
+                            count[f as usize] ^= 1;
+                            active[f as usize] = count[f as usize] != 0;
+                        }
+                    };
+                    match s.rule {
+                        1 => flip(s.fills[0]),
+                        2 => {
+                            if s.fills[0] >= 0 {
+                                let f = s.fills[0] as usize;
+                                count[f] += s.dir as i32;
+                                active[f] = count[f] != 0;
+                            }
+                        }
+                        _ => {
+                            flip(s.fills[0]);
+                            flip(s.fills[1]);
                         }
                     }
                     look = composite(&active, self.paints);
