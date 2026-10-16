@@ -15,6 +15,7 @@
 //!   digest [NAME]       print the machine state digest (for comparing builds)
 //!   lcdrate MS N        N times: run MS, print LCD frames/s and the idle-skipped share
 //!   auxlog              list accesses to unmodelled auxiliary registers so far
+//!   lcdregs             print the LCD registers and the last framebuffer DMA
 //!   watch ADDR MS       single-step MS, printing each change of the word at ADDR and the PC
 //!   bptrace PC MS [rN..] print registers (default r0-r3, blink) each time PC runs
 //!   logtrace PC rF MS   print a printf-style debug log call (format in rF, args after)
@@ -127,7 +128,14 @@ fn main() {
             }
             Some("sheet") => sheet(&std::mem::take(&mut kept), w[1]),
             Some("save") => std::fs::write(w[1], m.save_state()).unwrap(),
-            Some("load") => m.load_state(&std::fs::read(w[1]).unwrap()).unwrap(),
+            Some("load") => {
+                m.load_state(&std::fs::read(w[1]).unwrap()).unwrap();
+                if std::env::var_os("RIBBIT_NO_TIMING").is_some() {
+                    // Research: one cycle per instruction, no memory timing.
+                    m.cpu.config.pipeline_timing = false;
+                    m.io.mem.enabled = false;
+                }
+            }
             Some("label") => meter.label = w[1..].join(" "),
             Some("tvdump") => {
                 let tv = m.io.lmax_tv.as_ref().expect("RIBBIT_LMAX_TV=1 for tvdump");
@@ -315,6 +323,14 @@ fn main() {
                     println!("aux {reg:#06x} {kind:5} {value:#010x} pc {pc:08x} x{n}");
                 }
                 println!("({} unmodelled accesses in all)", m.cpu.diag.aux_unmodelled_total);
+            }
+            Some("lcdregs") => {
+                // lcdregs: the LCD controller and its last framebuffer DMA.
+                let l = &m.io.lcd;
+                println!(
+                    "lcd base {:#x} stride {:#x} format {:#x}; dma source {:#010x} stride {:#x} lines {} offset {:#x}",
+                    l.regs.fb_base, l.regs.stride, l.regs.format, l.dma_source, l.dma_stride, l.dma_lines, l.dma_offset
+                );
             }
             Some("watch") => {
                 // watch ADDR MS: single-step for MS, printing each change of the
