@@ -153,3 +153,18 @@ Four channels at +0x00, +0x40, +0x80 and +0xC0:
 | +0x8 | Destination |
 | +0xC | Count (bytes assumed: a fill's source is an odd address) |
 | +0x1FC | Completion flags, one bit per channel, write 1s to clear; interrupt line 24 |
+
+## Picture (in progress)
+
+The frame interrupt writes two addresses each frame: +0x1E0 and +0x1E8
+(e.g. 0x00F64580 and 0x00ECE580). They are 0x78000 bytes apart, the size of
+a 512x480 16-bit picture, and are swapped from frame to frame (double
+buffering, UNVERIFIED). The buffers hold 0x8080 words: as YUV 4:2:2 (Y U Y V
+bytes) that is mid grey, which suits a TV console, but the pixel format is
+UNVERIFIED. The 0xD0800000 engine's operations so far all take a buffer as
+both source (+0x04) and destination (+0x08) with +0x0C = 0x642. The menu's
+pictures (the kernel logs SPRITE_CACHE_SIZE, and cartridges carry
+mdp_sprites.bin and mdp_backgrounds.bin) are presumably drawn by the video
+chip's sprite and background layers (registers at 0xD0500000-0xFF, with
++0x80 = 0x003633EC and +0x48 changing every frame), which are not decoded
+yet.
