@@ -827,6 +827,7 @@ impl App {
             speed,
             gain,
             auto_calibrate: self.settings.auto_calibrate,
+            pcm_32k: self.settings.pcm_rate == crate::audio_out::PcmRate::Original32k,
         });
         if halted {
             return;

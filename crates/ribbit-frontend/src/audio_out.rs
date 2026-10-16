@@ -50,6 +50,28 @@ impl Enhance {
     }
 }
 
+/// How the Leapster 2's PCM sound (its 32 kHz DAC stream, ribbit-core
+/// voices.rs) reaches the speakers. Other sound is 8 kHz either way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum PcmRate {
+    /// The DAC's own 32 kHz samples, as the hardware plays them.
+    #[default]
+    Original32k,
+    /// Averaged down to 8 kHz, then interpolated back up like other sound.
+    Low8k,
+}
+
+impl PcmRate {
+    pub const ALL: [PcmRate; 2] = [PcmRate::Original32k, PcmRate::Low8k];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PcmRate::Original32k => "32 kHz (original)",
+            PcmRate::Low8k => "8 kHz",
+        }
+    }
+}
+
 /// Rate of the queued (interpolated) audio.
 const SOURCE_HZ: f64 = ribbit_audio::DAC_RATE_HZ as f64;
 /// Queue limit (a quarter second) before old samples are dropped.
@@ -123,6 +145,15 @@ impl AudioSink {
         for &s in samples {
             q.samples.extend(self.upsample.push(s).map(|v| (v as f32 * gain) as i16));
         }
+        while q.samples.len() > MAX_QUEUE {
+            q.samples.pop_front();
+        }
+    }
+
+    /// Queues 32 kHz samples as they are (the PCM DAC stream).
+    pub fn push_32k(&mut self, samples: &[i16], gain: f32) {
+        let mut q = self.queue.lock().unwrap();
+        q.samples.extend(samples.iter().map(|&s| (s as f32 * gain) as i16));
         while q.samples.len() > MAX_QUEUE {
             q.samples.pop_front();
         }

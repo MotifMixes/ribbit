@@ -40,10 +40,10 @@
 //! 16-bit sample from memory. A channel interrupts (flag bit 20 + channel, CPU
 //! line 0x13 if enabled) each time its position reaches a half-buffer
 //! boundary (MAME uses a timer of the same period from the control write).
-//! Host output: while channel 1 plays, the 32 kHz DAC stream is reduced to
-//! the 8 kHz host ring by averaging four samples (until frontends take 32
-//! kHz); otherwise the 8 kHz mix as before, which the host raises to 32 kHz
-//! with the same interpolator.
+//! Host output: while channel 1 plays, the 32 kHz DAC stream goes to
+//! `dac_output` as it is, and to the 8 kHz host ring averaged over four
+//! samples (for hosts that only take 8 kHz); otherwise the 8 kHz mix as
+//! before, which the host raises to 32 kHz with the same interpolator.
 //!
 //! Not modelled: analog output, the other 0x0180_4000 registers.
 
@@ -117,6 +117,13 @@ pub struct VoiceEngine {
     /// Mixed output at 8 kHz, for the host audio backend (not saved).
     #[serde(skip, default = "default_output")]
     pub output: ribbit_audio::SampleRing,
+    /// The 32 kHz DAC stream while PCM channel 1 plays (not saved).
+    #[serde(skip, default = "default_dac_output")]
+    pub dac_output: ribbit_audio::SampleRing,
+}
+
+fn default_dac_output() -> ribbit_audio::SampleRing {
+    ribbit_audio::SampleRing::new(PCM_HZ as usize)
 }
 
 fn default_output() -> ribbit_audio::SampleRing {
@@ -140,6 +147,7 @@ impl Default for VoiceEngine {
             samples_generated: 0,
             pcm: Pcm::default(),
             output: default_output(),
+            dac_output: default_dac_output(),
         }
     }
 }
@@ -477,6 +485,8 @@ impl VoiceEngine {
                 }
             }
             if p.control[1] & 1 != 0 {
+                self.dac_output.push(dac);
+                let p = &mut self.pcm;
                 p.host_sum += dac as i32;
                 if self.pcm.sub == 0 {
                     let avg = self.pcm.host_sum / 4;
@@ -609,6 +619,7 @@ mod tests {
         let mut out = vec![0i16; 64];
         e.output.pop_into(&mut out);
         assert_eq!(out[10], 4000, "host output: the DAC stream at 8 kHz");
+        assert_eq!(e.dac_output.len(), 256, "and at 32 kHz");
     }
 
     #[test]

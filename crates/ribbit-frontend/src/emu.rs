@@ -28,6 +28,8 @@ pub struct Control {
     pub gain: f32,
     /// Press the touch-calibration targets automatically.
     pub auto_calibrate: bool,
+    /// Play the Leapster 2's PCM sound at its 32 kHz (else via 8 kHz).
+    pub pcm_32k: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -63,7 +65,7 @@ impl Emu {
     pub fn start(machine: Machine) -> Self {
         let shared = Arc::new(Shared {
             machine: Mutex::new(machine),
-            control: Mutex::new((Control { running: false, speed: 1.0, gain: 1.0, auto_calibrate: false }, true)),
+            control: Mutex::new((Control { running: false, speed: 1.0, gain: 1.0, auto_calibrate: false, pcm_32k: true }, true)),
             wake: Condvar::new(),
             sink: Mutex::new(None),
             stats: Mutex::new(Stats::default()),
@@ -152,6 +154,7 @@ fn run(s: &Shared) {
     let mut meter: Option<(Instant, u64)> = None;
     let none = Breakpoints::default();
     let mut audio = Vec::new();
+    let mut dac_audio = Vec::new();
     let mut last_chunk = Instant::now();
     let mut calibrate = crate::calibrate::AutoCalibrate::new();
     while !s.quit.load(Ordering::Relaxed) {
@@ -214,11 +217,20 @@ fn run(s: &Shared) {
         let out = &mut m.io.voices.output;
         audio.resize(out.len(), 0);
         out.pop_into(&mut audio);
+        // The PCM DAC stream (Leapster 2), when it plays: the same sound at
+        // its 32 kHz, used instead of its 8 kHz copy if so chosen.
+        let dac = &mut m.io.voices.dac_output;
+        dac_audio.resize(dac.len(), 0);
+        dac.pop_into(&mut dac_audio);
         if control.speed == 1.0
             && !calibrating
             && let Some(sink) = s.sink.lock().unwrap().as_mut()
         {
-            sink.push(&audio, control.gain);
+            if control.pcm_32k && !dac_audio.is_empty() {
+                sink.push_32k(&dac_audio, control.gain);
+            } else {
+                sink.push(&audio, control.gain);
+            }
         }
         // Speed meter.
         let cycles = m.cpu.cycles;

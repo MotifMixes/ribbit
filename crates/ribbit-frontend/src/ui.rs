@@ -501,6 +501,14 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 }
             }
             ui.label(egui::RichText::new("The Leapster itself is mono with 8 kHz sound; these are effects.").weak());
+            ui.separator();
+            ui.label(egui::RichText::new("Leapster 2 PCM sound").strong());
+            for r in crate::audio_out::PcmRate::ALL {
+                if ui.radio_value(&mut settings.pcm_rate, r, r.label()).clicked() {
+                    actions.push(Action::SettingsChanged);
+                }
+            }
+            ui.label(egui::RichText::new("Games that stream sound through the Leapster 2's 32 kHz DAC.").weak());
         });
         ui.menu_button("Input", |ui| {
             if item(ui, "Key bindings…", "") {
