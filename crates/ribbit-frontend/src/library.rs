@@ -5,6 +5,8 @@
 //! booting the game unseen (no sound, no saves written) and keeping its most
 //! colourful screen of the first seconds, which is the game's title card.
 //! Art is cached as PNG in the data folder, so each game is booted once.
+//! With a BIOS whose Flash rasterizer Ribbit recognises, art is captured in
+//! HD (640x640, ribbit_core::hd); otherwise at the LCD's 160x160.
 
 use ribbit_core::Machine;
 use ribbit_debug::Breakpoints;
@@ -20,8 +22,13 @@ const MAX_DEPTH: usize = 3;
 /// Art: emulated time searched for the title card, and how often to look.
 const ART_SEARCH_MS: u64 = 16_000;
 const ART_SAMPLE_MS: u64 = 250;
-/// Games' art made at once (each boots a machine on its own thread).
-const ART_THREADS: usize = 4;
+/// Games' art made at once (each boots a machine on its own thread): all
+/// cores but two, so the first library scan is quick.
+fn art_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(2).max(1))
+}
+/// How often a capture hands its finished renders to its HD picture.
+const HD_DRAIN_MS: u64 = 50;
 
 /// When each known game shows its title card with no input (emulated ms
 /// from power-on, US BIOS v2.1, the built-in ART_PROFILE), by CRC32. Found
@@ -77,7 +84,7 @@ const ART_PROFILE: &[u8; 256] = include_bytes!("art_profile.eeprom");
 
 /// Where a game's art is cached (the suffix changes whenever the way art
 /// is made changes, so old pictures are made again).
-const ART_SUFFIX: &str = "-3.png";
+const ART_SUFFIX: &str = "-4.png";
 
 fn art_file(art_dir: &Path, key: &str) -> PathBuf {
     art_dir.join(format!("{key}{ART_SUFFIX}"))
@@ -239,9 +246,13 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
     if let Some(src) = art {
         let todo = std::sync::Mutex::new(todo);
         std::thread::scope(|scope| {
-            for _ in 0..ART_THREADS {
+            for _ in 0..art_threads() {
                 scope.spawn(|| {
-                    while let Some((key, cart)) = todo.lock().unwrap().pop() {
+                    // (The lock is released before the work: held in a
+                    // `while let`, it would make the captures take turns.)
+                    loop {
+                        let next = todo.lock().unwrap().pop();
+                        let Some((key, cart)) = next else { break };
                         let image = make_art(src, cart);
                         if let Some(img) = &image {
                             let _ = std::fs::create_dir_all(art_dir);
@@ -249,7 +260,7 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
                                 tracing::warn!(target: "ribbit::library", "saving art: {e:#}");
                             }
                         }
-                        if tx.send(Msg::Art(key, image.map(|f| to_image(&f)))).is_err() {
+                        if tx.send(Msg::Art(key, image.as_ref().map(to_image))).is_err() {
                             todo.lock().unwrap().clear(); // the library was closed or rescanned
                         }
                     }
@@ -349,7 +360,62 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
 }
 
 /// Boots the game unseen and returns its most colourful early screen.
-fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Box<[u32; WIDTH * HEIGHT]>> {
+/// A captured picture, `size` x `size`, 0xAARRGGBB.
+struct Shot {
+    size: usize,
+    pixels: Vec<u32>,
+}
+
+/// A machine booting a game for its art, with its HD picture kept up to
+/// date when the BIOS's rasterizer is recognised.
+struct Capture {
+    m: Machine,
+    canvas: Option<ribbit_core::hd::HdCanvas>,
+    frame: Box<[u32; WIDTH * HEIGHT]>,
+}
+
+impl Capture {
+    /// Runs to `ms` from power-on; false if the machine stopped.
+    fn run_to(&mut self, ms: u64) -> bool {
+        let none = Breakpoints::default();
+        let per_ms = self.m.clock.cpu_hz / 1000;
+        let target = per_ms * ms;
+        while self.m.cpu.cycles < target {
+            let chunk = (self.m.cpu.cycles + per_ms * HD_DRAIN_MS).min(target);
+            while self.m.cpu.cycles < chunk {
+                if self.m.run(chunk - self.m.cpu.cycles, &none).stop != ribbit_core::StopReason::StepLimit {
+                    return false;
+                }
+            }
+            self.drain();
+        }
+        true
+    }
+
+    /// The LCD frame now, with the finished renders drawn into the HD picture.
+    fn drain(&mut self) {
+        self.m.render_frame(&mut self.frame);
+        if let (Some(c), Some(hd)) = (self.canvas.as_mut(), self.m.hd.as_mut()) {
+            for p in hd.take() {
+                c.apply(&p, &self.frame[..]);
+            }
+        }
+    }
+
+    /// The picture now: HD when available (kept true to the LCD).
+    fn shot(&mut self) -> Shot {
+        self.drain();
+        match self.canvas.as_mut() {
+            Some(c) => {
+                c.reconcile(&self.frame[..]);
+                Shot { size: ribbit_core::hd::HD_SIZE, pixels: c.pixels.clone() }
+            }
+            None => Shot { size: WIDTH, pixels: self.frame.to_vec() },
+        }
+    }
+}
+
+fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Shot> {
     let title_card = TITLE_CARD_MS.iter().find(|(crc, _)| *crc == cart.id().crc32).map(|&(_, ms)| ms);
     let fw = ribbit_core::load_firmware(&src.bios).ok()?;
     // Straps bit 14 set: the BIOS takes the saved calibration (no targets).
@@ -357,54 +423,38 @@ fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Box<[u32; WIDTH * HEIGHT
     m.record_trace_tail = false;
     m.io.eeprom.load(ART_PROFILE);
     m.enable_experimental_mame_touch(Default::default());
-    let none = Breakpoints::default();
-    let step = m.clock.cpu_hz * ART_SAMPLE_MS / 1000;
-    let mut frame = Box::new([0u32; WIDTH * HEIGHT]);
+    let canvas = m.enable_hd_capture().then(|| ribbit_core::hd::HdCanvas::new(m.hd.as_ref().unwrap().hooks));
+    let mut cap = Capture { m, canvas, frame: Box::new([0u32; WIDTH * HEIGHT]) };
     if let Some(ms) = title_card {
         // A known game: straight to its title card.
-        let hz = m.clock.cpu_hz;
-        let run_to = |m: &mut Machine, ms: u64| {
-            let target = hz * ms / 1000;
-            while m.cpu.cycles < target {
-                if m.run(target - m.cpu.cycles, &none).stop != ribbit_core::StopReason::StepLimit {
-                    return false;
-                }
-            }
-            true
-        };
-        let crc = m.cartridge().map(|c| c.id().crc32);
+        let crc = cap.m.cartridge().map(|c| c.id().crc32);
         let taps = TITLE_CARD_TAPS.iter().find(|(c, _)| Some(*c) == crc).map_or(&[][..], |(_, t)| t);
         // MAME's crosshair mapping (0..=0x7F0 across 160 pixels), as for the mouse.
         let raw = |p: u32| ((p * 0x7F0 + 79) / 159).min(0x7F0);
         for &(at, x, y) in taps {
             for (when, live) in [(at, Some((raw(x), raw(y)))), (at + TAP_MS, None)] {
-                if !run_to(&mut m, when) {
+                if !cap.run_to(when) {
                     return None;
                 }
-                if let Some(t) = m.io.touch.as_mut() {
+                if let Some(t) = cap.m.io.touch.as_mut() {
                     t.live = live;
                 }
             }
         }
-        if !run_to(&mut m, ms) {
+        if !cap.run_to(ms) {
             return None;
         }
-        m.render_frame(&mut frame);
-        return Some(frame);
+        return Some(cap.shot());
     }
-    let mut best: Option<(usize, Box<[u32; WIDTH * HEIGHT]>)> = None;
-    for _ in 0..ART_SEARCH_MS / ART_SAMPLE_MS {
-        let target = m.cpu.cycles + step;
-        while m.cpu.cycles < target {
-            let r = m.run(target - m.cpu.cycles, &none);
-            if r.stop != ribbit_core::StopReason::StepLimit {
-                return best.map(|b| b.1);
-            }
+    let mut best: Option<(usize, Shot)> = None;
+    for i in 1..=ART_SEARCH_MS / ART_SAMPLE_MS {
+        if !cap.run_to(i * ART_SAMPLE_MS) {
+            return best.map(|b| b.1);
         }
-        m.render_frame(&mut frame);
-        let colours = colourfulness(&frame);
+        cap.drain();
+        let colours = colourfulness(&cap.frame);
         if best.as_ref().is_none_or(|b| colours > b.0) {
-            best = Some((colours, frame.clone()));
+            best = Some((colours, cap.shot()));
         }
     }
     // A blank or near-blank screen is no art.
@@ -416,17 +466,17 @@ fn colourfulness(frame: &[u32; WIDTH * HEIGHT]) -> usize {
     frame.iter().map(|p| p & 0x00FF_FFFF).collect::<HashSet<_>>().len()
 }
 
-fn to_image(frame: &[u32; WIDTH * HEIGHT]) -> egui::ColorImage {
-    let rgb: Vec<u8> = frame.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
-    egui::ColorImage::from_rgb([WIDTH, HEIGHT], &rgb)
+fn to_image(shot: &Shot) -> egui::ColorImage {
+    let rgb: Vec<u8> = shot.pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+    egui::ColorImage::from_rgb([shot.size, shot.size], &rgb)
 }
 
-fn save_png(path: &Path, frame: &[u32; WIDTH * HEIGHT]) -> anyhow::Result<()> {
+fn save_png(path: &Path, shot: &Shot) -> anyhow::Result<()> {
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
-    let mut enc = png::Encoder::new(file, WIDTH as u32, HEIGHT as u32);
+    let mut enc = png::Encoder::new(file, shot.size as u32, shot.size as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
-    let rgb: Vec<u8> = frame.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+    let rgb: Vec<u8> = shot.pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
     enc.write_header()?.write_image_data(&rgb)?;
     Ok(())
 }
@@ -464,12 +514,12 @@ mod tests {
     fn art_survives_a_png_round_trip() {
         let dir = std::env::temp_dir().join(format!("ribbit-art-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut frame = Box::new([0u32; WIDTH * HEIGHT]);
-        frame[0] = 0x0012_3456;
+        let mut shot = Shot { size: 640, pixels: vec![0; 640 * 640] };
+        shot.pixels[0] = 0x0012_3456;
         let path = dir.join("a.png");
-        save_png(&path, &frame).unwrap();
+        save_png(&path, &shot).unwrap();
         let img = load_png(&path).unwrap();
-        assert_eq!(img.size, [WIDTH, HEIGHT]);
+        assert_eq!(img.size, [640, 640]);
         assert_eq!(img.pixels[0], egui::Color32::from_rgb(0x12, 0x34, 0x56));
         let _ = std::fs::remove_dir_all(&dir);
     }

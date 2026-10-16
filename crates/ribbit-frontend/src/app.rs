@@ -102,6 +102,9 @@ pub struct App {
     quit: bool,
     /// The game closed for inactivity and its snapshot, for Resume.
     idle_resume: Option<(PathBuf, Vec<u8>)>,
+    /// The game's last picture fading out over the library (texture, start,
+    /// where it was shown in points).
+    fade: Option<(egui::TextureHandle, Instant, egui::Rect)>,
 }
 
 /// Runs the desktop app until the window closes.
@@ -136,7 +139,11 @@ impl App {
             settings_path,
             session: None,
             gpu: None,
-            egui_ctx: egui::Context::default(),
+            egui_ctx: {
+                let ctx = egui::Context::default();
+                crate::fonts::install(&ctx);
+                ctx
+            },
             egui_state: None,
             ui: UiState::new(),
             frame: Box::new([0; WIDTH * HEIGHT]),
@@ -159,6 +166,7 @@ impl App {
             fatal: None,
             quit: false,
             idle_resume: None,
+            fade: None,
         };
         // A game given on the command line starts at once; otherwise the
         // game library shows.
@@ -398,12 +406,6 @@ impl App {
                 self.ui.idle_closed = None;
                 self.idle_resume = None;
             }
-            Action::KeepAwake => {
-                self.settings.turn_off_when_idle = false;
-                self.save_settings();
-                self.ui.idle_closed = None;
-                self.ui.toast("The Leapster will stay on");
-            }
             Action::HdChanged => {
                 self.save_settings();
                 self.set_hd(self.settings.hd_vectors);
@@ -444,14 +446,27 @@ impl App {
         }
         let off = m.idle_powered_off();
         drop(m);
-        if off {
-            tracing::info!(target: "ribbit::boot", "the console turned itself off after inactivity: closing the game");
-            self.idle_resume = s.cart_path.clone().zip(s.idle_snapshot.take());
-            self.ui.idle_closed = Some(s.title.clone());
-            self.end_session();
-            self.update_title();
-            self.rescan_library();
+        if !off {
+            return;
         }
+        tracing::info!(target: "ribbit::boot", "the console turned itself off after inactivity: closing the game");
+        // The picture last shown fades out over the library.
+        let (pixels, size) = match &s.hd {
+            Some(c) => (c.pixels.clone(), ribbit_core::hd::HD_SIZE),
+            None => (self.frame.to_vec(), WIDTH),
+        };
+        let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+        let img = egui::ColorImage::from_rgb([size, size], &rgb);
+        let tex = self.egui_ctx.load_texture("closing picture", img, egui::TextureOptions::LINEAR);
+        let ppp = self.egui_ctx.pixels_per_point();
+        let (x, y, w, h) = self.lcd_px;
+        let rect = egui::Rect::from_min_size(egui::pos2(x / ppp, y / ppp), egui::vec2(w / ppp, h / ppp));
+        self.fade = Some((tex, Instant::now(), rect));
+        self.idle_resume = s.cart_path.clone().zip(s.idle_snapshot.take());
+        self.ui.idle_closed = Some(s.title.clone());
+        self.end_session();
+        self.update_title();
+        self.rescan_library();
     }
 
     /// Reopens the game closed for inactivity where it was (or from its
@@ -955,8 +970,21 @@ impl App {
             None => crate::discord::Presence::Browsing,
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
+        const FADE: f32 = 0.9;
+        let fade = self.fade.as_ref().map(|(t, start, rect)| (t.id(), start.elapsed().as_secs_f32() / FADE, *rect));
+        if fade.is_some_and(|(_, t, _)| t >= 1.0) {
+            self.fade = None;
+        }
         let out = self.egui_ctx.run_ui(raw, |ui| {
             area = ui::draw(ui, ui_state, settings, library, &info, &mut actions);
+            if let Some((tex, t, rect)) = fade.filter(|(_, t, _)| *t < 1.0) {
+                // Ease out: quick at first, gentle at the end.
+                let alpha = (1.0 - t).powi(2);
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("fade")));
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                painter.image(tex, rect, uv, egui::Color32::from_white_alpha((alpha * 255.0) as u8));
+                ui.ctx().request_repaint();
+            }
         });
         state.handle_platform_output(&gpu.window, out.platform_output);
         let ppp = out.pixels_per_point;

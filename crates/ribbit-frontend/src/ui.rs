@@ -25,8 +25,6 @@ pub enum Action {
     ResumeAfterIdle,
     /// Hide the "closed after inactivity" banner.
     DismissIdleBanner,
-    /// "Don't turn off automatically" from the banner.
-    KeepAwake,
     /// The HD vectors setting changed (applies to the running game at once).
     HdChanged,
     SaveState(u8),
@@ -71,6 +69,9 @@ pub struct UiState {
     /// The game (title) that was closed because the Leapster turned itself
     /// off; shown above the library until dismissed.
     pub idle_closed: Option<String>,
+    /// When the library last appeared (its cards grow in from then).
+    library_since: Option<Instant>,
+    was_running: bool,
 }
 
 const TOAST_TIME: Duration = Duration::from_millis(2500);
@@ -104,11 +105,16 @@ pub fn draw(
     if settings.show_status_bar && !info.fullscreen {
         egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, info));
     }
+    let was_running = std::mem::replace(&mut st.was_running, info.running);
     let mut area = egui::Rect::NOTHING;
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
         area = ui.max_rect();
         if !info.running && info.bios_name.is_some() {
-            library_screen(ui, settings, library, st.idle_closed.as_deref(), actions);
+            if was_running || st.library_since.is_none() {
+                st.library_since = Some(Instant::now());
+            }
+            let since = st.library_since.unwrap_or_else(Instant::now);
+            library_screen(ui, settings, library, st.idle_closed.as_deref(), since, actions);
         } else if !info.running {
             welcome(ui, settings, info, actions);
         } else if info.rewinding {
@@ -251,6 +257,16 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 ui.label(egui::RichText::new("Hold Tab to fast-forward").weak());
             });
             ui.separator();
+            // Power.
+            if ui
+                .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
+                .on_hover_text("Like the real Leapster, turn off after a while with nothing pressed (about 15 minutes; 5 on the Leapster TV). Ribbit then closes the game. Off: Ribbit keeps it on.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+            ui.separator();
+            // Touch, then how its calibration is handled.
             if ui
                 .checkbox(&mut settings.experimental_touch, "Touchscreen (experimental)")
                 .on_hover_text("MAME-derived, unverified touch model. Needed for calibration and touch games. Applies at the next start.")
@@ -272,13 +288,7 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             {
                 actions.push(Action::SettingsChanged);
             }
-            if ui
-                .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
-                .on_hover_text("Like the real Leapster, turn off after a while with nothing pressed (about 15 minutes; 5 on the Leapster TV). Ribbit then closes the game. Off: Ribbit keeps it on.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
+            ui.separator();
             ui.menu_button("Advanced (experimental)", |ui| {
                 ui.label(egui::RichText::new("Unverified guesses. Apply at the next start.").weak());
                 if ui
@@ -464,6 +474,7 @@ fn library_screen(
     settings: &Settings,
     library: &mut Library,
     idle_closed: Option<&str>,
+    since: Instant,
     actions: &mut Vec<Action>,
 ) {
     let ctx = ui.ctx().clone();
@@ -502,11 +513,17 @@ fn library_screen(
             let avail = ui.available_width();
             let cols = (((avail + CARD_GAP) / (CARD_WIDTH + CARD_GAP)).floor() as usize).max(1);
             let card_w = ((avail - CARD_GAP * (cols - 1) as f32) / cols as f32).floor().min(CARD_WIDTH * 1.4);
-            for row in library.games.chunks(cols) {
+            let shown = since.elapsed().as_secs_f32();
+            for (r, row) in library.games.chunks(cols).enumerate() {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = CARD_GAP;
-                    for game in row {
-                        game_card(ui, game, card_w, actions);
+                    for (c, game) in row.iter().enumerate() {
+                        // Each card grows in a moment after the one before.
+                        let t = ((shown - CARD_STAGGER * (r * cols + c) as f32) / CARD_GROW).clamp(0.0, 1.0);
+                        if t < 1.0 {
+                            ui.ctx().request_repaint();
+                        }
+                        game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), actions);
                     }
                 });
                 ui.add_space(CARD_GAP);
@@ -545,7 +562,7 @@ fn library_header(ui: &mut egui::Ui, library: &Library, actions: &mut Vec<Action
         });
         ui.add(egui::Image::new((frog.id(), egui::vec2(42.0, 42.0))));
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Games").size(28.0).strong().color(egui::Color32::WHITE));
+        ui.label(egui::RichText::new("Games").size(34.0).family(crate::fonts::title()).color(egui::Color32::WHITE));
         // Progress, next to the heading.
         let pending = library.games.iter().filter(|g| matches!(g.art, Art::Pending)).count();
         if library.scanning {
@@ -591,38 +608,77 @@ fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Respo
 /// Red banner: the last game was closed because the Leapster turned itself
 /// off after inactivity.
 fn idle_banner(ui: &mut egui::Ui, title: &str, actions: &mut Vec<Action>) {
-    const RED: egui::Color32 = egui::Color32::from_rgb(214, 64, 64);
-    const RED_HOVER: egui::Color32 = egui::Color32::from_rgb(232, 86, 86);
-    egui::Frame::NONE
-        .fill(egui::Color32::from_rgba_unmultiplied(214, 64, 64, 34))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(214, 64, 64, 110)))
-        .corner_radius(10)
-        .inner_margin(egui::Margin::symmetric(14, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("💤").size(16.0).color(RED_HOVER));
-                ui.label(egui::RichText::new(format!("{title} turned off after inactivity")).color(egui::Color32::from_gray(230)));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new("Dismiss").frame(false)).clicked() {
-                        actions.push(Action::DismissIdleBanner);
-                    }
-                    if ui.button("Don't turn off automatically").clicked() {
-                        actions.push(Action::KeepAwake);
-                    }
-                    let id = ui.next_auto_id();
-                    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-                    let resume = egui::Button::new(egui::RichText::new("▶  Resume").strong().color(egui::Color32::WHITE))
-                        .fill(if hovered { RED_HOVER } else { RED })
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(8)
-                        .min_size(egui::vec2(0.0, 28.0));
-                    if ui.add(resume).on_hover_text("Back to where you were").clicked() {
-                        actions.push(Action::ResumeAfterIdle);
-                    }
+    const RED: egui::Color32 = egui::Color32::from_rgb(220, 70, 70);
+    const RED_HOVER: egui::Color32 = egui::Color32::from_rgb(238, 92, 92);
+    // A rounded panel filled with a red fade, like the library's green one.
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let inner = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let (name, _) = split_region(title);
+            ui.vertical(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.label(egui::RichText::new(name).size(17.0).strong().color(egui::Color32::from_rgb(255, 214, 120)));
+                    ui.label(egui::RichText::new(" was closed").size(17.0).color(egui::Color32::WHITE));
                 });
+                ui.label(
+                    egui::RichText::new("Nothing was pressed for a while, so the Leapster switched itself off.")
+                        .color(egui::Color32::from_rgb(240, 200, 200)),
+                );
+                ui.label(
+                    egui::RichText::new("You can change this in Emulation > Turn off when idle.")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(200, 150, 150)),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let close = egui::Button::new(egui::RichText::new("×").size(20.0).color(egui::Color32::from_rgb(240, 200, 200)))
+                    .frame(false)
+                    .min_size(egui::vec2(28.0, 28.0));
+                if ui.add(close).on_hover_text("Dismiss").clicked() {
+                    actions.push(Action::DismissIdleBanner);
+                }
+                let id = ui.next_auto_id();
+                let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+                let resume = egui::Button::new(egui::RichText::new("▶  Resume").size(15.0).strong().color(egui::Color32::WHITE))
+                    .fill(if hovered { RED_HOVER } else { RED })
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(10)
+                    .min_size(egui::vec2(120.0, 36.0));
+                if ui.add(resume).on_hover_text("Back to where you were").clicked() {
+                    actions.push(Action::ResumeAfterIdle);
+                }
             });
         });
+    });
+    let rect = inner.response.rect;
+    let fade = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("red fade"))).unwrap_or_else(|| {
+        // 2x2 colours, bilinearly stretched: bright red top left to dark bottom right.
+        let px = [
+            egui::Color32::from_rgb(112, 30, 32),
+            egui::Color32::from_rgb(74, 20, 24),
+            egui::Color32::from_rgb(66, 18, 22),
+            egui::Color32::from_rgb(28, 12, 14),
+        ];
+        let img = egui::ColorImage { size: [2, 2], pixels: px.to_vec(), source_size: egui::vec2(2.0, 2.0) };
+        let tex = ui.ctx().load_texture("red fade", img, egui::TextureOptions::LINEAR);
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("red fade"), tex.clone()));
+        tex
+    });
+    let uv = egui::Rect::from_min_max(egui::pos2(0.25, 0.25), egui::pos2(0.75, 0.75));
+    ui.painter().set(
+        bg,
+        egui::epaint::RectShape::new(
+            rect,
+            14,
+            egui::Color32::WHITE,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(230, 90, 90, 120)),
+            egui::StrokeKind::Inside,
+        )
+        .with_texture(fade.id(), uv),
+    );
 }
 
 fn notice(ui: &mut egui::Ui, text: &str, mut on_click: impl FnMut()) {
@@ -766,7 +822,13 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
 }
 
 /// One game: its art, title, region and a line of info. Click to play.
-fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, actions: &mut Vec<Action>) {
+/// Library cards appear one after another (seconds between cards, and
+/// each card's grow-in).
+const CARD_STAGGER: f32 = 0.035;
+const CARD_GROW: f32 = 0.35;
+
+/// `appear`: 0 to 1 as the card grows in (smaller and transparent at 0).
+fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, actions: &mut Vec<Action>) {
     let pad = 10.0;
     let inner_w = w - 2.0 * pad;
     let (name, region) = split_region(&game.title);
@@ -786,7 +848,12 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
     let h = pad + inner_w + 12.0 + two_lines + 6.0 + sub_h.max(18.0) + pad;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
     let lift = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.12);
+    let opacity = ui.opacity();
+    ui.multiply_opacity(appear);
+    let grow = 0.86 + 0.14 * appear;
     let card = rect.translate(egui::vec2(0.0, -4.0 * lift));
+    let card = egui::Rect::from_center_size(card.center(), card.size() * grow);
+    let inner_w = inner_w * grow;
     let p = ui.painter();
     let shadow = egui::epaint::Shadow {
         offset: [0, (4.0 + 6.0 * lift) as i8],
@@ -817,6 +884,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         x = b.max.x + 8.0;
     }
     p.galley(egui::pos2(x, y + 1.0), sub, egui::Color32::from_gray(140));
+    ui.set_opacity(opacity);
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| {
         ui.label(egui::RichText::new(&game.title).strong());
         egui::Grid::new("game details").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
