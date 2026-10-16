@@ -74,6 +74,9 @@ pub struct Nand {
     failed: bool,
     /// Accesses outside the command set above, for research.
     pub unknown_commands: u64,
+    /// Set when a page was programmed or a block erased (for saving; not saved).
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 impl Nand {
@@ -125,6 +128,7 @@ impl Nand {
                     self.pages.insert(row, page);
                 }
                 self.failed = false;
+                self.dirty = true;
                 self.mode = Mode::Idle;
             }
             0x60 => {
@@ -139,6 +143,7 @@ impl Nand {
                     self.pages.remove(&k);
                 }
                 self.failed = false;
+                self.dirty = true;
                 self.mode = Mode::Idle;
             }
             0x70 => self.mode = Mode::Status,
@@ -181,6 +186,24 @@ impl Nand {
             // Ready (bit 6), not write-protected (bit 7), bit 0 = failure.
             Mode::Status => 0xC0 | self.failed as u32,
             _ => 0xFF,
+        }
+    }
+
+    /// The programmed pages as a save file (sparse.rs).
+    pub fn image(&self) -> Vec<u8> {
+        super::sparse::encode(&self.pages, PAGE_SIZE)
+    }
+
+    /// Replaces the contents with a save file from `image`; false (unchanged)
+    /// if the file is not one.
+    pub fn load_image(&mut self, bytes: &[u8]) -> bool {
+        match super::sparse::decode(bytes, PAGE_SIZE) {
+            Some(mut p) => {
+                p.retain(|&n, _| n < PAGES);
+                self.pages = p;
+                true
+            }
+            None => false,
         }
     }
 

@@ -1,5 +1,5 @@
 //! Save files (system EEPROM, cartridge save chip, the Leapster 2's
-//! internal flash): written atomically
+//! internal flash, NAND and SD card): written atomically
 //! (temporary file, then rename) so a crash or forced close mid-write can
 //! never leave a truncated save, and soon after the game changes them.
 
@@ -16,6 +16,10 @@ pub struct SavePaths {
     pub cart: Option<PathBuf>,
     /// Leapster 2 internal SPI flash (`io::spiflash`), when the machine has one.
     pub flash: Option<PathBuf>,
+    /// Leapster 2 SD card (`io::sd`; its written sectors, `io::sparse`).
+    pub sd: Option<PathBuf>,
+    /// Leapster 2 CIP3 NAND (`io::nand`; its programmed pages).
+    pub nand: Option<PathBuf>,
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -36,6 +40,8 @@ impl SavePaths {
             system: Some(dir.join(format!("system-{bios:08x}.eeprom"))),
             cart: machine.cartridge().map(|c| dir.join(format!("cart-{:08x}.sav", c.id().crc32))),
             flash: machine.io.spi_flash.as_ref().map(|_| dir.join(format!("flash-{bios:08x}.bin"))),
+            sd: sd_card(machine).map(|_| dir.join(format!("sdcard-{bios:08x}.img"))),
+            nand: machine.io.nand.as_ref().map(|_| dir.join(format!("nand-{bios:08x}.img"))),
         }
     }
 
@@ -58,6 +64,18 @@ impl SavePaths {
             && path.exists()
         {
             flash.load(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?);
+        }
+        if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine))
+            && path.exists()
+            && !card.load_image(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+        {
+            anyhow::bail!("{} is not an SD card image", path.display());
+        }
+        if let (Some(path), Some(nand)) = (&self.nand, machine.io.nand.as_mut())
+            && path.exists()
+            && !nand.load_image(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+        {
+            anyhow::bail!("{} is not a NAND image", path.display());
         }
         Ok(())
     }
@@ -91,8 +109,32 @@ impl SavePaths {
             written += 1;
             tracing::info!(target: "ribbit::saves", path = %path.display(), "internal flash saved");
         }
+        if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine))
+            && card.dirty
+        {
+            write_atomic(path, &card.image())?;
+            card.dirty = false;
+            written += 1;
+            tracing::info!(target: "ribbit::saves", path = %path.display(), "SD card saved");
+        }
+        if let (Some(path), Some(nand)) = (&self.nand, machine.io.nand.as_mut())
+            && nand.dirty
+        {
+            write_atomic(path, &nand.image())?;
+            nand.dirty = false;
+            written += 1;
+            tracing::info!(target: "ribbit::saves", path = %path.display(), "NAND saved");
+        }
         Ok(written)
     }
+}
+
+fn sd_card(machine: &Machine) -> Option<&ribbit_core::io::sd::SdCard> {
+    machine.io.sd.as_ref().and_then(|s| s.card.as_ref())
+}
+
+fn sd_card_mut(machine: &mut Machine) -> Option<&mut ribbit_core::io::sd::SdCard> {
+    machine.io.sd.as_mut().and_then(|s| s.card.as_mut())
 }
 
 /// Tracks when the saves last changed, to write them once they settle.
@@ -105,7 +147,9 @@ impl AutoSave {
     /// Call once per frame; writes the saves `SETTLE` after the last change.
     pub fn tick(&mut self, paths: &SavePaths, machine: &mut Machine, now: std::time::Instant) -> Result<()> {
         let e = &machine.io.eeprom;
-        let flash = machine.io.spi_flash.as_ref().is_some_and(|f| f.dirty);
+        let flash = machine.io.spi_flash.as_ref().is_some_and(|f| f.dirty)
+            || sd_card(machine).is_some_and(|c| c.dirty)
+            || machine.io.nand.as_ref().is_some_and(|n| n.dirty);
         if !(e.dirty || e.cart_dirty || flash) {
             self.changed_at = None;
             return Ok(());
@@ -135,7 +179,7 @@ mod tests {
     fn flush_writes_only_changed_saves_atomically() {
         let dir = std::env::temp_dir().join(format!("ribbit-saves-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), cart: Some(dir.join("game.sav")), flash: None };
+        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), cart: Some(dir.join("game.sav")), ..Default::default() };
         let mut m = machine_with_cart();
         assert_eq!(paths.flush(&mut m).unwrap(), 0, "nothing changed");
         m.io.eeprom.data[3] = 0x42;
@@ -147,10 +191,27 @@ mod tests {
     }
 
     #[test]
+    fn sd_card_is_saved_and_loaded_back() {
+        let dir = std::env::temp_dir().join(format!("ribbit-sdsave-{}", std::process::id()));
+        let paths = SavePaths { sd: Some(dir.join("sd.img")), ..Default::default() };
+        let mut m = machine_with_cart();
+        m.io.sd = Some(ribbit_core::io::sd::SdSlot::with_card());
+        let card = sd_card_mut(&mut m).unwrap();
+        card.sectors.insert(1000, vec![0x5A; 512]);
+        card.dirty = true;
+        assert_eq!(paths.flush(&mut m).unwrap(), 1);
+        let mut fresh = machine_with_cart();
+        fresh.io.sd = Some(ribbit_core::io::sd::SdSlot::with_card());
+        paths.load(&mut fresh).unwrap();
+        assert_eq!(sd_card(&fresh).unwrap().sectors, sd_card(&m).unwrap().sectors);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn autosave_waits_for_changes_to_settle() {
         let dir = std::env::temp_dir().join(format!("ribbit-autosave-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), cart: None, flash: None };
+        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), ..Default::default() };
         let mut m = machine_with_cart();
         let mut auto = AutoSave::default();
         let t0 = std::time::Instant::now();

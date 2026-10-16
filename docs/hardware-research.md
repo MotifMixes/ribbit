@@ -1026,8 +1026,8 @@ Result: with a cartridge it shows the seizure warning, then runs the cartridge (
      volatile RAM disk). The boot sector copies what B5's own formatter writes (media 0xF0, 8 sectors/track, 16
      heads, serial 0x1BAD_CAFE, 2 FATs of 256 sectors, 512 root entries, label "Leapster SD").
    * Result (0.6): with no cartridge the base system runs its first-time setup (country, name, Sign In) and the home
-     screen, and writes its profile log to the card ("Writing Log Header for User: 0"). The card is not yet saved
-     between runs (needs a frontend change). Research: `scenes` commands `sdlog`, `sdsector N`, the FAT library's
+     screen, and writes its profile log to the card ("Writing Log Header for User: 0"). The frontend saves the card's
+     written sectors as `sdcard-<bios crc>.img` (io/sparse.rs format; delete it for a freshly formatted card). Research: `scenes` commands `sdlog`, `sdsector N`, the FAT library's
      logger 0x400D_3854 on B5 (`logtrace 400d3854 r0 MS`).
    * Open (B5): B5 reformats the card at boot (even its own format) and then fails to create `b:\Leapster` ("No free
      directory entry for new directory": its free-cluster search 0x400D_5250 returns 0 on an empty FAT); cause not
@@ -1048,8 +1048,8 @@ Result: with a cartridge it shows the seizure warning, then runs the cartridge (
    page, 64 pages per block, 1024 blocks (1 Gbit). Ready/busy: write 0x84 to 0x0180_0018 and wait for bit 7 to
    clear, then wait for 0x0180_00EC bit 1 = 1 (the pin block above; on CIP3 bits 1-2 of E4/E8/F0/F4/F8 are set up
    for the NAND at 0x400D_BF08, and 0x0180_100C = 0x0100_0000). Model: ST-style ID 0x20 0xF1 0x00 0x1D
-   (UNVERIFIED which chip), instant operations, erased when new, sparse storage. NOT YET persistent between runs
-   (needs a frontend change): every boot formats the NAND, like a factory-fresh unit.
+   (UNVERIFIED which chip), instant operations, erased when new, sparse storage. The frontend saves the programmed pages
+   as `nand-<bios crc>.img` (io/sparse.rs format), so only the first boot formats the NAND, like a new unit.
 7. **Delay counters 0x0180_0010 / 0014 / 0018** (every model, original included): the BIOS writes a count with
    bit 7 set and polls until bit 7 clears (LCD reset 158 x 0xFF at 0x400B_18FA; 0x400B_79B8; NAND waits 0x84).
    Unmodelled: they read 0, so every such delay ends at once. Their clock is UNKNOWN (open question).
@@ -1078,7 +1078,7 @@ Open (Leapster 2):
 * "No Cartridge Long Term Memory found" (with no cartridge).
 * "Invalid User ID" / "Log not opened yet" from games' APEX logging: no LeapFrog Connect user profile exists (a
   fresh console); UNVERIFIED whether a real unit prints the same.
-* The USB controller (0x0180_F000), the SD host controller (for a card), NAND persistence, the delay counters.
+* The USB controller (0x0180_F000), the delay counters.
 * The Leapster 2 debug UART log (`scenes uart`) is the main source; keep reading it.
 
 ## ADC, touch panel and board lines (2026-10-16)

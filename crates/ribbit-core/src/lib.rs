@@ -568,6 +568,7 @@ impl Machine {
         Self::install_leapster2(&mut self.io, &self.firmware, self.cartridge.is_some());
         if let (Some(f), Some(slot)) = (flash, self.io.spi_flash.as_mut()) {
             slot.load(&f.data);
+            slot.dirty = f.dirty;
         }
         if nand.is_some() {
             self.io.nand = nand;

@@ -21,6 +21,7 @@ pub mod touch;
 pub mod memtiming;
 pub mod nand;
 pub mod sd;
+pub mod sparse;
 pub mod spiflash;
 pub mod uart;
 pub mod usb;

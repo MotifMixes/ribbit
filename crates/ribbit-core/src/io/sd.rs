@@ -86,6 +86,9 @@ pub struct SdCard {
     pub rca: u16,
     app_cmd: bool,
     pub wide: bool,
+    /// Set when a sector was written (for saving; not saved).
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 impl SdCard {
@@ -119,7 +122,25 @@ impl SdCard {
 
     /// The same card after a power cycle: its data, nothing else.
     pub fn powered_on(self) -> Self {
-        Self { sectors: self.sectors, ..Default::default() }
+        Self { sectors: self.sectors, dirty: self.dirty, ..Default::default() }
+    }
+
+    /// The written sectors as a save file (sparse.rs).
+    pub fn image(&self) -> Vec<u8> {
+        super::sparse::encode(&self.sectors, SECTOR)
+    }
+
+    /// Replaces the card's contents with a save file from `image`; false
+    /// (card unchanged) if the file is not one.
+    pub fn load_image(&mut self, bytes: &[u8]) -> bool {
+        match super::sparse::decode(bytes, SECTOR) {
+            Some(mut s) => {
+                s.retain(|&n, _| n < CARD_SECTORS);
+                self.sectors = s;
+                true
+            }
+            None => false,
+        }
     }
 
     fn status(&self) -> u32 {
@@ -133,7 +154,7 @@ impl SdCard {
         let r1 = |s: &Self| Some(short(cmd, s.status()));
         match (app, cmd) {
             (_, 0) => {
-                *self = Self { sectors: std::mem::take(&mut self.sectors), ..Default::default() };
+                *self = std::mem::take(self).powered_on();
                 None
             }
             (_, 8) => Some(short(8, arg & 0xFFF)),
@@ -308,6 +329,7 @@ impl SdSlot {
                 }
                 if n < CARD_SECTORS {
                     card.sectors.insert(n, s);
+                    card.dirty = true;
                 }
                 status |= WRITE_CRC_OK;
             } else {
