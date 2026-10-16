@@ -110,6 +110,10 @@ Backspace = Home; controllers via gilrs. Saves are autosaved and written when th
 point `APPDATA` at a scratch folder.
 
 Release zip: `python -I scripts/package-release.py` (checks that only the two programs and README.txt are packed).
+The release build is profile-guided (`scripts/pgo_build.py`, skip with `--no-pgo`): it trains an instrumented
+`bench` on the user's dumps (Leapster 2 Pet Pals and Cosmic Math, original Leapster Sonic X, L-MAX Cars 2) and
+needs `llvm-profdata` of rustc's LLVM major version. Measured 2026-10-16: 10.6% (Pet Pals) and 15.9% (Cosmic
+Math) faster per instruction, state digests identical.
 
 ## MAME differential check (local only)
 

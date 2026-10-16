@@ -72,12 +72,6 @@ impl Cache {
         }
     }
 
-    /// `find`, answered from `last` when it is the same line.
-    #[inline(always)]
-    fn find_after(&self, addr: u32, last: LastLine) -> Option<usize> {
-        if addr >> 4 == last.line { Some(last.slot) } else { self.find(addr) }
-    }
-
     /// Brings the line of `addr` in; returns its slot and whether the line
     /// it replaced was dirty.
     fn fill(&mut self, addr: u32) -> (usize, bool) {
@@ -144,8 +138,9 @@ pub struct MemTiming {
     pub misses: [u64; 3],
     #[serde(skip)]
     last_code: LastLine,
+    /// The last two data lines (a copy loop alternates between two).
     #[serde(skip)]
-    last_data: LastLine,
+    last_data: [LastLine; 2],
 }
 
 impl Default for MemTiming {
@@ -158,7 +153,7 @@ impl Default for MemTiming {
             stall: 0,
             misses: [0; 3],
             last_code: LastLine::default(),
-            last_data: LastLine::default(),
+            last_data: [LastLine::default(); 2],
         }
     }
 }
@@ -200,10 +195,21 @@ impl MemTiming {
         if !self.armed {
             return;
         }
-        let slot = match self.data.find_after(addr, self.last_data) {
+        let line = addr >> 4;
+        let slot = match self.last_data.iter().find(|l| l.line == line) {
+            Some(l) => Some(l.slot),
+            None => self.data.find(addr),
+        };
+        let slot = match slot {
             Some(i) => i,
             None => {
                 let (i, dirty) = self.data.fill(addr);
+                // That slot no longer holds the line remembered for it.
+                for l in &mut self.last_data {
+                    if l.slot == i {
+                        *l = LastLine::default();
+                    }
+                }
                 self.stall += fill_cost(addr);
                 self.misses[1] += 1;
                 if dirty {
@@ -213,7 +219,9 @@ impl MemTiming {
                 i
             }
         };
-        self.last_data = LastLine { line: addr >> 4, slot };
+        if self.last_data[0].line != line {
+            self.last_data = [LastLine { line, slot }, self.last_data[0]];
+        }
         if write {
             self.data.tags[slot] |= DIRTY;
         }
