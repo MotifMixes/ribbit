@@ -78,6 +78,16 @@ fn main() {
                 for f in p.fills.values() {
                     *painters.entry(f.painter).or_insert(0usize) += 1;
                 }
+                // RIBBIT_HD_PAINTER=hex: print the first few fills painted by
+                // that painter (0x100 bytes as words) with the pass's rect.
+                if let Ok(want) = std::env::var("RIBBIT_HD_PAINTER") {
+                    let want = u32::from_str_radix(&want, 16).unwrap();
+                    for (a, f) in p.fills.iter().filter(|(_, f)| f.painter == want).take(2) {
+                        let words: Vec<String> =
+                            (0..0x40u32).map(|i| format!("{:08x}", u32::from_le_bytes([0, 1, 2, 3].map(|k| m.bus.peek8(a + 4 * i + k).unwrap_or(0))))).collect();
+                        println!("{t:6} fill {a:08x} rgba {:?} rect {:?}: {}", f.rgba, p.rect, words.join(" "));
+                    }
+                }
                 if !dumped {
                     if let Some((a, _)) = p.fills.iter().find(|(_, f)| f.painter == 0x4005_4D24) {
                         let raw: Vec<u8> = (0..0xC0).map(|i| m.bus.peek8(a + i).unwrap_or(0)).collect();

@@ -58,6 +58,17 @@ const GLYPH_CALL_SIG: [u8; 58] = [
 ];
 const GLYPH_CALL_SIG_AT: u32 = 0x32;
 
+/// The gradient span painter (US v2.1 0x4005_5394): fill +0x34 = 0x12 is
+/// radial, else linear (Flash's fill types).
+const GRADIENT_PAINTER_SIG: [u8; 20] = [0xe1, 0xc5, 0xf1, 0xc0, 0xad, 0x80, 0x0b, 0x0d, 0x91, 0x14, 0xb1, 0xff, 0x02, 0xf0, 0x7d, 0xff, 0xd1, 0xc0, 0xc1, 0xc5];
+/// A wildcard byte in a signature (an absolute address or a line number).
+const W: u16 = 0x100;
+/// The painters that blend a gradient's or a bitmap's span over what is
+/// there (fills with transparency; US v2.1 0x4005_5498 and 0x4005_5504):
+/// each paints a span with the plain painter, then blends it.
+const GRADIENT_BLEND_SIG: [u16; 88] = [0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xf1, 0xc0, 0x99, 0x24, 0x04, 0x30, 0x3a, 0x70, 0x28, 0x77, 0x48, 0x76, 0x02, 0x22, 0x4d, 0x00, 0x8c, 0x25, 0x04, 0x90, 0x1a, 0x73, 0xcf, 0xf6, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, 0x2a, 0x70, 0xe9, 0x71, 0xc9, 0x72, 0x8b, 0x73, 0xad, 0xff, 0x8b, 0x70, 0x0a, 0x71, 0x2a, 0x0b, 0xef, 0xfb, 0xa9, 0x72, 0x96, 0x24];
+const BITMAP_BLEND_SIG: [u16; 88] = [0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xf1, 0xc0, 0x99, 0x24, 0x04, 0x30, 0x3a, 0x70, 0x28, 0x77, 0x48, 0x76, 0x02, 0x22, 0x4d, 0x00, 0x8c, 0x25, 0x04, 0x90, 0x1a, 0x73, 0xcf, 0xf6, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, 0x2a, 0x70, 0xe9, 0x71, 0xc9, 0x72, 0x8b, 0x73, 0xf6, 0xfd, 0x8b, 0x70, 0x0a, 0x71, 0xbe, 0x0a, 0xef, 0xfb, 0xa9, 0x72, 0x96, 0x24];
+
 /// Where the hooks are in one BIOS image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hooks {
@@ -68,6 +79,11 @@ pub struct Hooks {
     /// The device-font glyph blit call (None: device text stays as the
     /// LCD shows it).
     pub glyph: Option<u32>,
+    /// The gradient painter and the blending gradient and bitmap painters
+    /// (None: those fills show as the LCD shows them).
+    pub gradient: Option<u32>,
+    pub gradient_blend: Option<u32>,
+    pub bitmap_blend: Option<u32>,
 }
 
 impl Hooks {
@@ -83,8 +99,20 @@ impl Hooks {
             solid_painter: find(&SOLID_PAINTER_SIG)?,
             bitmap_painter: find(&BITMAP_PAINTER_SIG)? - BITMAP_PAINTER_SIG_AT,
             glyph: find(&GLYPH_CALL_SIG).map(|a| a + GLYPH_CALL_SIG_AT),
+            gradient: find(&GRADIENT_PAINTER_SIG),
+            gradient_blend: find_masked(bios, base, &GRADIENT_BLEND_SIG),
+            bitmap_blend: find_masked(bios, base, &BITMAP_BLEND_SIG),
         })
     }
+}
+
+/// The first even offset where `sig` matches (`W` matches any byte).
+fn find_masked(bios: &[u8], base: u32, sig: &[u16]) -> Option<u32> {
+    bios.windows(sig.len())
+        .enumerate()
+        .step_by(2)
+        .find(|(_, w)| w.iter().zip(sig).all(|(&b, &s)| s == W || b as u16 == s))
+        .map(|(i, _)| base + i as u32)
 }
 
 /// An edge in the pass's units (`Pass::scale` per pixel): start, control and end (a straight edge has
@@ -112,6 +140,7 @@ pub struct Fill {
     pub rgba: [u8; 4],
     /// The fill's span painter (+0x20): tells solid fills from others.
     pub painter: u32,
+    pub gradient: Option<GradientFill>,
     /// A bitmap fill the renderer can follow exactly: its bitmap and mapping
     /// (None for other fills, and for bitmaps with a colour transform).
     pub bitmap: Option<BitmapFill>,
@@ -123,6 +152,19 @@ pub struct Image {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u32>,
+}
+
+/// A gradient fill (VERIFIED-FW, US v2.1 painters 0x4005_5194 linear,
+/// 0x4005_5260 radial): the point (x, y) in LCD pixels, times 256, through
+/// the matrix at fill +0x28 (16.16 a b c d, then tx ty: u = a x + c y + tx,
+/// v = b x + d y + ty) picks the colour from a 257-entry ramp at +0x94 (B G
+/// R A): linear at u / 32768 + 128, radial at the distance (u, v) / 16384.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientFill {
+    pub matrix: [f32; 6],
+    pub radial: bool,
+    /// The ramp as straight R G B A, 0..1.
+    pub ramp: Arc<Vec<[f32; 4]>>,
 }
 
 /// A bitmap fill (VERIFIED-FW, US v2.1 painter 0x4005_4D24): texel (u, v) =
@@ -289,8 +331,16 @@ impl HdCapture {
             if f != 0 && !self.pending.fills.contains_key(&f) {
                 let c = |o: u32| u16::from_le_bytes([peek(f + o), peek(f + o + 1)]).min(255) as u8;
                 let painter = w(f + 0x20);
-                let bitmap = if painter == self.hooks.bitmap_painter { self.bitmap_fill(f, &peek) } else { None };
-                let fill = Fill { order: w(f + 0x0C), rgba: [c(0x28), c(0x26), c(0x24), c(0x2A)], painter, bitmap };
+                // Not a fill style (its "painter" is not BIOS code, e.g.
+                // 0x0031_6C65 in text left in a reused object): no fill.
+                if !(0x4000_0000..0x4100_0000).contains(&painter) {
+                    continue;
+                }
+                let is_bitmap = painter == self.hooks.bitmap_painter || Some(painter) == self.hooks.bitmap_blend;
+                let bitmap = if is_bitmap { self.bitmap_fill(f, &peek) } else { None };
+                let is_gradient = Some(painter) == self.hooks.gradient || Some(painter) == self.hooks.gradient_blend;
+                let gradient = if is_gradient { gradient_fill(f, &peek) } else { None };
+                let fill = Fill { order: w(f + 0x0C), rgba: [c(0x28), c(0x26), c(0x24), c(0x2A)], painter, bitmap, gradient };
                 self.pending.fills.insert(f, fill);
             }
         }
@@ -382,6 +432,24 @@ impl HdCapture {
     }
 }
 
+/// Reads gradient fill `f` (see `GradientFill`).
+fn gradient_fill(f: u32, peek: &impl Fn(u32) -> u8) -> Option<GradientFill> {
+    let w = |a: u32| u32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
+    let ramp_at = w(f + 0x94);
+    if ramp_at == 0 {
+        return None;
+    }
+    let m = [0, 4, 8, 12, 16, 20].map(|o| w(f + 0x28 + o) as i32 as f32);
+    let matrix = [m[0] / 65536.0, m[1] / 65536.0, m[2] / 65536.0, m[3] / 65536.0, m[4], m[5]];
+    let ramp = (0..257u32)
+        .map(|i| {
+            let b = |k: u32| peek(ramp_at + 4 * i + k) as f32 / 255.0;
+            [b(2), b(1), b(0), b(3)]
+        })
+        .collect();
+    Some(GradientFill { matrix, radial: w(f + 0x34) == 0x12, ramp: Arc::new(ramp) })
+}
+
 /// Decodes a BIOS bitmap (VERIFIED-FW, texel fetch at US v2.1 0x4005_66E0):
 /// formats 0-3 are 1/2/4/8-bit palette indices, most significant bits
 /// first, palette entries B G R A from `palette + 4`; 4 is RGB555 (5-bit
@@ -437,6 +505,8 @@ enum Paint {
     Solid([f32; 4]),
     /// A bitmap, sampled per canvas pixel.
     Bitmap(BitmapFill),
+    /// A gradient, evaluated per canvas pixel.
+    Gradient(GradientFill),
     /// Anything the canvas cannot draw (e.g. a gradient): left unknown, for
     /// the fallback picture to fill.
     Unknown,
@@ -577,10 +647,11 @@ impl HdCanvas {
         let index: HashMap<u32, i32> = order.iter().enumerate().map(|(i, (a, _))| (**a, i as i32)).collect();
         let paints: Vec<Paint> = order
             .iter()
-            .map(|(_, f)| match (&f.bitmap, f.painter == self.solid_painter) {
-                (Some(b), _) => Paint::Bitmap(b.clone()),
-                (None, true) => Paint::Solid(f.rgba.map(|c| c as f32 / 255.0)),
-                (None, false) => Paint::Unknown,
+            .map(|(_, f)| match (&f.bitmap, &f.gradient, f.painter == self.solid_painter) {
+                (Some(b), _, _) => Paint::Bitmap(b.clone()),
+                (None, Some(g), _) => Paint::Gradient(g.clone()),
+                (None, None, true) => Paint::Solid(f.rgba.map(|c| c as f32 / 255.0)),
+                (None, None, false) => Paint::Unknown,
             })
             .collect();
         // Edges flattened (finer as the canvas grows); each segment listed
@@ -890,7 +961,53 @@ fn weld(edges: &[Edge]) -> Vec<[(f32, f32); 2]> {
             a = b;
         }
     }
+    smooth_joins(edges, &mut out);
     out
+}
+
+/// Where two curve pieces of one outline meet at a shallow angle, the
+/// join is moved onto the line between their control points, so the curve
+/// keeps its direction through it. The BIOS rounds every piece's ends and
+/// control points to a unit (a quarter pixel), which leaves small kinks at
+/// the joins: invisible on the LCD, lumpy outlines at screen size (e.g. the
+/// rings of SpongeBob's OK button). The join moves less than that rounding;
+/// real corners (pieces meeting at more than 25 degrees) are kept.
+fn smooth_joins(edges: &[Edge], ends: &mut [[(f32, f32); 2]]) {
+    // Curve ends by (fills, rule, position): (edge, which end).
+    let mut at: HashMap<([u32; 2], u8, i32, i32), Vec<(usize, usize)>> = HashMap::new();
+    for (i, e) in edges.iter().enumerate() {
+        if e.line {
+            continue;
+        }
+        for j in 0..2 {
+            let (x, y) = ends[i][j];
+            at.entry((e.fills, e.rule, (x * 2.0).round() as i32, (y * 2.0).round() as i32)).or_default().push((i, j));
+        }
+    }
+    let cos_limit = 25f32.to_radians().cos();
+    for pair in at.values() {
+        let [(a, ja), (b, jb)] = pair[..] else { continue };
+        if a == b {
+            continue;
+        }
+        let p = ends[a][ja];
+        let ca = (edges[a].p[1].0 as f32, edges[a].p[1].1 as f32);
+        let cb = (edges[b].p[1].0 as f32, edges[b].p[1].1 as f32);
+        // Directions from each control point into the join.
+        let (u, v) = ((p.0 - ca.0, p.1 - ca.1), (cb.0 - p.0, cb.1 - p.1));
+        let (lu, lv) = (u.0.hypot(u.1), v.0.hypot(v.1));
+        if lu < 0.25 || lv < 0.25 || (u.0 * v.0 + u.1 * v.1) / (lu * lv) < cos_limit {
+            continue;
+        }
+        // The point on the line ca-cb nearest the join.
+        let d = (cb.0 - ca.0, cb.1 - ca.1);
+        let t = (((p.0 - ca.0) * d.0 + (p.1 - ca.1) * d.1) / (d.0 * d.0 + d.1 * d.1)).clamp(0.0, 1.0);
+        let q = (ca.0 + d.0 * t, ca.1 + d.1 * t);
+        if (q.0 - p.0).hypot(q.1 - p.1) <= 1.0 {
+            ends[a][ja] = q;
+            ends[b][jb] = q;
+        }
+    }
 }
 
 /// What one render's rows need.
@@ -1010,7 +1127,7 @@ fn composite(active: &[bool], paints: &[Paint]) -> Look {
         stack.push(i);
         match &paints[i] {
             Paint::Unknown => break,
-            Paint::Bitmap(_) => varying = true,
+            Paint::Bitmap(_) | Paint::Gradient(_) => varying = true,
             Paint::Solid(p) => {
                 for k in 0..3 {
                     c[k] += rest * p[3] * p[k];
@@ -1027,11 +1144,33 @@ fn composite(active: &[bool], paints: &[Paint]) -> Look {
     if varying { Look::Varying(stack) } else { Look::Uniform(c, rest, on_unknown) }
 }
 
+/// A gradient's colour at LCD position (px, py) (a pixel's own position as
+/// the BIOS counts it), straight R G B A, 0..1: the ramp between its
+/// entries, where the BIOS takes the entry below.
+fn sample_gradient(g: &GradientFill, px: f32, py: f32) -> [f32; 4] {
+    let m = g.matrix;
+    let (x, y) = (px * 256.0, py * 256.0);
+    let (u, v) = (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+    let t = if g.radial { (u / 16384.0).hypot(v / 16384.0) } else { u / 32768.0 + 128.0 };
+    let t = t.clamp(0.0, 256.0);
+    let (i, f) = (t.floor() as usize, t.fract());
+    let (a, b) = (g.ramp[i.min(256)], g.ramp[(i + 1).min(256)]);
+    std::array::from_fn(|k| a[k] + (b[k] - a[k]) * f)
+}
+
 /// A bitmap fill's colour at LCD position (px, py), premultiplied, 0..1:
-/// bilinear, which smooths bitmaps the LCD shows blocky (the BIOS samples
-/// the nearest texel unless the fill asks for smoothing).
+/// bilinear when the fill asks for smoothing, else the texel itself, as
+/// the BIOS draws it (the bitmap's own pixels, never smoothed for HD).
 fn sample(b: &BitmapFill, px: f32, py: f32) -> [f32; 4] {
     let m = b.matrix;
+    if !b.smooth {
+        let (u, v) = (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]);
+        let (w, h) = (b.image.width as i64, b.image.height as i64);
+        let (tx, ty) = (u.floor() as i64, v.floor() as i64);
+        let (tx, ty) = if b.clamp { (tx.clamp(0, w - 1), ty.clamp(0, h - 1)) } else { (tx.rem_euclid(w), ty.rem_euclid(h)) };
+        let p = b.image.pixels[(ty * w + tx) as usize];
+        return [(p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF, p >> 24].map(|c| c as f32 / 255.0);
+    }
     let (u, v) = (m[0] * px + m[2] * py + m[4] - 0.5, m[1] * px + m[3] * py + m[5] - 0.5);
     let (w, h) = (b.image.width as i64, b.image.height as i64);
     let at = |tx: i64, ty: i64| {
@@ -1077,6 +1216,14 @@ impl Sink<'_> {
                                 }
                                 rest *= 1.0 - p[3];
                             }
+                            Paint::Gradient(g) => {
+                                let s = self.scale.max(1.0);
+                                let p = sample_gradient(g, (x as f32 + 0.5) / s - 0.5, self.sy / s - 0.5);
+                                for k in 0..3 {
+                                    c[k] += rest * p[3] * p[k];
+                                }
+                                rest *= 1.0 - p[3];
+                            }
                         }
                     }
                     (c, rest, on_unknown)
@@ -1112,7 +1259,10 @@ mod tests {
                 scanline: 0x4000_0202,
                 solid_painter: 0x4000_0300,
                 bitmap_painter: 0x4000_0350,
-                glyph: None
+                glyph: None,
+                gradient: None,
+                gradient_blend: None,
+                bitmap_blend: None
             })
         );
         assert_eq!(Hooks::find(&bios[..0x200], 0x4000_0000), None);
@@ -1133,7 +1283,7 @@ mod tests {
             put(&mut mem, 0x128 + 4 * i, &v.to_le_bytes());
         }
         let peek = |a: u32| mem[a as usize];
-        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None });
+        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None, gradient: None, gradient_blend: None, bitmap_blend: None });
         c.edge(0, peek); // built before its render's first scanline event
         c.scanline(0x100, 1, peek);
         c.scanline(0x100, 2, peek); // later scanlines of the same render
@@ -1147,7 +1297,7 @@ mod tests {
         assert!(p.edges[0].line);
         assert_eq!(
             p.fills[&0x80],
-            Fill { order: 0x000A_0002, rgba: [0x30, 0x20, 0x10, 0xFF], painter: 0, bitmap: None }
+            Fill { order: 0x000A_0002, rgba: [0x30, 0x20, 0x10, 0xFF], painter: 0, bitmap: None, gradient: None }
         );
     }
 }
