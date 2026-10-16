@@ -40,6 +40,9 @@ pub struct Probe {
     /// Hold the power button this many instructions from power-on instead
     /// of the usual (long enough: the kernel enters its test mode).
     pub power_hold: Option<u64>,
+    /// Run idle loops instruction by instruction (to check that skipping
+    /// them changes nothing).
+    pub no_idle_skip: bool,
 }
 
 impl Probe {

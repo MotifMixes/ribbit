@@ -70,6 +70,27 @@ pub struct Zippity {
     bus: Bus,
 }
 
+/// The state at a loop's jump back, to tell whether the loop is idle.
+#[derive(Default)]
+struct IdleLoop {
+    r: [u32; 16],
+    cpsr: u32,
+    activity: u64,
+}
+
+impl IdleLoop {
+    /// Whether the CPU is where it was at the last jump back, with the same
+    /// registers and no write or I/O access since (an idle loop); notes the
+    /// state for next time if not.
+    fn again(&mut self, cpu: &Arm, activity: u64) -> bool {
+        if self.activity == activity && self.cpsr == cpu.cpsr && self.r == cpu.r {
+            return true;
+        }
+        *self = IdleLoop { r: cpu.r, cpsr: cpu.cpsr, activity };
+        false
+    }
+}
+
 /// The save state format's version (bumped when the layout changes).
 const STATE_VERSION: u32 = 1;
 
@@ -148,10 +169,24 @@ impl Zippity {
         self.bus.now
     }
 
+    /// Instructions skipped in idle loops since power-on.
+    pub fn skipped(&self) -> u64 {
+        self.bus.skipped
+    }
+
     /// Runs `n` instructions.
+    ///
+    /// Idle loops are skipped: a short loop (a jump back of under 64 bytes)
+    /// that makes no write and no I/O access, and comes round with every
+    /// register and flag as before, does the same thing again until
+    /// something else changes memory or the interrupt lines. Only device
+    /// ticks and frames (or an interrupt they raise) can, so time moves on
+    /// to the next one at once. The system spends most of its time in such
+    /// loops (waiting for the video interrupt's flag in RAM), and the result
+    /// is the same as running them. Waiting for an interrupt (CP15) is
+    /// skipped the same way.
     pub fn run(&mut self, n: u64) {
         let end = self.bus.now + n;
-        let (mut irq, mut fiq) = (false, false);
         // The next frame interrupt (at instruction FRAME - 1 of each frame)
         // and device tick (every 256 instructions).
         let mut frame_at = self.bus.now - self.bus.now % FRAME + FRAME - 1;
@@ -159,6 +194,7 @@ impl Zippity {
             frame_at += FRAME;
         }
         let mut tick_at = self.bus.now.next_multiple_of(256);
+        let mut idle = IdleLoop::default();
         while self.bus.now < end {
             let now = self.bus.now;
             if now == frame_at {
@@ -169,17 +205,25 @@ impl Zippity {
                 self.bus.tick();
                 tick_at += 256;
             }
-            if self.bus.lines_dirty {
-                self.bus.lines_dirty = false;
-                (irq, fiq) = self.bus.lines();
-                self.cpu.irq_line = irq;
-                self.cpu.fiq_line = fiq;
+            // Instructions up to the next event.
+            let next = frame_at.min(tick_at).min(end);
+            while self.bus.now < next {
+                if self.bus.lines_dirty {
+                    self.bus.lines_dirty = false;
+                    (self.cpu.irq_line, self.cpu.fiq_line) = self.bus.lines();
+                }
+                self.bus.pc = self.cpu.r[15];
+                self.cpu.step(&mut self.bus);
+                self.bus.now += 1;
+                let (pc, at) = (self.cpu.r[15], self.cpu.current);
+                if (self.cpu.waiting || pc <= at && at - pc < 64) && !self.bus.probe.no_idle_skip
+                    && idle.again(&self.cpu, self.bus.activity)
+                {
+                    self.bus.skipped += next - self.bus.now;
+                    self.bus.now = next;
+                }
             }
-            self.bus.pc = self.cpu.r[15];
-            self.cpu.step(&mut self.bus);
-            self.bus.now += 1;
         }
-        let _ = (irq, fiq);
     }
 
     /// Runs one video frame's worth of instructions.

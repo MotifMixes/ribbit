@@ -147,6 +147,13 @@ pub struct Bus {
     /// Interrupt lines need working out again (after I/O or a tick).
     #[serde(skip)]
     pub(crate) lines_dirty: bool,
+    /// CPU writes and I/O accesses so far: a loop that makes none changes
+    /// nothing (see `Zippity::run`'s idle loops).
+    #[serde(skip)]
+    pub(crate) activity: u64,
+    /// Instructions skipped in idle loops (research).
+    #[serde(skip)]
+    pub(crate) skipped: u64,
     #[serde(skip)]
     pub probe: Probe,
 }
@@ -180,6 +187,8 @@ impl Bus {
             audio_due: 0,
             audio_frac: 0,
             lines_dirty: true,
+            activity: 0,
+            skipped: 0,
             probe: Probe::default(),
         }
     }
@@ -376,6 +385,7 @@ impl Bus {
 
     pub(crate) fn io(&mut self, a: u32, write: Option<u32>, size: u32) -> u32 {
         self.lines_dirty = true;
+        self.activity += 1;
         self.probe.io(self.now, self.pc, a, write, size);
         if let Some(v) = self.nand_io(a, write) {
             return v;
@@ -571,6 +581,7 @@ impl ArmBus for Bus {
     }
     fn write8(&mut self, a: u32, v: u8) {
         self.probe.mem_write(self.now, self.pc, a, v as u32, 8);
+        self.activity += 1;
         match self.mem(a, 1) {
             Some(m) => m[0] = v,
             None => {
@@ -580,6 +591,7 @@ impl ArmBus for Bus {
     }
     fn write16(&mut self, a: u32, v: u16) {
         self.probe.mem_write(self.now, self.pc, a, v as u32, 16);
+        self.activity += 1;
         match self.mem(a, 2) {
             Some(m) => m.copy_from_slice(&v.to_le_bytes()),
             None => {
@@ -589,6 +601,7 @@ impl ArmBus for Bus {
     }
     fn write32(&mut self, a: u32, v: u32) {
         self.probe.mem_write(self.now, self.pc, a, v, 32);
+        self.activity += 1;
         match self.mem(a, 4) {
             Some(m) => m.copy_from_slice(&v.to_le_bytes()),
             None => {
