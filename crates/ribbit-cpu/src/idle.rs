@@ -49,6 +49,16 @@ impl Cpu {
     /// `instructions` idle instructions had executed.
     pub fn skip_idle(&mut self, cycles: u64, instructions: u64) {
         debug_assert!(cycles <= self.cycles_to_timer_event());
+        // A load still in flight arrives as many cycles later as are skipped
+        // (an executed run would have reissued it in the last iteration).
+        if self.ready_max > self.cycles {
+            for r in &mut self.ready {
+                if *r > self.cycles {
+                    *r += cycles;
+                }
+            }
+            self.ready_max += cycles;
+        }
         self.cycles += cycles;
         self.instructions_retired += instructions;
         for t in &mut self.timers {

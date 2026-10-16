@@ -102,14 +102,14 @@ pub struct CpuConfig {
     /// (`Cpu::pipeline_cost`); otherwise every instruction is one cycle.
     #[serde(default = "pipeline_timing_default")]
     pub pipeline_timing: bool,
+    /// Cycles from a load's issue (after any memory stall) until its result
+    /// can be read (pipeline timing). CALIBRATED (docs/hardware-research.md,
+    /// "CPU timing"): the PRM says only "a minimum of one cycle".
+    pub load_latency: u64,
 }
 
 fn pipeline_timing_default() -> bool {
     true
-}
-
-fn no_load() -> u8 {
-    isa::NO_LOAD
 }
 
 impl CpuConfig {
@@ -121,6 +121,7 @@ impl CpuConfig {
             illegal: IllegalPolicy::Stop,
             xy_extension: true,
             pipeline_timing: true,
+            load_latency: 3,
         }
     }
 }
@@ -264,10 +265,11 @@ pub struct Cpu {
     pub sleeping: bool,
     pub cycles: u64,
     pub instructions_retired: u64,
-    /// The register the previous instruction loaded (`isa::NO_LOAD` if
-    /// none): reading it next stalls (pipeline timing).
-    #[serde(default = "no_load")]
-    pub pending_load: u8,
+    /// Cycle at which each core register's pending load result arrives
+    /// (pipeline timing): reading it earlier stalls until then.
+    pub ready: Vec<u64>,
+    /// The latest of `ready` (a quick "nothing pending" check).
+    pub ready_max: u64,
     pub config: CpuConfig,
     #[serde(skip)]
     pub diag: Diagnostics,
@@ -313,7 +315,8 @@ impl Cpu {
             sleeping: false,
             cycles: 0,
             instructions_retired: 0,
-            pending_load: isa::NO_LOAD,
+            ready: vec![0; 64],
+            ready_max: 0,
             config,
             diag: Diagnostics::default(),
             xy: None,
@@ -355,7 +358,8 @@ impl Cpu {
             sleeping: false,
             cycles: 0,
             instructions_retired: 0,
-            pending_load: isa::NO_LOAD,
+            ready: vec![0; 64],
+            ready_max: 0,
             xy: config.xy_extension.then(xy::XyExtension::default),
             icache,
             last_instr: None,

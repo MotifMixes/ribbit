@@ -125,9 +125,10 @@ fn v15_timer_waits_are_10_ms() {
     let c3 = run_to(&mut m, 0x4002_BA72, 5_000_000);
     // 160,000 counts at 16 MHz with a 96 MHz CPU = 960,000 cycles. Measured
     // from the first poll (not the reset write), and the reset lands anywhere
-    // within a 6-cycle peripheral tick, so allow -6 / +10 (last poll iteration).
+    // within a 6-cycle peripheral tick, so allow -6, and up to one poll
+    // iteration over (its uncached device read costs ~40 cycles: memtiming.rs).
     for (name, cycles) in [("first", c1 - c0), ("second", c3 - c2)] {
-        assert!((959_994..960_010).contains(&cycles), "{name} 10 ms wait took {cycles} cycles");
+        assert!((959_994..960_100).contains(&cycles), "{name} 10 ms wait took {cycles} cycles");
     }
     // MQX BSP programs the tick timer (timer 0) after the waits.
     run_clean(&mut m, 5_000_000);
@@ -138,7 +139,7 @@ fn v15_timer_waits_are_10_ms() {
 #[test]
 fn v15_initialises_lcd_runs_dma_and_switches_display_format() {
     let mut m = bios_or_skip!(bios(V15));
-    check_display_boot(&mut m, 2_000_000..2_200_000, 140_000_000..152_000_000);
+    check_display_boot(&mut m, 2_900_000..3_200_000, 142_000_000..152_000_000);
 }
 
 #[test]
@@ -146,12 +147,12 @@ fn v21_initialises_lcd_runs_dma_and_switches_display_format() {
     let mut m = bios_or_skip!(bios(V21));
     // Same 10 ms wait sequence as v1.5, at 0x400390f6; released at 0x40039102.
     run_to(&mut m, 0x4003_9102, 5_000_000);
-    check_display_boot(&mut m, 2_100_000..2_300_000, 151_000_000..162_000_000);
+    check_display_boot(&mut m, 4_450_000..4_800_000, 162_000_000..173_000_000);
 }
 
 /// With all-zero straps no LCD config resource matches, and LcdMPI::Init
-/// asserts. The BIOS formats the message into VRAM (its UART driver is
-/// interrupt-driven and IRQ 0x1B is not modelled, so the UART gets one byte).
+/// asserts. The BIOS formats the message into VRAM (and sends it to the UART,
+/// interrupt-driven, line 0x1B).
 fn check_zero_straps_assert(name: &str) {
     let fw = match firmware(name) {
         Some(fw) => fw,
@@ -204,7 +205,7 @@ fn calibration_presses() -> Vec<TouchPress> {
     TARGETS
         .iter()
         .enumerate()
-        .map(|(n, &(x, y))| TouchPress { start_ms: 1700 + 1300 * n as u64, duration_ms: 300, x: raw(x), y: raw(y) })
+        .map(|(n, &(x, y))| TouchPress { start_ms: 2000 + 1300 * n as u64, duration_ms: 300, x: raw(x), y: raw(y) })
         .collect()
 }
 
@@ -242,16 +243,16 @@ fn experimental_calibration(name: &str) -> Option<Machine> {
     m.coverage = Some(Default::default());
     // Stylus up so far: the BIOS has entered calibration (format 3) and draws
     // the first target.
-    run_to_ms(&mut m, 1690); // v1.5 switches at ~1.52 s, v2.1 at ~1.63 s
+    run_to_ms(&mut m, 1800); // v1.5 switches at ~1.53 s, v2.1 at ~1.75 s (2026-10-15 timing)
     assert_eq!(m.io.lcd.regs.format, 0x8000_0003);
     assert!(m.interrupt_counts[0x10] > 50, "ADC interrupts (vector 0x10) are taken");
     assert_target_at(&m, 10, 10);
     // Each accepted press moves the target on.
     for (n, &(x, y)) in TARGETS.iter().enumerate().skip(1) {
-        run_to_ms(&mut m, 1700 + 1300 * n as u64 - 100);
+        run_to_ms(&mut m, 2000 + 1300 * n as u64 - 100);
         assert_target_at(&m, x as usize, y as usize);
     }
-    run_to_ms(&mut m, 8000);
+    run_to_ms(&mut m, 8300);
     assert_eq!(m.io.lcd.regs.format, 0x8000_0004, "calibration finished: back to 12 bpp");
     let t = m.io.touch.as_ref().unwrap();
     assert_eq!(t.touched_updates, 5 * 18, "each 300 ms press covers 18 updates");
@@ -288,7 +289,7 @@ fn v21_experimental_touch_calibration_then_splash_screen() {
         eprintln!("RIBBIT_BIOS_DIR not set; skipping");
         return;
     };
-    run_to_ms(&mut m, 9200);
+    run_to_ms(&mut m, 9500);
     assert!(!power_off_requested(&m, V21), "v2.1 does not take the power-off path");
     assert!(m.io.lcd.transfers > 3, "post-calibration screens are DMA'd ({} transfers)", m.io.lcd.transfers);
     assert!(lit_pixels(&m).len() > 10_000, "a full-screen image is displayed");
@@ -324,7 +325,7 @@ fn visited(m: &Machine, pc: u32) -> bool {
 #[test]
 fn v15_voice_command_is_acknowledged_and_the_audio_task_continues() {
     let mut m = bios_or_skip!(audio_machine(V15));
-    run_to_ms(&mut m, 700);
+    run_to_ms(&mut m, 1000); // first command at ~734 ms (2026-10-15 timing)
     assert_first_voice_command_acknowledged(&m);
     // 0x4002_6268: "last command for this voice still unacknowledged?" With
     // the acknowledge already taken, the event wait (0x4002_6286) is skipped
@@ -336,7 +337,7 @@ fn v15_voice_command_is_acknowledged_and_the_audio_task_continues() {
 #[test]
 fn v21_voice_command_is_acknowledged_and_master_stop_audio_is_answered() {
     let mut m = bios_or_skip!(audio_machine(V21));
-    run_to_ms(&mut m, 1000);
+    run_to_ms(&mut m, 1300); // first command at ~1023 ms (2026-10-15 timing)
     assert_first_voice_command_acknowledged(&m);
     // The voice-6 check at 0x4002_FC50 (called from 0x4003_174E) used to wait
     // forever for event bit 1; now it continues at 0x4002_FC9E.
@@ -385,7 +386,7 @@ fn v15_eeprom_reads_complete_and_startup_voice_plays() {
 #[test]
 fn v21_eeprom_reads_complete_and_startup_voice_plays() {
     let mut m = bios_or_skip!(audio_machine(V21));
-    run_to_ms(&mut m, 1000);
+    run_to_ms(&mut m, 1300);
     assert!(m.io.eeprom.reads > 0, "EEPROM reads complete through flag bit 7");
     assert_eq!(m.io.eeprom.other_device_commands, 0);
     assert!(m.io.voices.samples_generated > 0, "voice 6 start-up sound produces samples");

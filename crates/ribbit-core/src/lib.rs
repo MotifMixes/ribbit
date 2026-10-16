@@ -117,8 +117,9 @@ impl RawState {
 const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 /// Bumped whenever the machine state's layout changes (bincode is
 /// positional): 2 = UART transmit timing (divisor, busy) and CPU pipeline
-/// timing (pending load, config flag).
-pub const STATE_VERSION: u32 = 2;
+/// timing (pending load, config flag); 3 = memory timing (caches, register
+/// ready times, load latency).
+pub const STATE_VERSION: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -238,6 +239,8 @@ struct IdleProbe {
     retired: u64,
     steps: u64,
     event_syncs: u64,
+    /// Cache misses so far: an iteration that missed is not repeatable.
+    misses: [u64; 3],
 }
 
 /// Compact form of a `TraceEvent` for the always-on trace tail (recorded
@@ -861,6 +864,7 @@ impl Machine {
             let p = self.idle.probe.take().unwrap();
             let exact = self.cpu.idle_snapshot() == p.snapshot
                 && self.io.event_syncs == p.event_syncs
+                && self.io.mem.misses == p.misses
                 && self
                     .bus
                     .write_log
@@ -933,6 +937,7 @@ impl Machine {
             retired: self.cpu.instructions_retired,
             steps: 0,
             event_syncs: self.io.event_syncs,
+            misses: self.io.mem.misses,
         });
         self.io.probe = true;
         self.io.probe_violation = false;

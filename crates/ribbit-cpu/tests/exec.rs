@@ -499,9 +499,10 @@ fn pipeline_costs_load_use_and_taken_compare_branch() {
         0x78E0, // nop_s
     ];
     let bytes: Vec<u8> = prog.iter().flat_map(|h| h.to_le_bytes()).collect();
-    let costs = |timing: bool| {
+    let costs = |timing: bool, latency: u64| {
         let mut config = CpuConfig::leapster();
         config.pipeline_timing = timing;
+        config.load_latency = latency;
         let mut cpu = Cpu::new(config);
         let mut bus = image_bus(&bytes);
         cpu.pc = 0x4000_0000;
@@ -514,13 +515,17 @@ fn pipeline_costs_load_use_and_taken_compare_branch() {
         }
         out
     };
-    let on = costs(true);
-    assert_eq!(on.iter().map(|c| (c.0, c.2)).collect::<Vec<_>>(), [
-        (0x4000_0000, 1),
-        (0x4000_0002, 2), // load-use stall
-        (0x4000_0004, 3), // killed delay slot + the A5's second slot
-        (0x4000_0008, 1),
-    ]);
-    assert!(matches!(on[0].1, Op::Ld) && matches!(on[1].1, Op::Mov) && matches!(on[2].1, Op::Br(_)), "{on:?}");
-    assert!(costs(false).iter().all(|c| c.2 == 1), "one cycle each without pipeline timing");
+    // A result arriving `latency` cycles after its load issues: the next
+    // instruction (one cycle later) waits latency - 1.
+    for latency in [2, 3] {
+        let on = costs(true, latency);
+        assert_eq!(on.iter().map(|c| (c.0, c.2)).collect::<Vec<_>>(), [
+            (0x4000_0000, 1),
+            (0x4000_0002, latency), // load-use stall
+            (0x4000_0004, 3), // killed delay slot + the A5's second slot
+            (0x4000_0008, 1),
+        ]);
+        assert!(matches!(on[0].1, Op::Ld) && matches!(on[1].1, Op::Mov) && matches!(on[2].1, Op::Br(_)), "{on:?}");
+    }
+    assert!(costs(false, 3).iter().all(|c| c.2 == 1), "one cycle each without pipeline timing");
 }

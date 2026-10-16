@@ -913,3 +913,37 @@ Needed next: the same measurement in Ribbit's Leapster TV mode, and a handheld r
 | # | Source | License | Use in Ribbit |
 |---|---|---|---|
 | S10 | Nathan Farlow, `leapster-emu` (github.com/nathanfarlow/leapster-emu, first seen 2026-10-15; C++, "a small, accurate Leapster emulator", "coming soon: tests against hardware traces") | **None stated** (all rights reserved) | Read for facts only (timing structure and magnitudes, cited above). No code or tables copied. Ask the author before using more |
+
+### Memory timing in Ribbit, calibrated (2026-10-15, latest)
+
+`io/memtiming.rs` models the memory system as stall cycles charged to the instruction that causes them
+(`Bus::instruction` / `Bus::take_stall`; instruction-decoding reads use `Bus::fetch16` and are never timed):
+
+* Instruction and data caches with the BIOS-derived geometry (4 ways x 512 sets x 16 bytes). The data cache is
+  write-back and write-allocate (HYPOTHESIS). Replacement is round-robin advanced on fills only (UNKNOWN real
+  policy, chosen so that hits never change state).
+* CALIBRATED costs, per line fill: BIOS/cartridge ROM 200 cycles, SDRAM 80, on-chip RAM 40; a device-register
+  access 40; a dirty write-back 42. Magnitudes follow S10.
+* Load latency (`CpuConfig::load_latency`): a load's result arrives 3 cycles after it issues. Per-register
+  ready times make an instruction wait only for registers it actually reads.
+* Exactness: idle fast-forwarding only extrapolates an iteration that had no cache misses, and moves in-flight
+  load results with the skipped time. A block whose last instruction stalls past a processor-timer limit
+  advances the timers as single steps do. Save states (format 3) include both caches. Tests: `memtiming`
+  unit tests, `v15/v21_idle_skip_is_exact`, `v15/v21_save_state_is_exact`; `examples/statediff.rs` checks run
+  partitioning and restore.
+
+**Result**: Sonic X gameplay (Station Square act 1, running right) on Ribbit's **Leapster TV** model: 16-18,
+mean **17.0 frames/s**. The real Leapster TV capture: **17.7**. Handheld: 21-23. Emulation speed went from 192%
+to 221% of real time (one P-core), since an emulated second now holds fewer instructions.
+
+BIOS boot milestones moved later (`examples/milestones.rs`; the BIOS regression tests are re-pinned):
+
+| | v1.5 | US v2.1 |
+|---|---|---|
+| LCD init (format 4) | 2.75 M cycles | 3.71 M |
+| First voice command | 734 ms | 1023 ms |
+| Calibration (format 3), default straps | 1.53 s | 1.75 s |
+
+Open: second calibration points (other scenes, other games, a handheld reference); line prefetch; SDRAM row
+effects; `.di` accesses; multiplier latency; DMA bus contention; the cartridge chip-select timing registers
+(0x0180_C0xx) that should set the ROM cost per cartridge.

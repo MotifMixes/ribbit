@@ -41,7 +41,7 @@ pub fn width_of(major: u8) -> Width {
 
 /// Decodes the instruction at `addr`, reading halfwords from the bus.
 pub fn decode(bus: &mut impl Bus, addr: u32) -> Instr {
-    decode_with(addr, |a| bus.read16(a))
+    decode_with(addr, |a| bus.fetch16(a))
 }
 
 /// Decodes the instruction at `addr`, reading halfwords with `fetch`.

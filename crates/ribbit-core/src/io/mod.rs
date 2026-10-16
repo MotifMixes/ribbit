@@ -17,6 +17,7 @@ pub mod tv_link;
 pub mod straps;
 pub mod timer;
 pub mod touch;
+pub mod memtiming;
 pub mod uart;
 pub mod voices;
 
@@ -161,6 +162,8 @@ pub struct Peripherals {
     pub straps: Option<Straps>,
     pub clock_control: ClockControl,
     pub uart: DebugUart,
+    /// Caches and memory costs (CPU timing).
+    pub mem: memtiming::MemTiming,
     /// EXPERIMENTAL, UNVERIFIED MAME-derived touch/ADC sample source. None
     /// (the default) = no ADC conversions and channel controls unmodelled.
     pub touch: Option<MameTouch>,
@@ -222,6 +225,7 @@ impl Default for Peripherals {
             straps: None,
             clock_control: ClockControl::default(),
             uart: DebugUart::default(),
+            mem: memtiming::MemTiming::default(),
             touch: None,
             lmax_tv: None,
             tv_link: None,
@@ -500,15 +504,17 @@ impl Bus for MachineBus<'_> {
     }
 
     #[inline(always)]
-    fn read8(&mut self, addr: u32) -> u8 {
-        if !is_mmio(addr) {
-            return self.sys.read8(addr);
-        }
-        self.read8_mmio(addr)
+    fn instruction(&mut self, pc: u32, len: u32) {
+        self.io.mem.instruction(pc, len);
     }
 
     #[inline(always)]
-    fn read16(&mut self, addr: u32) -> u16 {
+    fn take_stall(&mut self) -> u64 {
+        self.io.mem.take_stall()
+    }
+
+    #[inline(always)]
+    fn fetch16(&mut self, addr: u32) -> u16 {
         if !is_mmio(addr) {
             return self.sys.read16(addr);
         }
@@ -516,10 +522,32 @@ impl Bus for MachineBus<'_> {
     }
 
     #[inline(always)]
+    fn read8(&mut self, addr: u32) -> u8 {
+        if !is_mmio(addr) {
+            self.io.mem.data(addr, false);
+            return self.sys.read8(addr);
+        }
+        self.io.mem.device();
+        self.read8_mmio(addr)
+    }
+
+    #[inline(always)]
+    fn read16(&mut self, addr: u32) -> u16 {
+        if !is_mmio(addr) {
+            self.io.mem.data(addr, false);
+            return self.sys.read16(addr);
+        }
+        self.io.mem.device();
+        self.read16_mmio(addr)
+    }
+
+    #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
         if !is_mmio(addr) {
+            self.io.mem.data(addr, false);
             return self.sys.read32(addr);
         }
+        self.io.mem.device();
         self.read32_mmio(addr)
     }
 
@@ -529,24 +557,30 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn write8(&mut self, addr: u32, value: u8) {
         if !is_mmio(addr) {
+            self.io.mem.data(addr, true);
             return self.sys.write8(addr, value);
         }
+        self.io.mem.device();
         self.write8_mmio(addr, value)
     }
 
     #[inline(always)]
     fn write16(&mut self, addr: u32, value: u16) {
         if !is_mmio(addr) {
+            self.io.mem.data(addr, true);
             return self.sys.write16(addr, value);
         }
+        self.io.mem.device();
         self.write16_mmio(addr, value)
     }
 
     #[inline(always)]
     fn write32(&mut self, addr: u32, value: u32) {
         if !is_mmio(addr) {
+            self.io.mem.data(addr, true);
             return self.sys.write32(addr, value);
         }
+        self.io.mem.device();
         self.write32_mmio(addr, value)
     }
 }

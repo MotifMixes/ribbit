@@ -24,6 +24,25 @@ pub trait Bus {
     #[inline(always)]
     fn at(&mut self, _cycle: u64, _pc: u32) {}
 
+    /// The instruction at `pc` (`len` bytes, decoded) is about to execute:
+    /// its fetch, and the accesses until `take_stall`, are its own (memory
+    /// timing). Instruction decoding reads come before this and are not timed.
+    #[inline(always)]
+    fn instruction(&mut self, _pc: u32, _len: u32) {}
+
+    /// An instruction-stream read (decoding): like `read16`, but never timed
+    /// as a data access (fetch timing is `instruction`'s).
+    #[inline(always)]
+    fn fetch16(&mut self, addr: u32) -> u16 {
+        self.read16(addr)
+    }
+
+    /// Stall cycles the memory system added to the instruction just executed.
+    #[inline(always)]
+    fn take_stall(&mut self) -> u64 {
+        0
+    }
+
     /// True once an access has happened that the machine must handle before
     /// the next instruction (a device register): ends a `Cpu::run_block`.
     #[inline(always)]
