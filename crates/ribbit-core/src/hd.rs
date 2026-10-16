@@ -152,6 +152,14 @@ pub struct Glyph {
     pub coverage: Vec<u8>,
     pub clip: [i32; 4],
     pub rgb: [u8; 3],
+    /// The character, its font's name (the BIOS font resource's +0x04,
+    /// e.g. "Leapster Mono") and size (pixels per em, the resource's
+    /// +0x10), and the pen: x and baseline y (LCD pixels), for drawing it
+    /// from the typeface's outlines when they are known.
+    pub ch: u16,
+    pub font: String,
+    pub em: f32,
+    pub pen: (i32, i32),
 }
 
 /// Everything one render pass drew.
@@ -244,6 +252,12 @@ impl HdCapture {
             .collect();
         let nib = |c: u32| ((c & 0xF0) | (c >> 4)) as u8;
         let c = regs[23];
+        // The text loop's own registers: r22 the string, r14 the index,
+        // r17 the run (+0x08 the BIOS font resource), r13 the pen x, r19
+        // the baseline.
+        let res = w(regs[17] + 8);
+        let name_at = w(res + 4);
+        let font: String = (0..32).map(|i| peek(name_at + i)).take_while(|&b| b != 0).map(|b| b as char).collect();
         self.glyphs.push(Glyph {
             x: regs[5] as i16 as i32,
             y: regs[6] as i16 as i32,
@@ -252,6 +266,10 @@ impl HdCapture {
             coverage,
             clip: [h(surface + 0x14), h(surface + 0x16), h(surface + 0x18), h(surface + 0x1A)],
             rgb: [nib(c & 0xFF), nib((c >> 8) & 0xFF), nib((c >> 16) & 0xFF)],
+            ch: peek(regs[22] + regs[14]) as u16,
+            font,
+            em: peek(res + 0x10) as f32,
+            pen: (regs[13] as i16 as i32, regs[19] as i16 as i32),
         });
     }
 
@@ -475,6 +493,14 @@ pub struct HdCanvas {
     prev_lcd: Vec<u32>,
     covered: Vec<bool>,
     stale: Vec<bool>,
+    /// LCD pixels last drawn from a font outline: they differ from the
+    /// BIOS's pixel glyph by design, so the LCD comparison does not apply
+    /// (until a render draws there again).
+    from_outline: Vec<bool>,
+    /// Outline fonts by name (from the player's cartridges, swf_font.rs):
+    /// device text in these is drawn from its curves, else from the BIOS's
+    /// pixel glyphs.
+    pub fonts: Option<Arc<HashMap<String, crate::swf_font::OutlineFont>>>,
 }
 
 /// Largest per-channel difference between a canvas block's average and its
@@ -508,6 +534,8 @@ impl HdCanvas {
             prev_lcd: vec![],
             covered: vec![false; 160 * 160],
             stale: vec![false; 160 * 160],
+            from_outline: vec![false; 160 * 160],
+            fonts: None,
         }
     }
 
@@ -541,6 +569,7 @@ impl HdCanvas {
         let s = self.scale;
         for py in y0 / s..y1.div_ceil(s) {
             self.covered[py * 160 + x0 / s..py * 160 + x1.div_ceil(s)].fill(true);
+            self.from_outline[py * 160 + x0 / s..py * 160 + x1.div_ceil(s)].fill(false);
         }
         // Fills bottom to top.
         let mut order: Vec<(&u32, &Fill)> = pass.fills.iter().collect();
@@ -620,6 +649,10 @@ impl HdCanvas {
     /// pixel's coverage. The glyph exists only at the LCD's resolution (the
     /// font is a pixel font), so this is its true shape.
     fn draw_glyph(&mut self, g: &Glyph) {
+        let outline = self.fonts.as_ref().and_then(|f| f.get(&g.font)).and_then(|f| f.glyphs.get(&g.ch)).filter(|o| !o.pieces.is_empty()).cloned();
+        if let Some(o) = outline {
+            return self.draw_outline(g, &o);
+        }
         let s = self.scale;
         let [cx0, cy0, cx1, cy1] = g.clip;
         for gy in 0..g.height {
@@ -640,6 +673,94 @@ impl HdCanvas {
                         *p = alpha << 24 | ch(16, g.rgb[0]) | ch(8, g.rgb[1]) | ch(0, g.rgb[2]);
                     }
                 }
+            }
+        }
+    }
+
+    /// Draws a device-font glyph from its typeface's outline: em units (1024
+    /// per em, y down from the baseline) scaled to `g.em` pixels at the
+    /// BIOS's pen, clipped like the BIOS's glyph, the colour blended by
+    /// coverage (4 x 4 samples per canvas pixel, even-odd).
+    fn draw_outline(&mut self, g: &Glyph, o: &crate::swf_font::Outline) {
+        let s = self.scale as f32;
+        let k = g.em / 1024.0;
+        let to_canvas = |(x, y): (f32, f32)| ((g.pen.0 as f32 + x * k) * s, (g.pen.1 as f32 + y * k) * s);
+        let mut segs: Vec<[f32; 4]> = vec![];
+        for p in &o.pieces {
+            let [a, c, b] = p.map(to_canvas);
+            let n = 16;
+            let mut prev = a;
+            for i in 1..=n {
+                let t = i as f32 / n as f32;
+                let u = 1.0 - t;
+                let q = (u * u * a.0 + 2.0 * u * t * c.0 + t * t * b.0, u * u * a.1 + 2.0 * u * t * c.1 + t * t * b.1);
+                segs.push([prev.0, prev.1, q.0, q.1]);
+                prev = q;
+            }
+        }
+        if segs.is_empty() {
+            return;
+        }
+        let [cx0, cy0, cx1, cy1] = g.clip;
+        let lim = |lo: i32, hi: i32| ((lo.max(0) as f32) * s, ((hi.min(159) + 1) as f32) * s);
+        let ((lx0, lx1), (ly0, ly1)) = (lim(cx0, cx1), lim(cy0, cy1));
+        let (mut bx0, mut bx1, mut by0, mut by1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for sg in &segs {
+            bx0 = bx0.min(sg[0]).min(sg[2]);
+            bx1 = bx1.max(sg[0]).max(sg[2]);
+            by0 = by0.min(sg[1]).min(sg[3]);
+            by1 = by1.max(sg[1]).max(sg[3]);
+        }
+        let (x0, x1) = (bx0.max(lx0).floor().max(0.0) as usize, (bx1.min(lx1).ceil() as usize).min(self.size));
+        let (y0, y1) = (by0.max(ly0).floor().max(0.0) as usize, (by1.min(ly1).ceil() as usize).min(self.size));
+        const N: usize = 4;
+        let mut xs = vec![];
+        for py in y0..y1 {
+            let mut cov = vec![0u32; x1.saturating_sub(x0)];
+            for j in 0..N {
+                let sy = py as f32 + (j as f32 + 0.5) / N as f32;
+                xs.clear();
+                for sg in &segs {
+                    if (sg[1] <= sy) != (sg[3] <= sy) {
+                        xs.push(sg[0] + (sy - sg[1]) / (sg[3] - sg[1]) * (sg[2] - sg[0]));
+                    }
+                }
+                xs.sort_by(f32::total_cmp);
+                for pair in xs.chunks(2) {
+                    let [a, b] = [pair[0], *pair.get(1).unwrap_or(&pair[0])];
+                    for (i, c) in cov.iter_mut().enumerate() {
+                        let px = (x0 + i) as f32;
+                        for q in 0..N {
+                            let sx = px + (q as f32 + 0.5) / N as f32;
+                            if sx >= a && sx < b {
+                                *c += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            for (i, &c) in cov.iter().enumerate() {
+                if c == 0 {
+                    continue;
+                }
+                let a = c * 64 / (N * N) as u32;
+                let p = &mut self.pixels[py * self.size + x0 + i];
+                let ch = |k: u32, v: u8| ((v as u32 * a + ((*p >> k) & 0xFF) * (64 - a)) / 64) << k;
+                let alpha = (255 * a + (*p >> 24) * (64 - a)) / 64;
+                *p = alpha << 24 | ch(16, g.rgb[0]) | ch(8, g.rgb[1]) | ch(0, g.rgb[2]);
+            }
+        }
+        // The LCD pixels the glyph covers are drawn now, from the outline:
+        // the outline's and the BIOS glyph's boxes (they differ by a pixel
+        // here and there), within the clip.
+        let sc = self.scale;
+        let (gx0, gy0) = ((g.x.max(cx0).max(0) as usize).min(160), (g.y.max(cy0).max(0) as usize).min(160));
+        let (gx1, gy1) =
+            (((g.x + g.width as i32).min(cx1 + 1).max(0) as usize).min(160), ((g.y + g.height as i32).min(cy1 + 1).max(0) as usize).min(160));
+        for y in (y0 / sc).min(gy0)..y1.div_ceil(sc).min(160).max(gy1) {
+            for x in (x0 / sc).min(gx0)..x1.div_ceil(sc).min(160).max(gx1) {
+                self.covered[y * 160 + x] = true;
+                self.from_outline[y * 160 + x] = true;
             }
         }
     }
@@ -693,7 +814,7 @@ impl HdCanvas {
                 let far = (0..3).any(|k| (avg[k] - lc[k]).abs() > FAR);
                 let off = (0..3).any(|k| avg[k] < lo[k] - AGREE || avg[k] > hi[k] + AGREE);
                 let unknown = known < n * 128;
-                let use_fallback = self.stale[i] || far || off || unknown;
+                let use_fallback = self.stale[i] || (!self.from_outline[i] && (far || off)) || unknown;
                 self.mask[i] = if use_fallback { 255 } else { 0 };
                 fallback += use_fallback as usize;
             }

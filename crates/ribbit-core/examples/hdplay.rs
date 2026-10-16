@@ -33,7 +33,23 @@ fn main() {
         assert!(m.enable_hd_capture(), "HD hooks not found in this BIOS");
         // RIBBIT_HD_SCALE: canvas pixels per LCD pixel (4 = 640, 16 = 2560).
         let scale = std::env::var("RIBBIT_HD_SCALE").map_or(4, |s| s.parse().unwrap());
-        canvas = Some(HdCanvas::with_scale(m.hd.as_ref().unwrap().hooks, scale));
+        let mut c = HdCanvas::with_scale(m.hd.as_ref().unwrap().hooks, scale);
+        // RIBBIT_HD_FONTS: cartridge files (';'-separated) whose Flash
+        // movies hold device fonts' outlines (swf_font.rs).
+        if let Ok(list) = std::env::var("RIBBIT_HD_FONTS") {
+            let mut fonts = std::collections::HashMap::new();
+            for path in list.split(';').filter(|p| !p.is_empty()) {
+                for (name, f) in ribbit_core::swf_font::find_fonts(&ribbit_core::read_image(path).unwrap()) {
+                    let better = fonts.get(&name).is_none_or(|g: &ribbit_core::swf_font::OutlineFont| g.glyphs.len() < f.glyphs.len());
+                    if better {
+                        fonts.insert(name, f);
+                    }
+                }
+            }
+            println!("fonts: {:?}", fonts.iter().map(|(n, f)| (n.clone(), f.glyphs.len())).collect::<Vec<_>>());
+            c.fonts = Some(std::sync::Arc::new(fonts));
+        }
+        canvas = Some(c);
     }
     let per_ms = m.clock.cpu_hz / 1000;
     let (total, every): (u64, u64) = (ms.parse().unwrap(), every.parse().unwrap());

@@ -401,6 +401,8 @@ impl App {
     fn rescan_library(&mut self) {
         let art = self.settings.bios.clone().map(|bios| ArtSource { bios });
         self.library.scan(&self.settings.rom_folders, &self.settings.recent_carts, art);
+        // Outline fonts for HD device text, from the same folders.
+        crate::device_fonts::load(self.settings.rom_folders.clone());
     }
 
     fn add_rom_folder(&mut self, path: PathBuf) {
@@ -1528,6 +1530,9 @@ impl App {
             if let Some(canvas) = &mut s.hd
                 && !hidden
             {
+                if canvas.fonts.is_none() {
+                    canvas.fonts = crate::device_fonts::get();
+                }
                 for p in &passes {
                     canvas.apply(p);
                 }

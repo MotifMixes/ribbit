@@ -6,6 +6,7 @@ pub mod app;
 mod audio_out;
 mod calibrate;
 mod console_view;
+mod device_fonts;
 mod discord;
 mod emu;
 mod files;

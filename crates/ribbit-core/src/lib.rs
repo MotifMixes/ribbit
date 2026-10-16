@@ -9,6 +9,7 @@ pub mod config;
 pub mod hd;
 pub mod idle_timer;
 pub mod io;
+pub mod swf_font;
 pub mod zip;
 
 use ribbit_cpu::isa::Instr;
