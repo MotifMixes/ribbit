@@ -39,13 +39,18 @@ pub const SPU_CLOCK: u64 = 281_250;
 /// The output rate, SPU_CLOCK / 4.
 pub const OUTPUT_RATE: f64 = SPU_CLOCK as f64 / 4.0;
 
-/// OKI ADPCM: the step sizes (index 0-48) and how each nibble moves the
-/// step index.
-fn oki_step(i: i32) -> i32 {
-    static STEPS: std::sync::OnceLock<[i32; 49]> = std::sync::OnceLock::new();
-    STEPS.get_or_init(|| std::array::from_fn(|i| (16.0 * 1.1f64.powi(i as i32)) as i32))[i as usize]
-}
-const OKI_INDEX: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
+/// IMA ADPCM: the step sizes (index 0-88) and how each nibble moves the
+/// step index. The Zippity's sounds decode cleanly only as IMA ADPCM, low
+/// nibble first: they stay centred and end at exactly 0, where OKI ADPCM
+/// (MAME's model of the 16-bit chips) or the other nibble order drift into
+/// rumble and clip (docs/zippity.md).
+const IMA_STEPS: [i32; 89] = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
+    143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282,
+    1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630,
+    9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+];
+const IMA_INDEX: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
 
 /// Ticks between envelope steps for each envelope clock setting, and
 /// between ramp-down steps for each ramp-down clock (MAME's tables).
@@ -78,12 +83,13 @@ impl Bus {
                 if self.probe.spu_log {
                     let phase = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0x10);
                     println!(
-                        "spu {:>10} ch {ch} mode {:04x} addr {:06x} loop {:06x} phase {phase:05x} vol {:04x}",
+                        "spu {:>10} ch {ch} mode {:04x} addr {:06x} loop {:06x} phase {phase:05x} vol {:04x} sel {:04x}",
                         self.now,
                         self.spu_reg(ch, 1),
                         self.spu_reg(ch, 0),
                         self.spu_reg(ch, 2),
-                        self.spu_reg(ch, 3)
+                        self.spu_reg(ch, 3),
+                        self.spu_reg(ch, 0xD)
                     );
                 }
                 let env_addr = (self.spu_reg(ch, 7) & 0x3F) << 16 | (self.spu_reg(ch, 8) & 0xFFFF);
@@ -117,17 +123,22 @@ impl Bus {
             if tone == 1 {
                 return None;
             }
-            // Loop: from the loop address (register 2).
+            // Loop: from the loop address (register 2). The ADPCM bit
+            // clears (as in MAME's model): an instrument's ADPCM attack
+            // loops on a stretch of plain samples (16-bit with mode bit 14;
+            // in the dumps, the words after the attack's 0xFFFF).
             self.voices[ch].addr = self.spu_reg(ch, 2) & 0x3F_FFFF;
             self.voices[ch].shift = 0;
+            if mode & 0x8000 != 0 {
+                self.spu_set(ch, 1, mode & !0x8000);
+            }
             return Some(v.sample);
         }
         let vo = &mut self.voices[ch];
         if mode & 0x8000 != 0 {
-            // 4-bit OKI ADPCM, high nibble first (low first, as in MAME's
-            // 16-bit chips, decodes to noise).
-            let n = ((word >> (12 - vo.shift)) & 15) as i32;
-            let step = oki_step(vo.step);
+            // 4-bit IMA ADPCM, low nibble first.
+            let n = ((word >> vo.shift) & 15) as i32;
+            let step = IMA_STEPS[vo.step as usize];
             let mut diff = step >> 3;
             if n & 1 != 0 {
                 diff += step >> 2;
@@ -138,15 +149,14 @@ impl Bus {
             if n & 4 != 0 {
                 diff += step;
             }
-            vo.signal = (vo.signal + if n & 8 != 0 { -diff } else { diff }).clamp(-2048, 2047);
-            vo.step = (vo.step + OKI_INDEX[(n & 7) as usize]).clamp(0, 48);
+            vo.signal = (vo.signal + if n & 8 != 0 { -diff } else { diff }).clamp(-32768, 32767);
+            vo.step = (vo.step + IMA_INDEX[(n & 7) as usize]).clamp(0, 88);
             vo.shift += 4;
             if vo.shift == 16 {
                 vo.shift = 0;
                 vo.addr += 1;
             }
-            // MAME keeps OKI ADPCM to 12 bits; scaled to 16 here.
-            Some(vo.signal << 4)
+            Some(vo.signal)
         } else if mode & 0x4000 != 0 {
             vo.addr += 1;
             Some(word as i32 - 0x8000)

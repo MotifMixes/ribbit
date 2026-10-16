@@ -305,12 +305,29 @@ channel from 20 to 31.
 | +0xE00 / +0xE80 | Control for channels 0-15 / 16-31: +0x00 enable, +0x04 main volume, +0x08 FIQ enable, +0x0C FIQ status, +0x14 beat count (bit 15 interrupt enable, bit 14 its flag), +0x18-0x24 envelope clocks (4 bits a channel), +0x28 envelope ramp-down, +0x2C stop flags, +0x30 zero cross, +0x34 control, +0x3C busy |
 
 A channel plays phase x 281250 / 2^19 samples a second (MAME's figure;
-the menus use phase 0x7482: 16000 Hz). The menus' sounds are 4-bit OKI ADPCM,
-one-shot, ending at the word 0xFFFF; each starts with a 4-word header
-(0x007F 0x7F00 0x6440 0x8000). Unlike MAME's 16-bit chips, the nibbles are
-taken high first: low first decodes to noise, high first to clean tones.
-When a one-shot ends the channel stops, its enable bit clears and its stop
-flag sets.
+the menus use phase 0x7482: 16000 Hz). The sounds are 4-bit **IMA ADPCM, low
+nibble first** (mode bit 15), ending at the word 0xFFFF. Decoded that way
+every sound tried stays centred and most end at exactly 0, as an encoder
+fading to silence leaves them; OKI ADPCM (MAME's model of the 16-bit chips)
+or high nibble first drift into rumble and clip. Before each sound in memory
+is an 8-word header of the sound library's (e.g. `0000 0516 0000 3255 0032
+0302 6440 8000`: the second word is about the length in words plus 0x16);
+the channel is started after it.
+
+Looping instruments (tone mode 2, modes like 0xE1C7: ADPCM and 16-bit) are
+two pieces: an ADPCM attack ending in 0xFFFF, then, right after it, the loop
+as plain 16-bit samples (unsigned, 0x8000 the middle) ending in 0xFFFF. The
+loop address points at the second piece. At the first 0xFFFF the channel
+jumps there and its ADPCM bit clears (as in MAME's model), so the loop plays
+as 16-bit samples. Decoding the loop as ADPCM gave the buzz and hum of
+Ribbit's first sound model. When a one-shot ends the channel stops, its
+enable bit clears and its stop flag sets.
+
+Checked against a recording of a real unit starting up (YouTube
+nt37NPE5-R8): the spectrogram shows the same opening sweep, voice and music,
+with clean harmonics; level, peak and the energy below 60 Hz are within a
+few dB of the recording's (before: 12 dB too loud, with 29 dB more rumble
+and a DC offset).
 
 The music comes from a sequencer in the kernel run by the beat counter:
 +0xE10 the base count (0x160), +0xE14 the beat count (0x30) with bit 15
@@ -321,13 +338,14 @@ down; when it reloads the beat count drops; at 0 the flag rises. The music
 uses looping ADPCM instruments (modes like 0xE1C7) with hardware envelopes
 and ramp-downs (+0xE28 written 0xFFFFFFFF to fade everything).
 
-Ribbit's research tool plays all of this as MAME's model does (envelopes,
-ramp-down, interpolation, volume and pan, the control register's volume
-select and the main volume), at 70312.5 Hz, and saves it with
-`ZIPBOOT_WAV=file`. Its start-up audio follows a recording of a real unit:
-the loudness over time correlates 0.64 with the recording's at one offset
-and about 0 at others. Envelope IRQs, channel FIQs and the compressor are
-not modelled. MAME keeps OKI ADPCM to 12 bits; the tool scales it to 16.
+Ribbit plays all of this as MAME's model does (envelopes, ramp-down,
+interpolation, volume and pan, the control register's volume select and the
+main volume), at 70312.5 Hz; the research tool saves it with
+`ZIPBOOT_WAV=file` (`ZIPBOOT_SPULOG` prints each channel start with its
+mode, addresses, phase, volume and register 0xD, the ADPCM select, which the
+kernel leaves 0). Its start-up loudness over time correlates 0.87 with the
+recording's, best at normal speed. Envelope IRQs, channel FIQs and the
+compressor are not modelled.
 
 ## DMA controller (0xD0300000)
 
