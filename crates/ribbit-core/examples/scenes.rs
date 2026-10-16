@@ -14,6 +14,7 @@
 //!   label TEXT          name the following part of the report
 //!   digest [NAME]       print the machine state digest (for comparing builds)
 //!   lcdrate MS N        N times: run MS, print LCD frames/s and the idle-skipped share
+//!   auxlog              list accesses to unmodelled auxiliary registers so far
 //!   watch ADDR MS       single-step MS, printing each change of the word at ADDR and the PC
 //!   bptrace PC MS [rN..] print registers (default r0-r3, blink) each time PC runs
 //!   logtrace PC rF MS   print a printf-style debug log call (format in rF, args after)
@@ -302,6 +303,18 @@ fn main() {
                         100.0 * idle
                     );
                 }
+            }
+            Some("auxlog") => {
+                // auxlog: accesses to auxiliary registers Ribbit does not model
+                // (cache controls and others) so far, each distinct one once.
+                let mut seen = std::collections::BTreeMap::new();
+                for x in &m.cpu.diag.aux_unmodelled {
+                    *seen.entry((x.reg, format!("{:?}", x.kind), x.value, x.pc)).or_insert(0u32) += 1;
+                }
+                for ((reg, kind, value, pc), n) in seen {
+                    println!("aux {reg:#06x} {kind:5} {value:#010x} pc {pc:08x} x{n}");
+                }
+                println!("({} unmodelled accesses in all)", m.cpu.diag.aux_unmodelled_total);
             }
             Some("watch") => {
                 // watch ADDR MS: single-step for MS, printing each change of the

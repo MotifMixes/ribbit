@@ -867,3 +867,25 @@ on screen). Counting frames that differ from the previous one in 2-second window
 mode, Sonic running right) gives 48-51. On the TV the picture goes through the external TV chip, probably at the
 TV's 60 Hz (17.7 fits a mix of 3- and 4-field frames), so this bounds but does not equal the handheld's speed.
 Needed next: the same measurement in Ribbit's Leapster TV mode, and a handheld reference.
+
+### Like-for-like check and the two hypotheses (2026-10-15)
+
+* Ribbit's **Leapster TV** mode (TV BIOS `am29pl160cb-90sf`, same cartridge, same act, running right): 43-45
+  frames/s, against the real TV's 17.7. Ribbit is about **2.5x too fast** on the same hardware model. In the
+  video, cutscenes (timer-paced at 8 frames/s in Ribbit) show at most 8-9 changes per second, so the method
+  measures the game's own frame rate.
+* Cache controls (VERIFIED-FW, US v2.1 0x4003_9244-0x4003_9364): IC_CTRL (aux 0x11) = 2 and DC_CTRL (aux 0x48) =
+  0x8A, both with bit 0 (disable) clear, after invalidating both. The BIOS then locks the code ranges of
+  resource 0x1000_000E into the instruction cache (routine 0x4003_8DF8) if IC_CTRL bit 0 reads 0. Sonic X scans
+  48 instruction-cache tags (12 lines in each of the 4 ways) at start-up (0x8007_9236-0x8007_9266).
+* **Hypothesis A: the CPU runs at 48 MHz** plus the PRM's pipeline costs. From the measured mix: CPI = 1 +
+  0.119 (wasted delay slots) + 0.080 (the A5's second BRcc/BBIT slot) + 0.077 (load-use) + about 0.05
+  (multiplies, cache misses) = about 1.32. Sonic X needs 1.81 M instructions per frame, giving 20 frames/s on the
+  handheld and about 18 on the TV (Ribbit's TV/handheld ratio 44/49). **Measured: 17.7.**
+* **Hypothesis B: 96 MHz with slow memory** needs a CPI of about 2.7. With the simulated miss rates (0.79
+  instruction and 6.5 data misses per 1000 instructions), each miss would have to cost about 190 cycles.
+  Implausible, unless large regions are uncached.
+* A is supported by MAME's note that "/2 gives a closer speed/framerate to real hardware videos" and by the
+  BIOS's clock function having an explicit 48 MHz mode (aux 0x56 bits 2-3 = 4). The board's actual aux 0x56
+  value is UNKNOWN. To separate A from B: a second CPU-bound scene with a different memory profile, a handheld
+  (non-TV) reference, or the real aux 0x56 value read on hardware.
