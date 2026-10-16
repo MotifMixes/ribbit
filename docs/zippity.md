@@ -327,7 +327,13 @@ Checked against a recording of a real unit starting up (YouTube
 nt37NPE5-R8): the spectrogram shows the same opening sweep, voice and music,
 with clean harmonics; level, peak and the energy below 60 Hz are within a
 few dB of the recording's (before: 12 dB too loud, with 29 dB more rumble
-and a DC offset).
+and a DC offset). Pitch and tempo, from log-frequency spectrograms of
+the two (1/192 octave, 10 ms steps): every stretch that matches well comes
+out at 0 cents (so the 281250 Hz clock and the phase formula are right to
+about 0.4%), and over the music from 6 to 13.5 s into the recording the
+emulation takes 7.40 s for its 7.5 s (tempo within about 1-2%, as fine as a
+camera recording allows). Someone who knows the hardware also remembers it
+using IMA ADPCM (hearsay, but it agrees).
 
 The music comes from a sequencer in the kernel run by the beat counter:
 +0xE10 the base count (0x160), +0xE14 the beat count (0x30) with bit 15
