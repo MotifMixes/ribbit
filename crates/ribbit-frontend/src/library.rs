@@ -410,7 +410,7 @@ impl Capture {
         self.m.render_frame(&mut self.frame);
         if let (Some(c), Some(hd)) = (self.canvas.as_mut(), self.m.hd.as_mut()) {
             for p in hd.take() {
-                c.apply(&p, &self.frame[..]);
+                c.apply(&p);
             }
         }
     }
@@ -420,8 +420,8 @@ impl Capture {
         self.drain();
         match self.canvas.as_mut() {
             Some(c) => {
-                c.reconcile(&self.frame[..]);
-                Shot { size: ribbit_core::hd::HD_SIZE, pixels: c.pixels.clone() }
+                c.update_mask(&self.frame[..]);
+                Shot { size: c.size, pixels: c.composed(&self.frame[..]) }
             }
             None => Shot { size: WIDTH, pixels: self.frame.to_vec() },
         }

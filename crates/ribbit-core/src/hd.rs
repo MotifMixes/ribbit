@@ -318,39 +318,40 @@ fn decode_image(
     Image { width: width as usize, height: height as usize, pixels }
 }
 
-/// Side of the HD picture: the BIOS's own quarter-pixel grid.
+/// Side of the default HD picture: the BIOS's own quarter-pixel grid. A
+/// canvas can be larger (`HdCanvas::with_scale`): the BIOS's curves are
+/// exact enough to draw at screen resolution.
 pub const HD_SIZE: usize = 640;
-/// Sub-rows sampled per HD row (horizontal coverage is exact).
+/// Sub-rows sampled per canvas row (horizontal coverage is exact).
 const SUB: usize = 4;
-/// Quarter pixels per LCD pixel.
-const Q: usize = HD_SIZE / 160;
 
 /// How a fill is drawn in HD.
 #[derive(Clone)]
 enum Paint {
     /// Plain colour, straight alpha.
     Solid([f32; 4]),
-    /// A bitmap, sampled per HD pixel.
+    /// A bitmap, sampled per canvas pixel.
     Bitmap(BitmapFill),
-    /// Anything else: the BIOS's own (LCD-resolution) pixels.
-    Lcd,
+    /// Anything the canvas cannot draw (e.g. a gradient): left unknown, for
+    /// the fallback picture to fill.
+    Unknown,
 }
 
 /// What covers a stretch of a sub-row.
 enum Look {
-    /// The same everywhere: premultiplied colour of the plain fills, the
+    /// The same everywhere: premultiplied colour of the drawable fills, the
     /// weight left beneath them, and whether that weight is a fill the
-    /// canvas cannot draw (the BIOS's pixel) or nothing at all (the canvas
-    /// keeps what it has: like the BIOS's framebuffer, a render only paints
-    /// where it has fills, and one frame is often several renders layered).
+    /// canvas cannot draw (unknown) or nothing at all (the canvas keeps what
+    /// it has: like the BIOS's framebuffer, a render only paints where it
+    /// has fills, and one frame is often several renders layered).
     Uniform([f32; 3], f32, bool),
     /// Depends on the pixel (a bitmap is involved): the covering fills, top
     /// first, down to the first that hides everything below.
     Varying(Vec<usize>),
 }
 
-/// One flattened piece of an edge, in HD pixels, with its fills (indices
-/// into the pass's fill list, -1 = none).
+/// One flattened piece of an edge, in canvas pixels, with its fills
+/// (indices into the pass's fill list, -1 = none).
 #[derive(Clone, Copy)]
 struct Seg {
     x0: f32,
@@ -361,53 +362,90 @@ struct Seg {
 }
 
 /// The HD picture, kept across passes like the BIOS keeps its framebuffer
-/// (a pass redraws only its rectangle).
+/// (a pass redraws only its rectangle). It holds only what was drawn from
+/// the BIOS's shapes and bitmaps; whatever it cannot know comes from a
+/// fallback picture (the LCD, smoothed or upscaled) when it is shown, as
+/// marked by its alpha and by `mask`.
 #[derive(Clone)]
 pub struct HdCanvas {
-    /// 0xAARRGGBB, HD_SIZE x HD_SIZE.
+    /// Side in pixels (160 x scale).
+    pub size: usize,
+    /// Canvas pixels per LCD pixel.
+    pub scale: usize,
+    /// 0xAARRGGBB, premultiplied: alpha is how much of the pixel the canvas
+    /// knows (255 drawn, 0 unknown).
     pub pixels: Vec<u32>,
+    /// Per LCD pixel (160x160): 255 where the shown picture must come from
+    /// the fallback (`update_mask`).
+    pub mask: Vec<u8>,
     solid_painter: u32,
     pub passes: u64,
-    /// The LCD frame at the last `reconcile`, and the LCD pixels renders
-    /// have covered since: an LCD pixel that changed where no render drew
-    /// was drawn some way the capture missed, so its HD block is stale.
+    /// The LCD frame at the last `update_mask`, the LCD pixels renders have
+    /// covered since, and those found stale: an LCD pixel that changed
+    /// where no render drew was drawn some way the capture missed.
     prev_lcd: Vec<u32>,
     covered: Vec<bool>,
+    stale: Vec<bool>,
 }
 
+/// Largest per-channel difference between a canvas block's average and its
+/// LCD pixel that still counts as the same picture (the LCD keeps 4 bits per
+/// channel, and the BIOS's anti-aliasing differs slightly from ours), beyond
+/// the range of the LCD pixel's 3x3 neighbourhood (an edge block blends its
+/// neighbours).
+const AGREE: i32 = 40;
+/// Largest difference from the block's own LCD pixel, whatever its
+/// neighbours: anti-aliasing never differs this much, but things drawn
+/// another way (the BIOS's pixel-font text) do.
+const FAR: i32 = 96;
+
 impl HdCanvas {
+    /// A 640x640 canvas (the BIOS's quarter-pixel grid).
     pub fn new(hooks: Hooks) -> Self {
+        Self::with_scale(hooks, 4)
+    }
+
+    /// A canvas of 160 x `scale` pixels square (scale 4 to 16).
+    pub fn with_scale(hooks: Hooks, scale: usize) -> Self {
+        let scale = scale.clamp(4, 16);
+        let size = 160 * scale;
         Self {
-            pixels: vec![0xFF00_0000; HD_SIZE * HD_SIZE],
+            size,
+            scale,
+            pixels: vec![0; size * size],
+            mask: vec![255; 160 * 160],
             solid_painter: hooks.solid_painter,
             passes: 0,
             prev_lcd: vec![],
             covered: vec![false; 160 * 160],
+            stale: vec![false; 160 * 160],
         }
     }
 
-    /// Draws `pass` inside its redraw rectangle. `lcd` (160x160, 0xAARRGGBB)
-    /// is the BIOS's frame: it supplies fills that are not plain colours and
-    /// places no fill covers.
-    pub fn apply(&mut self, pass: &Pass, lcd: &[u32]) {
+    /// Draws `pass` inside its redraw rectangle.
+    pub fn apply(&mut self, pass: &Pass) {
         self.passes += 1;
-        // Pass units to quarter pixels (a pass with no rectangle seen is
-        // taken as a full-quality full redraw).
-        let k = match pass.scale {
-            1 | 2 | 4 => (Q as i32) / pass.scale,
-            _ => 1,
+        // Pass units to canvas pixels (a pass with no rectangle seen is taken
+        // as a full-quality full redraw).
+        let units = match pass.scale {
+            1 | 2 | 4 => pass.scale,
+            _ => 4,
         };
-        let [x0, x1, mut y0, mut y1] = pass.rect.map_or([0, HD_SIZE as i32, 0, HD_SIZE as i32], |r| r.map(|v| v * k));
+        let k = self.scale as f32 / units as f32;
+        let n = self.size as f32;
+        let r = pass.rect.map_or([0.0, n, 0.0, n], |r| r.map(|v| v as f32 * k));
+        let (mut ry0, mut ry1) = (r[2], r[3]);
         if let Some((a, b)) = pass.rows {
-            (y0, y1) = (y0.max(a * k), y1.min(b * k));
+            (ry0, ry1) = (ry0.max(a as f32 * k), ry1.min(b as f32 * k));
         }
-        let clamp = |v: i32| v.clamp(0, HD_SIZE as i32) as usize;
-        let (x0, x1, y0, y1) = (clamp(x0), clamp(x1), clamp(y0), clamp(y1));
+        let clamp = |v: f32| (v.round().max(0.0) as usize).min(self.size);
+        let (x0, x1, y0, y1) = (clamp(r[0]), clamp(r[1]), clamp(ry0), clamp(ry1));
         if x0 >= x1 || y0 >= y1 {
             return;
         }
-        for py in y0 / Q..y1.div_ceil(Q) {
-            self.covered[py * 160 + x0 / Q..py * 160 + x1.div_ceil(Q)].fill(true);
+        let s = self.scale;
+        for py in y0 / s..y1.div_ceil(s) {
+            self.covered[py * 160 + x0 / s..py * 160 + x1.div_ceil(s)].fill(true);
         }
         // Fills bottom to top.
         let mut order: Vec<(&u32, &Fill)> = pass.fills.iter().collect();
@@ -418,22 +456,23 @@ impl HdCanvas {
             .map(|(_, f)| match (&f.bitmap, f.painter == self.solid_painter) {
                 (Some(b), _) => Paint::Bitmap(b.clone()),
                 (None, true) => Paint::Solid(f.rgba.map(|c| c as f32 / 255.0)),
-                (None, false) => Paint::Lcd,
+                (None, false) => Paint::Unknown,
             })
             .collect();
-        // Edges flattened; each segment listed under the rows it crosses.
+        // Edges flattened (finer as the canvas grows); each segment listed
+        // under the rows it crosses.
         let mut segs: Vec<Seg> = vec![];
         for e in &pass.edges {
             let fills = e.fills.map(|f| if f == 0 { -1 } else { index.get(&f).copied().unwrap_or(-1) });
             if fills == [-1, -1] {
                 continue;
             }
-            let p = e.p.map(|(x, y)| (x as f32 * k as f32, y as f32 * k as f32));
+            let p = e.p.map(|(x, y)| (x as f32 * k, y as f32 * k));
             let n = if e.line {
                 1
             } else {
                 let d = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
-                ((d(p[0], p[1]) + d(p[1], p[2])) / 6.0).ceil().clamp(1.0, 32.0) as usize
+                ((d(p[0], p[1]) + d(p[1], p[2])) / 6.0).ceil().clamp(1.0, 96.0) as usize
             };
             let at = |t: f32| {
                 let u = 1.0 - t;
@@ -449,8 +488,7 @@ impl HdCanvas {
                 prev = q;
             }
         }
-        let rows = y1 - y0;
-        let mut by_row: Vec<Vec<u32>> = vec![vec![]; rows];
+        let mut by_row: Vec<Vec<u32>> = vec![vec![]; y1 - y0];
         for (i, s) in segs.iter().enumerate() {
             let (lo, hi) = (s.y0.min(s.y1), s.y0.max(s.y1));
             let (a, b) = ((lo.floor() as i64).max(y0 as i64), (hi.ceil() as i64).min(y1 as i64));
@@ -458,97 +496,66 @@ impl HdCanvas {
                 by_row[(y as usize) - y0].push(i as u32);
             }
         }
-        let w = x1 - x0;
-        let mut acc = vec![[0f32; 3]; w];
-        let mut lcd_w = vec![0f32; w];
-        let mut keep_w = vec![0f32; w];
-        let mut xs: Vec<(f32, [i32; 2])> = vec![];
-        let mut active = vec![false; paints.len()];
-        for (r, list) in by_row.iter().enumerate() {
-            let y = y0 + r;
-            acc.iter_mut().for_each(|a| *a = [0.0; 3]);
-            lcd_w.iter_mut().for_each(|a| *a = 0.0);
-            keep_w.iter_mut().for_each(|a| *a = 0.0);
-            for j in 0..SUB {
-                let sy = y as f32 + (j as f32 + 0.5) / SUB as f32;
-                xs.clear();
-                for &i in list {
-                    let s = segs[i as usize];
-                    let (lo, hi) = if s.y0 < s.y1 { ((s.x0, s.y0), (s.x1, s.y1)) } else { ((s.x1, s.y1), (s.x0, s.y0)) };
-                    if sy >= lo.1 && sy < hi.1 {
-                        xs.push((lo.0 + (sy - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0), s.fills));
-                    }
-                }
-                xs.sort_by(|a, b| a.0.total_cmp(&b.0));
-                active.iter_mut().for_each(|a| *a = false);
-                let mut from = x0 as f32;
-                let mut look = composite(&active, &paints);
-                for &(x, fills) in &xs {
-                    let to = x.min(x1 as f32);
-                    if to > from {
-                        span(&mut acc, &mut lcd_w, &mut keep_w, x0, (from, to), &look, sy, &paints);
-                    }
-                    for f in fills {
-                        if f >= 0 {
-                            active[f as usize] ^= true;
-                        }
-                    }
-                    look = composite(&active, &paints);
-                    from = from.max(x);
-                }
-                if (x1 as f32) > from {
-                    span(&mut acc, &mut lcd_w, &mut keep_w, x0, (from, x1 as f32), &look, sy, &paints);
+        // Rows are independent: big renders are split across cores.
+        let size = self.size;
+        let rows = &mut self.pixels[y0 * size..y1 * size];
+        let work = (y1 - y0) * (x1 - x0);
+        let threads = if work < 200_000 {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(4, |t| t.get()).clamp(1, 16)
+        };
+        let band = (y1 - y0).div_ceil(threads);
+        let ctx = Raster { segs: &segs, paints: &paints, x0, x1, scale: s as f32 };
+        std::thread::scope(|scope| {
+            for (b, (chunk, lists)) in rows.chunks_mut(band * size).zip(by_row.chunks(band)).enumerate() {
+                let ctx = &ctx;
+                let first = y0 + b * band;
+                if threads == 1 {
+                    ctx.rows(chunk, lists, first, size);
+                } else {
+                    scope.spawn(move || ctx.rows(chunk, lists, first, size));
                 }
             }
-            let row = &mut self.pixels[y * HD_SIZE..(y + 1) * HD_SIZE];
-            for i in 0..w {
-                let x = x0 + i;
-                let l = lcd[(y / Q) * 160 + x / Q];
-                let lc = [(l >> 16) & 0xFF, (l >> 8) & 0xFF, l & 0xFF].map(|c| c as f32);
-                let o = row[x];
-                let oc = [(o >> 16) & 0xFF, (o >> 8) & 0xFF, o & 0xFF].map(|c| c as f32);
-                let c = |k: usize| {
-                    ((acc[i][k] * 255.0 + lcd_w[i] * lc[k] + keep_w[i] * oc[k]) / SUB as f32).round().clamp(0.0, 255.0) as u32
-                };
-                row[x] = 0xFF00_0000 | c(0) << 16 | c(1) << 8 | c(2);
-            }
-        }
+        });
     }
-}
 
-/// Largest per-channel difference between an HD block's average and its
-/// LCD pixel that still counts as the same picture (the LCD keeps 4 bits per
-/// channel, and the BIOS's anti-aliasing differs slightly from ours).
-const AGREE: i32 = 40;
-/// Largest difference from the block's own LCD pixel, whatever its
-/// neighbours: anti-aliasing never differs this much, but things drawn
-/// another way (the BIOS's pixel-font text) do.
-const FAR: i32 = 96;
-
-impl HdCanvas {
-    /// Makes the HD picture agree with the BIOS's frame `lcd` (160x160): each
-    /// 4x4 block whose average differs from its LCD pixel by more than
-    /// `AGREE` becomes that pixel, as does one that changed on the LCD where
-    /// no captured render drew. Covers whatever the edges did not
-    /// (bitmaps drawn another way, undecoded fills, stale areas), so the HD
-    /// picture is never wrong where the LCD is right. Returns the number of
-    /// blocks replaced.
-    pub fn reconcile(&mut self, lcd: &[u32]) -> usize {
-        let mut replaced = 0;
+    /// Updates `mask` against the BIOS's frame `lcd` (160x160): a block is
+    /// taken from the fallback where the canvas does not know it, where it
+    /// differs from its LCD pixel by more than `AGREE` beyond its
+    /// neighbourhood or by more than `FAR`, or where the LCD changed with no
+    /// render drawing there (until a render does). Returns the number of
+    /// blocks taken from the fallback.
+    pub fn update_mask(&mut self, lcd: &[u32]) -> usize {
+        let (s, size) = (self.scale, self.size);
+        // Up to 4x4 samples per block (enough to judge it, quick at any size).
+        let step = (s / 4).max(1);
+        let mut fallback = 0;
         for by in 0..160 {
             for bx in 0..160 {
-                let l = lcd[by * 160 + bx];
-                let mut sum = [0i32; 3];
-                for y in by * Q..(by + 1) * Q {
-                    for &p in &self.pixels[y * HD_SIZE + bx * Q..y * HD_SIZE + (bx + 1) * Q] {
-                        sum[0] += ((p >> 16) & 0xFF) as i32;
-                        sum[1] += ((p >> 8) & 0xFF) as i32;
-                        sum[2] += (p & 0xFF) as i32;
+                let i = by * 160 + bx;
+                let l = lcd[i];
+                if self.covered[i] {
+                    self.stale[i] = false;
+                } else if self.prev_lcd.get(i).is_some_and(|&p| p != l) {
+                    self.stale[i] = true;
+                }
+                let lc = [(l >> 16) & 0xFF, (l >> 8) & 0xFF, l & 0xFF].map(|c| c as i32);
+                // The block as shown (unknown parts from the LCD pixel).
+                let (mut sum, mut n, mut known) = ([0i32; 3], 0i32, 0i32);
+                for y in (by * s..(by + 1) * s).step_by(step) {
+                    for x in (bx * s..(bx + 1) * s).step_by(step) {
+                        let p = self.pixels[y * size + x];
+                        let a = (p >> 24) as i32;
+                        let rgb = [(p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF].map(|c| c as i32);
+                        for k in 0..3 {
+                            sum[k] += rgb[k] + lc[k] * (255 - a) / 255;
+                        }
+                        known += a;
+                        n += 1;
                     }
                 }
-                let n = (Q * Q) as i32;
-                // Accepted range per channel: the 3x3 LCD neighbourhood
-                // (an edge block blends its neighbours), widened by AGREE.
+                let avg = sum.map(|v| v / n);
                 let (mut lo, mut hi) = ([255i32; 3], [0i32; 3]);
                 for ny in by.saturating_sub(1)..(by + 2).min(160) {
                     for nx in bx.saturating_sub(1)..(bx + 2).min(160) {
@@ -559,27 +566,147 @@ impl HdCanvas {
                         }
                     }
                 }
-                let i = by * 160 + bx;
-                let stale = !self.covered[i] && self.prev_lcd.get(i).is_some_and(|&p| p != l);
-                let lc = [(l >> 16) & 0xFF, (l >> 8) & 0xFF, l & 0xFF].map(|c| c as i32);
-                let far = (0..3).any(|k| (sum[k] / n - lc[k]).abs() > FAR);
-                if stale || far || (0..3).any(|k| sum[k] / n < lo[k] - AGREE || sum[k] / n > hi[k] + AGREE) {
-                    replaced += 1;
-                    for y in by * Q..(by + 1) * Q {
-                        self.pixels[y * HD_SIZE + bx * Q..y * HD_SIZE + (bx + 1) * Q].fill(0xFF00_0000 | l);
-                    }
-                }
+                let far = (0..3).any(|k| (avg[k] - lc[k]).abs() > FAR);
+                let off = (0..3).any(|k| avg[k] < lo[k] - AGREE || avg[k] > hi[k] + AGREE);
+                let unknown = known < n * 128;
+                let use_fallback = self.stale[i] || far || off || unknown;
+                self.mask[i] = if use_fallback { 255 } else { 0 };
+                fallback += use_fallback as usize;
             }
         }
         self.prev_lcd.clear();
         self.prev_lcd.extend_from_slice(&lcd[..160 * 160]);
         self.covered.fill(false);
-        replaced
+        fallback
+    }
+
+    /// The picture as shown, on the CPU (for saved pictures and tests):
+    /// canvas where known and unmasked, else the LCD smoothed (bilinear).
+    pub fn composed(&self, lcd: &[u32]) -> Vec<u32> {
+        let (s, size) = (self.scale as f32, self.size);
+        let lcd_at = |x: f32, y: f32| -> [f32; 3] {
+            let (fx, fy) = ((x / s - 0.5).clamp(0.0, 159.0), (y / s - 0.5).clamp(0.0, 159.0));
+            let (ix, iy) = (fx.floor() as usize, fy.floor() as usize);
+            let (ax, ay) = (fx - ix as f32, fy - iy as f32);
+            let px = |x: usize, y: usize| {
+                let p = lcd[y.min(159) * 160 + x.min(159)];
+                [(p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF].map(|c| c as f32)
+            };
+            let (a, b, c, d) = (px(ix, iy), px(ix + 1, iy), px(ix, iy + 1), px(ix + 1, iy + 1));
+            std::array::from_fn(|k| (a[k] * (1.0 - ax) + b[k] * ax) * (1.0 - ay) + (c[k] * (1.0 - ax) + d[k] * ax) * ay)
+        };
+        // The mask, smoothed across block edges like the GPU's filtering.
+        let mask_at = |x: f32, y: f32| -> f32 {
+            let (fx, fy) = ((x / s - 0.5).clamp(0.0, 159.0), (y / s - 0.5).clamp(0.0, 159.0));
+            let (ix, iy) = (fx.floor() as usize, fy.floor() as usize);
+            let (ax, ay) = (fx - ix as f32, fy - iy as f32);
+            let m = |x: usize, y: usize| self.mask[y.min(159) * 160 + x.min(159)] as f32 / 255.0;
+            (m(ix, iy) * (1.0 - ax) + m(ix + 1, iy) * ax) * (1.0 - ay) + (m(ix, iy + 1) * (1.0 - ax) + m(ix + 1, iy + 1) * ax) * ay
+        };
+        let mut out = vec![0u32; size * size];
+        for y in 0..size {
+            for x in 0..size {
+                let p = self.pixels[y * size + x];
+                let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let keep = 1.0 - mask_at(cx, cy);
+                let a = (p >> 24) as f32 / 255.0 * keep;
+                let hd = [(p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF].map(|c| c as f32 * keep);
+                let f = lcd_at(cx, cy);
+                let c = |k: usize| (hd[k] + f[k] * (1.0 - a)).round().clamp(0.0, 255.0) as u32;
+                out[y * size + x] = 0xFF00_0000 | c(0) << 16 | c(1) << 8 | c(2);
+            }
+        }
+        out
     }
 }
 
-/// The look where the fills in `active` cover: (premultiplied colour of the
-/// plain fills, weight of the BIOS pixel showing beneath or in their place).
+/// What one render's rows need.
+struct Raster<'a> {
+    segs: &'a [Seg],
+    paints: &'a [Paint],
+    x0: usize,
+    x1: usize,
+    /// Canvas pixels per LCD pixel.
+    scale: f32,
+}
+
+impl Raster<'_> {
+    /// Rasterizes canvas rows `first..` (`chunk`, `size` pixels each), with
+    /// each row's segments in `lists`.
+    fn rows(&self, chunk: &mut [u32], lists: &[Vec<u32>], first: usize, size: usize) {
+        let (x0, x1) = (self.x0, self.x1);
+        let w = x1 - x0;
+        let mut acc = vec![[0f32; 3]; w];
+        let mut unknown_w = vec![0f32; w];
+        let mut keep_w = vec![0f32; w];
+        let mut xs: Vec<(f32, [i32; 2])> = vec![];
+        let mut active = vec![false; self.paints.len()];
+        for (r, list) in lists.iter().enumerate() {
+            let y = first + r;
+            acc.iter_mut().for_each(|a| *a = [0.0; 3]);
+            unknown_w.iter_mut().for_each(|a| *a = 0.0);
+            keep_w.iter_mut().for_each(|a| *a = 0.0);
+            for j in 0..SUB {
+                let sy = y as f32 + (j as f32 + 0.5) / SUB as f32;
+                xs.clear();
+                for &i in list {
+                    let s = self.segs[i as usize];
+                    let (lo, hi) = if s.y0 < s.y1 { ((s.x0, s.y0), (s.x1, s.y1)) } else { ((s.x1, s.y1), (s.x0, s.y0)) };
+                    if sy >= lo.1 && sy < hi.1 {
+                        xs.push((lo.0 + (sy - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0), s.fills));
+                    }
+                }
+                xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+                active.iter_mut().for_each(|a| *a = false);
+                let mut from = x0 as f32;
+                let mut look = composite(&active, self.paints);
+                let mut sink = Sink { acc: &mut acc, unknown_w: &mut unknown_w, keep_w: &mut keep_w, x0, sy, scale: self.scale };
+                for &(x, fills) in &xs {
+                    let to = x.min(x1 as f32);
+                    if to > from {
+                        sink.span((from, to), &look, self.paints);
+                    }
+                    for f in fills {
+                        if f >= 0 {
+                            active[f as usize] ^= true;
+                        }
+                    }
+                    look = composite(&active, self.paints);
+                    from = from.max(x);
+                }
+                if (x1 as f32) > from {
+                    sink.span((from, x1 as f32), &look, self.paints);
+                }
+            }
+            let row = &mut chunk[r * size..(r + 1) * size];
+            for i in 0..w {
+                let o = row[x0 + i];
+                let oa = (o >> 24) as f32;
+                let oc = [(o >> 16) & 0xFF, (o >> 8) & 0xFF, o & 0xFF].map(|c| c as f32);
+                let keep = keep_w[i] / SUB as f32;
+                // Premultiplied: drawn colour, plus what was kept; alpha is
+                // the known share (drawn fills, plus the known part kept).
+                let c = |k: usize| ((acc[i][k] * 255.0 / SUB as f32) + keep * oc[k]).round().clamp(0.0, 255.0) as u32;
+                let drawn = 1.0 - (unknown_w[i] + keep_w[i]) / SUB as f32;
+                let a = (drawn * 255.0 + keep * oa).round().clamp(0.0, 255.0) as u32;
+                row[x0 + i] = a << 24 | c(0) << 16 | c(1) << 8 | c(2);
+            }
+        }
+    }
+}
+
+/// A sub-row's accumulators.
+struct Sink<'a> {
+    acc: &'a mut [[f32; 3]],
+    unknown_w: &'a mut [f32],
+    keep_w: &'a mut [f32],
+    x0: usize,
+    sy: f32,
+    /// Canvas pixels per LCD pixel, for bitmap sampling.
+    scale: f32,
+}
+
+/// The look where the fills in `active` cover.
 fn composite(active: &[bool], paints: &[Paint]) -> Look {
     let (mut c, mut rest) = ([0f32; 3], 1f32);
     let mut stack = vec![];
@@ -590,7 +717,7 @@ fn composite(active: &[bool], paints: &[Paint]) -> Look {
         }
         stack.push(i);
         match &paints[i] {
-            Paint::Lcd => break,
+            Paint::Unknown => break,
             Paint::Bitmap(_) => varying = true,
             Paint::Solid(p) => {
                 for k in 0..3 {
@@ -604,15 +731,14 @@ fn composite(active: &[bool], paints: &[Paint]) -> Look {
             }
         }
     }
-    let on_lcd = stack.last().is_some_and(|&i| matches!(paints[i], Paint::Lcd));
-    if varying { Look::Varying(stack) } else { Look::Uniform(c, rest, on_lcd) }
+    let on_unknown = stack.last().is_some_and(|&i| matches!(paints[i], Paint::Unknown));
+    if varying { Look::Varying(stack) } else { Look::Uniform(c, rest, on_unknown) }
 }
 
-/// A bitmap fill's colour at HD pixel (x, y) (centre), premultiplied, 0..1:
+/// A bitmap fill's colour at LCD position (px, py), premultiplied, 0..1:
 /// bilinear, which smooths bitmaps the LCD shows blocky (the BIOS samples
 /// the nearest texel unless the fill asks for smoothing).
-fn sample(b: &BitmapFill, x: f32, y: f32) -> [f32; 4] {
-    let (px, py) = (x / Q as f32, y / Q as f32);
+fn sample(b: &BitmapFill, px: f32, py: f32) -> [f32; 4] {
     let m = b.matrix;
     let (u, v) = (m[0] * px + m[2] * py + m[4] - 0.5, m[1] * px + m[3] * py + m[5] - 0.5);
     let (w, h) = (b.image.width as i64, b.image.height as i64);
@@ -624,63 +750,54 @@ fn sample(b: &BitmapFill, x: f32, y: f32) -> [f32; 4] {
     let (fu, fv) = (u.floor(), v.floor());
     let (tx, ty, ax, ay) = (fu as i64, fv as i64, u - fu, v - fv);
     let (p00, p10, p01, p11) = (at(tx, ty), at(tx + 1, ty), at(tx, ty + 1), at(tx + 1, ty + 1));
-    std::array::from_fn(|k| {
-        (p00[k] * (1.0 - ax) + p10[k] * ax) * (1.0 - ay) + (p01[k] * (1.0 - ax) + p11[k] * ax) * ay
-    })
+    std::array::from_fn(|k| (p00[k] * (1.0 - ax) + p10[k] * ax) * (1.0 - ay) + (p01[k] * (1.0 - ax) + p11[k] * ax) * ay)
 }
 
-/// Adds one sub-row's span [a, b) (HD pixels) of `look` at height `sy`
-/// to the row.
-#[allow(clippy::too_many_arguments)]
-fn span(
-    acc: &mut [[f32; 3]],
-    lcd_w: &mut [f32],
-    keep_w: &mut [f32],
-    x0: usize,
-    (a, b): (f32, f32),
-    look: &Look,
-    sy: f32,
-    paints: &[Paint],
-) {
-    let (first, last) = (a.floor() as usize, (b.ceil() as usize).min(x0 + acc.len()));
-    for x in first.max(x0)..last {
-        let cov = (b.min(x as f32 + 1.0) - a.max(x as f32)).max(0.0);
-        let i = x - x0;
-        let (c, rest, on_lcd) = match look {
-            Look::Uniform(c, rest, on_lcd) => (*c, *rest, *on_lcd),
-            Look::Varying(stack) => {
-                let (mut c, mut rest, mut on_lcd) = ([0f32; 3], 1f32, false);
-                for &f in stack {
-                    match &paints[f] {
-                        Paint::Lcd => {
-                            on_lcd = true;
-                            break;
-                        }
-                        Paint::Solid(p) => {
-                            for k in 0..3 {
-                                c[k] += rest * p[3] * p[k];
+impl Sink<'_> {
+    /// Adds the sub-row's span [a, b) (canvas pixels) of `look`.
+    fn span(&mut self, (a, b): (f32, f32), look: &Look, paints: &[Paint]) {
+        let x0 = self.x0;
+        let (first, last) = (a.floor() as usize, (b.ceil() as usize).min(x0 + self.acc.len()));
+        for x in first.max(x0)..last {
+            let cov = (b.min(x as f32 + 1.0) - a.max(x as f32)).max(0.0);
+            let i = x - x0;
+            let (c, rest, on_unknown) = match look {
+                Look::Uniform(c, rest, on_unknown) => (*c, *rest, *on_unknown),
+                Look::Varying(stack) => {
+                    let (mut c, mut rest, mut on_unknown) = ([0f32; 3], 1f32, false);
+                    for &f in stack {
+                        match &paints[f] {
+                            Paint::Unknown => {
+                                on_unknown = true;
+                                break;
                             }
-                            rest *= 1.0 - p[3];
-                        }
-                        Paint::Bitmap(bf) => {
-                            let p = sample(bf, x as f32 + 0.5, sy);
-                            for k in 0..3 {
-                                c[k] += rest * p[k];
+                            Paint::Solid(p) => {
+                                for k in 0..3 {
+                                    c[k] += rest * p[3] * p[k];
+                                }
+                                rest *= 1.0 - p[3];
                             }
-                            rest *= 1.0 - p[3];
+                            Paint::Bitmap(bf) => {
+                                let s = self.scale.max(1.0);
+                                let p = sample(bf, (x as f32 + 0.5) / s, self.sy / s);
+                                for k in 0..3 {
+                                    c[k] += rest * p[k];
+                                }
+                                rest *= 1.0 - p[3];
+                            }
                         }
                     }
+                    (c, rest, on_unknown)
                 }
-                (c, rest, on_lcd)
+            };
+            for (a, c) in self.acc[i].iter_mut().zip(c) {
+                *a += c * cov;
             }
-        };
-        for (a, c) in acc[i].iter_mut().zip(c) {
-            *a += c * cov;
-        }
-        if on_lcd {
-            lcd_w[i] += rest * cov;
-        } else {
-            keep_w[i] += rest * cov;
+            if on_unknown {
+                self.unknown_w[i] += rest * cov;
+            } else {
+                self.keep_w[i] += rest * cov;
+            }
         }
     }
 }

@@ -10,6 +10,34 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
+/// The HD picture over its fallback: the canvas (premultiplied, alpha =
+/// how much of each pixel it knows) where it knows and the mask allows,
+/// else the fallback (the AI-upscaled LCD, or the LCD itself). The mask is
+/// 160x160 and filtered, so fallback areas blend in without block edges.
+const HD_SHADER: &str = r#"
+struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> Out {
+    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    var o: Out;
+    o.pos = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    o.uv = uv;
+    return o;
+}
+@group(0) @binding(0) var hd: texture_2d<f32>;
+@group(0) @binding(1) var smooth_samp: sampler;
+@group(0) @binding(2) var fallback: texture_2d<f32>;
+@group(0) @binding(3) var mask: texture_2d<f32>;
+@fragment
+fn fs_hd(in: Out) -> @location(0) vec4<f32> {
+    let c = textureSample(hd, smooth_samp, in.uv);
+    let f = textureSample(fallback, smooth_samp, in.uv).rgb;
+    let keep = 1.0 - textureSample(mask, smooth_samp, in.uv).r;
+    let known = c.a * keep;
+    return vec4<f32>(c.rgb * keep + f * (1.0 - known), 1.0);
+}
+"#;
+
 const SHADER: &str = r#"
 struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -185,9 +213,14 @@ pub struct Gpu {
     last_frame: Vec<u32>,
     last_chain: Vec<Network>,
     /// EXPERIMENTAL HD picture (ribbit_core::hd), shown instead of the
-    /// LCD while `show_hd` is set.
+    /// LCD while `show_hd` is set: the canvas (its side in `hd_size`), its
+    /// 160x160 fallback mask, and what draws them.
     hd_texture: wgpu::Texture,
-    hd_bind_group: wgpu::BindGroup,
+    hd_size: u32,
+    mask_texture: wgpu::Texture,
+    hd_bgl: wgpu::BindGroupLayout,
+    hd_pipeline: wgpu::RenderPipeline,
+    linear: wgpu::Sampler,
     pub show_hd: bool,
     pixel: wgpu::RenderPipeline,
     sharp: wgpu::RenderPipeline,
@@ -271,24 +304,77 @@ impl Gpu {
             ],
         });
         let hd_size = ribbit_core::hd::HD_SIZE as u32;
-        let hd_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("hd"),
-            size: wgpu::Extent3d { width: hd_size, height: hd_size, depth_or_array_layers: 1 },
+        let hd_texture = Self::hd_texture(&device, hd_size);
+        let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hd mask"),
+            size: wgpu::Extent3d { width: 160, height: 160, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let hd_view = hd_texture.create_view(&Default::default());
-        let hd_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let hd_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("hd"),
-            layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hd_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                tex_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                tex_entry(2),
+                tex_entry(3),
             ],
+        });
+        let hd_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hd"),
+            source: wgpu::ShaderSource::Wgsl(HD_SHADER.into()),
+        });
+        let hd_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hd"),
+            bind_group_layouts: &[Some(&hd_bgl)],
+            ..Default::default()
+        });
+        let hd_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hd"),
+            layout: Some(&hd_layout),
+            vertex: wgpu::VertexState {
+                module: &hd_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &hd_shader,
+                entry_point: Some("fs_hd"),
+                compilation_options: Default::default(),
+                targets: &[Some(config.format.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lcd"),
@@ -337,7 +423,11 @@ impl Gpu {
             config,
             texture,
             hd_texture,
-            hd_bind_group,
+            hd_size,
+            mask_texture,
+            hd_bgl,
+            hd_pipeline,
+            linear,
             show_hd: false,
             lcd_view: view,
             bgl,
@@ -396,10 +486,42 @@ impl Gpu {
         );
     }
 
-    /// The HD picture (0xAARRGGBB, `HD_SIZE` square).
-    pub fn upload_hd(&mut self, pixels: &[u32]) {
-        let size = ribbit_core::hd::HD_SIZE as u32;
-        let rgba: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 0xFF]).collect();
+    fn hd_texture(device: &wgpu::Device, size: u32) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hd"),
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    /// The HD fallback mask (160x160, 255 = use the fallback).
+    pub fn upload_hd_mask(&mut self, mask: &[u8]) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            mask,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(160), rows_per_image: None },
+            wgpu::Extent3d { width: 160, height: 160, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// The HD canvas (0xAARRGGBB premultiplied, `size` square).
+    pub fn upload_hd(&mut self, pixels: &[u32], size: usize) {
+        let size = size as u32;
+        if size != self.hd_size {
+            self.hd_texture = Self::hd_texture(&self.device, size);
+            self.hd_size = size;
+        }
+        let rgba: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]).collect();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.hd_texture,
@@ -411,6 +533,27 @@ impl Gpu {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * size), rows_per_image: None },
             wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
         );
+    }
+
+    fn hd_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        hd: &wgpu::Texture,
+        sampler: &wgpu::Sampler,
+        fallback: &wgpu::TextureView,
+        mask: &wgpu::Texture,
+    ) -> wgpu::BindGroup {
+        let (hd, mask) = (hd.create_view(&Default::default()), mask.create_view(&Default::default()));
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hd"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hd) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(fallback) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&mask) },
+            ],
+        })
     }
 
     /// Draws the LCD into `lcd` (None: no game screen) and egui on top.
@@ -448,7 +591,13 @@ impl Gpu {
         let extra = self.egui.update_buffers(&self.device, &self.queue, &mut encoder, paint_jobs, &screen);
         // AI upscale, only when the picture or the chain changed.
         let mut ai_bind_group = None;
-        if let (Some(((_, _, w, h), Display::Ai, ai)), Some(up), false) = (lcd, &mut self.upscaler, self.show_hd) {
+        let mut hd_bind_group = None;
+        let ai_for = |lcd: Option<LcdView>, show_hd: bool| match lcd {
+            Some((rect, Display::Ai, ai)) if !show_hd => Some((rect, ai)),
+            Some((rect, _, ai)) if show_hd => Some((rect, ai)),
+            _ => None,
+        };
+        if let (Some(((_, _, w, h), ai)), Some(up)) = (ai_for(lcd, self.show_hd), &mut self.upscaler) {
             let size = WIDTH as u32;
             let chain = ai.chain(size, ai.resolution.target(size, w.min(h)));
             let view = if self.frame_dirty || chain != self.last_chain || up.output().is_none() {
@@ -458,14 +607,23 @@ impl Gpu {
             } else {
                 up.output().unwrap()
             };
-            ai_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("upscaled"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            }));
+            if self.show_hd {
+                hd_bind_group = Some(Self::hd_group(&self.device, &self.hd_bgl, &self.hd_texture, &self.linear, view, &self.mask_texture));
+            } else {
+                ai_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("upscaled"),
+                    layout: &self.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    ],
+                }));
+            }
+        }
+        if self.show_hd && hd_bind_group.is_none() {
+            // No AI upscaler on this GPU: the LCD itself is the fallback.
+            hd_bind_group =
+                Some(Self::hd_group(&self.device, &self.hd_bgl, &self.hd_texture, &self.linear, &self.lcd_view, &self.mask_texture));
         }
         {
             let mut pass = encoder
@@ -490,9 +648,9 @@ impl Gpu {
                 if w >= 1.0 && h >= 1.0 {
                     pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
                     match (&ai_bind_group, display) {
-                        _ if self.show_hd => {
-                            pass.set_pipeline(&self.resample);
-                            pass.set_bind_group(0, &self.hd_bind_group, &[]);
+                        _ if hd_bind_group.is_some() => {
+                            pass.set_pipeline(&self.hd_pipeline);
+                            pass.set_bind_group(0, hd_bind_group.as_ref().unwrap(), &[]);
                         }
                         (Some(group), Display::Ai) => {
                             pass.set_pipeline(&self.resample);
@@ -536,5 +694,9 @@ mod tests {
         for entry in ["fs", "fs_sharp", "fs_lcd", "fs_smooth", "fs_resample"] {
             assert!(module.entry_points.iter().any(|e| e.name == entry), "{entry}");
         }
+        let hd = naga::front::wgsl::parse_str(super::HD_SHADER).unwrap_or_else(|e| panic!("{}", e.emit_to_string(super::HD_SHADER)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
+            .validate(&hd)
+            .expect("HD shader validates");
     }
 }

@@ -52,6 +52,11 @@ pub struct Info {
     /// When each save-state slot was last written (None = empty).
     pub slots: Vec<Option<String>>,
     pub rewinding: bool,
+    /// Paused because the window is in the background (not by the user).
+    pub background: bool,
+    /// Seconds until the console turns itself off for inactivity, in its
+    /// last minute.
+    pub idle_left: Option<u32>,
 }
 
 #[derive(Default)]
@@ -128,13 +133,10 @@ pub fn draw(
         } else if info.paused {
             let p = ui.painter();
             p.rect_filled(area, 0.0, egui::Color32::from_black_alpha(140));
-            p.text(
-                area.center(),
-                egui::Align2::CENTER_CENTER,
-                "⏸ Paused",
-                egui::FontId::proportional(28.0),
-                egui::Color32::WHITE,
-            );
+            let text = if info.background { "⏸ Paused while in the background" } else { "⏸ Paused" };
+            p.text(area.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(28.0), egui::Color32::WHITE);
+        } else if let Some(left) = info.idle_left {
+            idle_countdown(ui, area, left);
         }
     });
     dialogs(&ctx, st, settings, info, actions);
@@ -147,6 +149,23 @@ pub fn draw(
     }
     toasts(&ctx, st);
     area
+}
+
+/// The last minute before an idle power-off: a small notice at the top.
+fn idle_countdown(ui: &egui::Ui, area: egui::Rect, left: u32) {
+    let p = ui.painter();
+    let title = format!("Inactive: turning off in {}:{:02}", left / 60, left % 60);
+    let font = egui::FontId::proportional(17.0);
+    let small = egui::FontId::proportional(13.0);
+    let g1 = p.layout_no_wrap(title, font, egui::Color32::WHITE);
+    let g2 = p.layout_no_wrap("Press any button to keep playing".into(), small, egui::Color32::from_gray(215));
+    let w = g1.size().x.max(g2.size().x) + 28.0;
+    let h = g1.size().y + g2.size().y + 18.0;
+    let rect = egui::Rect::from_min_size(egui::pos2(area.center().x - w / 2.0, area.top() + 12.0), egui::vec2(w, h));
+    p.rect_filled(rect, 10.0, egui::Color32::from_rgba_unmultiplied(150, 24, 24, 225));
+    p.galley(egui::pos2(rect.center().x - g1.size().x / 2.0, rect.top() + 7.0), g1, egui::Color32::WHITE);
+    let y = rect.bottom() - 7.0 - g2.size().y;
+    p.galley(egui::pos2(rect.center().x - g2.size().x / 2.0, y), g2, egui::Color32::WHITE);
 }
 
 fn item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
@@ -261,6 +280,22 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if ui
                 .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
                 .on_hover_text("Like the real Leapster, turn off after a while with nothing pressed (about 15 minutes; 5 on the Leapster TV). Ribbit then closes the game. Off: Ribbit keeps it on.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+            ui.add_enabled_ui(settings.turn_off_when_idle, |ui| {
+                if ui
+                    .checkbox(&mut settings.flash_before_idle_off, "    Flash taskbar before turning off")
+                    .on_hover_text("Flash Ribbit's taskbar button in the last minute. On Windows this also shows an auto-hidden taskbar until you click Ribbit.")
+                    .changed()
+                {
+                    actions.push(Action::SettingsChanged);
+                }
+            });
+            if ui
+                .checkbox(&mut settings.pause_in_background, "Pause in background")
+                .on_hover_text("Pause the game while another window is active.")
                 .changed()
             {
                 actions.push(Action::SettingsChanged);

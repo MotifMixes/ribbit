@@ -5,7 +5,7 @@
 //! RIBBIT_HD=0 runs the same span without capture (for the speed comparison).
 
 use ribbit_core::Machine;
-use ribbit_core::hd::{HD_SIZE, HdCanvas};
+use ribbit_core::hd::HdCanvas;
 use ribbit_debug::Breakpoints;
 use ribbit_video::{HEIGHT, WIDTH};
 use std::time::{Duration, Instant};
@@ -31,7 +31,9 @@ fn main() {
     let mut canvas = None;
     if hd_on {
         assert!(m.enable_hd_capture(), "HD hooks not found in this BIOS");
-        canvas = Some(HdCanvas::new(m.hd.as_ref().unwrap().hooks));
+        // RIBBIT_HD_SCALE: canvas pixels per LCD pixel (4 = 640, 16 = 2560).
+        let scale = std::env::var("RIBBIT_HD_SCALE").map_or(4, |s| s.parse().unwrap());
+        canvas = Some(HdCanvas::with_scale(m.hd.as_ref().unwrap().hooks, scale));
     }
     let per_ms = m.clock.cpu_hz / 1000;
     let (total, every): (u64, u64) = (ms.parse().unwrap(), every.parse().unwrap());
@@ -73,19 +75,19 @@ fn main() {
                 }
                 edges += p.edges.len();
                 passes += 1;
-                c.apply(&p, &lcd[..]);
+                c.apply(&p);
                 if let Ok(from) = std::env::var("RIBBIT_HD_EACH") {
                     if t >= from.parse::<u64>().unwrap() {
-                        write(&format!("{prefix}each{t}_{passes}_{:?}.png", p.rect.unwrap_or_default()).replace(['[', ']', ' '], "").replace(',', "-"), &lcd, &c.pixels);
+                        write(&format!("{prefix}each{t}_{passes}_{:?}.png", p.rect.unwrap_or_default()).replace(['[', ']', ' '], "").replace(',', "-"), &lcd, &c.composed(&lcd[..]), c.size);
                     }
                 }
             }
-            fixed += c.reconcile(&lcd[..]);
+            fixed += c.update_mask(&lcd[..]);
             draw_t += start.elapsed();
         }
         if (t + 16) % every < 16 {
             if let Some(c) = &canvas {
-                write(&format!("{prefix}{shot:03}.png"), &lcd, &c.pixels);
+                write(&format!("{prefix}{shot:03}.png"), &lcd, &c.composed(&lcd[..]), c.size);
                 shot += 1;
             }
         }
@@ -96,19 +98,20 @@ fn main() {
         100.0 * secs / emu_t.as_secs_f64(),
         draw_t.as_secs_f64() * 1000.0 / secs
     );
-    println!("blocks taken from the LCD: {fixed}");
+    println!("blocks from the fallback: {fixed}");
     println!("fills by painter: {painters:x?}");
     if let Some(hd) = &m.hd {
         println!("dropped passes: {}", hd.dropped);
     }
 }
 
-fn write(path: &str, lcd: &[u32; WIDTH * HEIGHT], hd: &[u32]) {
-    let (w, h) = (HD_SIZE * 2 + 8, HD_SIZE);
+fn write(path: &str, lcd: &[u32; WIDTH * HEIGHT], hd: &[u32], size: usize) {
+    let (w, h) = (size * 2 + 8, size);
+    let s = size / WIDTH;
     let mut rgb = vec![255u8; w * h * 3];
-    for y in 0..HD_SIZE {
-        for x in 0..HD_SIZE {
-            for (ox, p) in [(0, lcd[(y / 4) * WIDTH + x / 4]), (HD_SIZE + 8, hd[y * HD_SIZE + x])] {
+    for y in 0..size {
+        for x in 0..size {
+            for (ox, p) in [(0, lcd[(y / s) * WIDTH + x / s]), (size + 8, hd[y * size + x])] {
                 let o = (y * w + ox + x) * 3;
                 rgb[o..o + 3].copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
             }

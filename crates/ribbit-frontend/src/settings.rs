@@ -59,6 +59,12 @@ pub struct Settings {
     /// (as the real console does); Ribbit then closes the game. Off by
     /// default: Ribbit keeps it on.
     pub turn_off_when_idle: bool,
+    /// With `turn_off_when_idle`: flash the taskbar button in the last
+    /// minute before the power-off. (On Windows this also raises an
+    /// auto-hidden taskbar until Ribbit is clicked, hence the choice.)
+    pub flash_before_idle_off: bool,
+    /// Pause the game while Ribbit's window is not the active one.
+    pub pause_in_background: bool,
 }
 
 impl Default for Settings {
@@ -85,6 +91,8 @@ impl Default for Settings {
             show_status_bar: true,
             hd_vectors: false,
             turn_off_when_idle: false,
+            flash_before_idle_off: true,
+            pause_in_background: true,
         }
     }
 }

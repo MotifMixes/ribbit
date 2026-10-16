@@ -84,6 +84,10 @@ pub struct App {
     ui: UiState,
     frame: Box<[u32; WIDTH * HEIGHT]>,
     paused: bool,
+    /// The window is not the active one (paused if `pause_in_background`).
+    background: bool,
+    /// The taskbar button is flashing for an upcoming idle power-off.
+    flashing: bool,
     fast_forward: bool,
     rewinding: bool,
     modifiers: ModifiersState,
@@ -97,6 +101,8 @@ pub struct App {
     mouse_down: bool,
     finger: Option<(u64, (f64, f64))>,
     lcd_px: (f32, f32, f32, f32),
+    /// Seconds until the idle power-off, in its last minute (shown).
+    idle_left: Option<u32>,
     library: Library,
     discord: crate::discord::Discord,
     /// Frames left to size the window around the screen (0 = done).
@@ -148,6 +154,8 @@ impl App {
             ui: UiState::new(),
             frame: Box::new([0; WIDTH * HEIGHT]),
             paused: false,
+            background: false,
+            flashing: false,
             fast_forward: false,
             rewinding: false,
             modifiers: ModifiersState::empty(),
@@ -160,6 +168,7 @@ impl App {
             mouse_down: false,
             finger: None,
             lcd_px: (0.0, 0.0, 0.0, 0.0),
+            idle_left: None,
             fit_window: 0,
             library: Library::new(&opts_data_dir),
             discord: crate::discord::Discord::start(),
@@ -218,7 +227,7 @@ impl App {
         if self.opts.experimental_touch.unwrap_or(self.settings.experimental_touch) {
             machine.enable_experimental_mame_touch(Default::default());
         }
-        let hd = self.settings.hd_vectors.then(|| Self::start_hd(&mut machine)).flatten();
+        let hd = self.settings.hd_vectors.then(|| Self::start_hd(&mut machine, self.hd_scale())).flatten();
         if self.settings.hd_vectors && hd.is_none() {
             self.ui.toast("HD vectors are not available with this BIOS");
         }
@@ -428,6 +437,7 @@ impl App {
     /// keeps the BIOS's idle count at most that many seconds, to try this
     /// without waiting.)
     fn check_idle_power_off(&mut self) {
+        self.idle_left = None;
         let Some(s) = &mut self.session else {
             return;
         };
@@ -438,8 +448,17 @@ impl App {
         if !self.settings.turn_off_when_idle {
             return;
         }
+        let left = m.idle_seconds_left();
+        self.idle_left = left.filter(|&l| l > 0 && l <= 60);
+        let flash = self.idle_left.is_some() && self.settings.flash_before_idle_off && self.background;
+        if flash != self.flashing
+            && let Some(g) = &self.gpu
+        {
+            self.flashing = flash;
+            g.window.request_user_attention(flash.then_some(winit::window::UserAttentionType::Critical));
+        }
         // Keep a snapshot from just before the power-off, for Resume.
-        match m.idle_seconds_left() {
+        match left {
             Some(left) if left <= 3 && left > 0 => {
                 if s.idle_snapshot.is_none() {
                     s.idle_snapshot = Some(m.save_state());
@@ -494,17 +513,25 @@ impl App {
 
     /// Turns HD capture on in `machine`; the canvas to draw into, or None
     /// if this BIOS's rasterizer is not recognised.
-    fn start_hd(machine: &mut Machine) -> Option<ribbit_core::hd::HdCanvas> {
-        machine.enable_hd_capture().then(|| ribbit_core::hd::HdCanvas::new(machine.hd.as_ref().unwrap().hooks))
+    fn start_hd(machine: &mut Machine, scale: usize) -> Option<ribbit_core::hd::HdCanvas> {
+        machine.enable_hd_capture().then(|| ribbit_core::hd::HdCanvas::with_scale(machine.hd.as_ref().unwrap().hooks, scale))
+    }
+
+    /// HD canvas pixels per LCD pixel for the game's size on screen (one
+    /// canvas pixel per screen pixel, 4x to 16x).
+    fn hd_scale(&self) -> usize {
+        let (_, _, w, h) = self.lcd_px;
+        ((w.min(h) / 160.0).ceil() as usize).clamp(4, 16)
     }
 
     /// HD vectors on or off for the running game.
     fn set_hd(&mut self, on: bool) {
+        let scale = self.hd_scale();
         let Some(s) = &mut self.session else {
             return;
         };
         let mut m = s.emu.lock();
-        s.hd = if on { Self::start_hd(&mut m) } else { None };
+        s.hd = if on { Self::start_hd(&mut m, scale) } else { None };
         if !on {
             m.disable_hd_capture();
         }
@@ -656,6 +683,31 @@ impl App {
         }
     }
 
+    /// Paused by the user, or by being in the background.
+    fn halted(&self) -> bool {
+        self.paused || (self.background && self.settings.pause_in_background)
+    }
+
+    /// The window became active (or not).
+    fn focus_changed(&mut self, focused: bool) {
+        let was = self.halted();
+        self.background = !focused;
+        if focused && self.flashing {
+            self.flashing = false;
+            if let Some(g) = &self.gpu {
+                g.window.request_user_attention(None);
+            }
+        }
+        if was != self.halted()
+            && let Some(s) = &self.session
+        {
+            s.emu.resync();
+            if let Some(a) = &mut self.audio {
+                a.clear();
+            }
+        }
+    }
+
     fn toggle_fullscreen(&mut self) {
         if let Some(g) = &self.gpu {
             let fs = if g.window.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) };
@@ -696,6 +748,7 @@ impl App {
     /// Per frame: tells the emulation thread whether and how fast to run,
     /// and does the UI-side work (rewind, sound, autosave, speed meter).
     fn emulate(&mut self) {
+        let halted = self.halted();
         let Some(s) = &mut self.session else {
             return;
         };
@@ -709,12 +762,12 @@ impl App {
             a.set_enhance(self.settings.audio_enhance);
         }
         s.emu.set_control(Control {
-            running: !self.paused && !self.rewinding,
+            running: !halted && !self.rewinding,
             speed,
             gain,
             auto_calibrate: self.settings.auto_calibrate,
         });
-        if self.paused {
+        if halted {
             return;
         }
         if self.rewinding {
@@ -912,7 +965,7 @@ impl App {
         self.poll_pads();
         self.emulate();
         self.check_idle_power_off();
-        let mut hd_frame = false;
+        let (mut hd_frame, mut hd_dirty) = (false, false);
         if let Some(s) = &mut self.session {
             let passes = {
                 let mut m = s.emu.lock();
@@ -924,17 +977,29 @@ impl App {
             if hidden {
                 self.frame.fill(0);
             }
-            // EXPERIMENTAL HD: this frame's renders at 4x, kept true to the LCD.
+            // EXPERIMENTAL HD: this frame's renders at the game's size on
+            // screen (a new canvas when that changes; the fallback shows
+            // until renders refill it).
+            let scale = ((self.lcd_px.2.min(self.lcd_px.3) / 160.0).ceil() as usize).clamp(4, 16);
+            if let Some(canvas) = &mut s.hd
+                && canvas.scale != scale
+                && let Some(hooks) = s.emu.lock().hd.as_ref().map(|h| h.hooks)
+            {
+                *canvas = ribbit_core::hd::HdCanvas::with_scale(hooks, scale);
+                hd_dirty = true;
+            }
             if let Some(canvas) = &mut s.hd
                 && !hidden
             {
                 for p in &passes {
-                    canvas.apply(p, &self.frame[..]);
+                    canvas.apply(p);
                 }
-                canvas.reconcile(&self.frame[..]);
+                hd_dirty |= !passes.is_empty();
+                canvas.update_mask(&self.frame[..]);
                 hd_frame = true;
             }
         }
+        let halted = self.halted();
         let save_dir = self.save_dir().display().to_string();
         let slots = self.slot_times();
         let (Some(gpu), Some(state)) = (&mut self.gpu, &mut self.egui_state) else {
@@ -943,13 +1008,18 @@ impl App {
         gpu.upload(&self.frame);
         gpu.show_hd = hd_frame;
         if let Some(c) = self.session.as_ref().and_then(|s| s.hd.as_ref()).filter(|_| hd_frame) {
-            gpu.upload_hd(&c.pixels);
+            if hd_dirty {
+                gpu.upload_hd(&c.pixels, c.size);
+            }
+            gpu.upload_hd_mask(&c.mask);
         }
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
                 running: self.session.is_some(),
-                paused: self.paused,
+                paused: halted,
+                background: !self.paused && halted,
+                idle_left: self.idle_left,
                 title: self.session.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
                 speed: self.speed_percent,
                 bios_name: self.settings.bios.as_ref().map(|p| {
@@ -1068,6 +1138,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::Focused(f) => self.focus_changed(f),
             WindowEvent::DroppedFile(path) => self.open_dropped(path),
             WindowEvent::KeyboardInput { event: KeyEvent { physical_key, state, repeat: false, .. }, .. } => {
                 if consumed && self.egui_ctx.egui_wants_keyboard_input() {
