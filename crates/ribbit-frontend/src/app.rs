@@ -357,18 +357,20 @@ impl App {
         }
     }
 
-    /// A game chosen in the library: on the open console page's BIOS (the
-    /// chosen BIOS for the original Leapster and the "All games" page).
+    /// A game chosen in the library: on the console chosen in the library
+    /// (the original Leapster uses the chosen BIOS; the other models the
+    /// BIOS found in the games folders).
     fn open_from_library(&mut self, path: PathBuf) {
+        use crate::library::Family;
         use ribbit_memory::known::Hardware;
-        let family = self.library.games.iter().find(|g| g.path == path).map(|g| g.family);
-        if family == Some(crate::library::Family::Zippity) {
+        let family = self.library.games.iter().find(|g| g.path == path).map_or(Family::Leapster, |g| g.family);
+        if family == Family::Zippity {
             self.ui.toast("Zippity emulation is in progress: Zippity games can't run yet.");
             return;
         }
-        self.next_bios = match self.ui.library_tab {
-            Some(hw) if hw != Hardware::Leapster => self.library.bios_for(hw).map(Path::to_path_buf),
-            _ => None,
+        self.next_bios = match self.library.console_for(family, &self.settings.library_console) {
+            Hardware::Leapster => None,
+            hw => self.library.bios_for(hw).map(Path::to_path_buf),
         };
         self.open_cart(path);
     }
@@ -409,6 +411,10 @@ impl App {
             Action::Pick(w) => self.pick(w),
             Action::OpenCartridge(p) => self.open_cart(p),
             Action::PlayFromLibrary(p) => self.open_from_library(p),
+            Action::SetLibraryConsole(hw) => {
+                self.settings.library_console = hw.name().to_string();
+                self.save_settings();
+            }
             Action::SetBios(p) => self.set_bios(p),
             Action::CloseCartridge => {
                 self.end_session();

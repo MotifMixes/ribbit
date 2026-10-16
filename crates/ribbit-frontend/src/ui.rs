@@ -3,7 +3,7 @@
 
 use crate::files::{Browser, Pick};
 use crate::gpu::Display;
-use crate::library::{Art, Library};
+use crate::library::{Art, Family, Library};
 use crate::settings::{self, BINDABLE, Settings};
 use ribbit_input::Button;
 use std::path::PathBuf;
@@ -15,6 +15,8 @@ pub enum Action {
     OpenCartridge(PathBuf),
     /// A game chosen in the library (on the open console page's BIOS).
     PlayFromLibrary(PathBuf),
+    /// The console the library plays Leapster games on.
+    SetLibraryConsole(ribbit_memory::known::Hardware),
     SetBios(PathBuf),
     CloseCartridge,
     Reset,
@@ -73,8 +75,8 @@ pub struct UiState {
     pub browser: Browser,
     toasts: Vec<(String, Instant)>,
     pub error: Option<String>,
-    /// The library page: None for all games, else one console's games.
-    pub library_tab: Option<ribbit_memory::known::Hardware>,
+    /// The library page: None for all games, else one family's games.
+    pub library_tab: Option<crate::library::Family>,
     /// The game (title) that was closed because the Leapster turned itself
     /// off; shown above the library until dismissed.
     pub idle_closed: Option<String>,
@@ -172,20 +174,13 @@ fn idle_countdown(ui: &egui::Ui, area: egui::Rect, left: u32) {
     p.galley(egui::pos2(rect.center().x - g2.size().x / 2.0, y), g2, egui::Color32::WHITE);
 }
 
-/// The library's pages: all games, then each console that has games (and,
-/// for the Leapster family, a BIOS to run them; the original Leapster uses
-/// the chosen BIOS).
-fn console_tabs(ui: &mut egui::Ui, library: &Library, tab: &mut Option<ribbit_memory::known::Hardware>) {
-    use ribbit_memory::known::Hardware;
-    let count = |hw: Option<Hardware>| library.games.iter().filter(|g| hw.is_none_or(|h| g.family.runs_on(h))).count();
-    let consoles: Vec<Hardware> = crate::library::CONSOLES
-        .into_iter()
-        .filter(|&hw| {
-            count(Some(hw)) > 0
-                && matches!(hw, Hardware::Leapster | Hardware::Zippity) | library.bios_for(hw).is_some()
-        })
-        .collect();
-    if tab.is_some_and(|t| !consoles.contains(&t)) {
+/// The library's pages: all games, then each family that has games (all
+/// the Leapster models share one page; the console is chosen in the
+/// header's dropdown).
+fn console_tabs(ui: &mut egui::Ui, library: &Library, tab: &mut Option<Family>) {
+    let count = |f: Option<Family>| library.games.iter().filter(|g| f.is_none_or(|f| g.family == f)).count();
+    let families: Vec<Family> = Family::ALL.into_iter().filter(|&f| count(Some(f)) > 0).collect();
+    if tab.is_some_and(|t| !families.contains(&t)) {
         *tab = None;
     }
     // Tabs: a label each over a shared rule; the open one in the accent
@@ -193,9 +188,9 @@ fn console_tabs(ui: &mut egui::Ui, library: &Library, tab: &mut Option<ribbit_me
     let top = ui.cursor().min.y;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(26.0, 6.0);
-        for choice in std::iter::once(None).chain(consoles.into_iter().map(Some)) {
+        for choice in std::iter::once(None).chain(families.into_iter().map(Some)) {
             let selected = *tab == choice;
-            let name = choice.map_or("All games", |hw| hw.name());
+            let name = choice.map_or("All games", Family::name);
             let font = egui::FontId::proportional(16.0);
             let name_g = ui.painter().layout_no_wrap(name.to_string(), font.clone(), egui::Color32::WHITE);
             let count_g =
@@ -569,7 +564,7 @@ fn library_screen(
     ui: &mut egui::Ui,
     settings: &Settings,
     library: &mut Library,
-    tab: &mut Option<ribbit_memory::known::Hardware>,
+    tab: &mut Option<Family>,
     idle_closed: Option<&str>,
     since: Instant,
     actions: &mut Vec<Action>,
@@ -583,7 +578,7 @@ fn library_screen(
     }
     backdrop(ui);
     egui::Frame::NONE.inner_margin(egui::Margin::symmetric(28, 20)).show(ui, |ui| {
-        library_header(ui, library, actions);
+        library_header(ui, settings, library, *tab, actions);
         if library.games.is_empty() && !library.scanning {
             empty_library(ui, settings, actions);
             return;
@@ -608,10 +603,10 @@ fn library_screen(
             console_tabs(ui, library, tab);
             ui.add_space(14.0);
             let shown_games: Vec<&crate::library::Game> =
-                library.games.iter().filter(|g| tab.is_none_or(|hw| g.family.runs_on(hw))).collect();
+                library.games.iter().filter(|g| tab.is_none_or(|f| g.family == f)).collect();
             let heading = match tab {
                 None => "ALL GAMES".to_string(),
-                Some(hw) => hw.name().to_uppercase(),
+                Some(f) => f.name().to_uppercase(),
             };
             ui.label(egui::RichText::new(format!("{heading}  ·  {}", shown_games.len())).size(13.0).strong().color(ACCENT));
             ui.add_space(12.0);
@@ -658,7 +653,7 @@ fn backdrop(ui: &egui::Ui) {
     ui.painter().add(mesh);
 }
 
-fn library_header(ui: &mut egui::Ui, library: &Library, actions: &mut Vec<Action>) {
+fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         let frog = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("frog icon"))).unwrap_or_else(|| {
             let img = egui::ColorImage::from_rgba_unmultiplied([256, 256], &crate::icon::frog_glyph_rgba(256));
@@ -689,15 +684,50 @@ fn library_header(ui: &mut egui::Ui, library: &Library, actions: &mut Vec<Action
             {
                 actions.push(Action::RescanLibrary);
             }
-            if ui.add(egui::Button::new("Open a file…").corner_radius(8).min_size(egui::vec2(0.0, 32.0))).clicked() {
+            if ui.add(egui::Button::new("Open Cartridge…").corner_radius(8).min_size(egui::vec2(0.0, 32.0))).clicked() {
                 actions.push(Action::Pick(Pick::Cartridge));
             }
             if primary_button(ui, "➕  Add games folder", egui::vec2(0.0, 32.0)).clicked() {
                 actions.push(Action::Pick(Pick::RomFolder));
             }
+            console_picker(ui, settings, library, tab, actions);
         });
     });
     ui.add_space(10.0);
+}
+
+/// The console the library plays games on: only consoles that run the
+/// open page's games (on "All games", the Leapster models, the one family
+/// with a choice, unless there are only Zippity games).
+fn console_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
+    let family = tab.unwrap_or(if library.games.iter().any(|g| g.family == Family::Leapster) || library.games.is_empty() {
+        Family::Leapster
+    } else {
+        Family::Zippity
+    });
+    let options = library.consoles(family);
+    let current = library.console_for(family, &settings.library_console);
+    let only = if family == Family::Leapster {
+        "Add a Leapster TV, L-MAX or Leapster 2 BIOS to your games folder to play on those"
+    } else {
+        "The only console these games play on"
+    };
+    ui.add_enabled_ui(options.len() > 1, |ui| {
+        ui.spacing_mut().interact_size.y = 32.0;
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+        egui::ComboBox::from_id_salt("library console")
+            .selected_text(format!("🎮  {}", current.name()))
+            .show_ui(ui, |ui| {
+                for hw in options {
+                    if ui.selectable_label(hw == current, hw.name()).clicked() && hw != current {
+                        actions.push(Action::SetLibraryConsole(hw));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("The console your games play on")
+            .on_disabled_hover_text(only);
+    });
 }
 
 fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {

@@ -65,6 +65,9 @@ pub struct Settings {
     pub flash_before_idle_off: bool,
     /// Pause the game while Ribbit's window is not the active one.
     pub pause_in_background: bool,
+    /// The console Leapster games play on from the library ("Leapster",
+    /// "Leapster TV", ...; empty: the original Leapster).
+    pub library_console: String,
 }
 
 impl Default for Settings {
@@ -93,6 +96,7 @@ impl Default for Settings {
             turn_off_when_idle: false,
             flash_before_idle_off: true,
             pause_in_background: true,
+            library_console: String::new(),
         }
     }
 }

@@ -116,6 +116,16 @@ pub enum Family {
 }
 
 impl Family {
+    /// The library tabs, in order.
+    pub const ALL: [Family; 2] = [Family::Leapster, Family::Zippity];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Family::Leapster => "Leapster",
+            Family::Zippity => "Zippity",
+        }
+    }
+
     /// Whether a console of this hardware runs the family's games.
     pub fn runs_on(self, hw: Hardware) -> bool {
         match self {
@@ -256,12 +266,30 @@ impl Library {
         }
     }
 
-    /// Forgets a game's cached art, so the next scan makes it again.
     /// A BIOS found for `hw`, if any.
     pub fn bios_for(&self, hw: Hardware) -> Option<&Path> {
         self.bios.iter().find(|(h, _)| *h == hw).map(|(_, p)| p.as_path())
     }
 
+    /// The consoles that can play a family's games here: the original
+    /// Leapster (on the chosen BIOS) and the Zippity always, the other
+    /// Leapster models when their BIOS is in a games folder.
+    pub fn consoles(&self, family: Family) -> Vec<Hardware> {
+        CONSOLES
+            .into_iter()
+            .filter(|&hw| family.runs_on(hw))
+            .filter(|&hw| matches!(hw, Hardware::Leapster | Hardware::Zippity) || self.bios_for(hw).is_some())
+            .collect()
+    }
+
+    /// The console that plays a family's games: the one chosen in the
+    /// library (`chosen`, a console name) when it can, else the first.
+    pub fn console_for(&self, family: Family, chosen: &str) -> Hardware {
+        let options = self.consoles(family);
+        options.iter().copied().find(|hw| hw.name() == chosen).or(options.first().copied()).unwrap_or(Hardware::Leapster)
+    }
+
+    /// Forgets a game's cached art, so the next scan makes it again.
     pub fn forget_art(&mut self, path: &Path) {
         for g in self.games.iter_mut().filter(|g| g.path == path) {
             let _ = std::fs::remove_file(art_file(&self.art_dir, &g.key));
