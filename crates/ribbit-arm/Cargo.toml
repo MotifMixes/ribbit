@@ -1,0 +1,10 @@
+[package]
+name = "ribbit-arm"
+description = "ARM9 (ARMv5TE: ARM and Thumb, CP15 MMU) processor model, for the LeapFrog Zippity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true

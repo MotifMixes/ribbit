@@ -2620,6 +2620,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ribbit-arm"
+version = "1.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "ribbit-audio"
 version = "1.0.0"
 

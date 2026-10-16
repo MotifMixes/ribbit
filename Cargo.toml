@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/ribbit-core",
     "crates/ribbit-cpu",
+    "crates/ribbit-arm",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
@@ -15,6 +16,7 @@ members = [
 default-members = [
     "crates/ribbit-core",
     "crates/ribbit-cpu",
+    "crates/ribbit-arm",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
