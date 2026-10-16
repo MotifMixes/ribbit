@@ -172,6 +172,12 @@ struct Bus {
     /// the done flag (+0x7C bit 0, write 1 to clear).
     gfx_ops: u64,
     gfx_done: bool,
+    /// ZIPBOOT_WATCH=lo-hi (hex): every access in that range is logged.
+    watch: Option<(u32, u32)>,
+    watched: Vec<String>,
+    /// ZIPBOOT_RWATCH=lo-hi (hex): CPU writes to memory in that range are logged.
+    rwatch: Option<(u32, u32)>,
+    rwatched: Vec<String>,
 }
 
 /// Instructions between video frames (a stand-in: the CPU clock and the
@@ -185,6 +191,10 @@ const IRQ_VIDEO: u32 = 27;
 const IRQ_DMA: u32 = 24;
 /// The 0xD0800000 engine's completion interrupt line.
 const IRQ_GFX: u32 = 12;
+/// What the analogue-to-digital converter reads: the batteries (the kernel
+/// warns at 0x5BCB or less and gives up at 0x5928 or less). Full batteries'
+/// reading is UNKNOWN; this is comfortably above both.
+const ADC_BATTERY: u32 = 0x7000;
 
 impl Bus {
     fn latch(&self, a: u32) -> u32 {
@@ -216,6 +226,15 @@ impl Bus {
     /// controller (0xD0100038 bit 0).
     fn irq_line(&self) -> bool {
         self.pending_irq() != 0 && self.latch(0xD010_0038) & 1 == 0
+    }
+
+    fn note_write(&mut self, a: u32, v: u32, size: u32) {
+        if let Some((lo, hi)) = self.rwatch
+            && (lo..=hi).contains(&a)
+            && self.rwatched.len() < 400_000
+        {
+            self.rwatched.push(format!("{:>10} {:08x}  W{size} {a:08x} = {v:08x}", self.now, self.pc));
+        }
     }
 
     fn mem(&mut self, a: u32, n: usize) -> Option<&mut [u8]> {
@@ -315,6 +334,12 @@ impl Bus {
                 format!("{pc:08x}  R{size} {a:08x}")
             }
         };
+        if let Some((lo, hi)) = self.watch
+            && (lo..=hi).contains(&a)
+            && self.watched.len() < 400_000
+        {
+            self.watched.push(format!("{:>10} {line}", self.now));
+        }
         // The first few accesses to each register.
         if e.reads + e.writes <= 6 && self.log.len() < 2000 {
             self.log.push(line);
@@ -340,14 +365,16 @@ impl Bus {
             }
             // DMA controller, 4 channels at 0xD0300000 + 0x40 * n: +0 control
             // (bit 0 start, bit 1 busy, bit 7 source fixed (a fill), bit 8
-            // interrupt?), +4 source, +8 destination, +C count. Bytes are
-            // assumed (a fill's source is an odd address). UNVERIFIED.
+            // interrupt?, bits 13-12 unit: 0 bytes, 1 halfwords (the palette
+            // copies use 0x1109 and flush twice the count in bytes)), +4
+            // source, +8 destination, +C count of units. UNVERIFIED.
             (0xD030_0000 | 0xD030_0040 | 0xD030_0080 | 0xD030_00C0, Some(v)) if v & 1 != 0 => {
                 let src = self.latch(a + 4);
                 let dst = self.latch(a + 8);
                 let count = self.latch(a + 12);
                 let fixed = v & 0x80 != 0;
-                for i in 0..count {
+                let bytes = count << ((v >> 12) & 3);
+                for i in 0..bytes {
                     let b = self.read8(if fixed { src } else { src.wrapping_add(i) });
                     self.write8(dst.wrapping_add(i), b);
                 }
@@ -390,6 +417,31 @@ impl Bus {
             (0xC000_0040, None) => if self.now < POWER_HOLD { 0xFBFF } else { 0xFFFF },
             // Interrupt controller: the pending IRQ's number (0: none).
             (0xD010_0028, None) => self.pending_irq(),
+            // Analogue-to-digital converter (0xC00C0000; interrupt lines 28
+            // and 29 have handlers): +0 control (bit 15 on), +4 conversion:
+            // bit 6 starts one, bit 15 done, bits 5 and 4 errors (the kernel
+            // retries), all three cleared by writing 1; +8 the 16-bit
+            // result. Conversions finish at once and read the batteries.
+            (0xC00C_0004, Some(v)) => {
+                let e = self.io.get_mut(&a).unwrap();
+                let mut r = latched & !(v & 0x8030) | (v & !0x8070);
+                if v & 0x40 != 0 {
+                    r |= 0x8000;
+                }
+                e.last_write = r;
+                0
+            }
+            (0xC00C_0004, None) => latched,
+            (0xC00C_0008, None) => ADC_BATTERY,
+            // Sprite corner converter (2.5D sprites?): the kernel writes four
+            // corners (x at +0x300/+0x308/+0x310/+0x318, y at +0x304/..,
+            // centred coordinates, y up) and stores five results (+0x320..
+            // +0x330) in a sprite's words 1, 2, 5, 6 and 7. What the
+            // hardware returns is UNKNOWN: this gives the first corner's x
+            // and y (words 1 and 2) and 0 for the rest.
+            (0xD050_0320, None) => self.latch(0xD050_0300) & 0xFFFF,
+            (0xD050_0324, None) => self.latch(0xD050_0304) & 0xFFFF,
+            (0xD050_0328 | 0xD050_032C | 0xD050_0330, None) => 0,
             (0xD010_002C, None) => 0,
             (0xD050_018C, None) => self.video_status,
             (0xD050_018C, Some(v)) => {
@@ -404,6 +456,144 @@ impl Bus {
             _ => 0,
         }
     }
+}
+
+/// The picture's size (VGA mode, 0xD05001FC bit 4). Sprite coordinates are
+/// centred: x to the right and y up from the middle of the screen.
+const SCREEN_W: usize = 640;
+const SCREEN_H: usize = 480;
+
+/// A 15-bit palette colour (bit 15: transparent) as 8-bit RGB.
+fn rgb555(c: u16) -> [u8; 3] {
+    let f = |v: u16| ((v & 31) << 3 | (v & 31) >> 2) as u8;
+    [f(c >> 10), f(c >> 5), f(c)]
+}
+
+impl Bus {
+    /// A byte of RAM, SRAM or on-chip RAM, without side effects.
+    fn peek8(&self, a: u32) -> u8 {
+        let a = a as usize;
+        if a < RAM_SIZE {
+            return self.ram[a];
+        }
+        let s = a.wrapping_sub(SRAM_BASE as usize);
+        if s < SRAM_SIZE {
+            return self.sram[s];
+        }
+        let i = a.wrapping_sub(IRAM_BASE as usize);
+        if i < IRAM_SIZE {
+            return self.iram[i];
+        }
+        0
+    }
+
+    fn peek32(&self, a: u32) -> u32 {
+        u32::from_le_bytes([self.peek8(a), self.peek8(a + 1), self.peek8(a + 2), self.peek8(a + 3)])
+    }
+
+    /// Pixel `i` of a picture of `bpp` bits per pixel at `addr`: the bits
+    /// are one stream, most significant bit first (6-bit sprites show this).
+    fn pixel(&self, addr: u32, bpp: u32, i: u32) -> u32 {
+        let bit = i * bpp;
+        let a = addr + bit / 8;
+        let w = (self.peek8(a) as u32) << 16 | (self.peek8(a + 1) as u32) << 8 | self.peek8(a + 2) as u32;
+        (w >> (24 - bpp - bit % 8)) & ((1 << bpp) - 1)
+    }
+
+    /// The video chip's picture, from its registers and RAM, as RGB. Only
+    /// what the system menu uses is decoded (docs/zippity.md): text layer 1
+    /// as an 8-bit bitmap, and sprites. Everything here is UNVERIFIED on
+    /// hardware; it matches recordings of the start-up screens.
+    fn render(&self) -> Vec<u8> {
+        let mut img = vec![0u8; SCREEN_W * SCREEN_H * 3];
+        // Palette RAM (0xD0501000): 16-bit colours, two per word.
+        let pal: Vec<u16> = (0..2048u32).map(|i| (self.latch(0xD050_1000 + i / 2 * 4) >> (16 * (i & 1))) as u16).collect();
+
+        // Text layer 1: +0x40/+0x44 scroll, +0x48 attributes, +0x4C control
+        // (bit 3 on), +0x50 tile map (32-bit entries: the tile's byte offset
+        // from the base at +0x80, 0 for none), pages of 1024x512 pixels.
+        let attr = self.latch(0xD050_0048);
+        if self.latch(0xD050_004C) & 8 != 0 && attr & 3 == 3 {
+            let (map, base) = (self.latch(0xD050_0050), self.latch(0xD050_0080));
+            let (tw, th) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
+            // Bits 23-22 pick the palette's 256-colour bank (0x300 seen).
+            let bank = ((attr >> 22) & 3) * 0x100;
+            let (sx, sy) = (self.latch(0xD050_0040), self.latch(0xD050_0044));
+            for y in 0..SCREEN_H as u32 {
+                for x in 0..SCREEN_W as u32 {
+                    let (px, py) = ((x + sx) % 1024, (y + sy) % 512);
+                    let entry = self.peek32(map + ((py / th) * (1024 / tw) + px / tw) * 4);
+                    if entry == 0 {
+                        continue;
+                    }
+                    let c = pal[(bank + self.peek8(base + entry + (py % th) * tw + px % tw) as u32) as usize & 2047];
+                    if c & 0x8000 == 0 {
+                        let o = (y as usize * SCREEN_W + x as usize) * 3;
+                        img[o..o + 3].copy_from_slice(&rgb555(c));
+                    }
+                }
+            }
+        }
+
+        // Sprites (control +0x108, bit 0 on): 512 entries of 32 bytes at
+        // 0xD0502000. Halfword 0 and byte 8 bits 6-0: the picture's address
+        // in halfwords; halfwords 1 and 2: x and y; halfword 3: attributes
+        // (bits 1-0 depth 2/4/6/8 bits, 2/3 flips, 5-4 width and 7-6 height
+        // 8 << n, 11-8 palette, 13-12 priority, 15 palette bank: colours
+        // from 0x200 if set, 0x100 if clear).
+        if self.latch(0xD050_0108) & 1 == 0 {
+            return img;
+        }
+        let half = |n: u32, k: u32| (self.latch(0xD050_2000 + n * 32 + k / 2 * 4) >> (16 * (k & 1))) as u16;
+        let mut order: Vec<(u16, u32)> =
+            (0..512).filter(|&n| half(n, 0) != 0 || half(n, 4) & 0x7F != 0).map(|n| ((half(n, 3) >> 12) & 3, n)).collect();
+        order.sort();
+        for (_, n) in order {
+            let attr = half(n, 3) as u32;
+            let addr = (half(n, 0) as u32 | (half(n, 4) as u32 & 0x7F) << 16) * 2;
+            let x0 = SCREEN_W as i32 / 2 + half(n, 1) as i16 as i32;
+            let y0 = SCREEN_H as i32 / 2 - half(n, 2) as i16 as i32;
+            let (w, h) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
+            // 8 bits with palette bit 0 set: 16 bits per pixel, bits 7-0 a
+            // colour, bits 13-8 its opacity (0-63).
+            let wide = attr & 3 == 3 && attr & 0x100 != 0;
+            let bpp = if wide { 16 } else { 2 * ((attr & 3) + 1) };
+            let bank = if attr & 0x8000 != 0 { 0x200 } else { 0x100 };
+            let pal_base = bank + ((((attr >> 8) & 15) << 4) >> bpp << bpp);
+            for py in 0..h {
+                for px in 0..w {
+                    let x = x0 + if attr & 4 != 0 { (w - 1 - px) as i32 } else { px as i32 };
+                    let y = y0 + if attr & 8 != 0 { (h - 1 - py) as i32 } else { py as i32 };
+                    if x < 0 || y < 0 || x >= SCREEN_W as i32 || y >= SCREEN_H as i32 {
+                        continue;
+                    }
+                    let o = (y as usize * SCREEN_W + x as usize) * 3;
+                    if wide {
+                        let a = addr + (py * w + px) * 2;
+                        let v = self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8;
+                        let alpha = (v >> 8) & 63;
+                        let c = rgb555(pal[(bank + (v & 0xFF)) as usize]);
+                        for k in 0..3 {
+                            img[o + k] = ((c[k] as u32 * alpha + img[o + k] as u32 * (63 - alpha)) / 63) as u8;
+                        }
+                    } else {
+                        let c = pal[(pal_base + self.pixel(addr, bpp, py * w + px)) as usize & 2047];
+                        if c & 0x8000 == 0 {
+                            img[o..o + 3].copy_from_slice(&rgb555(c));
+                        }
+                    }
+                }
+            }
+        }
+        img
+    }
+}
+
+/// Saves a picture as a binary PPM.
+fn save_ppm(path: &str, img: &[u8]) {
+    let mut out = format!("P6\n{SCREEN_W} {SCREEN_H}\n255\n").into_bytes();
+    out.extend_from_slice(img);
+    std::fs::write(path, out).unwrap();
 }
 
 impl ArmBus for Bus {
@@ -426,6 +616,7 @@ impl ArmBus for Bus {
         }
     }
     fn write8(&mut self, a: u32, v: u8) {
+        self.note_write(a, v as u32, 8);
         match self.mem(a, 1) {
             Some(m) => m[0] = v,
             None => {
@@ -434,6 +625,7 @@ impl ArmBus for Bus {
         }
     }
     fn write16(&mut self, a: u32, v: u16) {
+        self.note_write(a, v as u32, 16);
         match self.mem(a, 2) {
             Some(m) => m.copy_from_slice(&v.to_le_bytes()),
             None => {
@@ -442,6 +634,7 @@ impl ArmBus for Bus {
         }
     }
     fn write32(&mut self, a: u32, v: u32) {
+        self.note_write(a, v, 32);
         match self.mem(a, 4) {
             Some(m) => m.copy_from_slice(&v.to_le_bytes()),
             None => {
@@ -471,7 +664,15 @@ fn main() {
         log: Vec::new(),
     };
 
-    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false };
+    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
+    if let Ok(w) = std::env::var("ZIPBOOT_RWATCH") {
+        let (lo, hi) = w.split_once('-').expect("ZIPBOOT_RWATCH=lo-hi");
+        bus.rwatch = Some((u32::from_str_radix(lo, 16).unwrap(), u32::from_str_radix(hi, 16).unwrap()));
+    }
+    if let Ok(w) = std::env::var("ZIPBOOT_WATCH") {
+        let (lo, hi) = w.split_once('-').expect("ZIPBOOT_WATCH=lo-hi");
+        bus.watch = Some((u32::from_str_radix(lo, 16).unwrap(), u32::from_str_radix(hi, 16).unwrap()));
+    }
     bus.ram[..len].copy_from_slice(&data[start..start + len]);
     let mut cpu = Arm::new();
     cpu.reset();
@@ -482,7 +683,26 @@ fn main() {
     const JUMPS: usize = 600;
     let mut jumps: std::collections::VecDeque<(u32, u32, u32)> = std::collections::VecDeque::new();
     let mut prev = 0u32;
+    // ZIPBOOT_EVERY=n (with ZIPBOOT_DUMP): RAM is also saved every n
+    // instructions, as ram_<millions>.bin.
+    let every: Option<u64> = std::env::var("ZIPBOOT_EVERY").ok().and_then(|s| s.parse().ok());
+    let dump_dir = std::env::var("ZIPBOOT_DUMP").ok();
+    // ZIPBOOT_FRAMES=n (with ZIPBOOT_DUMP): the picture is saved every n
+    // instructions, as frame_<millions>.ppm.
+    let frames: Option<u64> = std::env::var("ZIPBOOT_FRAMES").ok().and_then(|s| s.parse().ok());
     while ran < steps {
+        if let (Some(n), Some(dir)) = (frames, &dump_dir)
+            && ran > 0
+            && ran.is_multiple_of(n)
+        {
+            save_ppm(&format!("{dir}/frame_{:04}.ppm", ran / 1_000_000), &bus.render());
+        }
+        if let (Some(n), Some(dir)) = (every, &dump_dir)
+            && ran > 0
+            && ran.is_multiple_of(n)
+        {
+            std::fs::write(format!("{dir}/ram_{}.bin", ran / 1_000_000), &bus.ram[..0x100_0000]).unwrap();
+        }
         bus.pc = cpu.r[15];
         bus.now = ran;
         if ran % FRAME == FRAME - 1 {
@@ -549,6 +769,10 @@ fn main() {
     }
     println!("cp15 control {:08x} ttb {:08x}", cpu.cp15.control, cpu.cp15.ttb);
     if let Ok(dir) = std::env::var("ZIPBOOT_DUMP") {
+        std::fs::write(format!("{dir}/watch.log"), bus.watched.join("
+")).ok();
+        std::fs::write(format!("{dir}/rwatch.log"), bus.rwatched.join("
+")).ok();
         std::fs::write(format!("{dir}/ram.bin"), &bus.ram[..0x100_0000]).unwrap();
         std::fs::write(format!("{dir}/iram.bin"), &bus.iram).unwrap();
     }
