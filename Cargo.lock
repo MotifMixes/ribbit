@@ -2710,6 +2710,7 @@ dependencies = [
  "ribbit-debug",
  "ribbit-input",
  "ribbit-memory",
+ "ribbit-twist",
  "ribbit-video",
  "ribbit-zippity",
  "serde",
@@ -2736,6 +2737,14 @@ dependencies = [
  "sha1",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "ribbit-twist"
+version = "1.0.0"
+dependencies = [
+ "ribbit-arm",
+ "ribbit-core",
 ]
 
 [[package]]

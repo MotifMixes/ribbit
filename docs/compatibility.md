@@ -17,6 +17,12 @@ How far each game gets in Ribbit. Update this file whenever a game is tested.
 "Menus" from the automated check means the game was running its own code but was waiting for
 input (the check presses nothing). Most such games may well go further when played.
 
+## RockIt Twist
+
+Not emulated: every RockIt Twist package is **Nothing**. Game packs (.lf3) are encrypted and the console's
+hardware is not modelled yet (docs/rockit-twist.md). Ribbit lists them so the library is complete, and opens a
+controls-only preview.
+
 ## Results
 
 BIOS: US v2.1 (152-11265). Automated check: 70 s from power-on, no input, with saved

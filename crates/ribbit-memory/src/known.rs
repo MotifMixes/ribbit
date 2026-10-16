@@ -18,6 +18,10 @@ pub enum Hardware {
     /// booting from NAND flash; its games are FAT16 images with a KERNEL.BIN.
     /// Unrelated to the Leapster's hardware (MAME: `generalplus_gpl32612.cpp`).
     Zippity,
+    /// LeapFrog RockIt Twist (2019 handheld, model 6060): an ARM9 GeneralPlus
+    /// system-on-chip (part UNKNOWN), firmware from VTech. NOT EMULATED: a
+    /// research preview (crates/ribbit-twist, docs/rockit-twist.md).
+    RockItTwist,
 }
 
 impl Hardware {
@@ -29,6 +33,7 @@ impl Hardware {
             Hardware::LeapsterLmax => "Leapster L-MAX",
             Hardware::Leapster2 => "Leapster 2",
             Hardware::Zippity => "Zippity",
+            Hardware::RockItTwist => "RockIt Twist",
         }
     }
 }

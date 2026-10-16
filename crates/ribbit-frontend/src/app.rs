@@ -1,15 +1,18 @@
 //! The Ribbit application: one window, the emulated Leapster, egui menus.
 
 use crate::audio_out::AudioOut;
+use crate::console_view::{ConsoleView, Event as ViewEvent, Target};
 use crate::emu::{Control, Emu};
 use crate::files::Pick;
 use crate::gpu::Gpu;
+use crate::held::{Held, Source};
 use crate::library::{ArtSource, Library};
 use crate::saves::{AutoSave, SavePaths};
 use crate::settings::Settings;
 use crate::ui::{self, Action, UiState};
 use anyhow::{Context, Result};
 use ribbit_core::Machine;
+use ribbit_memory::known::Hardware;
 use ribbit_video::{HEIGHT, WIDTH};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,6 +67,7 @@ struct Session {
     title: String,
     /// The console model (its BIOS), as players call it.
     system: &'static str,
+    hardware: Hardware,
     /// When play started (Unix seconds), for Discord's timer.
     started: u64,
     /// Prefix for this game's save-state files.
@@ -86,6 +90,15 @@ pub struct App {
     tv_frame: Vec<u32>,
     /// Removing the saved players from a Zippity dump (the cleaned dump).
     zippity_cleaning: Option<std::thread::JoinHandle<anyhow::Result<PathBuf>>>,
+    /// A RockIt Twist research preview (not emulated), instead of the others.
+    twist: Option<crate::twist::TwistSession>,
+    /// The console view's pointer state (controls held by the mouse).
+    console_view: ConsoleView,
+    /// Leapster/Zippity buttons held by each input source.
+    held: Held,
+    /// Mouse-wheel scrolling (pixels) not yet a whole notch (RockIt Twist
+    /// Slider without the console view).
+    wheel_px: f64,
     gpu: Option<Gpu>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
@@ -163,6 +176,10 @@ impl App {
             zippity: None,
             tv_frame: Vec::new(),
             zippity_cleaning: None,
+            twist: None,
+            console_view: ConsoleView::default(),
+            held: Held::default(),
+            wheel_px: 0.0,
             gpu: None,
             egui_ctx: {
                 let ctx = egui::Context::default();
@@ -305,8 +322,10 @@ impl App {
             None => format!("bios-{:08x}", machine.firmware().id().crc32),
         };
         let system = machine.firmware().known().map_or("Leapster", |k| k.hardware.name());
+        let hardware = machine.firmware().known().map_or(Hardware::Leapster, |k| k.hardware);
         self.session = Some(Session {
             system,
+            hardware,
             idle_test_secs: std::env::var("RIBBIT_IDLE_TEST_SECS").ok().and_then(|v| v.parse().ok()),
             idle_snapshot: None,
             closing: None,
@@ -336,6 +355,12 @@ impl App {
     }
 
     fn end_session(&mut self) {
+        // Nothing stays held into the next game.
+        self.console_view.release_all();
+        self.held.clear();
+        if self.twist.take().is_some() {
+            self.fit_window = FIT_TRIES;
+        }
         if let Some(z) = self.zippity.take() {
             z.stop();
             // Back to the Leapster's square screen.
@@ -401,7 +426,7 @@ impl App {
 
     /// Starts a console's own system (its BIOS from the library), no
     /// cartridge.
-    fn start_system(&mut self, hw: ribbit_memory::known::Hardware) {
+    fn start_system(&mut self, hw: Hardware) {
         let Some(bios) = self.library.bios_for(hw).map(Path::to_path_buf) else {
             return self.ui.problem(
                 "No BIOS for this console",
@@ -427,6 +452,10 @@ impl App {
         // A Zippity cartridge runs only on a Zippity: its NAND dump, whatever
         // console the library has chosen.
         let family = self.library.games.iter().find(|g| g.path == path).map(|g| g.family).or_else(|| crate::library::family_of(&path));
+        // A RockIt Twist package: the research preview (it cannot run).
+        if family == Some(crate::library::Family::RockItTwist) {
+            return self.start_twist(Some(path));
+        }
         if family == Some(crate::library::Family::Zippity) {
             // The library may still be scanning (a cartridge given on the
             // command line): then the folders are searched directly.
@@ -558,6 +587,127 @@ impl App {
         }
     }
 
+    /// Opens the RockIt Twist research preview: its controls, no emulation
+    /// (`package`: the package chosen in the library, if any).
+    fn start_twist(&mut self, package: Option<PathBuf>) {
+        self.end_session();
+        self.twist = Some(crate::twist::TwistSession::start(package));
+        self.paused = false;
+        self.fit_window = FIT_TRIES;
+        if let Some(a) = &mut self.audio {
+            a.clear();
+        }
+        self.update_title();
+        self.ui.toast("RockIt Twist: research preview, not emulated");
+    }
+
+    /// The console running (None: none).
+    fn current_hardware(&self) -> Option<Hardware> {
+        if self.twist.is_some() {
+            Some(Hardware::RockItTwist)
+        } else if self.zippity.is_some() {
+            Some(Hardware::Zippity)
+        } else {
+            self.session.as_ref().map(|s| s.hardware)
+        }
+    }
+
+    /// The console view's layout for the running console, when it is on.
+    fn view_layout(&self) -> Option<crate::console_view::Layout> {
+        let hw = self.current_hardware()?;
+        self.view_setting(hw).then(|| crate::console_view::layout_for(hw)).flatten()
+    }
+
+    /// Whether the console view is chosen for `hw` (each console has its
+    /// own choice: on for the RockIt Twist, off for the Leapsters, unless
+    /// changed).
+    fn view_setting(&self, hw: Hardware) -> bool {
+        if hw == Hardware::RockItTwist { self.settings.console_view_twist } else { self.settings.console_view }
+    }
+
+    /// A Leapster or Zippity button pressed or let go by one source (the
+    /// machine sees it down while any source holds it).
+    fn press(&mut self, source: Source, b: ribbit_input::Button, down: bool) {
+        let Some(state) = self.held.set(source, b, down) else {
+            return;
+        };
+        if let Some(s) = &self.session {
+            s.emu.lock().buttons.set(b, state);
+        }
+        if let Some(z) = &self.zippity {
+            z.set_button(b, state);
+        }
+    }
+
+    /// What the console view's controls did.
+    fn apply_view_events(&mut self, events: Vec<ViewEvent>) {
+        use ribbit_twist::input::Source as TwistSource;
+        for e in events {
+            match e {
+                ViewEvent::Press(Target::Leapster(b), down) => self.press(Source::Pointer, b, down),
+                ViewEvent::Press(Target::Twist(b), down) => {
+                    if let Some(t) = &mut self.twist {
+                        t.controls.set(TwistSource::Pointer, b, down);
+                    }
+                }
+                ViewEvent::Turn(r, steps) => {
+                    if let Some(t) = &mut self.twist {
+                        t.controls.turn(r, steps);
+                    }
+                }
+                ViewEvent::Strip(pos) => {
+                    if let Some(t) = &mut self.twist {
+                        t.controls.touch_slider(pos);
+                    }
+                }
+                ViewEvent::Swipe(up) => {
+                    if let Some(t) = &mut self.twist {
+                        t.controls.swipe(up);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Lets go of every control the mouse holds on the console view.
+    fn release_view(&mut self) {
+        let events = self.console_view.release_all();
+        self.apply_view_events(events);
+        for b in self.held.release(Source::Pointer) {
+            if let Some(s) = &self.session {
+                s.emu.lock().buttons.set(b, false);
+            }
+            if let Some(z) = &self.zippity {
+                z.set_button(b, false);
+            }
+        }
+        if let Some(t) = &mut self.twist {
+            t.controls.release(ribbit_twist::input::Source::Pointer);
+        }
+    }
+
+    /// F7: the running console's choice (the Leapster's when none runs).
+    fn toggle_console_view(&mut self) {
+        let hw = self.current_hardware().unwrap_or(Hardware::Leapster);
+        let on = !self.view_setting(hw);
+        if hw == Hardware::RockItTwist {
+            self.settings.console_view_twist = on;
+        } else {
+            self.settings.console_view = on;
+        }
+        self.console_view_changed();
+        self.ui.toast(if on { "Console view on" } else { "Console view off" });
+    }
+
+    /// Saved at once; turning it off lets go of what the mouse held. The
+    /// game carries on (nothing in the emulation changes).
+    fn console_view_changed(&mut self) {
+        self.save_settings();
+        if self.view_layout().is_none() {
+            self.release_view();
+        }
+    }
+
     fn pick(&mut self, what: Pick) {
         let start = match what {
             Pick::Bios => self.settings.bios.clone(),
@@ -580,7 +730,12 @@ impl App {
 
     fn update_title(&self) {
         if let Some(g) = &self.gpu {
-            let title = self.session.as_ref().map(|s| &s.title).or(self.zippity.as_ref().map(|z| &z.title));
+            let title = self
+                .session
+                .as_ref()
+                .map(|s| &s.title)
+                .or(self.zippity.as_ref().map(|z| &z.title))
+                .or(self.twist.as_ref().map(|t| &t.title));
             let t = match title {
                 Some(t) if self.paused => format!("{APP_NAME} - {t} (paused)"),
                 Some(t) => format!("{APP_NAME} - {t}"),
@@ -631,6 +786,8 @@ impl App {
                 self.settings.zippity_keep_saves.push(path);
                 self.save_settings();
             }
+            Action::OpenTwist => self.start_twist(None),
+            Action::ConsoleViewChanged => self.console_view_changed(),
             Action::Reset => self.reset(),
             Action::TogglePause => self.toggle_pause(),
             Action::Screenshot => self.screenshot(),
@@ -920,6 +1077,10 @@ impl App {
     }
 
     fn reset(&mut self) {
+        if let Some(t) = &mut self.twist {
+            t.controls.release_all();
+            self.ui.toast("Reset (nothing is emulated on the RockIt Twist yet)");
+        }
         if let Some(z) = &self.zippity {
             z.reset();
             self.ui.toast("Reset");
@@ -936,7 +1097,7 @@ impl App {
     }
 
     fn toggle_pause(&mut self) {
-        if self.zippity.is_some() {
+        if self.zippity.is_some() || self.twist.is_some() {
             self.paused = !self.paused;
             if let Some(a) = &mut self.audio {
                 a.clear();
@@ -962,6 +1123,14 @@ impl App {
     fn focus_changed(&mut self, focused: bool) {
         let was = self.halted();
         self.background = !focused;
+        if !focused {
+            // Releases may never arrive while another window has the mouse
+            // or the keys: nothing on the console view stays held.
+            self.release_view();
+            if let Some(t) = &mut self.twist {
+                t.controls.release(ribbit_twist::input::Source::Keyboard);
+            }
+        }
         if focused && self.flashing {
             self.flashing = false;
             if let Some(g) = &self.gpu {
@@ -1048,6 +1217,13 @@ impl App {
                 Ok(Err(e)) => self.ui.problem("Couldn't clear the old players", CLEAN_FAILED, format!("{e:#}")),
                 Err(_) => self.ui.problem("Couldn't clear the old players", CLEAN_FAILED, "The cleaning thread crashed."),
             }
+        }
+        if let Some(t) = &mut self.twist {
+            if !halted {
+                t.tick();
+            }
+            self.speed_percent = 0.0;
+            return;
         }
         if let Some(z) = &self.zippity {
             if z.take_user_data() && !self.settings.zippity_keep_saves.contains(&z.nand) {
@@ -1149,6 +1325,26 @@ impl App {
         self.egui_ctx.layer_id_at(pos).is_some_and(|l| l.order != egui::Order::Background)
     }
 
+    /// The mouse wheel swipes the RockIt Twist's Slider (with the console
+    /// view on, the view handles the wheel itself).
+    fn wheel(&mut self, delta: winit::event::MouseScrollDelta) {
+        if self.twist.is_none() || self.view_layout().is_some() || self.cursor.is_some_and(|p| self.ui_at(p)) {
+            return;
+        }
+        const NOTCH: f64 = 40.0;
+        self.wheel_px += match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64 * NOTCH,
+            winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
+        };
+        while self.wheel_px.abs() >= NOTCH {
+            let up = self.wheel_px > 0.0;
+            self.wheel_px -= NOTCH.copysign(self.wheel_px);
+            if let Some(t) = &mut self.twist {
+                t.controls.swipe(up);
+            }
+        }
+    }
+
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
     fn set_stylus(&mut self, pos: Option<(f64, f64)>) {
         let Some(s) = &mut self.session else {
@@ -1189,12 +1385,19 @@ impl App {
                 KeyCode::F10 => return self.ui.menu_visible = !self.ui.menu_visible,
                 KeyCode::F11 => return self.toggle_fullscreen(),
                 KeyCode::F12 => return self.screenshot(),
+                KeyCode::F7 => return self.toggle_console_view(),
                 KeyCode::F5 => return self.save_state(1),
                 KeyCode::F9 => return self.load_state(1),
                 KeyCode::KeyO if ctrl => return self.act(Action::Pick(Pick::Cartridge), event_loop),
                 KeyCode::KeyR if ctrl => return self.reset(),
                 _ => {}
             }
+        }
+        // The RockIt Twist has its own keys (twist::KEYS), Tab and Shift
+        // included, while its session is open.
+        if let Some(t) = &mut self.twist {
+            t.key(code, pressed);
+            return;
         }
         if code == KeyCode::Backquote {
             self.rewinding = pressed && self.session.is_some();
@@ -1221,11 +1424,8 @@ impl App {
             }
             return;
         }
-        if let (Some(b), Some(s)) = (self.settings.button_for(code), &self.session) {
-            s.emu.lock().buttons.set(b, pressed);
-        }
-        if let (Some(b), Some(z)) = (self.settings.button_for(code), &self.zippity) {
-            z.set_button(b, pressed);
+        if let Some(b) = self.settings.button_for(code) {
+            self.press(Source::Keyboard, b, pressed);
         }
     }
 
@@ -1253,12 +1453,7 @@ impl App {
             103 => Button::VolumeUp,   // BUTTON_R1
             _ => return,
         };
-        if let Some(s) = &self.session {
-            s.emu.lock().buttons.set(button, pressed);
-        }
-        if let Some(z) = &self.zippity {
-            z.set_button(button, pressed);
-        }
+        self.press(Source::Gamepad, button, pressed);
     }
 
     /// Applies controller input (desktop; Android pads arrive as keys).
@@ -1272,17 +1467,10 @@ impl App {
         pads.poll(|e| events.push(e));
         for e in events {
             match e {
-                PadEvent::Button(b, pressed) => {
-                    if let Some(s) = &self.session {
-                        s.emu.lock().buttons.set(b, pressed);
-                    }
-                    if let Some(z) = &self.zippity {
-                        z.set_button(b, pressed);
-                    }
-                }
+                PadEvent::Button(b, pressed) => self.press(Source::Gamepad, b, pressed),
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
-                    if (self.session.is_some() || self.zippity.is_some()) && !self.paused {
+                    if (self.session.is_some() || self.zippity.is_some() || self.twist.is_some()) && !self.paused {
                         self.toggle_pause();
                     }
                 }
@@ -1335,17 +1523,30 @@ impl App {
         if let Some(z) = &self.zippity {
             z.frame(&mut self.tv_frame);
         }
+        if let Some(t) = &self.twist {
+            t.frame(&mut self.tv_frame);
+        }
         let halted = self.halted();
         let save_dir = self.save_dir().display().to_string();
         let slots = self.slot_times();
+        let view_layout = self.view_layout();
+        let view_available = self.current_hardware().map(|h| crate::console_view::layout_for(h).is_some());
+        // A picture other than the Leapster's 160 x 160 LCD.
+        let tv_size = if self.twist.is_some() {
+            Some((ribbit_twist::SCREEN_W, ribbit_twist::SCREEN_H))
+        } else if self.zippity.is_some() {
+            Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
+        } else {
+            None
+        };
         let (Some(gpu), Some(state)) = (&mut self.gpu, &mut self.egui_state) else {
             return;
         };
         gpu.upload(&self.frame);
         gpu.show_hd = hd_frame;
-        gpu.show_tv = self.zippity.is_some();
-        if self.zippity.is_some() {
-            gpu.upload_tv(&self.tv_frame, (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H));
+        gpu.show_tv = tv_size.is_some();
+        if let Some(size) = tv_size {
+            gpu.upload_tv(&self.tv_frame, size);
         }
         if let Some(c) = self.session.as_ref().and_then(|s| s.hd.as_ref()).filter(|_| hd_frame) {
             if hd_dirty {
@@ -1356,7 +1557,7 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some() || self.zippity.is_some(),
+                running: self.session.is_some() || self.zippity.is_some() || self.twist.is_some(),
                 paused: halted,
                 background: !self.paused && halted,
                 idle_left: self.idle_left,
@@ -1367,6 +1568,7 @@ impl App {
                     .as_ref()
                     .map(|s| s.title.clone())
                     .or(self.zippity.as_ref().map(|z| z.title.clone()))
+                    .or(self.twist.as_ref().map(|t| t.title.clone()))
                     .unwrap_or_default(),
                 speed: self.speed_percent,
                 bios_name: self.settings.bios.as_ref().map(|p| {
@@ -1377,6 +1579,7 @@ impl App {
                 save_dir,
                 slots,
                 rewinding: self.rewinding,
+                console_view_available: view_available,
             };
         let mut actions = Vec::new();
         let mut area = egui::Rect::NOTHING;
@@ -1384,38 +1587,92 @@ impl App {
         self.discord.set(match &self.session {
             _ if !self.settings.discord_presence => crate::discord::Presence::Off,
             Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
-            None => match &self.zippity {
-                Some(z) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
-                None => crate::discord::Presence::Browsing,
+            None => match (&self.zippity, &self.twist) {
+                (Some(z), _) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
+                (None, Some(t)) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
+                (None, None) => crate::discord::Presence::Browsing,
             },
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
+        let (view, held, twist) = (&mut self.console_view, &self.held, self.twist.as_ref());
+        // Where the screen is inside the console view (None: the plain view).
+        let mut screen = None;
+        let mut view_events = Vec::new();
         let out = self.egui_ctx.run_ui(raw, |ui| {
+            // The console is painted into this slot, under the menus and
+            // messages drawn next.
+            let under = ui.painter().add(egui::Shape::Noop);
             area = ui::draw(ui, ui_state, settings, library, &info, &mut actions);
+            if let (true, Some(layout)) = (info.running, &view_layout) {
+                let pressed = |t: Target| match t {
+                    Target::Leapster(b) => held.pressed(b),
+                    Target::Twist(b) => twist.is_some_and(|tw| tw.controls.pressed(b)),
+                };
+                let turned = |r| twist.map_or(0, |tw| tw.controls.turned(r));
+                let turning = |r| twist.and_then(|tw| tw.controls.turning(r));
+                let keys = |c: &crate::console_view::Control| control_keys(c, settings);
+                let cap = |what| cap_label(what, settings);
+                let lit = crate::console_view::Lit {
+                    pressed: &pressed,
+                    turned: &turned,
+                    turning: &turning,
+                    strip: twist.and_then(|t| t.controls.slider()),
+                    swiping: twist.and_then(|t| t.controls.swiping()),
+                    cap: &cap,
+                    show_caps: settings.console_view_keys,
+                    keys: &keys,
+                };
+                let (at, events) = view.show(ui, under, layout, area, &lit);
+                screen = Some(at);
+                view_events = events;
+            }
+            if let Some(tw) = twist {
+                let at = screen.unwrap_or_else(|| {
+                    let size = (ribbit_twist::SCREEN_W, ribbit_twist::SCREEN_H);
+                    let (x, y, w, h) = Gpu::tv_rect((area.min.x, area.min.y, area.width(), area.height()), size);
+                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+                });
+                crate::twist::overlay(ui.painter(), at, tw);
+            }
         });
         state.handle_platform_output(&gpu.window, out.platform_output);
         let ppp = out.pixels_per_point;
         if self.fit_window > 0 {
             self.fit_window -= 1;
-            let unit = if self.zippity.is_some() { (160, 120) } else { (160, 160) };
+            let unit = match &view_layout {
+                // The whole console: sized so its screen gets the scale.
+                Some(l) => {
+                    let h = 160.0 / l.screen_aspect / l.screen.height() * 1.04;
+                    ((h * l.aspect).round() as u32, h.round() as u32)
+                }
+                None if tv_size.is_some() => (160, 120),
+                None => (160, 160),
+            };
             if Self::fit_window(&gpu.window, self.settings.window_scale, (area.width() * ppp, area.height() * ppp), unit) {
                 self.fit_window = 0;
             }
         }
         let display = self.settings.display;
-        let px_area = (area.min.x * ppp, area.min.y * ppp, area.width() * ppp, area.height() * ppp);
-        self.lcd_px = if self.zippity.is_some() {
-            Gpu::tv_rect(px_area, (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
-        } else {
-            Gpu::lcd_rect(px_area, display)
+        let at = screen.unwrap_or(area);
+        let px_area = (at.min.x * ppp, at.min.y * ppp, at.width() * ppp, at.height() * ppp);
+        self.lcd_px = match tv_size {
+            Some(size) => Gpu::tv_rect(px_area, size),
+            None => Gpu::lcd_rect(px_area, display),
         };
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = (self.session.is_some() || self.zippity.is_some()).then_some((self.lcd_px, display, self.settings.ai));
-        if let Err(e) = gpu.render(lcd, &jobs, &out.textures_delta, ppp) {
+        let lcd = (self.session.is_some() || self.zippity.is_some() || self.twist.is_some())
+            .then_some((self.lcd_px, display, self.settings.ai));
+        let mut deltas = out.textures_delta;
+        let rendered = gpu.render(lcd, &jobs, &deltas, ppp);
+        // Handled by `render` (debug builds of egui panic when an unhandled
+        // delta is dropped).
+        deltas.clear();
+        if let Err(e) = rendered {
             self.fatal = Some(e);
             event_loop.exit();
             return;
         }
+        self.apply_view_events(view_events);
         for a in actions {
             self.act(a, event_loop);
         }
@@ -1540,6 +1797,7 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
         }
@@ -1573,6 +1831,40 @@ impl Compressor {
             })
             .expect("spawning the rewind worker");
         Self { todo, done }
+    }
+}
+
+/// The key a console-view keycap shows (None: no key).
+fn cap_label(what: crate::console_view::CapFor, settings: &Settings) -> Option<String> {
+    use crate::console_view::CapFor;
+    use crate::twist::{TwistKey, cap_for};
+    match what {
+        CapFor::Press(Target::Leapster(b)) => settings.key_for(b).map(crate::settings::cap_text),
+        CapFor::Press(Target::Twist(b)) => cap_for(TwistKey::Press(b)),
+        CapFor::Turn(r, s) => cap_for(TwistKey::Turn(r, s)),
+        CapFor::Swipe(up) => cap_for(TwistKey::Swipe(up)),
+    }
+}
+
+/// The keys for a console-view control, for its tooltip.
+fn control_keys(c: &crate::console_view::Control, settings: &Settings) -> String {
+    use crate::console_view::Action as A;
+    use crate::twist::{TwistKey, keys_for};
+    let leapster = |b| settings.key_for(b).map(crate::settings::key_label).unwrap_or_default();
+    let twist = |t: Target| match t {
+        Target::Twist(b) => keys_for(TwistKey::Press(b)),
+        Target::Leapster(b) => leapster(b),
+    };
+    let join = |v: Vec<String>| v.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" / ");
+    match c.action {
+        A::Press(t) => twist(t),
+        A::Dpad(ts) => join(ts.into_iter().map(twist).collect()),
+        A::Rocker(ts) => join(ts.into_iter().map(twist).collect()),
+        A::Wheel { rotary, .. } => {
+            let keys = join(vec![keys_for(TwistKey::Turn(rotary, 1)), keys_for(TwistKey::Turn(rotary, -1))]);
+            format!("{keys}; drag, click an end or scroll")
+        }
+        A::Strip => "Page Up / Page Down; drag or scroll".to_string(),
     }
 }
 

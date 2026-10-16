@@ -10,6 +10,10 @@ An emulator in development for the **original 2003 LeapFrog Leapster** (the blue
 > seconds after start-up unless MAME's equally unverified power-line workaround is switched on. Only one game has
 > been tested. See [docs/accuracy-matrix.md](docs/accuracy-matrix.md).
 
+Ribbit also runs the **LeapFrog Zippity** (TV console, see [docs/zippity.md](docs/zippity.md)) and lists the
+**LeapFrog RockIt Twist** as a **research preview: not emulated**. Its controls work and its packages are listed,
+but no Twist software runs yet and its game packs are encrypted. See [docs/rockit-twist.md](docs/rockit-twist.md).
+
 Leapster games are Flash content run by a player built into the console firmware. To run games you will need a
 dump of the **BIOS from your own console**, as well as your cartridge. No firmware or game data is included or will
 be accepted into this repository.
@@ -40,6 +44,14 @@ cargo run -p ribbit-desktop -- --help
     (Auto, 2×, 3×, 4×, 16×). `cargo run --release -p ribbit-frontend --example upscale` runs it on a saved frame.
     Also Sharp pixels, LCD grid, Pixel perfect, Smooth. Window size 2×, 3×, 4× or 16× (as big as fits; never maximized or full screen unless you ask).
     Display only: none of this changes emulation.
+  * **Console view** (Video → Console view, or F7 for the running console): the screen inside a drawing of the
+    handheld with clickable, animated controls, each showing its keyboard key as a keycap that lights up while
+    pressed (Video → Show keys on the console). On by default for the RockIt Twist, off for the Leapster handhelds
+    (Leapster, L-MAX and Leapster 2 share one drawing, after the original Leapster's Parent Guide); TV consoles
+    have none. The game keeps running when it is switched; the screen keeps its shape and is never covered.
+  * **RockIt Twist** (choose it in the library's console menu, or File → RockIt Twist preview): not emulated.
+    Keys: WASD/arrows = D-pad, Q/E = Switch, number pad = button grid, number pad * and - = Spinner, U/J, I/K,
+    O/L = the three Dials, Page Up/Down or the mouse wheel = Slider, Shift/Tab = Hint, Home, Enter = check mark.
   * Emulation → Advanced holds the experimental options: MAME's power-line workaround (needed by v1.5) and the
     CPU clock (96 MHz nominal, 48 MHz as in MAME).
 * **Release zip**: `python -I scripts/package-release.py` writes `target/dist/Ribbit-<version>-windows-x64.zip`
@@ -50,6 +62,7 @@ cargo run -p ribbit-desktop -- --help
 ## Documentation
 
 * [Hardware research](docs/hardware-research.md): what is known, with sources and confidence labels
+* [RockIt Twist](docs/rockit-twist.md): research, formats, controls, emulation status and what is missing
 * [Architecture](docs/architecture.md): crate layout, frontend choice, mobile feasibility, licensing
 * [Accuracy matrix](docs/accuracy-matrix.md): what Ribbit implements and how it is tested
 * [Open questions](docs/open-questions.md): unknowns and recommended experiments

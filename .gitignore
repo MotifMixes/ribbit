@@ -20,3 +20,5 @@
 # The built-in art-capture profile (made by Ribbit; no personal data).
 !crates/ribbit-frontend/src/art_profile.eeprom
 zippity/
+# Downloaded RockIt Twist packages (LeapFrog firmware and encrypted game packs).
+/leapfrog-rockit-twist-apps/

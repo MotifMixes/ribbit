@@ -17,7 +17,7 @@ use ribbit_memory::known::Hardware;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-const EXTENSIONS: [&str; 5] = ["bin", "rom", "u3", "lst", "zip"];
+const EXTENSIONS: [&str; 7] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3"];
 /// Folder depth scanned below each ROM folder.
 const MAX_DEPTH: usize = 3;
 /// Art: emulated time searched for the title card, and how often to look.
@@ -135,6 +135,8 @@ pub enum Family {
     Leapster2,
     /// A Zippity cartridge (a FAT16 image with KERNEL.BIN).
     Zippity,
+    /// A RockIt Twist package (.lfp system package, encrypted .lf3 pack).
+    RockItTwist,
 }
 
 /// Cartridges made for the Leapster 2 alone, by CRC32: the "Leapster 2
@@ -144,22 +146,24 @@ const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 
 impl Family {
     /// The library tabs, in order.
-    pub const ALL: [Family; 3] = [Family::Leapster, Family::Leapster2, Family::Zippity];
+    pub const ALL: [Family; 4] = [Family::Leapster, Family::Leapster2, Family::Zippity, Family::RockItTwist];
 
     pub fn name(self) -> &'static str {
         match self {
             Family::Leapster => "Leapster",
             Family::Leapster2 => "Leapster 2",
             Family::Zippity => "Zippity",
+            Family::RockItTwist => "RockIt Twist",
         }
     }
 
     /// Whether a console of this hardware runs the family's games.
     pub fn runs_on(self, hw: Hardware) -> bool {
         match self {
-            Family::Leapster => hw != Hardware::Zippity,
+            Family::Leapster => !matches!(hw, Hardware::Zippity | Hardware::RockItTwist),
             Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
+            Family::RockItTwist => hw == Hardware::RockItTwist,
         }
     }
 
@@ -170,6 +174,7 @@ impl Family {
             Family::Leapster => Hardware::Leapster,
             Family::Leapster2 => Hardware::Leapster2,
             Family::Zippity => Hardware::Zippity,
+            Family::RockItTwist => Hardware::RockItTwist,
         }
     }
 
@@ -180,8 +185,14 @@ impl Family {
 }
 
 /// The consoles, in the order the library lists them.
-pub const CONSOLES: [Hardware; 5] =
-    [Hardware::Leapster, Hardware::LeapsterTv, Hardware::LeapsterLmax, Hardware::Leapster2, Hardware::Zippity];
+pub const CONSOLES: [Hardware; 6] = [
+    Hardware::Leapster,
+    Hardware::LeapsterTv,
+    Hardware::LeapsterLmax,
+    Hardware::Leapster2,
+    Hardware::Zippity,
+    Hardware::RockItTwist,
+];
 
 pub struct Game {
     pub path: PathBuf,
@@ -193,7 +204,7 @@ pub struct Game {
     pub details: Vec<(&'static str, String)>,
     /// Badges shown with the game ("Internal": built into the console).
     pub tags: Vec<&'static str>,
-    key: String,
+    pub(crate) key: String,
     pub art: Art,
 }
 
@@ -318,12 +329,15 @@ impl Library {
     }
 
     /// The consoles that can play games here: the original Leapster (on
-    /// the chosen BIOS) and the Zippity always, the other Leapster models
-    /// when their BIOS is in a games folder.
+    /// the chosen BIOS), the Zippity and the RockIt Twist (research preview)
+    /// always, the other Leapster models when their BIOS is in a games folder.
     pub fn consoles(&self) -> Vec<Hardware> {
         CONSOLES
             .into_iter()
-            .filter(|&hw| matches!(hw, Hardware::Leapster | Hardware::Zippity) || self.bios_for(hw).is_some())
+            .filter(|&hw| {
+                matches!(hw, Hardware::Leapster | Hardware::Zippity | Hardware::RockItTwist)
+                    || self.bios_for(hw).is_some()
+            })
             .collect()
     }
 
@@ -338,6 +352,7 @@ impl Library {
     pub fn tab_for(&self, hw: Hardware) -> Family {
         match hw {
             Hardware::Zippity => Family::Zippity,
+            Hardware::RockItTwist => Family::RockItTwist,
             Hardware::Leapster2 if self.games.iter().any(|g| g.family == Family::Leapster2) => Family::Leapster2,
             _ => Family::Leapster,
         }
@@ -395,7 +410,7 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
                 }
                 continue;
             }
-            Some(Found::Zippity(game)) => {
+            Some(Found::Zippity(game) | Found::Twist(game)) => {
                 if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
                     return;
                 }
@@ -488,6 +503,8 @@ enum Found {
     Zippity(Game),
     /// The Zippity's system NAND: the console, and its built-in games.
     ZippityNand(Game),
+    /// A RockIt Twist package (listed; it cannot run).
+    Twist(Game),
 }
 
 /// Zippity images: the system NAND (with spare area) and cartridges.
@@ -495,6 +512,11 @@ const ZIPPITY_NAND_SIZE: usize = 0x1080_0000;
 const ZIPPITY_CART_SIZE: usize = 0x420_0000;
 
 fn classify(path: &Path) -> Option<Found> {
+    // RockIt Twist packages go by name and first bytes (they are big, and
+    // a .lfp is a zip that must not be unpacked as a ROM).
+    if let Some(game) = crate::twist::describe_package(path) {
+        return Some(Found::Twist(game));
+    }
     // Zipped images are smaller on disk; sizes are checked again on the data.
     let size = std::fs::metadata(path).ok()?.len();
     if !(0x100..=ZIPPITY_NAND_SIZE as u64).contains(&size) {
@@ -528,6 +550,7 @@ pub fn family_of(path: &Path) -> Option<Family> {
         Found::Cart(c) if c.known().is_some_and(|k| LEAPSTER2_ONLY.contains(&k.crc32)) => Some(Family::Leapster2),
         Found::Cart(_) => Some(Family::Leapster),
         Found::Zippity(_) | Found::ZippityNand(_) => Some(Family::Zippity),
+        Found::Twist(_) => Some(Family::RockItTwist),
         Found::Bios(_) => None,
     }
 }

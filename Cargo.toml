@@ -5,6 +5,7 @@ members = [
     "crates/ribbit-cpu",
     "crates/ribbit-arm",
     "crates/ribbit-zippity",
+    "crates/ribbit-twist",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
@@ -19,6 +20,7 @@ default-members = [
     "crates/ribbit-cpu",
     "crates/ribbit-arm",
     "crates/ribbit-zippity",
+    "crates/ribbit-twist",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
@@ -42,6 +44,7 @@ ribbit-core = { path = "crates/ribbit-core" }
 ribbit-cpu = { path = "crates/ribbit-cpu" }
 ribbit-arm = { path = "crates/ribbit-arm" }
 ribbit-zippity = { path = "crates/ribbit-zippity" }
+ribbit-twist = { path = "crates/ribbit-twist" }
 ribbit-memory = { path = "crates/ribbit-memory" }
 ribbit-video = { path = "crates/ribbit-video" }
 ribbit-audio = { path = "crates/ribbit-audio" }

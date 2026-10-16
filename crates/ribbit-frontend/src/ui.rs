@@ -45,6 +45,10 @@ pub enum Action {
     CleanZippityDump(PathBuf),
     /// Keep them (and don't ask again).
     KeepZippitySaves(PathBuf),
+    /// Open the RockIt Twist research preview (no package).
+    OpenTwist,
+    /// The console view was turned on or off.
+    ConsoleViewChanged,
     Quit,
 }
 
@@ -71,6 +75,8 @@ pub struct Info {
     /// A Zippity is running, and whether the player stands on its home spot.
     pub zippity: bool,
     pub zippity_on_home: bool,
+    /// The running console has a console view (None: nothing running).
+    pub console_view_available: Option<bool>,
 }
 
 /// Something that went wrong, as the error card shows it.
@@ -321,6 +327,14 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if item(ui, "Open BIOS…", "") {
                 actions.push(Action::Pick(Pick::Bios));
             }
+            if ui
+                .add(egui::Button::new("RockIt Twist preview (not emulated)"))
+                .on_hover_text(ribbit_twist::STATUS)
+                .clicked()
+            {
+                actions.push(Action::OpenTwist);
+                ui.close();
+            }
             ui.separator();
             if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
                 actions.push(Action::Screenshot);
@@ -519,6 +533,28 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if ui.checkbox(&mut settings.show_status_bar, "Status bar").changed() {
                 actions.push(Action::SettingsChanged);
             }
+            ui.separator();
+            ui.label(egui::RichText::new("Console view (F7: the running console's)").strong());
+            let tip = "Shows the screen inside a drawing of the handheld, with its controls around it. Click, drag or scroll the controls to use them.";
+            if ui.checkbox(&mut settings.console_view_twist, "RockIt Twist").on_hover_text(tip).changed() {
+                actions.push(Action::ConsoleViewChanged);
+            }
+            let leapster_tip = match info.console_view_available {
+                Some(false) => "TV consoles (Leapster TV, Zippity) have no handheld to draw: they show the plain screen.",
+                _ => "Leapster, L-MAX and Leapster 2 (one drawing for all three, after the original Leapster).",
+            };
+            if ui.checkbox(&mut settings.console_view, "Leapster handhelds").on_hover_text(leapster_tip).changed() {
+                actions.push(Action::ConsoleViewChanged);
+            }
+            ui.add_enabled_ui(settings.console_view || settings.console_view_twist, |ui| {
+                if ui
+                    .checkbox(&mut settings.console_view_keys, "Show keys on the console")
+                    .on_hover_text("Each control shows its keyboard key; the key lights up while pressed.")
+                    .changed()
+                {
+                    actions.push(Action::SettingsChanged);
+                }
+            });
         });
         ui.menu_button("Audio", |ui| {
             if ui.checkbox(&mut settings.muted, "Mute").changed() {
@@ -839,6 +875,7 @@ fn console_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     let hint = match tab {
         Some(Family::Leapster2) if options.is_empty() => "Add a Leapster 2 BIOS to your games folder to play these games",
         Some(Family::Zippity) => "The only console these games play on",
+        Some(Family::RockItTwist) => "RockIt Twist packages: research preview, not emulated",
         _ => "Add a Leapster TV, L-MAX or Leapster 2 BIOS to your games folder to play on those",
     };
     ui.add_enabled_ui(options.len() > 1 || (!usable && !options.is_empty()), |ui| {
@@ -1232,6 +1269,7 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
                 ("Fullscreen", "F11"),
                 ("Screenshot", "F12"),
                 ("Show/hide menu", "F10"),
+                ("Console view on/off", "F7"),
             ] {
                 ui.label(what);
                 ui.label(key);
@@ -1244,6 +1282,31 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
             for (b, _, what) in crate::zippity::CONTROLS {
                 ui.label(what);
                 ui.label(settings.key_for(b).map_or_else(|| format!("{b:?}"), |k| format!("{} ({b:?})", settings::key_label(k))));
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        ui.label(egui::RichText::new("On the RockIt Twist (research preview)").strong());
+        egui::Grid::new("twist").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+            use crate::twist::{TwistKey, keys_for};
+            use ribbit_twist::input::{Button as T, Rotary as R};
+            let both = |a: TwistKey, b: TwistKey| format!("{} / {}", keys_for(a), keys_for(b));
+            for (what, keys) in [
+                ("D-pad", "W A S D or the arrows".to_string()),
+                ("Switch left / right", both(TwistKey::Press(T::SwitchLeft), TwistKey::Press(T::SwitchRight))),
+                ("Button grid", "Number pad 1-9 (as laid out)".to_string()),
+                ("Spinner left / right", both(TwistKey::Turn(R::Spinner, -1), TwistKey::Turn(R::Spinner, 1))),
+                ("Yellow dial up / down", both(TwistKey::Turn(R::YellowDial, 1), TwistKey::Turn(R::YellowDial, -1))),
+                ("Green dial up / down", both(TwistKey::Turn(R::GreenDial, 1), TwistKey::Turn(R::GreenDial, -1))),
+                ("Red dial up / down", both(TwistKey::Turn(R::RedDial, 1), TwistKey::Turn(R::RedDial, -1))),
+                ("Slider swipe up / down", "Page Up / Page Down, mouse wheel".to_string()),
+                ("Hint", keys_for(TwistKey::Press(T::Hint))),
+                ("Home", keys_for(TwistKey::Press(T::Home))),
+                ("Check mark", keys_for(TwistKey::Press(T::Check))),
+                ("Volume up / down", both(TwistKey::Press(T::VolumeUp), TwistKey::Press(T::VolumeDown))),
+            ] {
+                ui.label(what);
+                ui.label(keys);
                 ui.end_row();
             }
         });
@@ -1292,6 +1355,7 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
                     ("Saves (EEPROMs)", "From BIOS behaviour; sizes unverified"),
                     ("US BIOS v2.1", "Boots; SpongeBob reaches gameplay"),
                     ("Universal BIOS v1.5", "Powers itself off after ~4 s (unknown input line)"),
+                    ("RockIt Twist", "NOT EMULATED: research preview (controls, packages); game packs are encrypted"),
                 ] {
                     ui.label(part);
                     ui.label(state);

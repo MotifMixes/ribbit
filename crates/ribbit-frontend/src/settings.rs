@@ -82,6 +82,17 @@ pub struct Settings {
     /// The console Leapster games play on from the library ("Leapster",
     /// "Leapster TV", ...; empty: the original Leapster).
     pub library_console: String,
+    /// Console view for the Leapster handhelds (Leapster, L-MAX, Leapster
+    /// 2): the screen inside a drawing of the handheld, with clickable
+    /// controls (see `console_view`). Off by default, Ribbit's usual plain
+    /// screen.
+    pub console_view: bool,
+    /// Console view for the RockIt Twist: on by default (its controls are
+    /// what its research preview is for).
+    pub console_view_twist: bool,
+    /// Console view: show each control's keyboard key on it, as a keycap
+    /// that lights up when pressed.
+    pub console_view_keys: bool,
 }
 
 impl Default for Settings {
@@ -116,6 +127,9 @@ impl Default for Settings {
             flash_before_idle_off: true,
             pause_in_background: true,
             library_console: String::new(),
+            console_view: false,
+            console_view_twist: true,
+            console_view_keys: true,
         }
     }
 }
@@ -157,6 +171,35 @@ pub fn default_keys() -> BTreeMap<String, String> {
     .into_iter()
     .map(|(b, k)| (button_name(b), k.to_string()))
     .collect()
+}
+
+/// A key's name as short as a keycap shows it ("ArrowUp" -> "↑",
+/// "Numpad7" -> "7", "PageUp" -> "PgUp").
+pub fn cap_text(name: &str) -> String {
+    match name {
+        "ArrowUp" => "↑".into(),
+        "ArrowDown" => "↓".into(),
+        "ArrowLeft" => "←".into(),
+        "ArrowRight" => "→".into(),
+        "NumpadMultiply" => "*".into(),
+        "NumpadSubtract" | "Minus" => "-".into(),
+        "Equal" => "=".into(),
+        "PageUp" => "PgUp".into(),
+        "PageDown" => "PgDn".into(),
+        "Backspace" => "Bksp".into(),
+        "ShiftLeft" | "ShiftRight" => "Shift".into(),
+        "ControlLeft" => "Ctrl".into(),
+        "AltLeft" => "Alt".into(),
+        "NumpadEnter" => "Enter".into(),
+        "Semicolon" => ";".into(),
+        "Quote" => "'".into(),
+        "Comma" => ",".into(),
+        "Period" => ".".into(),
+        "Slash" => "/".into(),
+        "BracketLeft" => "[".into(),
+        "BracketRight" => "]".into(),
+        n => n.strip_prefix("Numpad").map(str::to_string).unwrap_or_else(|| key_label(n)),
+    }
 }
 
 /// Keys that can be bound, by name.
@@ -323,6 +366,11 @@ mod tests {
         assert_eq!(s.button_for(KeyCode::KeyZ), Some(Button::B));
         assert_eq!(s.key_for(Button::A), None, "the key moved to B");
         assert!(default_keys().values().all(|k| key_from_name(k).is_some()));
+        assert_eq!(
+            (cap_text("ArrowUp").as_str(), cap_text("KeyZ").as_str(), cap_text("Numpad7").as_str()),
+            ("↑", "Z", "7")
+        );
+        assert_eq!(cap_text("PageDown"), "PgDn");
     }
 
     #[test]
@@ -340,5 +388,18 @@ mod tests {
     fn partial_files_fill_in_defaults() {
         let s: Settings = toml::from_str("volume = 0.25").unwrap();
         assert_eq!((s.volume, s.window_scale), (0.25, 0));
+        assert!(!s.console_view, "the Leapster's is off unless chosen");
+        assert!(s.console_view_twist, "the RockIt Twist's is on unless turned off");
+    }
+
+    #[test]
+    fn console_view_choice_is_kept() {
+        let dir = std::env::temp_dir().join(format!("ribbit-settings-{}", std::process::id()));
+        let path = dir.join("settings.toml");
+        let s = Settings { console_view: true, console_view_twist: false, ..Default::default() };
+        s.save(&path).unwrap();
+        let back = Settings::load(&path);
+        assert!(back.console_view && !back.console_view_twist);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

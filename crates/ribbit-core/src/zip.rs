@@ -48,9 +48,8 @@ struct Entry {
     local: usize,
 }
 
-/// The ROM file in a zip archive: the largest entry with a ROM extension,
-/// else the largest file.
-pub fn extract_image(d: &[u8]) -> Result<Vec<u8>, ZipError> {
+/// The archive's entries, from its central directory.
+fn entries(d: &[u8]) -> Result<Vec<Entry>, ZipError> {
     // End of central directory: the last 22+ bytes (plus a comment).
     let from = d.len().saturating_sub(22 + 0xFFFF);
     let eocd = (from..=d.len().saturating_sub(22))
@@ -77,6 +76,13 @@ pub fn extract_image(d: &[u8]) -> Result<Vec<u8>, ZipError> {
         });
         at += 46 + skip;
     }
+    Ok(entries)
+}
+
+/// The ROM file in a zip archive: the largest entry with a ROM extension,
+/// else the largest file.
+pub fn extract_image(d: &[u8]) -> Result<Vec<u8>, ZipError> {
+    let entries = entries(d)?;
     let is_image = |e: &Entry| {
         let ext = e.name.rsplit_once('.').map_or("", |(_, x)| x);
         IMAGE_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(ext))
@@ -88,6 +94,18 @@ pub fn extract_image(d: &[u8]) -> Result<Vec<u8>, ZipError> {
         .max_by_key(|e| e.size)
         .or_else(|| files.max_by_key(|e| e.size))
         .ok_or(ZipError::NoImage)?;
+    read_entry(d, entry)
+}
+
+/// The file called `name` (its full path in the archive, any case), such
+/// as a system package's "Firmware/meta.inf".
+pub fn extract_named(d: &[u8], name: &str) -> Result<Vec<u8>, ZipError> {
+    let entries = entries(d)?;
+    let entry = entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)).ok_or(ZipError::NoImage)?;
+    read_entry(d, entry)
+}
+
+fn read_entry(d: &[u8], entry: &Entry) -> Result<Vec<u8>, ZipError> {
     if entry.size > MAX_IMAGE {
         return Err(ZipError::Damaged("entry too large"));
     }
@@ -170,6 +188,15 @@ mod tests {
         let readme = vec![b'x'; 900];
         let z = zip(&[("readme.txt", &readme, true), ("Game (USA).bin", &rom, true)]);
         assert_eq!(unzip_image(z).unwrap(), rom);
+    }
+
+    #[test]
+    fn named_files_are_found() {
+        let meta = b"Device=\"PocketPlay\"".to_vec();
+        let z =
+            zip(&[("Firmware/", &[], false), ("Firmware/meta.inf", &meta, true), ("Firmware/System", &[1; 64], false)]);
+        assert_eq!(extract_named(&z, "firmware/META.inf").unwrap(), meta);
+        assert_eq!(extract_named(&z, "Firmware/Boot"), Err(ZipError::NoImage));
     }
 
     #[test]

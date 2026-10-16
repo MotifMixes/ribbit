@@ -5,6 +5,7 @@
 pub mod app;
 mod audio_out;
 mod calibrate;
+mod console_view;
 mod discord;
 mod emu;
 mod files;
@@ -12,12 +13,14 @@ mod files;
 mod gamepad;
 mod fonts;
 mod gpu;
+mod held;
 mod icon;
 mod library;
 mod perf;
 pub mod saves;
 pub mod settings;
 mod ui;
+mod twist;
 pub mod upscale;
 mod zippity;
 

@@ -29,6 +29,12 @@ crates/
   ribbit-input/            buttons -> GIODataIn, touch state
   ribbit-debug/            logging setup, hexdump, breakpoints, trace ring
   ribbit-core/             Machine: wiring, run loop, reset, render, config, image loading
+  ribbit-arm/              ARM9 (ARMv5TE) processor model (Zippity; RockIt Twist research)
+  ribbit-zippity/          LeapFrog Zippity machine (GeneralPlus GPL32300A)
+  ribbit-twist/            LeapFrog RockIt Twist research: controls, package/firmware formats, boot probe
+                           (NOT an emulator yet; docs/rockit-twist.md)
+  ribbit-frontend/         UI shared by desktop and Android; console_view.rs draws each console's handheld
+                           (layouts as data) around the screen: presentation only, never in a core
   ribbit-desktop/          `ribbit` binary: CLI + headless runner + winit/wgpu window
 docs/                      this documentation
 ```
