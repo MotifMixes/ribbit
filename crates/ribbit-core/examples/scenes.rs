@@ -13,6 +13,9 @@
 //!   save PATH / load PATH   save state
 //!   label TEXT          name the following part of the report
 //!   digest [NAME]       print the machine state digest (for comparing builds)
+//!   watch ADDR MS       single-step MS, printing each change of the word at ADDR and the PC
+//!   bptrace PC MS [rN..] print registers (default r0-r3, blink) each time PC runs
+//!   logtrace PC rF MS   print a printf-style debug log call (format in rF, args after)
 //!   tvdump PATH         write the L-MAX TV chip's memory (RIBBIT_LMAX_TV=1)
 //! RIBBIT_MAME_GPIO=1 reads unresolved GPIO lines as 1 (MAME's workaround).
 //! Every 250 ms of emulated time prints the speed (percent of real time at
@@ -202,6 +205,101 @@ fn main() {
                             last_rect = Some(rect);
                             n += 1;
                         }
+                    }
+                }
+            }
+            Some("bptrace") => {
+                // bptrace PC MS [r..]: each time PC runs within MS, print the time
+                // and the given registers (default r0-r3, blink).
+                let pc = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let regs: Vec<usize> = if w.len() > 3 { w[3..].iter().map(|r| r.trim_start_matches('r').parse().unwrap()).collect() } else { vec![0, 1, 2, 3, 31] };
+                let mut bp = Breakpoints::default();
+                bp.add(pc);
+                let end = m.cpu.cycles + num(2, 1000) * (m.clock.cpu_hz / 1000);
+                let mut hits = 0;
+                while m.cpu.cycles < end && hits < 100000 {
+                    if m.cpu.pc == pc {
+                        m.run(1, &Breakpoints::default());
+                    }
+                    m.run(end - m.cpu.cycles, &bp);
+                    if m.cpu.pc == pc {
+                        hits += 1;
+                        print!("{:10.3} ms", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64);
+                        for &r in &regs {
+                            print!("  r{r}={:08x}", m.cpu.regs[r]);
+                        }
+                        println!();
+                    }
+                }
+            }
+            Some("logtrace") => {
+                // logtrace PC FMTREG MS: each time PC runs, print the printf-style
+                // string in register FMTREG with the following registers as its
+                // arguments (a game's debug log).
+                let pc = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let fr: usize = w[2].trim_start_matches('r').parse().unwrap();
+                let mut bp = Breakpoints::default();
+                bp.add(pc);
+                let end = m.cpu.cycles + num(3, 1000) * (m.clock.cpu_hz / 1000);
+                let cstr = |m: &Machine, a: u32| {
+                    let mut v = vec![];
+                    for i in 0..200 {
+                        match m.bus.peek8(a + i) {
+                            Some(0) | None => break,
+                            Some(c) => v.push(c),
+                        }
+                    }
+                    String::from_utf8_lossy(&v).into_owned()
+                };
+                while m.cpu.cycles < end {
+                    if m.cpu.pc == pc {
+                        m.run(1, &Breakpoints::default());
+                    }
+                    m.run(end - m.cpu.cycles, &bp);
+                    if m.cpu.pc != pc {
+                        continue;
+                    }
+                    let fmt = cstr(&m, m.cpu.regs[fr]);
+                    let (mut out, mut arg, mut it) = (String::new(), fr + 1, fmt.chars().peekable());
+                    while let Some(c) = it.next() {
+                        if c != '%' {
+                            out.push(c);
+                            continue;
+                        }
+                        let mut spec = String::new();
+                        while let Some(&d) = it.peek() {
+                            it.next();
+                            if d.is_ascii_alphabetic() || d == '%' {
+                                spec.push(d);
+                                break;
+                            }
+                        }
+                        let v = if arg < 8 { m.cpu.regs[arg] } else { 0 };
+                        arg += 1;
+                        match spec.as_str() {
+                            "s" => out.push_str(&cstr(&m, v)),
+                            "x" | "X" | "p" => out.push_str(&format!("{v:x}")),
+                            "%" => out.push('%'),
+                            _ => out.push_str(&format!("{}", v as i32)),
+                        }
+                    }
+                    println!("{:10.3} ms  {}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, out.trim_end());
+                }
+            }
+            Some("watch") => {
+                // watch ADDR MS: single-step for MS, printing each change of the
+                // 32-bit word at ADDR with the PC that changed it.
+                let addr = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let rd = |m: &Machine| (0..4).fold(0u32, |v, i| v | (m.bus.peek8(addr + i).unwrap_or(0) as u32) << (8 * i));
+                let end = m.cpu.cycles + num(2, 1000) * (m.clock.cpu_hz / 1000);
+                let (mut last, none) = (rd(&m), Breakpoints::default());
+                while m.cpu.cycles < end {
+                    let pc = m.cpu.pc;
+                    m.run(1, &none);
+                    let v = rd(&m);
+                    if v != last {
+                        println!("{:10.3} ms  [{addr:08x}] {last:08x} -> {v:08x}  pc {pc:08x}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64);
+                        last = v;
                     }
                 }
             }

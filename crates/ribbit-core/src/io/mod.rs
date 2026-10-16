@@ -323,7 +323,7 @@ impl Peripherals {
     pub fn next_event(&self) -> u64 {
         let timers = self.timers.iter().map(|t| t.ticks_to_wrap()).min().unwrap_or(u64::MAX);
         let touch = self.touch.as_ref().map_or(u64::MAX, |t| t.ticks_to_next_update());
-        timers.min(touch)
+        timers.min(touch).min(self.uart.ticks_to_ready())
     }
 
     /// Advances all devices by `ticks` peripheral-clock counts.
@@ -331,6 +331,7 @@ impl Peripherals {
         for t in &mut self.timers {
             t.advance(ticks, cpu_halted);
         }
+        self.uart.advance(ticks);
         if let Some(t) = &mut self.touch {
             t.advance(ticks, &mut self.adc, &mut self.intc);
         }
@@ -344,6 +345,7 @@ impl Peripherals {
             | 1 << intc::ADC_IRQ_LINE
             | 1 << intc::VOICE_ACK_IRQ_LINE
             | 1 << tv_link::IRQ_LINE
+            | 1 << uart::IRQ_LINE
     }
 
     /// Levels of the lines in `irq_mask` (same values as `irq_outputs`).
@@ -357,6 +359,7 @@ impl Peripherals {
         l |= (self.intc.adc_line() as u32) << intc::ADC_IRQ_LINE;
         l |= (self.intc.voice_ack_line() as u32) << intc::VOICE_ACK_IRQ_LINE;
         l |= (self.tv_link.as_ref().is_some_and(|t| t.irq_line()) as u32) << tv_link::IRQ_LINE;
+        l |= (self.uart.irq_line() as u32) << uart::IRQ_LINE;
         l
     }
 
@@ -371,6 +374,7 @@ impl Peripherals {
             .chain(std::iter::once((intc::ADC_IRQ_LINE, self.intc.adc_line())))
             .chain(std::iter::once((intc::VOICE_ACK_IRQ_LINE, self.intc.voice_ack_line())))
             .chain(std::iter::once((tv_link::IRQ_LINE, self.tv_link.as_ref().is_some_and(|t| t.irq_line()))))
+            .chain(std::iter::once((uart::IRQ_LINE, self.uart.irq_line())))
     }
 
     #[cfg(test)]
