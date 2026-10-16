@@ -18,17 +18,17 @@ use std::process::ExitCode;
 #[command(
     name = "ribbit",
     version,
-    about = "Original LeapFrog Leapster emulator (in development; does not run games yet)"
+    about = "Original LeapFrog Leapster emulator"
 )]
 struct Cli {
     /// TOML configuration file (paths may also be given per command).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Default)]
 struct Images {
     /// System firmware ("BaseROM") dumped from your own Leapster.
     #[arg(long)]
@@ -173,7 +173,8 @@ fn real_main() -> Result<ExitCode> {
     };
     ribbit_debug::init_logging(config.log_filter.as_deref().unwrap_or("info"));
 
-    match cli.command {
+    // No command: open the window.
+    match cli.command.unwrap_or(Command::Run(Images::default())) {
         Command::Info(images) => {
             let (fw, cart) = resolve(&images, &config);
             if fw.is_none() && cart.is_none() {
