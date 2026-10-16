@@ -287,6 +287,9 @@ const TIMER_HZ: u64 = 32_768;
 /// How often the radio receiver sends the controllers' state: UNKNOWN; once
 /// a frame here.
 const RADIO_PERIOD: u64 = FRAME;
+/// The controllers' state with nothing pressed: the buttons are active-low
+/// (the kernel turns 1-to-0 changes into presses; 0x3FF is all released).
+const PAD_IDLE: u16 = 0x3FF;
 /// The serial port's receive FIFO size (16 assumed, as in ARM's PL011).
 const RX_FIFO: usize = 16;
 /// The 0xD0800000 engine's completion interrupt line.
@@ -355,7 +358,7 @@ impl Bus {
         // kernel's decoder at 0x2B154).
         if self.now >= self.radio_due {
             self.radio_due = self.now + RADIO_PERIOD;
-            let state = self.pad.iter().find(|p| (p.1..p.2).contains(&self.now)).map_or(0, |p| p.0);
+            let state = self.pad.iter().find(|p| (p.1..p.2).contains(&self.now)).map_or(PAD_IDLE, |p| p.0);
             let a = ((state >> 5) & 31) << 11 | (state & 31) << 3;
             for b in [a as u8, (a >> 8) as u8, (a ^ 1) as u8, ((a ^ 1) >> 8) as u8] {
                 if self.rx.len() < RX_FIFO {

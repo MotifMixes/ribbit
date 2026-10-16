@@ -191,10 +191,32 @@ a 16-bit word A, little-endian, then A ^ 1. The state is 10 bits: A's bits
 15-11 become bits 9-5 and A's bits 7-3 bits 4-0 (A's bits 10-8 and 2-1 are
 not used). When the state changes, it is queued as an event. With no packets
 the menu shows a picture of the mat and joystick with radio waves (asking for
-them to be switched on); with packets of state 0 it does not, and the start-up
-goes on to the "Sign In" menu as in the recording. How often the receiver
-sends, and which bit is which button, are UNKNOWN (the research tool sends
-once a frame; `ZIPBOOT_PAD=state:from:to` sets the state).
+them to be switched on); with packets it does not, and the start-up goes on
+to the "Sign In" menu as in the recording. How often the receiver sends is
+UNKNOWN (the research tool sends once a frame; `ZIPBOOT_PAD=state:from:to`
+sets the state).
+
+The buttons are active-low: 0x3FF is nothing pressed. Each frame the kernel
+(0x2C358) compares the state with the last one and keeps a mask of bits that
+went from 1 to 0 (pressed, 0x2D29B8: tested in 103 places) and from 0 to 1
+(released, 0x2D29C4: tested in one), and the menus also test bits held low.
+Found by pressing each bit on the menus:
+
+| Bit | Button | How it was found |
+|---|---|---|
+| 0 | Joystick up | "Sign In": the highlight moves up |
+| 1 | Joystick down | "Sign In": the highlight moves down |
+| 2 | Joystick left | Player screen: the highlight moves left (to the cancel button) |
+| 3 | Joystick right | Player screen: the highlight moves right (to OK) |
+| 4 | UNKNOWN | Shows a panel with a forward arrow over the menu |
+| 5, 6 | UNKNOWN | No effect on these two screens |
+| 7 | Choose | "Sign In": chooses the player, and the player screen follows as in the recording (the name at the top; Learning Path, back, cancel and OK) |
+| 8, 9 | UNKNOWN | No effect; only ever tested as held, alone or together (0x300) |
+
+The kernel tests bits 5-7 together (0xE0) and bits 0-3 together (0xF). A
+guess (UNVERIFIED) is that bits 5-7 are the mat's red, green and blue pads,
+bits 8 and 9 its two foot pads (both held: standing on the mat), and bit 4
+the button on top of the joystick.
 
 ## DMA controller (0xD0300000)
 
@@ -333,13 +355,11 @@ only its renderer reads: the first corner (halfwords 1 and 2), the third
 corner (5 and 6) and 0x8000 (7); its renderer scales the sprite to that
 rectangle. Skewed quads are not handled.
 
-**Open question:** after a player is chosen on "Sign In", the recording
-shows the chosen name's button grown wide at the top and a row of round
-buttons (Learning Path, back, cancel, forward). The research tool shows the
-name's ellipse at the top and, below it, a 320x192 panel of direct-colour
-sprites (a blue gradient) with the forward button on it. No corner converter
-input is scaled there, so how the hardware turns those sprites into the wide
-button is UNKNOWN.
+With the controllers idle (0x3FF), choosing a player gives the screen the
+recording shows: the name's button grows wide at the top, with Learning
+Path, back, cancel and OK below. (Earlier runs sent 0, every button held, and
+showed a large direct-colour panel instead; controller bit 4 still shows that
+panel, and whether it looks right is UNKNOWN.)
 
 ## Research tool
 
@@ -357,6 +377,3 @@ environment variables:
 | `ZIPBOOT_WATCH=lo-hi`, `ZIPBOOT_WATCH_FROM=n` | Log I/O accesses in that range (`watch.log`) |
 | `ZIPBOOT_RWATCH=lo-hi` | Log CPU writes to memory in that range (`rwatch.log`) |
 | `ZIPBOOT_JUMPS[=n]` | Print the last n jumps (600) |
-
-Of the controller bits, only bit 4 has shown an effect so far: on "Sign In"
-it chooses the highlighted player.
