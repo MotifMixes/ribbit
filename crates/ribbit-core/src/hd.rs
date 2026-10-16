@@ -1276,6 +1276,7 @@ mod tests {
         put(&mut mem, 0x08, &0x80u32.to_le_bytes());
         put(&mut mem, 0x10, &[4, 0, 8, 0, 12, 0, 16, 0, 20, 0, 24, 0, 1]);
         put(&mut mem, 0x80 + 0x0C, &0x000A_0002u32.to_le_bytes());
+        put(&mut mem, 0x80 + 0x20, &0x4000_0300u32.to_le_bytes());
         put(&mut mem, 0x80 + 0x24, &[0x10, 0, 0x20, 0, 0x30, 0, 0xFF, 0]);
         // Renderer at 0x100 with rectangle 40..106 x 208..256.
         put(&mut mem, 0x100, &2i32.to_le_bytes());
@@ -1297,7 +1298,7 @@ mod tests {
         assert!(p.edges[0].line);
         assert_eq!(
             p.fills[&0x80],
-            Fill { order: 0x000A_0002, rgba: [0x30, 0x20, 0x10, 0xFF], painter: 0, bitmap: None, gradient: None }
+            Fill { order: 0x000A_0002, rgba: [0x30, 0x20, 0x10, 0xFF], painter: 0x4000_0300, bitmap: None, gradient: None }
         );
     }
 }
