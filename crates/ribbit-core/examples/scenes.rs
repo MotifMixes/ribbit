@@ -492,6 +492,43 @@ fn main() {
                     }
                 }
             }
+            Some("pchist") => {
+                // pchist MS: sample the PC every 10 us for MS; print the top
+                // 256-byte code blocks (where the CPU spends its time).
+                let mut h: std::collections::HashMap<u32, u64> = Default::default();
+                let step = m.clock.cpu_hz / 100_000;
+                let none = Breakpoints::default();
+                for _ in 0..num(1, 100) * 100 {
+                    m.run_cycles(step, &none);
+                    *h.entry(m.cpu.pc & !std::env::var("PCHIST_MASK").map_or(0xFF, |v| u32::from_str_radix(&v, 16).unwrap())).or_default() += 1;
+                }
+                let mut v: Vec<_> = h.into_iter().collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1));
+                for (pc, n) in v.iter().take(12) {
+                    println!("pchist {pc:#010x} {n}");
+                }
+            }
+            Some("adcstat") => {
+                // adcstat: the ADC's conversion counters and slot controls.
+                let a = &m.io.adc;
+                println!("adc conversions {} dropped {} empty reads {} fifo {} controls {:x?} config {:#x}", a.conversions, a.dropped, a.empty_reads, a.fifo.len(), a.controls, a.config);
+            }
+            Some("flashstat") => {
+                // flashstat [PATH]: the Leapster 2 SPI flash's programmed bytes
+                // (and their first offsets); with PATH, write it to a file.
+                if let Some(f) = m.io.spi_flash.as_ref() {
+                    let used: Vec<usize> = (0..f.data.len()).filter(|&i| f.data[i] != 0xFF).collect();
+                    println!("flash {} bytes programmed, first {:x?}", used.len(), &used[..used.len().min(8)]);
+                    if let Some(p) = w.get(1) {
+                        std::fs::write(p, &f.data).unwrap();
+                    }
+                }
+            }
+            Some("flashload") => {
+                // flashload PATH: load the SPI flash from a file (as the frontend does).
+                let data = std::fs::read(w[1]).unwrap();
+                m.io.spi_flash.as_mut().expect("no SPI flash").load(&data);
+            }
             Some("logtrace") => {
                 // logtrace PC FMTREG MS: each time PC runs, print the printf-style
                 // string in register FMTREG with the following registers as its

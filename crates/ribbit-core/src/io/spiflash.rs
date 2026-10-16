@@ -77,7 +77,20 @@ impl Default for SpiFlash {
     }
 }
 
+/// The 4 KB sector holding the touch calibration (Leapster 2 BIOS 0.6).
+/// VERIFIED-FW by experiment (2026-10-16): calibrating writes a 0x30-byte
+/// record there twice (0x1000 and 0x1030, starting 00 01 00 00 40 06 40 06);
+/// a boot with straps bit 14 set (skip calibration) reads it back and touch
+/// works, while with the sector erased the BIOS's calibration matrix stays
+/// all zeros and every tap is dropped. The record's layout is UNKNOWN.
+pub const TOUCH_CALIBRATION: usize = 0x1000;
+
 impl SpiFlash {
+    /// Whether a touch calibration has been saved (see TOUCH_CALIBRATION).
+    pub fn has_touch_calibration(&self) -> bool {
+        self.data[TOUCH_CALIBRATION..TOUCH_CALIBRATION + 0x30].iter().any(|&b| b != 0xFF)
+    }
+
     /// Loads saved contents (shorter data is padded with erased bytes).
     pub fn load(&mut self, bytes: &[u8]) {
         let n = bytes.len().min(SIZE);
@@ -224,6 +237,16 @@ mod tests {
         }
         f.pins(0x30);
         got
+    }
+
+    #[test]
+    fn touch_calibration_is_seen_in_its_sector() {
+        let mut f = SpiFlash::default();
+        assert!(!f.has_touch_calibration(), "erased");
+        let mut image = vec![0xFF; SIZE];
+        image[TOUCH_CALIBRATION..TOUCH_CALIBRATION + 8].copy_from_slice(&[0, 1, 0, 0, 0x40, 6, 0x40, 6]);
+        f.load(&image);
+        assert!(f.has_touch_calibration());
     }
 
     #[test]

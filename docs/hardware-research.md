@@ -1175,6 +1175,13 @@ Results: the Leapster 2 (0.6) accepts all five calibration targets in order and 
 tapped letter and accepts OK (previously no press was ever accepted). US v2.1 and v1.5 calibrate as before
 (tests `v15_touch_calibration_then_splash_screen`, `v21_touch_calibration_then_splash_screen`).
 
+Stored calibration (Leapster 2 0.6, 2026-10-16, by experiment): calibrating writes a 0x30-byte record twice into
+the internal SPI flash's sector at 0x1000 (0x1000 and 0x1030, starting 00 01 00 00 40 06 40 06; layout UNKNOWN). A
+boot with straps bit 14 set (skip calibration) reads it back. With that sector erased, the touch task still reports
+positions (+0xC0/+0xC4) but its calibration matrix (+0x78..+0x90) stays all zero, so every tap is dropped and the
+setup screens only move on by their own timeouts (this looked like a broken name entry). The frontend therefore
+calibrates once when skipping is asked for but no calibration is saved (`Machine::touch_calibration_stored`).
+
 ### Board lines on GIODataIn (VERIFIED-FW)
 
 Every BIOS's SysMgr loads a battery-monitor resource (`kSysMgrRsrcBatteryMonitorConfig`, ID 0x100B_0003):

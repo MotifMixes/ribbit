@@ -341,6 +341,25 @@ impl Machine {
 
     /// `straps`: board configuration (0x0180_9004); bit 26 is overridden by
     /// cartridge presence.
+    /// The straps register value (0x0180_9004), if the machine has one.
+    pub fn straps(&self) -> Option<u32> {
+        self.io.straps.map(|s| s.value)
+    }
+
+    /// Replaces the straps register value before the machine runs (bit 26
+    /// still follows cartridge presence).
+    pub fn set_straps(&mut self, value: u32) {
+        self.io.straps = Some(io::straps::Straps::new(value, self.cartridge.is_some()));
+    }
+
+    /// Whether skipping touch calibration at boot leaves a working touch
+    /// screen: false on a Leapster 2 whose internal flash holds no
+    /// calibration yet (see `io::spiflash::TOUCH_CALIBRATION`). Other models
+    /// are assumed to have one (their storage is not modelled this way).
+    pub fn touch_calibration_stored(&self) -> bool {
+        self.io.spi_flash.as_ref().is_none_or(|f| f.has_touch_calibration())
+    }
+
     pub fn with_straps(firmware: Firmware, cartridge: Option<Cartridge>, straps: u32) -> Self {
         let bus = SystemBus::new(&firmware, cartridge.as_ref());
         let mut io = Peripherals::default();

@@ -251,6 +251,16 @@ impl App {
             saves.cart = Some(p.clone());
         }
         saves.load(&mut machine)?;
+        if self.opts.straps.is_none()
+            && let Some(straps) = machine.straps()
+            && straps & ribbit_core::io::straps::SKIP_CALIBRATION != 0
+            && !machine.touch_calibration_stored()
+        {
+            // A Leapster 2 with no saved calibration ignores every tap when
+            // calibration is skipped: calibrate this once (the BIOS saves it).
+            tracing::info!(target: "ribbit::boot", "no saved touch calibration: calibrating at boot");
+            machine.set_straps(straps & !ribbit_core::io::straps::SKIP_CALIBRATION);
+        }
         let title = match (machine.cartridge(), &cart) {
             (Some(c), Some(path)) => c.known().map(|k| short_name(k.name)).unwrap_or_else(|| {
                 path.file_stem().map_or_else(|| "Cartridge".into(), |s| s.to_string_lossy().into_owned())
