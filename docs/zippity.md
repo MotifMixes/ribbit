@@ -329,7 +329,14 @@ UNVERIFIED on hardware.
   band, recoloured for each screen), 0x10 to 0x2F0 (text) and 0x100 to 0x300
   (the background).
 
-### Text layer 1
+### Text layers
+
+Text layers 1 and 2 have the same registers at +0x40 and +0x58 (scroll x and
+y, attributes, control, tile map, attribute map) and picture bases at +0x80
+and +0x84. The system menu draws its background on layer 1; Mickey Mouse
+Clubhouse draws its clubhouse on layer 2 (attributes 0x00C0A073: the same
+format, priority 2). Layers and sprites are drawn by priority (attribute
+bits 13-12), 0 first: at each level the text layers, then the sprites.
 
 The menu's background is a 640x480 picture at 8 bits per pixel.
 
@@ -356,24 +363,26 @@ Sprite RAM entries are 32 bytes (the kernel keeps a copy of the list at
 | 0-1 | Picture address bits 15-0, in halfwords |
 | 2-3 | x (signed, from the screen's centre, right) |
 | 4-5 | y (signed, from the screen's centre, up): the sprite's top-left corner is at (320 + x, 240 - y) |
-| 6-7 | Attributes: bits 1-0 depth (2/4/6/8 bits), 2 x flip, 3 y flip, 5-4 width and 7-6 height (8 << n), 11-8 palette, 13-12 priority, 15 palette bank (below) |
-| 8 | Bits 6-0: picture address bits 22-16 |
+| 6-7 | Attributes: bits 1-0 depth (2/4/6/8 bits), 2 x flip, 3 y flip, 5-4 width and 7-6 height (8 << n), 11-8 palette, 13-12 priority, 15 palette bank bit 1 (below) |
+| 8 | Bits 6-0: picture address bits 22-16; bit 7 palette bank bit 0 |
 | 9 | Bits 5-0 and 7-6 set by the kernel from its arguments (0x3F seen) |
 | 10-15 | Words written from the corner converter |
 | 19 | Bit 7 set |
 
 - **Pixels** are one bit stream, most significant bit first: the 6-bit Zippity
   logo only comes out right this way.
-- **Colours** are palette entry bank + palette x 16 (rounded down to the
-  depth's size) + the pixel, where the bank is 0x200 if attribute bit 15 is
-  set and 0x100 if not (the menu's blue buttons use 0x100).
+- **Colours** are palette entry 0x100 x bank + palette x 16 (rounded down
+  to the depth's size) + the pixel. The bank is two bits: attribute bit 15
+  and byte 8 bit 7. Found by matching recordings: the menus' background art
+  and text are bank 2, the buttons and game pictures bank 1, Pooh's picture
+  on the game-select ring bank 0, and Mickey Mouse Clubhouse's characters
+  bank 3 (with banks 2 or 1 they come out black or in false colours).
 - **16-bit pixels:** a sprite of depth 8 with palette bit 0 set (0x99F3,
   0x29F3, 0x33F3) has 16 bits per pixel, decided pixel by pixel:
   - **Bit 14 set:** bits 7-0 are a colour from the bank, with an opacity.
-    From bank 0x200 (attribute bit 15 set) the opacity is bits 13-8 (0 to
-    63): the menus' background art, a 64-pixel grid of these sprites, is
+    In bank 2 the opacity is bits 13-8 (0 to 63): the menus' background art, a 64-pixel grid of these sprites, is
     blended over text layer 1 this way, and recolouring entries 0x200-0x27F
-    gives each screen its colour. From bank 0x100 the pixel is solid unless
+    gives each screen its colour. In the other banks the pixel is solid unless
     bit 13 is set, and then bits 12-8 (0 to 31) are the opacity: the game
     pictures on the game-select ring are all 0x18 in bits 13-8 and look
     solid in recordings. Colours whose palette entry has bit 15 set are
@@ -384,8 +393,6 @@ Sprite RAM entries are 32 bytes (the kernel keeps a copy of the list at
 
   Which attribute bit selects 16-bit pixels, and the two opacity encodings,
   are UNVERIFIED.
-- **Byte 8 bit 7** is set on some sprites (e.g. game pictures). It is not an
-  address bit (nothing is there); its meaning is UNKNOWN.
 - **Count:** only the first (control bits 15-8) x 4 entries are drawn; the
   rest of sprite RAM holds stale entries from earlier screens.
 - **Order:** priority 0 to 3, and within a priority later sprites on top.
@@ -412,8 +419,17 @@ Choosing OK on the player screen (right, then choose) logs "Already ran
 tutorial for player..." and goes on to the game-select screen as in the
 recording: the Zippity logo, the Playhouse Disney ears and a ring of game
 pictures in bubbles that turns. The pictures are shrunk through the corner
-converter (64x64 to 39x39 at the back of the ring). Still wrong: only the top
-part of each picture shows, and a patch next to the logo is noise.
+converter (64x64 to 39x39 at the back of the ring). Still wrong: each picture
+shows as a wide strip (the recording shows taller bubbles, bodies and all),
+the game titles under the front picture are missing (their sprites are sent
+to the converter as a single point), and a patch next to the logo is noise.
+
+Choosing the front game (Mickey Mouse Clubhouse) loads its kernel, which logs
+"Loading with init_tv as: 0", mounts the file system again, reads the
+player's save (MMCH.P01: "MMCH: player_name: [MATTHEW]") and shows the game's
+menu: Mickey, Minnie and Goofy in the clubhouse with "Mickey Says", back and
+"Goofy's Fancy Dancing", and the player's score. The research tool draws it
+as a recording of a real unit shows it.
 
 ## Research tool
 

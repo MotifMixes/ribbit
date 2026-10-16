@@ -99,7 +99,16 @@ impl Snapshot {
             sram: bus.sram.clone(),
             iram: bus.iram.clone(),
             io: bus.io.iter().map(|(a, e)| (*a, e.last_write)).collect(),
-            nand: (n.port, n.column, n.row, n.buf.clone(), n.cursor, n.dma_addr, n.dma_len, n.regs.iter().map(|(a, v)| (*a, *v)).collect()),
+            nand: (
+                n.port,
+                n.column,
+                n.row,
+                n.buf.clone(),
+                n.cursor,
+                n.dma_addr,
+                n.dma_len,
+                n.regs.iter().map(|(a, v)| (*a, *v)).collect(),
+            ),
             video_status: bus.video_status,
             dma_status: bus.dma_status,
             gfx_done: bus.gfx_done,
@@ -434,11 +443,7 @@ impl Bus {
     /// bit 4-n masks line n (0xF written at start, then 0xB).
     fn pending_fiq(&self) -> u32 {
         let mask = self.latch(0xD010_0034);
-        if self.beat_flag && mask & (1 << 2) == 0 {
-            2
-        } else {
-            0
-        }
+        if self.beat_flag && mask & (1 << 2) == 0 { 2 } else { 0 }
     }
 
     /// The CPU's IRQ input: a pending line, interrupts not disabled at the
@@ -626,7 +631,13 @@ impl Bus {
             // bit 4 receive FIFO empty, bit 5 transmit FIFO full (never),
             // bit 15 receive interrupt.
             (0xC006_0000, None) => self.rx.pop_front().unwrap_or(0) as u32,
-            (0xC006_0010, None) => if self.rx.is_empty() { 0x10 } else { 0x8000 },
+            (0xC006_0010, None) => {
+                if self.rx.is_empty() {
+                    0x10
+                } else {
+                    0x8000
+                }
+            }
             (0xC006_0000, Some(v)) => {
                 self.uart.push(v as u8 as char);
                 0
@@ -795,119 +806,135 @@ impl Bus {
     /// what the system menu uses is decoded (docs/zippity.md): text layer 1
     /// as an 8-bit bitmap, and sprites. Everything here is UNVERIFIED on
     /// hardware; it matches recordings of the start-up screens.
-    fn render(&self) -> Vec<u8> {
-        let mut img = vec![0u8; SCREEN_W * SCREEN_H * 3];
-        // Palette RAM (0xD0501000): 16-bit colours, two per word.
-        let pal: Vec<u16> = (0..2048u32).map(|i| (self.latch(0xD050_1000 + i / 2 * 4) >> (16 * (i & 1))) as u16).collect();
-
-        // Text layer 1: +0x40/+0x44 scroll, +0x48 attributes, +0x4C control
-        // (bit 3 on), +0x50 tile map (32-bit entries: the tile's byte offset
-        // from the base at +0x80, 0 for none), pages of 1024x512 pixels.
-        let attr = self.latch(0xD050_0048);
-        if self.latch(0xD050_004C) & 8 != 0 && attr & 3 == 3 {
-            let (map, base) = (self.latch(0xD050_0050), self.latch(0xD050_0080));
-            let (tw, th) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
-            // Bits 23-22 pick the palette's 256-colour bank (0x300 seen).
-            let bank = ((attr >> 22) & 3) * 0x100;
-            let (sx, sy) = (self.latch(0xD050_0040), self.latch(0xD050_0044));
-            for y in 0..SCREEN_H as u32 {
-                for x in 0..SCREEN_W as u32 {
-                    let (px, py) = ((x + sx) % 1024, (y + sy) % 512);
-                    let entry = self.peek32(map + ((py / th) * (1024 / tw) + px / tw) * 4);
-                    if entry == 0 {
-                        continue;
-                    }
-                    let c = pal[(bank + self.peek8(base + entry + (py % th) * tw + px % tw) as u32) as usize & 2047];
-                    if c & 0x8000 == 0 {
-                        let o = (y as usize * SCREEN_W + x as usize) * 3;
-                        img[o..o + 3].copy_from_slice(&rgb555(c));
-                    }
+    /// Draws a text layer (registers at +reg: +0/+4 scroll, +8 attributes,
+    /// +0xC control (bit 3 on), +0x10 tile map (32-bit entries: the tile's
+    /// byte offset from the picture base, 0 for none), pages of 1024x512
+    /// pixels). Only 8-bit tiles are decoded.
+    fn draw_text(&self, img: &mut [u8], pal: &[u16], reg: u32, base_reg: u32) {
+        let attr = self.latch(0xD050_0008 + reg);
+        if self.latch(0xD050_000C + reg) & 8 == 0 || attr & 3 != 3 {
+            return;
+        }
+        let (map, base) = (self.latch(0xD050_0010 + reg), self.latch(0xD050_0000 + base_reg));
+        let (tw, th) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
+        // Bits 23-22 pick the palette's 256-colour bank (0x300 seen).
+        let bank = ((attr >> 22) & 3) * 0x100;
+        let (sx, sy) = (self.latch(0xD050_0000 + reg), self.latch(0xD050_0004 + reg));
+        for y in 0..SCREEN_H as u32 {
+            for x in 0..SCREEN_W as u32 {
+                let (px, py) = ((x + sx) % 1024, (y + sy) % 512);
+                let entry = self.peek32(map + ((py / th) * (1024 / tw) + px / tw) * 4);
+                if entry == 0 {
+                    continue;
+                }
+                let c = pal[(bank + self.peek8(base + entry + (py % th) * tw + px % tw) as u32) as usize & 2047];
+                if c & 0x8000 == 0 {
+                    let o = (y as usize * SCREEN_W + x as usize) * 3;
+                    img[o..o + 3].copy_from_slice(&rgb555(c));
                 }
             }
         }
+    }
+
+    fn render(&self) -> Vec<u8> {
+        let mut img = vec![0u8; SCREEN_W * SCREEN_H * 3];
+        // Palette RAM (0xD0501000): 16-bit colours, two per word.
+        let pal: Vec<u16> =
+            (0..2048u32).map(|i| (self.latch(0xD050_1000 + i / 2 * 4) >> (16 * (i & 1))) as u16).collect();
 
         // Sprites (control +0x108, bit 0 on): up to 512 entries of 32 bytes at
         // 0xD0502000. Halfword 0 and byte 8 bits 6-0: the picture's address
         // in halfwords; halfwords 1 and 2: x and y; halfword 3: attributes
         // (bits 1-0 depth 2/4/6/8 bits, 2/3 flips, 5-4 width and 7-6 height
-        // 8 << n, 11-8 palette, 13-12 priority, 15 palette bank: colours
-        // from 0x200 if set, 0x100 if clear).
-        if self.latch(0xD050_0108) & 1 == 0 {
-            return img;
-        }
+        // 8 << n, 11-8 palette, 13-12 priority, 15 palette bank bit 1);
+        // byte 8 bit 7: palette bank bit 0. Colours come from 0x100 x bank.
+        let sprites_on = self.latch(0xD050_0108) & 1 != 0;
         let half = |n: u32, k: u32| (self.latch(0xD050_2000 + n * 32 + k / 2 * 4) >> (16 * (k & 1))) as u16;
         // Control bits 15-8: the number of sprites drawn, in fours (the
         // kernel sends that many entries by DMA each frame; later ones are
         // stale).
-        let count = ((self.latch(0xD050_0108) >> 8) & 0xFF) * 4;
-        let mut order: Vec<(u16, u32)> =
-            (0..count.min(512)).filter(|&n| half(n, 0) != 0 || half(n, 4) & 0x7F != 0).map(|n| ((half(n, 3) >> 12) & 3, n)).collect();
+        let count = if sprites_on { ((self.latch(0xD050_0108) >> 8) & 0xFF) * 4 } else { 0 };
+        let mut order: Vec<(u16, u32)> = (0..count.min(512))
+            .filter(|&n| half(n, 0) != 0 || half(n, 4) & 0x7F != 0)
+            .map(|n| ((half(n, 3) >> 12) & 3, n))
+            .collect();
         order.sort();
-        for (_, n) in order {
-            let attr = half(n, 3) as u32;
-            let addr = (half(n, 0) as u32 | (half(n, 4) as u32 & 0x7F) << 16) * 2;
-            let x0 = SCREEN_W as i32 / 2 + half(n, 1) as i16 as i32;
-            let y0 = SCREEN_H as i32 / 2 - half(n, 2) as i16 as i32;
-            let (w, h) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
-            // The size on screen: the corner converter's third corner (this
-            // tool's own encoding, see the converter), or the picture's.
-            let (sw, sh) = if half(n, 7) == 0x8000 {
-                let x2 = SCREEN_W as i32 / 2 + half(n, 5) as i16 as i32;
-                let y2 = SCREEN_H as i32 / 2 - half(n, 6) as i16 as i32;
-                ((x2 - x0 + 1).max(0) as u32, (y2 - y0 + 1).max(0) as u32)
-            } else {
-                (w, h)
-            };
-            // 8 bits with palette bit 0 set: 16 bits per pixel. A pixel with
-            // bit 14 set is a colour (bits 7-0, from the bank) and an
-            // opacity (below); otherwise it is the colour itself,
-            // RGB 5:5:5, 0 transparent (bit 15 is set in some light pixels;
-            // its meaning is UNKNOWN).
-            let wide = attr & 3 == 3 && attr & 0x100 != 0;
-            let bpp = if wide { 16 } else { 2 * ((attr & 3) + 1) };
-            let bank = if attr & 0x8000 != 0 { 0x200 } else { 0x100 };
-            let pal_base = bank + ((((attr >> 8) & 15) << 4) >> bpp << bpp);
-            for sy in 0..sh {
-                for sx in 0..sw {
-                    let (px, py) = (sx * w / sw, sy * h / sh);
-                    let x = x0 + if attr & 4 != 0 { (sw - 1 - sx) as i32 } else { sx as i32 };
-                    let y = y0 + if attr & 8 != 0 { (sh - 1 - sy) as i32 } else { sy as i32 };
-                    if x < 0 || y < 0 || x >= SCREEN_W as i32 || y >= SCREEN_H as i32 {
-                        continue;
-                    }
-                    let o = (y as usize * SCREEN_W + x as usize) * 3;
-                    let a = addr + (py * w + px) * 2;
-                    let v = if wide { self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8 } else { 0 };
-                    if wide && v & 0x4000 == 0 {
-                        if v != 0 {
-                            img[o..o + 3].copy_from_slice(&rgb555(v as u16 & 0x7FFF));
-                        }
-                    } else if wide {
-                        // The opacity's encoding depends on the bank: from 0x200,
-                        // bits 13-8 (0-63; the menus' background art, which
-                        // fades through it); from 0x100, opaque unless bit 13
-                        // is set, then bits 12-8 (0-31; the game pictures,
-                        // all 0x18 with bit 13 clear, are solid in
-                        // recordings). UNVERIFIED.
-                        let (alpha, full) = if bank == 0x200 {
-                            ((v >> 8) & 63, 63)
-                        } else if v & 0x2000 != 0 {
-                            ((v >> 8) & 31, 31)
-                        } else {
-                            (1, 1)
-                        };
-                        let raw = pal[(bank + (v & 0xFF)) as usize];
-                        if bank == 0x100 && raw & 0x8000 != 0 {
+        // Layers are drawn by priority, 0 first: at each, the text layers
+        // (attributes bits 13-12) and then the sprites. Text layers 1 and 2
+        // (registers at +0x40 and +0x58, picture bases at +0x80 and +0x84).
+        for d in 0..4u16 {
+            for (reg, base_reg) in [(0x40, 0x80), (0x58, 0x84)] {
+                if (self.latch(0xD050_0008 + reg) >> 12) & 3 == d as u32 {
+                    self.draw_text(&mut img, &pal, reg, base_reg);
+                }
+            }
+            for &(_, n) in order.iter().filter(|o| o.0 == d) {
+                let attr = half(n, 3) as u32;
+                let addr = (half(n, 0) as u32 | (half(n, 4) as u32 & 0x7F) << 16) * 2;
+                let x0 = SCREEN_W as i32 / 2 + half(n, 1) as i16 as i32;
+                let y0 = SCREEN_H as i32 / 2 - half(n, 2) as i16 as i32;
+                let (w, h) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
+                // The size on screen: the corner converter's third corner (this
+                // tool's own encoding, see the converter), or the picture's.
+                let (sw, sh) = if half(n, 7) == 0x8000 {
+                    let x2 = SCREEN_W as i32 / 2 + half(n, 5) as i16 as i32;
+                    let y2 = SCREEN_H as i32 / 2 - half(n, 6) as i16 as i32;
+                    ((x2 - x0 + 1).max(0) as u32, (y2 - y0 + 1).max(0) as u32)
+                } else {
+                    (w, h)
+                };
+                // 8 bits with palette bit 0 set: 16 bits per pixel. A pixel with
+                // bit 14 set is a colour (bits 7-0, from the bank) and an
+                // opacity (below); otherwise it is the colour itself,
+                // RGB 5:5:5, 0 transparent (bit 15 is set in some light pixels;
+                // its meaning is UNKNOWN).
+                let wide = attr & 3 == 3 && attr & 0x100 != 0;
+                let bpp = if wide { 16 } else { 2 * ((attr & 3) + 1) };
+                let bank = ((attr >> 15) << 1 | ((half(n, 4) as u32 >> 7) & 1)) * 0x100;
+                let pal_base = bank + ((((attr >> 8) & 15) << 4) >> bpp << bpp);
+                for sy in 0..sh {
+                    for sx in 0..sw {
+                        let (px, py) = (sx * w / sw, sy * h / sh);
+                        let x = x0 + if attr & 4 != 0 { (sw - 1 - sx) as i32 } else { sx as i32 };
+                        let y = y0 + if attr & 8 != 0 { (sh - 1 - sy) as i32 } else { sy as i32 };
+                        if x < 0 || y < 0 || x >= SCREEN_W as i32 || y >= SCREEN_H as i32 {
                             continue;
                         }
-                        let c = rgb555(raw);
-                        for k in 0..3 {
-                            img[o + k] = ((c[k] as u32 * alpha + img[o + k] as u32 * (full - alpha)) / full) as u8;
-                        }
-                    } else {
-                        let c = pal[(pal_base + self.pixel(addr, bpp, py * w + px)) as usize & 2047];
-                        if c & 0x8000 == 0 {
-                            img[o..o + 3].copy_from_slice(&rgb555(c));
+                        let o = (y as usize * SCREEN_W + x as usize) * 3;
+                        let a = addr + (py * w + px) * 2;
+                        let v = if wide { self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8 } else { 0 };
+                        if wide && v & 0x4000 == 0 {
+                            if v != 0 {
+                                img[o..o + 3].copy_from_slice(&rgb555(v as u16 & 0x7FFF));
+                            }
+                        } else if wide {
+                            // The opacity's encoding depends on the bank: in bank
+                            // 2, bits 13-8 (0-63; the menus' background art,
+                            // which fades through it); in the others, opaque
+                            // unless bit 13 is set, then bits 12-8 (0-31; the
+                            // game pictures, all 0x18 with bit 13 clear, are
+                            // solid in recordings). UNVERIFIED.
+                            let six = bank == 0x200;
+                            let (alpha, full) = if six {
+                                ((v >> 8) & 63, 63)
+                            } else if v & 0x2000 != 0 {
+                                ((v >> 8) & 31, 31)
+                            } else {
+                                (1, 1)
+                            };
+                            let raw = pal[(bank + (v & 0xFF)) as usize];
+                            if !six && raw & 0x8000 != 0 {
+                                continue;
+                            }
+                            let c = rgb555(raw);
+                            for k in 0..3 {
+                                img[o + k] = ((c[k] as u32 * alpha + img[o + k] as u32 * (full - alpha)) / full) as u8;
+                            }
+                        } else {
+                            let c = pal[(pal_base + self.pixel(addr, bpp, py * w + px)) as usize & 2047];
+                            if c & 0x8000 == 0 {
+                                img[o..o + 3].copy_from_slice(&rgb555(c));
+                            }
                         }
                     }
                 }
@@ -977,10 +1004,23 @@ impl Bus {
             if on && !self.voices[ch].playing {
                 if std::env::var_os("ZIPBOOT_SPULOG").is_some() {
                     let phase = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0x10);
-                    println!("spu {:>10} ch {ch} mode {:04x} addr {:06x} loop {:06x} phase {phase:05x} vol {:04x}", self.now, self.spu_reg(ch, 1), self.spu_reg(ch, 0), self.spu_reg(ch, 2), self.spu_reg(ch, 3));
+                    println!(
+                        "spu {:>10} ch {ch} mode {:04x} addr {:06x} loop {:06x} phase {phase:05x} vol {:04x}",
+                        self.now,
+                        self.spu_reg(ch, 1),
+                        self.spu_reg(ch, 0),
+                        self.spu_reg(ch, 2),
+                        self.spu_reg(ch, 3)
+                    );
                 }
                 let env_addr = (self.spu_reg(ch, 7) & 0x3F) << 16 | (self.spu_reg(ch, 8) & 0xFFFF);
-                self.voices[ch] = Voice { playing: true, addr: self.spu_reg(ch, 0) & 0x3F_FFFF, env_addr, env_frame: 4, ..Default::default() };
+                self.voices[ch] = Voice {
+                    playing: true,
+                    addr: self.spu_reg(ch, 0) & 0x3F_FFFF,
+                    env_addr,
+                    env_frame: 4,
+                    ..Default::default()
+                };
                 // The envelope count starts at its load value.
                 let r5 = self.spu_reg(ch, 5);
                 self.spu_set(ch, 5, (self.spu_reg(ch, 6) & 0xFF) << 8 | (r5 & 0x7F));
@@ -1315,7 +1355,39 @@ fn main() {
         log: Vec::new(),
     };
 
-    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, presses: Vec::new(), timer_due: [0; 4], timer_flags: 0, rx: Default::default(), pad: Vec::new(), radio_due: 0, voices: [Voice::default(); 32], spu_stopped: [0; 2], beat_base: 0, beat_flag: false, audio: Vec::new(), audio_due: 0, audio_frac: 0, watch_from: 0, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
+    let mut bus = Bus {
+        ram: vec![0; RAM_SIZE],
+        sram: vec![0; SRAM_SIZE],
+        iram: vec![0; IRAM_SIZE],
+        pc: 0,
+        now: 0,
+        io: BTreeMap::new(),
+        log: Vec::new(),
+        uart: String::new(),
+        nand,
+        video_status: 0,
+        dma_status: 0,
+        gfx_ops: 0,
+        gfx_done: false,
+        watch: None,
+        presses: Vec::new(),
+        timer_due: [0; 4],
+        timer_flags: 0,
+        rx: Default::default(),
+        pad: Vec::new(),
+        radio_due: 0,
+        voices: [Voice::default(); 32],
+        spu_stopped: [0; 2],
+        beat_base: 0,
+        beat_flag: false,
+        audio: Vec::new(),
+        audio_due: 0,
+        audio_frac: 0,
+        watch_from: 0,
+        watched: Vec::new(),
+        rwatch: None,
+        rwatched: Vec::new(),
+    };
     if let Ok(w) = std::env::var("ZIPBOOT_RWATCH") {
         let (lo, hi) = w.split_once('-').expect("ZIPBOOT_RWATCH=lo-hi");
         bus.rwatch = Some((u32::from_str_radix(lo, 16).unwrap(), u32::from_str_radix(hi, 16).unwrap()));
@@ -1334,7 +1406,12 @@ fn main() {
                 "b" => 0xC000_0020,
                 _ => 0xC000_0040,
             };
-            bus.presses.push((port, u32::from_str_radix(f[1], 16).unwrap(), f[2].parse().unwrap(), f[3].parse().unwrap()));
+            bus.presses.push((
+                port,
+                u32::from_str_radix(f[1], 16).unwrap(),
+                f[2].parse().unwrap(),
+                f[3].parse().unwrap(),
+            ));
         }
     }
     if let Some(n) = std::env::var("ZIPBOOT_WATCH_FROM").ok().and_then(|s| s.parse().ok()) {
@@ -1352,7 +1429,8 @@ fn main() {
     // carry on from the snapshot's.
     let mut ran = 0u64;
     if let Ok(path) = std::env::var("ZIPBOOT_LOAD") {
-        let snap: Snapshot = bincode::deserialize(&std::fs::read(&path).expect("read the snapshot")).expect("a snapshot");
+        let snap: Snapshot =
+            bincode::deserialize(&std::fs::read(&path).expect("read the snapshot")).expect("a snapshot");
         ran = snap.restore(&mut cpu, &mut bus);
     }
     let save: Option<(String, u64)> = std::env::var("ZIPBOOT_SAVE").ok().map(|s| {
@@ -1446,12 +1524,18 @@ fn main() {
         println!("{l}");
     }
     println!("--- 0xD0800000 operations: {} ---", bus.gfx_ops);
-    println!("--- serial output ---
+    println!(
+        "--- serial output ---
 {}
---- end of serial output ---", bus.uart);
+--- end of serial output ---",
+        bus.uart
+    );
     println!("--- registers touched ({}) ---", bus.io.len());
     for (a, e) in &bus.io {
-        println!("{a:08x}  reads {:>8}  writes {:>8}  last {:08x}  first pc {:08x}", e.reads, e.writes, e.last_write, e.first_pc);
+        println!(
+            "{a:08x}  reads {:>8}  writes {:>8}  last {:08x}  first pc {:08x}",
+            e.reads, e.writes, e.last_write, e.first_pc
+        );
     }
     println!("--- state after {ran} instructions ---");
     println!("pc {:08x} cpsr {:08x} mode {:02x} thumb {}", cpu.r[15], cpu.cpsr, cpu.mode(), cpu.thumb());
