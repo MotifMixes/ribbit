@@ -678,6 +678,7 @@ impl App {
             _ => {}
         }
         let off = m.idle_powered_off();
+        let console = m.firmware().known().map_or("Leapster", |k| k.hardware.name());
         drop(m);
         if !off {
             return;
@@ -692,7 +693,7 @@ impl App {
         }
         tracing::info!(target: "ribbit::boot", "the console turned itself off after inactivity: closing the game");
         self.idle_resume = s.cart_path.clone().zip(s.idle_snapshot.take());
-        self.ui.idle_closed = Some(s.title.clone());
+        self.ui.idle_closed = Some((s.title.clone(), console));
         self.end_session();
         self.update_title();
         self.rescan_library();

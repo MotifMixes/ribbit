@@ -97,9 +97,9 @@ pub struct UiState {
     pub zippity_clean: Option<PathBuf>,
     /// The library's page and search.
     pub library: LibraryView,
-    /// The game (title) that was closed because the Leapster turned itself
-    /// off; shown above the library until dismissed.
-    pub idle_closed: Option<String>,
+    /// The game (title) that was closed because the console (name) turned
+    /// itself off; shown above the library until dismissed.
+    pub idle_closed: Option<(String, &'static str)>,
     /// When the library last appeared (its cards grow in from then).
     library_since: Option<Instant>,
     was_running: bool,
@@ -160,7 +160,7 @@ pub fn draw(
                 st.library_since = Some(Instant::now());
             }
             let since = st.library_since.unwrap_or_else(Instant::now);
-            library_screen(ui, settings, library, &mut st.library, st.idle_closed.as_deref(), since, actions);
+            library_screen(ui, settings, library, &mut st.library, st.idle_closed.as_ref().map(|(t, c)| (t.as_str(), *c)), since, actions);
         } else if !info.running {
             welcome(ui, settings, info, actions);
         } else if info.rewinding {
@@ -641,7 +641,7 @@ fn library_screen(
     settings: &Settings,
     library: &mut Library,
     view: &mut LibraryView,
-    idle_closed: Option<&str>,
+    idle_closed: Option<(&str, &str)>,
     since: Instant,
     actions: &mut Vec<Action>,
 ) {
@@ -668,8 +668,8 @@ fn library_screen(
                 });
                 ui.add_space(18.0);
             }
-            if let Some(title) = idle_closed {
-                idle_banner(ui, title, actions);
+            if let Some((title, console)) = idle_closed {
+                idle_banner(ui, title, console, actions);
                 ui.add_space(14.0);
             }
             let last = settings.recent_carts.first().filter(|_| search.is_empty());
@@ -848,9 +848,9 @@ fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Respo
     if min.x > 0.0 { ui.add_sized(min, b) } else { ui.add(b) }
 }
 
-/// Red banner: the last game was closed because the Leapster turned itself
-/// off after inactivity.
-fn idle_banner(ui: &mut egui::Ui, title: &str, actions: &mut Vec<Action>) {
+/// Red banner: the last game was closed because the console (`console`, as
+/// players know it) turned itself off after inactivity.
+fn idle_banner(ui: &mut egui::Ui, title: &str, console: &str, actions: &mut Vec<Action>) {
     const RED: egui::Color32 = egui::Color32::from_rgb(220, 70, 70);
     const RED_HOVER: egui::Color32 = egui::Color32::from_rgb(238, 92, 92);
     // A rounded panel filled with a red fade, like the library's green one.
@@ -866,7 +866,7 @@ fn idle_banner(ui: &mut egui::Ui, title: &str, actions: &mut Vec<Action>) {
                     ui.label(egui::RichText::new(" was closed").size(17.0).color(egui::Color32::WHITE));
                 });
                 ui.label(
-                    egui::RichText::new("Nothing was pressed for a while, so the Leapster switched itself off.")
+                    egui::RichText::new(format!("Nothing was pressed for a while, so the {console} switched itself off."))
                         .color(egui::Color32::from_rgb(240, 200, 200)),
                 );
                 ui.label(
