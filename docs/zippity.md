@@ -350,8 +350,19 @@ main volume), at 70312.5 Hz; the research tool saves it with
 `ZIPBOOT_WAV=file` (`ZIPBOOT_SPULOG` prints each channel start with its
 mode, addresses, phase, volume and register 0xD, the ADPCM select, which the
 kernel leaves 0). Its start-up loudness over time correlates 0.87 with the
-recording's, best at normal speed. Envelope IRQs, channel FIQs and the
-compressor are not modelled.
+recording's, best at normal speed.
+
+Not modelled, and what the kernel does with them (start-up to Mickey Says,
+in MAME's register layout): channel FIQs are left off (+0xE08 written 0);
+the zero-cross register (+0xE30) and manual envelopes (+0xE54) are 0. The
+compressor is on: control +0xE34 = 0x08A8 (compressor enable 0x0800, volume
+select 2, FOF and INIT), compressor control +0xE38 = 0xE03D (peak mode,
+threshold 0x60 of 0x7F, release scale 3, zero-cross disabled, ratio 5) and
++0xE68 (attack/release) = 0x02FF. MAME does not model the compressor, so how
+it acts is UNKNOWN. Ribbit's loudest output over that run is 11131, about 34%
+of full scale, well under a threshold of 0x60/0x7F if that is a fraction of
+full scale (UNVERIFIED): the compressor would then never act on these
+sounds.
 
 ## DMA controller (0xD0300000)
 
