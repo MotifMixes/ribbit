@@ -51,12 +51,10 @@ const RX_FIFO: usize = 16;
 /// reading is UNKNOWN; this is comfortably above both.
 const ADC_BATTERY: u32 = 0x7000;
 /// Instructions a NAND DMA transfer keeps the controller busy per byte:
-/// about 2 MB/s (at CLOCK). Measured from recordings of real units, whose
-/// loading screens last 8.8 s (Mickey Mouse Clubhouse, 14.2 MB read) and
-/// 4.6 s (its second, 7.8 MB) where instant transfers took 1-2 s. The
-/// system's sprite cache depends on it: with instant loads it reused the
-/// pictures of a screen still shown (garbage between the start-up screens).
-const NAND_DMA_COST: u64 = CLOCK / 2_000_000;
+/// about 5 MB/s (at CLOCK). Fitted to recordings of real units: Mickey
+/// Mouse Clubhouse's loading screen lasts 8.8 s (14.2 MB read); here 9.5 s
+/// with this, 1 s with instant transfers.
+const NAND_DMA_COST: u64 = 12;
 
 const SPU_WORDS: usize = 0x2000 / 4;
 const PPU_WORDS: usize = 0x8000 / 4;

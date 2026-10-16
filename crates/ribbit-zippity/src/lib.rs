@@ -251,11 +251,13 @@ impl Zippity {
     /// end, its frame handler does not run and the TV keeps showing the last
     /// picture, though the sprite cache it came from is being overwritten
     /// (drawing that memory instead showed garbage between the start-up
-    /// screens, which recordings do not). Drawn now only if no picture has
-    /// been handed over for 2 seconds (some screen might never do it).
+    /// screens, which recordings do not). The same holds while a game's own
+    /// kernel is loaded (no frame handler at all for seconds: the TV keeps
+    /// the "LOADING" screen, where drawing memory gave black and garbage).
+    /// Drawn now only before the first picture.
     pub fn render(&self, out: &mut [u32]) {
         match self.bus.picture_at {
-            Some(at) if self.bus.now - at < 120 * FRAME && self.bus.picture.len() == out.len() => {
+            Some(_) if self.bus.picture.len() == out.len() => {
                 out.copy_from_slice(&self.bus.picture)
             }
             _ => self.bus.render(out),

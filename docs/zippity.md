@@ -96,7 +96,7 @@ Modelled from its driver in the bootloader:
 
 | Offset | Use |
 |---|---|
-| +0x000 | DMA control: bit 0 start (reads 1 while busy), bit 1 direction (1: memory to NAND). Ribbit keeps it busy about 30 instructions a byte (2 MB/s): recordings' loading screens last 8.8 s and 4.6 s for 14.2 and 7.8 MB, where instant transfers took 1-2 s; data from the NAND lands when the transfer ends |
+| +0x000 | DMA control: bit 0 start (reads 1 while busy), bit 1 direction (1: memory to NAND). Ribbit keeps it busy 12 instructions a byte (about 5 MB/s): a recording's Mickey Mouse Clubhouse loading screen lasts 8.8 s for 14.2 MB, here 9.5 s (1 s with instant transfers); data from the NAND lands when the transfer ends |
 | +0x004 | DMA memory address |
 | +0x008 | DMA length in bytes |
 | +0x140 | Status: bit 15 ready. Drivers wait for it after each command (if it is set, they poll once more, then wait until it is set) |
