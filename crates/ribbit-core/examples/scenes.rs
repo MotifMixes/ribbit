@@ -360,6 +360,138 @@ fn main() {
                     }
                 }
             }
+            Some("bpdump") => {
+                // bpdump PC MS REG LEN: each time PC runs, print LEN 16-bit words
+                // at the address in register REG (research: audio buffers).
+                let pc = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let reg: usize = w[3].trim_start_matches('r').parse().unwrap();
+                let len = num(4, 16) as u32;
+                let mut bp = Breakpoints::default();
+                bp.add(pc);
+                let end = m.cpu.cycles + num(2, 1000) * (m.clock.cpu_hz / 1000);
+                while m.cpu.cycles < end {
+                    if m.cpu.pc == pc {
+                        m.run(1, &Breakpoints::default());
+                    }
+                    m.run_cycles(end - m.cpu.cycles, &bp);
+                    if m.cpu.pc == pc {
+                        let a = m.cpu.regs[reg];
+                        let rd = |a: u32| (m.bus.peek8(a).unwrap_or(0) as u16 | (m.bus.peek8(a + 1).unwrap_or(0) as u16) << 8) as i16;
+                        let words: Vec<String> = (0..len).map(|i| rd(a + 2 * i).to_string()).collect();
+                        println!("{:10.3} ms {a:#010x}: {}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, words.join(" "));
+                    }
+                }
+            }
+            Some("bpxy") => {
+                // bpxy PC MS MEM START LEN: each time PC runs, print LEN XY-memory
+                // words from START (MEM x or y, current bank) as 16-bit halves.
+                let pc = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let which = usize::from(w[3] == "y");
+                let start = usize::from_str_radix(w[4].trim_start_matches("0x"), 16).unwrap();
+                let len = num(5, 16) as usize;
+                let mut bp = Breakpoints::default();
+                bp.add(pc);
+                let end = m.cpu.cycles + num(2, 1000) * (m.clock.cpu_hz / 1000);
+                while m.cpu.cycles < end {
+                    if m.cpu.pc == pc {
+                        m.run(1, &Breakpoints::default());
+                    }
+                    m.run_cycles(end - m.cpu.cycles, &bp);
+                    if m.cpu.pc == pc {
+                        let xy = m.cpu.xy.as_ref().expect("no XY memory");
+                        let bank = (xy.aux[0x18] & 1) as usize;
+                        let words: Vec<String> = (start..start + len)
+                            .flat_map(|i| {
+                                let v = xy.mem[bank][which][i % 0x400];
+                                [(v as u16 as i16).to_string(), ((v >> 16) as u16 as i16).to_string()]
+                            })
+                            .collect();
+                        println!("{:10.3} ms: {}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, words.join(" "));
+                    }
+                }
+            }
+            Some("bpspan") => {
+                // bpspan FROM TO MS: for each run from PC FROM to PC TO, print
+                // the interrupts taken in between (research: DSP glitches).
+                let from = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let to = u32::from_str_radix(w[2].trim_start_matches("0x"), 16).unwrap();
+                let mut bp = Breakpoints::default();
+                bp.add(from);
+                bp.add(to);
+                let end = m.cpu.cycles + num(3, 1000) * (m.clock.cpu_hz / 1000);
+                let mut start: Option<[u64; 64]> = None;
+                while m.cpu.cycles < end {
+                    if m.cpu.pc == from || m.cpu.pc == to {
+                        m.run(1, &Breakpoints::default());
+                    }
+                    m.run_cycles(end - m.cpu.cycles, &bp);
+                    if m.cpu.pc == from {
+                        start = Some(m.interrupt_counts);
+                    } else if m.cpu.pc == to
+                        && let Some(s0) = start.take()
+                    {
+                        let taken: Vec<String> =
+                            (0..64).filter(|&i| m.interrupt_counts[i] != s0[i]).map(|i| format!("{i}x{}", m.interrupt_counts[i] - s0[i])).collect();
+                        println!("{:10.3} ms span irqs [{}]", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, taken.join(" "));
+                    }
+                }
+            }
+            Some("irqpc") => {
+                // irqpc MS: single-step for MS, printing the PC each interrupt
+                // interrupts (and the interrupt number).
+                let end = m.cpu.cycles + num(1, 1000) * (m.clock.cpu_hz / 1000);
+                let none = Breakpoints::default();
+                while m.cpu.cycles < end {
+                    let (pc, before) = (m.cpu.pc, m.interrupt_counts);
+                    m.run(1, &none);
+                    if let Some(i) = (0..64).find(|&i| m.interrupt_counts[i] != before[i]) {
+                        println!("{:10.3} ms irq {i} at pc {pc:#010x} -> {:#010x}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, m.cpu.pc);
+                        if std::env::var_os("IRQ_PATH").is_some() {
+                            // The handler's path until it returns to `pc`.
+                            let mut path = vec![];
+                            while m.cpu.pc != pc && path.len() < 4000 {
+                                path.push(format!("{:08x}", m.cpu.pc));
+                                m.run(1, &none);
+                            }
+                            println!("  path {}", path.join(" "));
+                        }
+                    }
+                }
+            }
+            Some("spanirq") => {
+                // spanirq FROM TO MS: run to FROM, single-step to TO; for spans
+                // with interrupts print where they hit and the peak of the 128
+                // samples at FROM's r1 (research: the Leapster 2 PCM filter).
+                let from = u32::from_str_radix(w[1].trim_start_matches("0x"), 16).unwrap();
+                let to = u32::from_str_radix(w[2].trim_start_matches("0x"), 16).unwrap();
+                let mut bp = Breakpoints::default();
+                bp.add(from);
+                let none = Breakpoints::default();
+                let end = m.cpu.cycles + num(3, 1000) * (m.clock.cpu_hz / 1000);
+                while m.cpu.cycles < end {
+                    if m.cpu.pc == from {
+                        m.run(1, &none);
+                    }
+                    m.run_cycles(end - m.cpu.cycles, &bp);
+                    if m.cpu.pc != from {
+                        continue;
+                    }
+                    let out = m.cpu.regs[1];
+                    let mut hits = vec![];
+                    while m.cpu.pc != to {
+                        let (pc, before) = (m.cpu.pc, m.interrupt_counts);
+                        m.run(1, &none);
+                        if let Some(i) = (0..64).find(|&i| m.interrupt_counts[i] != before[i]) {
+                            hits.push(format!("{i}@{pc:08x}"));
+                        }
+                    }
+                    let rd = |a: u32| (m.bus.peek8(a).unwrap_or(0) as u16 | (m.bus.peek8(a + 1).unwrap_or(0) as u16) << 8) as i16;
+                    let peak = (0..128).map(|i| rd(out + 2 * i).unsigned_abs()).max().unwrap();
+                    if !hits.is_empty() || peak >= 32767 {
+                        println!("{:10.3} ms span peak {peak} first {} irqs {}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, rd(out), hits.join(" "));
+                    }
+                }
+            }
             Some("logtrace") => {
                 // logtrace PC FMTREG MS: each time PC runs, print the printf-style
                 // string in register FMTREG with the following registers as its

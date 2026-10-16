@@ -223,10 +223,11 @@ fn max_min_and_their_flags() {
 #[test]
 fn mul64_results_leapster_mmid() {
     // 0x12345678 * 0x9abcdef0, signed and unsigned (values from exact
-    // integer arithmetic). MMID = low word under MmidMode::LowLeapster.
+    // integer arithmetic). MMID = low word under MmidMode::LowLeapster, and
+    // r57 (the dual MAC's accumulator there, see exec.rs MUL64) is unchanged.
     let r = run("t_mul64");
-    assert_eq!((r.r(10), r.r(11), r.r(12)), (0x242D_2080, 0x242D_2080, 0xF8CC_93D6));
-    assert_eq!((r.r(13), r.r(14), r.r(15)), (0x242D_2080, 0x242D_2080, 0x0B00_EA4E));
+    assert_eq!((r.r(10), r.r(11), r.r(12)), (0, 0x242D_2080, 0xF8CC_93D6));
+    assert_eq!((r.r(13), r.r(14), r.r(15)), (0, 0x242D_2080, 0x0B00_EA4E));
 }
 
 #[test]

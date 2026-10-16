@@ -1215,7 +1215,18 @@ impl Cpu {
                 } else {
                     b as u64 * c as u64
                 };
-                self.regs[reg::MLO] = p as u32;
+                // Leapster: r57 is the dual MAC's low-lane accumulator (see
+                // MULDW), and MUL64 leaves it alone; the low word is read from
+                // MMID instead. HYPOTHESIS from the Leapster 2 BIOS 0.6: its
+                // interrupt entry (0x4004_B308) saves only r58/r59 and restores
+                // them with `mulu64 0,r0,1; sr r6,[mulhi]` (0x4004_B434), while
+                // its PCM filter reads r57 after MACs (0x4003_E0B0). With MUL64
+                // writing r57, every interrupt landing on that read corrupted
+                // the filter, which then rang at full scale (audible clicks in
+                // The Talking Words Factory, each one at an interrupt there).
+                if self.config.mmid != MmidMode::LowLeapster {
+                    self.regs[reg::MLO] = p as u32;
+                }
                 self.regs[reg::MHI] = (p >> 32) as u32;
                 self.regs[reg::MMID] = match self.config.mmid {
                     MmidMode::Middle => (p >> 16) as u32,
