@@ -205,8 +205,9 @@ struct IdleTracker {
     log_buf: Vec<(u32, u8)>,
     skipped_steps: u64,
     /// Probe outcomes, for diagnosis: started, interrupted/violated/too long,
-    /// state differed, a device event happened, memory differed, no room, skipped.
-    pub stats: [u64; 7],
+    /// state differed, a device event happened, memory differed, no room, skipped,
+    /// sleeps fast-forwarded (`sleep_skip`).
+    pub stats: [u64; 8],
 }
 
 impl IdleTracker {
@@ -823,7 +824,11 @@ impl Machine {
                     tracing::debug!(target: "ribbit::irq", vector, from = format_args!("{from:#010x}"), "interrupt");
                     self.record_interrupt(cycle, vector, from);
                 }
-                Ok(Step::Sleeping) => {}
+                Ok(Step::Sleeping) => {
+                    if self.idle_skip {
+                        self.sleep_skip(max_steps, &mut report);
+                    }
+                }
                 Ok(Step::Halted(reason)) => {
                     report.steps += 1;
                     report.instructions += 1;
@@ -1061,6 +1066,37 @@ impl Machine {
         self.bus.write_log = Some(std::mem::take(&mut self.idle.log_buf));
     }
 
+    /// Sleep fast-forwarding, exact: a sleeping CPU (SLEEP) spends one cycle
+    /// per step until an interrupt is pending, so with none pending and the
+    /// devices up to date, time can advance to just before the next device
+    /// or CPU-timer event (or PCM DAC tick, or the step budget) in one go.
+    /// The Leapster 2 BIOS's idle task sleeps (0.6 0x4004_B174); stepping it
+    /// a cycle at a time ran an idle machine at about 60% of real time.
+    fn sleep_skip(&mut self, max_steps: u64, report: &mut RunReport) {
+        if !self.cpu.sleeping || self.io.sync_needed || self.cpu.pending_interrupt().is_some() {
+            return;
+        }
+        let to_event = self.io.horizon.saturating_sub(self.io.deferred);
+        let mut budget = self.clock.max_cycles_below(to_event).min(self.cpu.cycles_to_timer_event());
+        if self.io.voices.pcm.running() {
+            let to_dac = self.io.voices.ticks_to_next_sample(self.clock.peripheral_hz);
+            budget = budget.min(self.clock.max_cycles_below(to_dac));
+        }
+        // Each sleeping step is one cycle; leave this step's own count to `run`.
+        let k = budget.min(max_steps.saturating_sub(report.steps + 2));
+        if k == 0 {
+            return;
+        }
+        self.cpu.skip_sleep(k);
+        let ticks = self.clock.ticks(k);
+        self.io.deferred += ticks;
+        self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+        self.io.deliver_pcm_irq();
+        report.steps += k;
+        self.idle.skipped_steps += k;
+        self.idle.stats[7] += 1;
+    }
+
     fn idle_end_probe(&mut self, _ok: bool) {
         if let Some(p) = self.idle.probe.take() {
             self.idle.back_off(p.head, self.cpu.cycles);
@@ -1148,7 +1184,7 @@ impl Machine {
     }
 
     /// Idle probe outcomes (see `IdleTracker::stats`).
-    pub fn idle_stats(&self) -> [u64; 7] {
+    pub fn idle_stats(&self) -> [u64; 8] {
         self.idle.stats
     }
 

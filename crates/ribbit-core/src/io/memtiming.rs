@@ -59,6 +59,12 @@ impl Cache {
         (set * WAYS..set * WAYS + WAYS).find(|&i| self.tags[i] & !DIRTY == tag)
     }
 
+    /// `find`, answered from `last` when it is the same line.
+    #[inline(always)]
+    fn find_after(&self, addr: u32, last: LastLine) -> Option<usize> {
+        if addr >> 4 == last.line { Some(last.slot) } else { self.find(addr) }
+    }
+
     /// Brings the line of `addr` in; returns its slot and whether the line
     /// it replaced was dirty.
     fn fill(&mut self, addr: u32) -> (usize, bool) {
@@ -71,6 +77,31 @@ impl Cache {
         (i, evicted_dirty)
     }
 }
+
+/// The last line looked up in one cache and its slot (speed only): a hit
+/// changes no cache state and only that cache's own fills evict, so until
+/// its next fill the line is still at that slot. Not state: compares equal,
+/// not saved.
+#[derive(Debug, Clone, Copy)]
+struct LastLine {
+    /// Address >> 4 (u32::MAX: none).
+    line: u32,
+    slot: usize,
+}
+
+impl Default for LastLine {
+    fn default() -> Self {
+        Self { line: u32::MAX, slot: 0 }
+    }
+}
+
+impl PartialEq for LastLine {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LastLine {}
 
 /// Cost of filling a line at `addr` from its memory.
 fn fill_cost(addr: u32) -> u64 {
@@ -98,11 +129,24 @@ pub struct MemTiming {
     /// idle fast-forward: an iteration that missed is not repeatable).
     #[serde(skip)]
     pub misses: [u64; 3],
+    #[serde(skip)]
+    last_code: LastLine,
+    #[serde(skip)]
+    last_data: LastLine,
 }
 
 impl Default for MemTiming {
     fn default() -> Self {
-        Self { enabled: true, code: Cache::default(), data: Cache::default(), armed: false, stall: 0, misses: [0; 3] }
+        Self {
+            enabled: true,
+            code: Cache::default(),
+            data: Cache::default(),
+            armed: false,
+            stall: 0,
+            misses: [0; 3],
+            last_code: LastLine::default(),
+            last_data: LastLine::default(),
+        }
     }
 }
 
@@ -123,11 +167,18 @@ impl MemTiming {
 
     #[inline(always)]
     fn fetch(&mut self, addr: u32) {
-        if self.code.find(addr).is_none() {
-            self.code.fill(addr);
-            self.stall += fill_cost(addr);
-            self.misses[0] += 1;
+        if addr >> 4 == self.last_code.line {
+            return;
         }
+        let slot = match self.code.find(addr) {
+            Some(i) => i,
+            None => {
+                self.stall += fill_cost(addr);
+                self.misses[0] += 1;
+                self.code.fill(addr).0
+            }
+        };
+        self.last_code = LastLine { line: addr >> 4, slot };
     }
 
     /// A memory (not device) access by the executing instruction.
@@ -136,7 +187,7 @@ impl MemTiming {
         if !self.armed {
             return;
         }
-        let slot = match self.data.find(addr) {
+        let slot = match self.data.find_after(addr, self.last_data) {
             Some(i) => i,
             None => {
                 let (i, dirty) = self.data.fill(addr);
@@ -149,6 +200,7 @@ impl MemTiming {
                 i
             }
         };
+        self.last_data = LastLine { line: addr >> 4, slot };
         if write {
             self.data.tags[slot] |= DIRTY;
         }

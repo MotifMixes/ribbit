@@ -47,6 +47,17 @@ impl Cpu {
         self.timers.iter().map(|t| t.limit.wrapping_sub(t.count) as u64).min().unwrap_or(u64::MAX)
     }
 
+    /// Advances time by `cycles` (at most `cycles_to_timer_event`) while the
+    /// CPU sleeps: exactly what that many sleeping steps (one cycle each,
+    /// `step_with`) do. Loads in flight complete as they would.
+    pub fn skip_sleep(&mut self, cycles: u64) {
+        debug_assert!(self.sleeping && cycles <= self.cycles_to_timer_event());
+        self.cycles += cycles;
+        for t in &mut self.timers {
+            t.count = t.count.wrapping_add(cycles as u32);
+        }
+    }
+
     /// Advances time by `cycles` (at most `cycles_to_timer_event`) as if
     /// `instructions` idle instructions had executed.
     pub fn skip_idle(&mut self, cycles: u64, instructions: u64) {

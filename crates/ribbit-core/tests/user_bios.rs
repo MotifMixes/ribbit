@@ -456,6 +456,13 @@ fn v21_idle_skip_is_exact() {
     idle_skip_is_exact(V21);
 }
 
+/// The Leapster 2's idle task sleeps (SLEEP) rather than loops: covers the
+/// sleep fast-forward (`Machine::sleep_skip`).
+#[test]
+fn leapster2_06_idle_skip_is_exact() {
+    idle_skip_is_exact("leapster2/152-12206_0.6.bin");
+}
+
 // ---------------------------------------------------------------------------
 // Save states: a state loaded into a fresh machine continues identically.
 
