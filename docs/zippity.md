@@ -237,21 +237,27 @@ Found by pressing each bit on the menus:
 
 | Bit | Button | How it was found |
 |---|---|---|
-| 0 | Joystick up | "Sign In": the highlight moves up |
-| 1 | Joystick down | "Sign In": the highlight moves down |
-| 2 | Joystick left | Player screen: the highlight moves left (to the cancel button) |
-| 3 | Joystick right | Player screen: the highlight moves right (to OK) |
-| 4 | UNKNOWN | Shows a panel with a forward arrow over the menu and over the "stand on the mat" screen |
-| 5, 6 | UNKNOWN | No effect on the menus or the "stand on the mat" screen |
-| 7 | Choose | "Sign In": chooses the player, and the player screen follows as in the recording (the name at the top; Learning Path, back, cancel and OK) |
-| 8, 9 | The mat's foot pads | Mickey Says' "stand on the mat" screen (the mat with its pads lighting up) goes on to the game when either or both are held; the kernel also tests them together (0x300) |
+| 0 | Bopper (joystick) up | "Sign In": the highlight moves up |
+| 1 | Bopper down | "Sign In": the highlight moves down |
+| 2 | Bopper left | Player screen: the highlight moves left (to the cancel button) |
+| 3 | Bopper right | Player screen: the highlight moves right (to OK) |
+| 4 | Pause/Home button | Test menu: "Home = Back" (pressing it goes back a screen); on the menus it shows a panel with a forward arrow (pause?) |
+| 5 | Red spot | Test menu: "Red = Cartridge Test" |
+| 6 | Blue spot | Test menu: "Blue = Button Test" (opens it) |
+| 7 | Green spot (Choose) | "Sign In": chooses the player, and the player screen follows as in the recording; test menu: "Green = Clear User Log" |
+| 8, 9 | The home spot's two footprints | Mickey Says' "stand on the mat" screen goes on to the game when either or both are held; the kernel also tests them together (0x300) |
 
 The kernel tests bits 5-7 together (0xE0) and bits 0-3 together (0xF). The
-test mode's menu (below) names them by colour: bit 5 red (starts its
-cartridge test), bit 7 green (clears the user data). Bit 6 is probably blue
-(its button test; pressing it there showed nothing in the log). So bits 5-7
-are likely the mat's red, blue and green pads, with green doubling as Choose
-on the menus, and bit 4 the button on top of the joystick (UNVERIFIED).
+manual (LeapFrog's Parent Guide, 605-11430-A, at
+https://t7.leapfrog.com/images/z/Zippity.pdf) names exactly ten inputs: the
+bopper (a joystick on the main unit), a Pause/Home button on the main unit
+("To exit a game, press the Home Button"), and the mat's orange home spot
+(two footprints), red, blue and green spots (blue, the "Zippity" oval, in
+front of the home spot; red and green to the sides). The main unit talks to
+the console by infrared (the test menu's "IR Reciever"; the manual asks for
+line of sight). A review says green "doubles as the 'enter' button". The
+manual also says to change the language at Sign In by standing on red and
+green and pushing the bopper up.
 
 ## Test mode and the user data
 
@@ -292,9 +298,10 @@ tagged "Internal"; cartridge dumps (raw, or a .zip of one) are listed as
 Zippity games. Playing either starts the system (from the NAND dump in the
 games folders, whatever console the library has chosen), with the cartridge
 in the slot for a cartridge, on its own thread at 60 frames a second; the TV
-picture is 640 x 480 and the window keeps 4:3. Controls: D-pad = joystick,
-A = Choose (green), B = bit 4, Hint = both foot pads, Home = bit 5 (red),
-Pause = bit 6. What the system saves goes to `<save folder>/<dump
+picture is 640 x 480 and the window keeps 4:3. Controls (the Leapster's five action buttons for the
+Zippity's five other inputs; Help > Controls (F1) lists them): D-pad = bopper, A
+= green spot (choose), B = red spot, Hint = blue spot, Home = the Pause/Home
+button, Pause = standing on the home spot. What the system saves goes to `<save folder>/<dump
 name>.nandpages` (the pages that differ from the dump); the dump file is not
 changed.
 

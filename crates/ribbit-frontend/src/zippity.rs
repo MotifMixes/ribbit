@@ -19,6 +19,24 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// The Zippity's inputs (its manual, the Parent Guide 605-11430-A, and the
+/// factory test menu, which names bits 4-7) on Ribbit's buttons: the
+/// Leapster's five action buttons for the Zippity's five other inputs. The
+/// mat's spots are red and green to the sides and blue (the "Zippity" oval)
+/// in front of the home spot, two footprints the child stands on; the
+/// Pause/Home button is on the main unit, by the bopper (the joystick).
+pub const CONTROLS: [(Button, u16, &str); 9] = [
+    (Button::Up, Pad::UP, "Bopper up (away from you)"),
+    (Button::Down, Pad::DOWN, "Bopper down (towards you)"),
+    (Button::Left, Pad::LEFT, "Bopper left"),
+    (Button::Right, Pad::RIGHT, "Bopper right"),
+    (Button::A, Pad::CHOOSE, "Green spot (choose)"),
+    (Button::B, Pad::RED, "Red spot"),
+    (Button::Hint, Pad::BLUE, "Blue spot"),
+    (Button::Home, Pad::HOME, "Pause/Home button"),
+    (Button::Pause, Pad::LEFT_FOOT | Pad::RIGHT_FOOT, "Stand on the home spot"),
+];
+
 /// Frames a second (the model's stand-in timing: FRAME instructions each).
 const FPS: f64 = 60.0;
 /// The output queue's rate (mono).
@@ -133,20 +151,9 @@ impl ZipSession {
         self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
     }
 
-    /// A Leapster button, as the Zippity button it stands for.
+    /// A Leapster button, as the Zippity input it stands for (`CONTROLS`).
     pub fn set_button(&self, b: Button, pressed: bool) {
-        let bits = match b {
-            Button::Up => Pad::UP,
-            Button::Down => Pad::DOWN,
-            Button::Left => Pad::LEFT,
-            Button::Right => Pad::RIGHT,
-            Button::A => Pad::CHOOSE,
-            Button::B => Pad::BIT4,
-            Button::Hint => Pad::LEFT_FOOT | Pad::RIGHT_FOOT,
-            Button::Home => Pad::BIT5,
-            Button::Pause => Pad::BIT6,
-            _ => return,
-        };
+        let Some(&(_, bits, _)) = CONTROLS.iter().find(|c| c.0 == b) else { return };
         if pressed {
             self.shared.held.fetch_or(bits, Ordering::Relaxed);
         } else {

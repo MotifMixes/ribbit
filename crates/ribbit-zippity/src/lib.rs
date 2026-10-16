@@ -44,15 +44,15 @@ impl Pad {
     pub const DOWN: u16 = 1 << 1;
     pub const LEFT: u16 = 1 << 2;
     pub const RIGHT: u16 = 1 << 3;
-    /// Brings up a panel with a forward arrow (which button is UNKNOWN; the
-    /// button on top of the joystick?).
-    pub const BIT4: u16 = 1 << 4;
-    /// UNKNOWN (the mat's colour pads?). The test menu calls it red.
-    pub const BIT5: u16 = 1 << 5;
-    pub const BIT6: u16 = 1 << 6;
-    /// Chooses on the menus (green, the test menu says).
+    /// The Pause/Home button on the main unit (the factory test menu's
+    /// "Home = Back"; the manual: "To exit a game, press the Home Button").
+    pub const HOME: u16 = 1 << 4;
+    /// The mat's red and blue spots (the test menu's red and blue).
+    pub const RED: u16 = 1 << 5;
+    pub const BLUE: u16 = 1 << 6;
+    /// The mat's green spot, which chooses on the menus.
     pub const CHOOSE: u16 = 1 << 7;
-    /// The mat's foot pads (standing on the mat starts Mickey Says).
+    /// The home spot's two footprints (standing there starts Mickey Says).
     pub const LEFT_FOOT: u16 = 1 << 8;
     pub const RIGHT_FOOT: u16 = 1 << 9;
 

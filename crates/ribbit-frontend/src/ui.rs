@@ -1203,6 +1203,15 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
             }
         });
         ui.separator();
+        ui.label(egui::RichText::new("On the Zippity").strong());
+        egui::Grid::new("zippity").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+            for (b, _, what) in crate::zippity::CONTROLS {
+                ui.label(what);
+                ui.label(settings.key_for(b).map_or_else(|| format!("{b:?}"), |k| format!("{} ({b:?})", settings::key_label(k))));
+                ui.end_row();
+            }
+        });
+        ui.separator();
         ui.label(egui::RichText::new("Controller").strong());
         egui::Grid::new("pad").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
             for (what, button) in [
