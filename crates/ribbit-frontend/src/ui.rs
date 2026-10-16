@@ -66,6 +66,9 @@ pub struct Info {
     /// Seconds until the console turns itself off for inactivity, in its
     /// last minute.
     pub idle_left: Option<u32>,
+    /// A Zippity is running, and whether the player stands on its home spot.
+    pub zippity: bool,
+    pub zippity_on_home: bool,
 }
 
 /// Something that went wrong, as the error card shows it.
@@ -547,6 +550,14 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if item(ui, "Key bindings…", "") {
                 st.show_bindings = true;
             }
+            ui.separator();
+            if ui
+                .checkbox(&mut settings.zippity_on_home, "Zippity: stand on the home spot (Shift)")
+                .on_hover_text("Both footprints of the mat's orange home spot stay pressed. Mickey Says and other games wait for the player to stand there.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
         });
         ui.menu_button("Help", |ui| {
             if item(ui, "Controls", "F1") {
@@ -568,6 +579,9 @@ fn status_bar(ui: &mut egui::Ui, info: &Info) {
         ui.label(if info.running { info.title.as_str() } else { "No game running" });
         if info.experimental_touch && info.running {
             ui.label(egui::RichText::new("· touch: experimental").weak());
+        }
+        if info.zippity && info.zippity_on_home {
+            ui.label(egui::RichText::new("· on the home spot").weak());
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if info.running {

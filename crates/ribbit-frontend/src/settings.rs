@@ -22,6 +22,10 @@ pub struct Settings {
     /// Zippity dumps whose saved players the user chose to keep (not asked
     /// about again).
     pub zippity_keep_saves: Vec<PathBuf>,
+    /// The Zippity player stands on the mat's home spot (both footprints
+    /// held) unless they choose otherwise: Mickey Says and others wait for
+    /// it. Shift toggles it while a Zippity runs.
+    pub zippity_on_home: bool,
     pub display: Display,
     /// AI upscaler style, quality and resolution (Display::Ai).
     pub ai: crate::upscale::AiSettings,
@@ -84,6 +88,7 @@ impl Default for Settings {
             recent_carts: Vec::new(),
             rom_folders: Vec::new(),
             zippity_keep_saves: Vec::new(),
+            zippity_on_home: false,
             display: Display::Pixel,
             ai: Default::default(),
             window_scale: 0,

@@ -50,6 +50,8 @@ struct Shared {
     quit: AtomicBool,
     /// Buttons held (Pad bits).
     held: AtomicU16,
+    /// Standing on the home spot (the footprints held) as well.
+    on_home: AtomicBool,
     /// Volume, as f32 bits.
     gain: AtomicU32,
     /// Speed over the last second, percent of real time (f32 bits).
@@ -111,6 +113,7 @@ impl ZipSession {
             running: AtomicBool::new(true),
             quit: AtomicBool::new(false),
             held: AtomicU16::new(0),
+            on_home: AtomicBool::new(false),
             gain: AtomicU32::new(1f32.to_bits()),
             speed: AtomicU32::new(100f32.to_bits()),
             sink: Mutex::new(sink),
@@ -131,6 +134,12 @@ impl ZipSession {
     /// Copies the latest picture into `out` (SCREEN_W x SCREEN_H).
     pub fn frame(&self, out: &mut Vec<u32>) {
         out.clone_from(&self.shared.frame.lock().unwrap());
+    }
+
+    /// Whether the player stands on the mat's home spot (both footprints
+    /// held, whatever else is pressed).
+    pub fn set_on_home(&self, on: bool) {
+        self.shared.on_home.store(on, Ordering::Relaxed);
     }
 
     /// True once, when the system has loaded saved players from the dump.
@@ -262,7 +271,8 @@ fn run(s: &Shared) {
         next += Duration::from_secs_f64(1.0 / FPS);
         let audio = {
             let mut z = s.z.lock().unwrap();
-            z.set_pad(Pad::held(s.held.load(Ordering::Relaxed)));
+            let feet = if s.on_home.load(Ordering::Relaxed) { Pad::LEFT_FOOT | Pad::RIGHT_FOOT } else { 0 };
+            z.set_pad(Pad::held(s.held.load(Ordering::Relaxed) | feet));
             z.run_frame();
             z.render(&mut img);
             // The boot log says whether the system found saved players.

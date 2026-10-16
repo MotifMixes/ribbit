@@ -511,6 +511,7 @@ impl App {
                         .find(|g| g.path == nand && g.tags.contains(&"Internal"))
                         .map_or_else(|| "Zippity Built-in Games".to_string(), |g| g.title.clone()),
                 };
+                z.set_on_home(self.settings.zippity_on_home);
                 self.zippity = Some(z);
                 self.paused = false;
                 if let Some(a) = &mut self.audio {
@@ -616,6 +617,9 @@ impl App {
             }
             Action::SettingsChanged => {
                 self.save_settings();
+                if let Some(z) = &self.zippity {
+                    z.set_on_home(self.settings.zippity_on_home);
+                }
                 if let Some(s) = &self.session {
                     s.emu.lock().keep_awake = !self.settings.turn_off_when_idle;
                 }
@@ -1173,6 +1177,20 @@ impl App {
             }
             return;
         }
+        // Shift: stand on (or step off) the Zippity mat's home spot, unless
+        // Shift is bound to a button.
+        if matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
+            && self.settings.button_for(code).is_none()
+            && let Some(z) = &self.zippity
+        {
+            if pressed {
+                self.settings.zippity_on_home = !self.settings.zippity_on_home;
+                z.set_on_home(self.settings.zippity_on_home);
+                self.save_settings();
+                self.ui.toast(if self.settings.zippity_on_home { "Standing on the home spot" } else { "Stepped off the home spot" });
+            }
+            return;
+        }
         if let (Some(b), Some(s)) = (self.settings.button_for(code), &self.session) {
             s.emu.lock().buttons.set(b, pressed);
         }
@@ -1312,6 +1330,8 @@ impl App {
                 paused: halted,
                 background: !self.paused && halted,
                 idle_left: self.idle_left,
+                zippity: self.zippity.is_some(),
+                zippity_on_home: self.settings.zippity_on_home,
                 title: self
                     .session
                     .as_ref()

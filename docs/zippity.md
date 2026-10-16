@@ -301,7 +301,10 @@ in the slot for a cartridge, on its own thread at 60 frames a second; the TV
 picture is 640 x 480 and the window keeps 4:3. Controls (the Leapster's five action buttons for the
 Zippity's five other inputs; Help > Controls (F1) lists them): D-pad = bopper, A
 = green spot (choose), B = red spot, Hint = blue spot, Home = the Pause/Home
-button, Pause = standing on the home spot. What the system saves goes to `<save folder>/<dump
+button, Pause = standing on the home spot. Input > "Zippity: stand on
+the home spot" (or Shift, while a Zippity runs) keeps the home spot's
+footprints pressed, as a child standing on it does: Mickey Says and others
+wait for it. What the system saves goes to `<save folder>/<dump
 name>.nandpages` (the pages that differ from the dump); the dump file is not
 changed.
 
