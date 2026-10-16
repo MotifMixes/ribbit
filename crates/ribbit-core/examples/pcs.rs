@@ -77,7 +77,7 @@ fn main() {
     if log_mmio {
         for a in m.io.mmio_tail.to_vec() {
             let line = a.to_string();
-            if !line.contains("0x01809008") {
+            if m.io.mmio_filter.is_some() || !line.contains("0x01809008") {
                 println!("{line}");
             }
         }

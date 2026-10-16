@@ -795,3 +795,75 @@ with bend and duration; program change 0xC0 selects cartridge instead of BIOS so
   (e.g. 0x9BB0 up to 0xBFC8 over 180 ms and back). So the hardware must apply pitch writes immediately;
   Ribbit now does (MAME latches pitch at note start, which plays bends flat).
 * The intro cut scenes' soundtracks are LFC streams on voice 7 (one per scene), not sequenced notes.
+
+## CPU timing, caches and clocks (2026-10-15)
+
+Labels as above. Tools: `examples/mix.rs` (instruction mix and cache simulation from a save state),
+`examples/scenes.rs` `lcdrate` (LCD frames per second).
+
+### Caches (VERIFIED-FW geometry, US v2.1)
+
+The BIOS locks lines into the caches with two routines that write the cache RAM-address registers directly:
+instruction cache at 0x4003_8DF8 (aux 0x11 control, 0x1A address, 0x1B tag, 0x1C data, 0x19 and 0x13 line
+operations) and data cache at 0x4003_8EC8 (aux 0x48 control, 0x58 address, 0x59 tag, 0x5A data, 0x49/0x4A line
+operations; it polls 0x48 bit 8 while a line operation is busy). Both:
+
+* mask the address with `~15`: **16-byte lines**;
+* form the cache RAM address as `(way << 13) | (addr & 0x1FF0)`: **512 sets** (address bits 4-12) per way;
+* try ways 3, 2, 1 for a free (tag bit 1 clear) line, else way 0: **4 ways**.
+
+So each cache is **32 KB, 4-way set associative, 16-byte lines** (HYPOTHESIS only in that the full index range
+is populated). Tag bit 0 reads as valid and bit 1 as locked. The replacement policy and the data cache's write
+policy are UNKNOWN; the existence of flush operations (aux 0x4B) suggests write-back. Games (Cars, Sonic X) use
+the same aux registers through their own copies of the routines. Ribbit does not model the caches yet.
+
+### Clock control (VERIFIED-FW)
+
+* BIOS CPU-clock function (US v2.1 0x4008_B940; copies in Cars 0x8003_8BB4 and Sonic X 0x8007_E538): reads aux
+  register **0x56**. 0 gives 12 MHz; otherwise bits 2-3 select 0 = 96 MHz, 4 = 48 MHz, 8 = 24 MHz, else 12 MHz.
+  No code writes aux 0x56, so it is a read-only hardware value. Ribbit returns IDENTITY (0x10), which reads as
+  96 MHz. The only user found is a UART driver for a device at 0xFC1000 (clock source when that device is used).
+* Boot (0x4003_9060, configuration table 0x400F_D378): 0x0180_9008 low 3 bits set to 1, then 5; 0x0180_9080 =
+  0x1104; 10 ms wait; memory bank 2 configured (below); 10 ms wait; 0x0180_9008 = 1, then the table's value 0;
+  0x0180_9080 = 0x1102. 0x0180_A000-A008 = 0x4981E0, 0x421122, 0x23 (meaning UNKNOWN). RAM is described by the
+  same table as 0x3C00_0000-0x3C1F_FFFF (2 MB).
+* At run time 0x0180_9008 low bits are 0 (MAME's commented-out code treats them as a divider, 96 MHz >> n). MQX
+  idle tasks set them to 1 then 5 before sleeping (Cars 0x8003_9C5E), and every MQX interrupt-entry stub writes
+  1 then 0 (Sonic X 0x8007_8262 onwards): a low-power clock while idle, full speed whenever code runs. It does
+  not slow gameplay.
+
+### Memory bank registers (VERIFIED-FW values, meaning HYPOTHESIS)
+
+0x0180_C000-C010 are written 0xCAFE_00FF, 0xCAFE_1027, 0xCAFE_203F (at boot, from the table), 0xCAFE_3027
+(0x4002_7F6A, with 0x0180_C024 = 0x80 then 0x30) and 0xCAFE_4027 (0x4002_81C8, with 0x0180_C020 = 0xBF, C01C = 1,
+C020 = 0x58). The top half is a key, bits 12-15 the bank number, the low 12 bits presumably access timing.
+Which address range each bank serves, and the field layout, are UNKNOWN.
+
+### Pipeline costs the PRM documents (SOURCED: ARCompact PRM)
+
+* Branches and jumps take effect one cycle late; without `.d` a taken branch wastes its delay slot.
+* On the ARCtangent-A5, BRcc/BBIT branch a cycle later still: a second delay slot that is always nullified when
+  taken.
+* Loads take at least one cycle; using the loaded register in the next instruction stalls; latency depends on
+  cache and memory.
+* MUL64 is multi-cycle and stalls a read of its results; LR/SR are single-cycle; limm instructions are
+  "single cycle immediate data".
+* The PRM gives no per-instruction cycle table for the A5.
+
+### Measured: Sonic X gameplay (Ribbit, 2026-10-15)
+
+From a save state in Station Square act 1 (`mix`, 2 s, 192 M instructions at Ribbit's 1 cycle each):
+99.8% of instructions fetched from the cartridge; loads 17.3% and stores 6.7% of instructions (almost all to
+RAM); taken branches without `.d` 11.9% (BRcc/BBIT 8.0%); a load used by the next instruction 7.7%; long
+immediates 3.5%; multiplies 1.6%. Simulated 32 KB caches: 0.79 instruction-cache misses per 1000 instructions,
+2.7% data-cache misses. The game is CPU-bound: 49-53 LCD frames/s with no idle time.
+
+### Real-hardware reference
+
+"Sonic X Leapster Playthrough" (RescueHero's Nostalgia Zone, 2017, youtube.com/watch?v=ZywUhXukzRI) is a clean
+digital capture at 29.97 fps, most likely of a **Leapster TV** (TV overscan border, the TV controller's pointer
+on screen). Counting frames that differ from the previous one in 2-second windows of continuous motion gives
+**17.4-17.9 game frames/s** in four separate stretches (2:25, 5:00, 10:00, 20:00). Ribbit (original-Leapster
+mode, Sonic running right) gives 48-51. On the TV the picture goes through the external TV chip, probably at the
+TV's 60 Hz (17.7 fits a mix of 3- and 4-field frames), so this bounds but does not equal the handheld's speed.
+Needed next: the same measurement in Ribbit's Leapster TV mode, and a handheld reference.
