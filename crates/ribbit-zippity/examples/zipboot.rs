@@ -21,6 +21,7 @@
 //! | ZIPBOOT_POWER_HOLD=n | Hold the power button for n instructions (the test mode) |
 //! | ZIPBOOT_RESET | Clear the user data first (`Zippity::factory_reset`) |
 //! | ZIPBOOT_SPRITES | Print the sprites in use at the end |
+//! | ZIPBOOT_CART=file | Put a cartridge (a raw dump of its NAND) in the slot |
 
 use ribbit_zippity::{OUTPUT_RATE, SCREEN_H, SCREEN_W, Zippity};
 use std::collections::{BTreeMap, VecDeque};
@@ -71,6 +72,9 @@ fn main() {
     }
     let steps: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
     let mut z = Zippity::new(flash);
+    if let Ok(path) = std::env::var("ZIPBOOT_CART") {
+        z.insert_cartridge(std::fs::read(&path).expect("read the cartridge"));
+    }
     if let Ok(path) = std::env::var("ZIPBOOT_LOAD") {
         z.load_state(&std::fs::read(&path).expect("read the state")).expect("a state");
     }
@@ -193,7 +197,11 @@ fn main() {
         println!("{l}");
     }
     println!("--- NAND writes and erases ---");
-    for l in nand_log.iter().filter(|l| l.starts_with("program") || l.starts_with("erase")) {
+    for l in nand_log.iter().filter(|l| l.contains(" program ") || l.contains(" erase ")) {
+        println!("{l}");
+    }
+    println!("--- cartridge NAND ---");
+    for l in nand_log.iter().filter(|l| !l.starts_with("chip 0") && !l.starts_with("DMA")).take(2000) {
         println!("{l}");
     }
     println!("--- 0xD0800000 operations: {} ---", z.probe().gfx_ops);

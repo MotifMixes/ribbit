@@ -566,11 +566,20 @@ impl Bus {
                 }
                 0
             }
+            // GPIO 0xC0000108 bits 5-4 select the NAND chip (0: the system
+            // NAND; the bootloader tries 1 and 2 for a cartridge).
+            (0xC000_0108, Some(v)) => {
+                self.nand.select = (v >> 4) & 3;
+                0
+            }
             // GPIO inputs (0xC0000000 port A, +0x20 B, +0x40 C). Port C bit
             // 10 is the power button (low: held), held at power-on; port A
-            // bit 6 the 50/60 Hz strap (high: 60). Idle levels UNVERIFIED.
+            // bit 6 the 50/60 Hz strap (high: 60), bit 4 a cartridge in the
+            // slot (high; the test mode's "Cart is seated"). Other idle
+            // levels UNVERIFIED.
             (0xC000_0000 | 0xC000_0020 | 0xC000_0040, None) => {
                 let idle = match a {
+                    0xC000_0000 if !self.nand.cart.is_empty() => 0xFFFF,
                     0xC000_0000 => 0xFFEF,
                     0xC000_0020 => 0xFFFF,
                     _ if self.now < self.probe.power_hold.unwrap_or(POWER_HOLD) => 0xFBFF,

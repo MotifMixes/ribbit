@@ -16,8 +16,10 @@ it says otherwise.
 - **Page 0:** a header that starts "PGandnand", then words 0x20000000, 0x200fc,
   0x20100000, 0x20100258, 0x20100270, 1, 0x40001. Stage 1 runs in SRAM at
   about 0x20100000.
-- **Cartridges:** FAT16 images (OEM name MSDOS5.0, 0x420_0000 bytes) holding
-  KERNEL.BIN plus mdp_sprites.bin, mdp_backgrounds.bin and mdp_wavs.bin.
+- **Cartridges:** raw dumps of a 64 MB small-page NAND (pages of 0x200 bytes
+  plus 0x10 spare, 0x420_0000 bytes) holding a FAT16 file system (OEM name
+  MSDOS5.0) with KERNEL.BIN plus mdp_sprites.bin, mdp_backgrounds.bin and
+  mdp_wavs.bin. See "Cartridges" below.
 
 ## Boot
 
@@ -75,7 +77,7 @@ down and jumps to the on-chip RAM at 0xF8000000, which ends in a loop.
 |---|---|
 | 0x00000000 | SDRAM (64 MB assumed, as in MAME's stub) |
 | 0x20000000 | SRAM (stage 1; size unknown, 2 MB assumed) |
-| 0xC0000000 | GPIO: port A +0x00 (data in) / +0x04 (out) / +0x08 / +0x0C, port B +0x20.., port C +0x40.. (the kernel logs port C as R_IOC_I_DATA). Port C bit 10 is the power button (low: pressed); port A bit 6 is a TV-standard strap (low: 50 Hz; its callers choose 50 or 60 and 5000 or 5994); port B bit 5 is read active-low and port A bit 4 active-high (meanings UNKNOWN). Port B bit 0, port C bits 5/4 and bits 6/5 of 0xC00000C4 drive five LEDs (the factory test mode's "Leds:"). Also clock or pad registers at 0xA0-0xAC, 0x104/0x108, 0x124, 0x140 |
+| 0xC0000000 | GPIO: port A +0x00 (data in) / +0x04 (out) / +0x08 / +0x0C, port B +0x20.., port C +0x40.. (the kernel logs port C as R_IOC_I_DATA). Port C bit 10 is the power button (low: pressed); port A bit 6 is a TV-standard strap (low: 50 Hz; its callers choose 50 or 60 and 5000 or 5994); port B bit 5 is read active-low (meaning UNKNOWN); port A bit 4 is high when a cartridge is in the slot (the test mode's "Cart is seated"). 0x108 bits 5-4 select the NAND chip (see Cartridges). Port B bit 0, port C bits 5/4 and bits 6/5 of 0xC00000C4 drive five LEDs (the factory test mode's "Leds:"). Also clock or pad registers at 0xA0-0xAC, 0x104/0x108, 0x124, 0x140 |
 | 0xC0020000 | Timers (below) |
 | 0xC0060000 | Serial port (below): the debug log goes out, the controllers' radio receiver comes in |
 | 0xC00C0000 | Analogue-to-digital converter (below) |
@@ -113,6 +115,37 @@ table, where 0xDA means 2 Gbit with 2 KB pages. A read is: command 0x00, the
 column to +0x148, the row to +0x14C, command 0x30, wait for ready, then DMA
 or data-port reads. Large-page chips use the 0x30 confirm; small-page chips
 start reading on the address.
+
+## Cartridges
+
+A cartridge is a second NAND chip on the same controller (0xD0900000):
+
+- **Detect:** port A bit 4 (0xC0000000) reads 1 with a cartridge in the slot
+  (the kernel's function at 0x2BC8C; the test mode prints "Cartridge: Cart is
+  seated" or "No Cartridge detected").
+- **Chip select:** GPIO 0xC0000108 bits 5-4. 0 is the system NAND. The
+  bootloader and the kernel set 1 and then 2 and read the chip ID each time;
+  the kernel's chip select (0x31908) also writes per-chip values to +0x154
+  and +0x140's low byte from a table of 3-byte entries.
+- **ID:** the kernel's check (0x31C14) returns 0 for no chip (ID 0xFFFF), 2
+  for an ID starting 45 76 (SanDisk, 64 MB) and 1 for anything else; only 2
+  is used as a cartridge ("Cart seated but loading cart fails:(" otherwise).
+  The bytes after 45 76 are UNKNOWN (Ribbit sends FF). Having found it on
+  select 1, the kernel reads it with select 3 (both bits; why is UNKNOWN).
+- **Reads:** command 0x00, +0x148 = sector << 8, +0x14C = 0, then a 0x200-byte
+  DMA. The controller sends +0x148 as two address bytes and +0x14C after
+  them, so on a small-page chip (one column byte) +0x148 bits 15-8 are the
+  page number's low byte. The read starts on the address (no 0x30).
+
+With these, the kernel logs "Cart seated and sucessfully loaded!", copies
+the cartridge's log files (`qqtUS.LPD` and others) to the system NAND, and
+after the player signs in runs "Kernal load test... kernel OK", loads the
+cartridge's KERNEL.BIN ("LK file found, size is 0X0028C768") and starts it:
+the game mounts its own file system ("Loaded filesystem: OTP") and looks for
+its save (`MDP.P01` for Disney Princess, `MPF.P01` for The Princess and the
+Frog). Both dumps reach their game menus (Disney Princess: Ariel's Fireworks
+Display, Cinderella's Dress Dash, Snow White's Dancing Delight). The Princess
+and the Frog's backgrounds do not draw yet.
 
 ## Interrupt controller (0xD0100000)
 
@@ -255,8 +288,10 @@ user data cleared" (CRC32 de80d788).
 ## In the Ribbit app
 
 The library lists a Zippity NAND dump as "Zippity Built-in Games (US)",
-tagged "Internal". Playing it (or a Zippity cartridge, which can't be read
-yet) starts the system on its own thread at 60 frames a second; the TV
+tagged "Internal"; cartridge dumps (raw, or a .zip of one) are listed as
+Zippity games. Playing either starts the system (from the NAND dump in the
+games folders, whatever console the library has chosen), with the cartridge
+in the slot for a cartridge, on its own thread at 60 frames a second; the TV
 picture is 640 x 480 and the window keeps 4:3. Controls: D-pad = joystick,
 A = Choose (green), B = bit 4, Hint = both foot pads, Home = bit 5 (red),
 Pause = bit 6. What the system saves goes to `<save folder>/<dump

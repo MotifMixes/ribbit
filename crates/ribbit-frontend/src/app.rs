@@ -400,6 +400,25 @@ impl App {
         if listed || crate::library::is_internal(&path) {
             return self.start_zippity(path.clone(), path);
         }
+        // A Zippity cartridge runs only on a Zippity: its NAND dump, whatever
+        // console the library has chosen.
+        let family = self.library.games.iter().find(|g| g.path == path).map(|g| g.family).or_else(|| crate::library::family_of(&path));
+        if family == Some(crate::library::Family::Zippity) {
+            // The library may still be scanning (a cartridge given on the
+            // command line): then the folders are searched directly.
+            let nand = self.library.bios_for(hw_zippity()).map(Path::to_path_buf).or_else(|| crate::library::find_zippity_nand(&self.settings.rom_folders));
+            match nand {
+                Some(nand) => return self.start_zippity(nand, path),
+                None => {
+                    return self.ui.problem(
+                        "No Zippity dump found",
+                        "Zippity cartridges need the console's own memory (its NAND dump) in one of your games \
+                         folders. Add the folder that holds it with \"Add games folder\".",
+                        "",
+                    );
+                }
+            }
+        }
         if self.opts.firmware.is_none() {
             match self.console_bios(&path) {
                 Ok(Some(nand)) if self.library.selected_console(&self.settings.library_console) == ribbit_memory::known::Hardware::Zippity => {
@@ -472,19 +491,26 @@ impl App {
     fn start_zippity(&mut self, nand: PathBuf, game: PathBuf) {
         self.end_session();
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match crate::zippity::ZipSession::start(&nand, &self.save_dir(), sink) {
+        // A cartridge goes in the slot; the system starts its game after
+        // the player signs in.
+        let cart = (game != nand).then_some(game.as_path());
+        match crate::zippity::ZipSession::start(&nand, cart, &self.save_dir(), sink) {
             Ok(mut z) => {
                 // The TV's 4:3 picture.
                 self.fit_window = FIT_TRIES;
-                if game != nand {
-                    self.ui.toast("Zippity cartridges can't be read yet: the console's built-in games are playable");
-                }
-                z.title = self
-                    .library
-                    .games
-                    .iter()
-                    .find(|g| g.path == nand && g.tags.contains(&"Internal"))
-                    .map_or_else(|| "Zippity Built-in Games".to_string(), |g| g.title.clone());
+                z.title = match cart {
+                    // Until the library has listed it, the file's name.
+                    Some(c) => self.library.games.iter().find(|g| g.path == c).map_or_else(
+                        || c.file_stem().map_or_else(|| "Zippity".to_string(), |s| s.to_string_lossy().into_owned()),
+                        |g| g.title.clone(),
+                    ),
+                    None => self
+                        .library
+                        .games
+                        .iter()
+                        .find(|g| g.path == nand && g.tags.contains(&"Internal"))
+                        .map_or_else(|| "Zippity Built-in Games".to_string(), |g| g.title.clone()),
+                };
                 self.zippity = Some(z);
                 self.paused = false;
                 if let Some(a) = &mut self.audio {
@@ -494,7 +520,14 @@ impl App {
             }
             Err(e) => self.ui.problem(
                 "Couldn't start the Zippity",
-                format!("Ribbit couldn't load the Zippity's memory dump \"{}\". It may be damaged or not a full dump.", file_name(&nand)),
+                match cart {
+                    Some(c) => format!(
+                        "Ribbit couldn't load the Zippity with the cartridge \"{}\" (and the memory dump \"{}\"). Either may be damaged or not a full dump.",
+                        file_name(c),
+                        file_name(&nand)
+                    ),
+                    None => format!("Ribbit couldn't load the Zippity's memory dump \"{}\". It may be damaged or not a full dump.", file_name(&nand)),
+                },
                 format!("{e:#}"),
             ),
         }

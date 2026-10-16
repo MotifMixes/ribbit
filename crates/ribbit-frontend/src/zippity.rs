@@ -58,8 +58,18 @@ pub struct ZipSession {
 
 impl ZipSession {
     /// Powers on a Zippity from its NAND dump (`nand`, raw or zipped).
-    pub fn start(nand: &Path, save_dir: &Path, sink: Option<AudioSink>) -> anyhow::Result<Self> {
+    /// Starts the system from its NAND dump, with a cartridge (a raw dump of
+    /// its NAND, or a .zip of one) in the slot if given.
+    pub fn start(nand: &Path, cart: Option<&Path>, save_dir: &Path, sink: Option<AudioSink>) -> anyhow::Result<Self> {
         let original = ribbit_core::read_image(nand)?;
+        let cart = match cart {
+            Some(path) => {
+                let data = ribbit_core::read_image(path)?;
+                anyhow::ensure!(data.len() == ribbit_zippity::CART_SIZE, "not a Zippity cartridge dump (raw, with spare bytes)");
+                Some(data)
+            }
+            None => None,
+        };
         anyhow::ensure!(original.len() >= 0x200_0000 && original.len() % PAGE == 0, "not a Zippity NAND dump (raw, with spare bytes)");
         let save_path = save_file(nand, save_dir);
         let mut flash = original.clone();
@@ -72,7 +82,13 @@ impl ZipSession {
             Err(_) => true,
         };
         let shared = Arc::new(Shared {
-            z: Mutex::new(Zippity::new(flash)),
+            z: Mutex::new({
+                let mut z = Zippity::new(flash);
+                if let Some(cart) = cart {
+                    z.insert_cartridge(cart);
+                }
+                z
+            }),
             frame: Mutex::new(vec![0; SCREEN_W * SCREEN_H]),
             running: AtomicBool::new(true),
             quit: AtomicBool::new(false),

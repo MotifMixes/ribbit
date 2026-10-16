@@ -532,6 +532,22 @@ pub fn family_of(path: &Path) -> Option<Family> {
     }
 }
 
+/// A Zippity NAND dump (raw) in these folders, found by size and header
+/// alone: for when one is needed before the library's scan has finished.
+pub fn find_zippity_nand(folders: &[PathBuf]) -> Option<PathBuf> {
+    let mut files = Vec::new();
+    for f in folders {
+        collect(f, 0, &mut files);
+    }
+    files.into_iter().find(|p| {
+        use std::io::Read;
+        let mut head = [0u8; 9];
+        std::fs::metadata(p).is_ok_and(|m| m.len() == ZIPPITY_NAND_SIZE as u64)
+            && std::fs::File::open(p).and_then(|mut f| f.read_exact(&mut head)).is_ok()
+            && &head == b"PGandnand"
+    })
+}
+
 /// Whether a file is a console's built-in games (the Zippity's NAND).
 pub fn is_internal(path: &Path) -> bool {
     matches!(classify(path), Some(Found::ZippityNand(_)))

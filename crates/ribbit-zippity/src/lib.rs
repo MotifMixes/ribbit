@@ -23,7 +23,7 @@ mod sound;
 mod video;
 
 pub use bus::{CLOCK, FRAME};
-pub use nand::{PAGE, PAGE_DATA, PAGES_PER_BLOCK};
+pub use nand::{CART_PAGE, CART_SIZE, PAGE, PAGE_DATA, PAGES_PER_BLOCK};
 pub use sound::OUTPUT_RATE;
 pub use video::{SCREEN_H, SCREEN_W};
 
@@ -109,6 +109,13 @@ impl Zippity {
         let mut cpu = Arm::new();
         cpu.reset();
         Self { cpu, bus }
+    }
+
+    /// Puts a cartridge in the slot: a raw dump of its NAND (pages of 0x200
+    /// bytes plus 0x10 spare, `CART_SIZE` bytes). Done before power-on, as
+    /// the bootloader looks for it then.
+    pub fn insert_cartridge(&mut self, cart: Vec<u8>) {
+        self.bus.nand.cart = cart;
     }
 
     /// Clears what users have saved (players, progress, the play log), as
