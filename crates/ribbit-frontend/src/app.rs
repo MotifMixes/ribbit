@@ -968,6 +968,7 @@ impl App {
             gain,
             auto_calibrate: self.settings.auto_calibrate,
             pcm_32k: self.settings.pcm_rate == crate::audio_out::PcmRate::Original32k,
+            pcm_clean: self.settings.pcm_clean == crate::audio_out::PcmClean::Clean,
         });
         if halted {
             return;

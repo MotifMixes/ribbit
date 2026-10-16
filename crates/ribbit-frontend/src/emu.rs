@@ -30,6 +30,8 @@ pub struct Control {
     pub auto_calibrate: bool,
     /// Play the Leapster 2's PCM sound at its 32 kHz (else via 8 kHz).
     pub pcm_32k: bool,
+    /// Low-pass that 32 kHz sound (`audio_out::PcmClean`).
+    pub pcm_clean: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,7 +67,7 @@ impl Emu {
     pub fn start(machine: Machine) -> Self {
         let shared = Arc::new(Shared {
             machine: Mutex::new(machine),
-            control: Mutex::new((Control { running: false, speed: 1.0, gain: 1.0, auto_calibrate: false, pcm_32k: true }, true)),
+            control: Mutex::new((Control { running: false, speed: 1.0, gain: 1.0, auto_calibrate: false, pcm_32k: true, pcm_clean: true }, true)),
             wake: Condvar::new(),
             sink: Mutex::new(None),
             stats: Mutex::new(Stats::default()),
@@ -155,6 +157,7 @@ fn run(s: &Shared) {
     let none = Breakpoints::default();
     let mut audio = Vec::new();
     let mut dac_audio = Vec::new();
+    let mut clean = ribbit_audio::LowPass32k::new();
     let mut last_chunk = Instant::now();
     let mut calibrate = crate::calibrate::AutoCalibrate::new();
     while !s.quit.load(Ordering::Relaxed) {
@@ -227,6 +230,9 @@ fn run(s: &Shared) {
             && let Some(sink) = s.sink.lock().unwrap().as_mut()
         {
             if control.pcm_32k && !dac_audio.is_empty() {
+                if control.pcm_clean {
+                    dac_audio.iter_mut().for_each(|s| *s = clean.push(*s));
+                }
                 sink.push_32k(&dac_audio, control.gain);
             } else {
                 sink.push(&audio, control.gain);

@@ -516,6 +516,17 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 }
             }
             ui.label(egui::RichText::new("Games that stream sound through the Leapster 2's 32 kHz DAC.").weak());
+            ui.add_enabled_ui(settings.pcm_rate == crate::audio_out::PcmRate::Original32k, |ui| {
+                for c in crate::audio_out::PcmClean::ALL {
+                    if ui.radio_value(&mut settings.pcm_clean, c, c.label()).clicked() {
+                        actions.push(Action::SettingsChanged);
+                    }
+                }
+            });
+            ui.label(
+                egui::RichText::new("Clean audio removes a 10-16 kHz mirror image in the 32 kHz sound; real units may not have it.")
+                    .weak(),
+            );
         });
         ui.menu_button("Input", |ui| {
             if item(ui, "Key bindings…", "") {

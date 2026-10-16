@@ -72,6 +72,28 @@ impl PcmRate {
     }
 }
 
+/// Whether the Leapster 2's 32 kHz PCM sound is low-passed on the way out
+/// (`ribbit_audio::LowPass32k`): it removes the mirror image (10-16 kHz)
+/// that the emulated stream carries. Whether the real hardware outputs that
+/// image is UNKNOWN; "Unfiltered" plays the stream exactly as emulated.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum PcmClean {
+    #[default]
+    Clean,
+    Unfiltered,
+}
+
+impl PcmClean {
+    pub const ALL: [PcmClean; 2] = [PcmClean::Clean, PcmClean::Unfiltered];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PcmClean::Clean => "Clean audio",
+            PcmClean::Unfiltered => "Unfiltered (original)",
+        }
+    }
+}
+
 /// Rate of the queued (interpolated) audio.
 const SOURCE_HZ: f64 = ribbit_audio::DAC_RATE_HZ as f64;
 /// Queue limit (a quarter second) before old samples are dropped.

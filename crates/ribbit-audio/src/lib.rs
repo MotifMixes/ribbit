@@ -78,6 +78,70 @@ impl Upsample4x {
     }
 }
 
+/// A host-side low-pass filter for 32 kHz sound: a 95-tap windowed-sinc FIR
+/// (Blackman window) with its cutoff at 8.5 kHz, flat to about 7.5 kHz and
+/// below -70 dB from about 9.5 kHz. Delay: 47 samples (1.5 ms).
+///
+/// Why: the Leapster 2's 32 kHz PCM stream, as Ribbit emulates the BIOS's
+/// mixer, carries a mirror image of its content (at 32 kHz - f, 10-16 kHz
+/// for The Talking Words Factory, about 2% of the energy). Whether real
+/// hardware outputs it is UNKNOWN (no recording of a Leapster 2's own sound
+/// has been found); the frontend offers the stream filtered (default) or as
+/// emulated. Not part of the emulation.
+#[derive(Debug, Clone)]
+pub struct LowPass32k {
+    taps: Vec<f64>,
+    /// Ring of the last `taps.len()` inputs; `next` is the oldest.
+    history: Vec<f64>,
+    next: usize,
+}
+
+impl Default for LowPass32k {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LowPass32k {
+    pub const TAPS: usize = 95;
+    pub const CUTOFF_HZ: f64 = 8_500.0;
+
+    pub fn new() -> Self {
+        let n = Self::TAPS;
+        let m = (n - 1) as f64;
+        let fc = Self::CUTOFF_HZ / DAC_RATE_HZ as f64;
+        let mut taps: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 - m / 2.0;
+                let sinc = if t == 0.0 { 2.0 * fc } else { (2.0 * std::f64::consts::PI * fc * t).sin() / (std::f64::consts::PI * t) };
+                let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / m).cos() + 0.08 * (4.0 * std::f64::consts::PI * i as f64 / m).cos();
+                sinc * w
+            })
+            .collect();
+        let sum: f64 = taps.iter().sum();
+        taps.iter_mut().for_each(|t| *t /= sum);
+        Self { taps, history: vec![0.0; n], next: 0 }
+    }
+
+    pub fn reset(&mut self) {
+        self.history.fill(0.0);
+        self.next = 0;
+    }
+
+    /// Filters one sample.
+    pub fn push(&mut self, sample: i16) -> i16 {
+        let n = self.taps.len();
+        self.history[self.next] = sample as f64;
+        self.next = (self.next + 1) % n;
+        // history[next] is now the oldest input; taps are symmetric.
+        let mut acc = 0.0;
+        for (k, t) in self.taps.iter().enumerate() {
+            acc += t * self.history[(self.next + k) % n];
+        }
+        acc.round().clamp(-32768.0, 32767.0) as i16
+    }
+}
+
 /// Fixed-capacity ring buffer between the emulation thread and a host audio
 /// callback. Overflow drops the oldest samples and is counted, never hidden.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +200,33 @@ impl SampleRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Steady-state gain of the low-pass filter for a sine at `hz`.
+    fn lowpass_gain(hz: f64) -> f64 {
+        let mut f = LowPass32k::new();
+        let amp = 10_000.0;
+        let mut peak: f64 = 0.0;
+        for i in 0..4000 {
+            let x = (amp * (2.0 * std::f64::consts::PI * hz * i as f64 / 32_000.0).sin()).round() as i16;
+            let y = f.push(x) as f64;
+            if i > 1000 {
+                peak = peak.max(y.abs());
+            }
+        }
+        peak / amp
+    }
+
+    #[test]
+    fn lowpass_keeps_the_band_and_removes_the_mirror() {
+        for hz in [100.0, 1_000.0, 5_000.0, 7_000.0] {
+            let g = lowpass_gain(hz);
+            assert!((g - 1.0).abs() < 0.01, "{hz} Hz passes: {g}");
+        }
+        for hz in [10_000.0, 12_000.0, 15_000.0] {
+            let g = lowpass_gain(hz);
+            assert!(g < 0.001, "{hz} Hz is removed: {g}");
+        }
+    }
 
     #[test]
     fn alaw_matches_g711_reference_points() {

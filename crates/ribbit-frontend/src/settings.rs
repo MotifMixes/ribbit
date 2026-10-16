@@ -33,6 +33,8 @@ pub struct Settings {
     pub audio_enhance: crate::audio_out::Enhance,
     /// Leapster 2 PCM sound: 32 kHz as the hardware plays it, or 8 kHz.
     pub pcm_rate: crate::audio_out::PcmRate,
+    /// Leapster 2 PCM sound at 32 kHz: low-passed (clean) or as emulated.
+    pub pcm_clean: crate::audio_out::PcmClean,
     pub muted: bool,
     /// Emulation speed in percent (0 = unlimited).
     pub speed_percent: u32,
@@ -88,6 +90,7 @@ impl Default for Settings {
             volume: 0.8,
             audio_enhance: Default::default(),
             pcm_rate: Default::default(),
+            pcm_clean: Default::default(),
             muted: false,
             speed_percent: 100,
             keys: default_keys(),
