@@ -496,3 +496,67 @@ fn v15_save_state_is_exact() {
 fn v21_save_state_is_exact() {
     save_state_is_exact(V21);
 }
+
+// ---------------------------------------------------------------------------
+// Idle power-off and Resume (the frontend's flow): a snapshot from just before
+// the BIOS turns the console off, loaded and given a fresh idle count, runs
+// on with the full timeout on every model.
+
+/// `cart`: a game in the folder above RIBBIT_BIOS_DIR (roms/), so the BIOS
+/// is in a game: without one, its "insert a cartridge" screen keeps
+/// resetting the count (US v2.1). Not every game has the timer: Sonic X
+/// runs without the BIOS's system manager (no idle power-off), and Cars 2
+/// on the L-MAX resets the count itself in its opening.
+fn resume_after_idle_power_off_resets_the_timer(name: &str, cart: &str) {
+    let Some(dir) = std::env::var_os("RIBBIT_BIOS_DIR") else {
+        eprintln!("RIBBIT_BIOS_DIR not set; skipping");
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    let Some(cart) = dir.parent().map(|p| p.join(cart)).filter(|p| p.exists()) else {
+        eprintln!("{cart} not found next to RIBBIT_BIOS_DIR; skipping");
+        return;
+    };
+    let fw = Firmware::from_bytes_any_model(std::fs::read(dir.join(name)).unwrap()).unwrap();
+    let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(&cart).unwrap()).unwrap();
+    let mut m = Machine::with_straps(fw.clone(), Some(cart.clone()), STRAPS_SKIP_CALIBRATION);
+    let second = m.clock.cpu_hz;
+    // Looked up every frame from boot, as the frontend does: it is found
+    // while BIOS code runs (through the BIOS's GP).
+    for _ in 0..15 * 60 {
+        m.run_cycles(second / 60, &Breakpoints::default());
+        m.idle_seconds_left();
+    }
+    let full = m.idle_seconds_left().unwrap_or_else(|| panic!("{name}: idle timer found"));
+    assert!(full > 60, "{name}: {full} s at start");
+    // Two seconds before the power-off, as the frontend snapshots it.
+    m.cap_idle_count(2);
+    let snapshot = m.save_state();
+    m.run_cycles(4 * second, &Breakpoints::default());
+    assert!(m.idle_powered_off(), "{name}: powered off after its count ran out");
+    // Resume: a fresh machine, the snapshot, a fresh count.
+    let mut r = Machine::with_straps(fw, Some(cart), STRAPS_SKIP_CALIBRATION);
+    r.load_state(&snapshot).unwrap();
+    // As the frontend: the location the first machine found.
+    r.set_idle_timer(m.idle_timer());
+    r.reset_idle_count();
+    r.run_cycles(5 * second, &Breakpoints::default());
+    assert!(!r.idle_powered_off(), "{name}: still on after resuming");
+    let left = r.idle_seconds_left().unwrap();
+    assert!(left > 60 && left + 10 >= full, "{name}: {left} s left after resuming (full timeout {full} s)");
+}
+
+#[test]
+fn v21_resume_after_idle_power_off_resets_the_timer() {
+    resume_after_idle_power_off_resets_the_timer(V21, "Talking-Words-Factory_Leapster_EN.zip");
+}
+
+#[test]
+fn lmax_resume_after_idle_power_off_resets_the_timer() {
+    resume_after_idle_power_off_resets_the_timer("leapsterlmx/152-11476_v2.2.bin", "Talking-Words-Factory_Leapster_EN.zip");
+}
+
+#[test]
+fn leapster2_resume_after_idle_power_off_resets_the_timer() {
+    resume_after_idle_power_off_resets_the_timer("leapster2/152-12206_0.6.bin", "Talking-Words-Factory_Leapster_EN.zip");
+}

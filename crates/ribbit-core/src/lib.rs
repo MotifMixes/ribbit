@@ -568,6 +568,24 @@ impl Machine {
     }
 
     /// Restarts the BIOS's idle timer, as a game calling LF_ResetIdleTimeout.
+    /// Where this BIOS keeps its idle timer, once found (see
+    /// `set_idle_timer`).
+    pub fn idle_timer(&self) -> Option<idle_timer::IdleTimer> {
+        self.idle_timer
+    }
+
+    /// Tells a fresh machine where its BIOS keeps the idle timer. It is
+    /// found through the GP of the code running when it is looked for, so a
+    /// machine that has just loaded a state may not find it at once (a game
+    /// can run with a GP of its own); a frontend resuming a state passes the
+    /// location the earlier machine found (same BIOS), so the reset after it
+    /// never depends on that.
+    pub fn set_idle_timer(&mut self, timer: Option<idle_timer::IdleTimer>) {
+        if timer.is_some() {
+            self.idle_timer = timer;
+        }
+    }
+
     pub fn reset_idle_count(&mut self) {
         if let Some((count_addr, _, reload)) = self.idle_state()
             && reload != 0

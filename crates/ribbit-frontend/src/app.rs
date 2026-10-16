@@ -120,8 +120,9 @@ pub struct App {
     fit_window: u8,
     fatal: Option<anyhow::Error>,
     quit: bool,
-    /// The game closed for inactivity and its snapshot, for Resume.
-    idle_resume: Option<(PathBuf, Vec<u8>)>,
+    /// The game closed for inactivity, its snapshot, and where its BIOS
+    /// keeps the idle timer (for Resume).
+    idle_resume: Option<(PathBuf, Vec<u8>, Option<ribbit_core::idle_timer::IdleTimer>)>,
 }
 
 fn hw_zippity() -> ribbit_memory::known::Hardware {
@@ -679,6 +680,7 @@ impl App {
         }
         let off = m.idle_powered_off();
         let console = m.firmware().known().map_or("Leapster", |k| k.hardware.name());
+        let timer = m.idle_timer();
         drop(m);
         if !off {
             return;
@@ -692,7 +694,7 @@ impl App {
             return;
         }
         tracing::info!(target: "ribbit::boot", "the console turned itself off after inactivity: closing the game");
-        self.idle_resume = s.cart_path.clone().zip(s.idle_snapshot.take());
+        self.idle_resume = s.cart_path.clone().zip(s.idle_snapshot.take()).map(|(p, st)| (p, st, timer));
         self.ui.idle_closed = Some((s.title.clone(), console));
         self.end_session();
         self.update_title();
@@ -703,7 +705,7 @@ impl App {
     /// start if there is no snapshot), with a fresh idle timer.
     fn resume_after_idle(&mut self) {
         self.ui.idle_closed = None;
-        let Some((path, state)) = self.idle_resume.take() else {
+        let Some((path, state, timer)) = self.idle_resume.take() else {
             return;
         };
         self.open_cart(path);
@@ -713,6 +715,9 @@ impl App {
                 if let Err(e) = m.load_state(&state) {
                     tracing::warn!(target: "ribbit::saves", "resume after inactivity: {e:#}");
                 }
+                // The snapshot may be in game code, where this fresh machine
+                // cannot find the timer itself: give it the old one's.
+                m.set_idle_timer(timer);
                 m.reset_idle_count();
             }
             s.emu.resync();
