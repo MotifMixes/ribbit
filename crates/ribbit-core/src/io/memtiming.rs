@@ -56,7 +56,20 @@ impl Cache {
     #[inline(always)]
     fn find(&self, addr: u32) -> Option<usize> {
         let (tag, set) = (addr >> 4 | VALID, (addr >> 4) as usize % SETS);
-        (set * WAYS..set * WAYS + WAYS).find(|&i| self.tags[i] & !DIRTY == tag)
+        let ways: &[u32; WAYS] = self.tags[set * WAYS..set * WAYS + WAYS].try_into().unwrap();
+        let hit = |w: usize| ways[w] & !DIRTY == tag;
+        // Unrolled (the iterator form was a loop with a bounds check per way).
+        if hit(0) {
+            Some(set * WAYS)
+        } else if hit(1) {
+            Some(set * WAYS + 1)
+        } else if hit(2) {
+            Some(set * WAYS + 2)
+        } else if hit(3) {
+            Some(set * WAYS + 3)
+        } else {
+            None
+        }
     }
 
     /// `find`, answered from `last` when it is the same line.

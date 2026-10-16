@@ -273,8 +273,12 @@ impl SystemBus {
                     self.cart_reads += w as u64;
                     self.first_cart_read.get_or_insert((self.now, addr));
                     self.last_cart_read = Some((self.now, addr + width as u32 - 1));
-                    for i in 0..w {
-                        self.cart_read_buckets[(o + i) >> 16] += 1;
+                    if (o >> 16) == ((o + w - 1) >> 16) {
+                        self.cart_read_buckets[o >> 16] += w as u64;
+                    } else {
+                        for i in 0..w {
+                            self.cart_read_buckets[(o + i) >> 16] += 1;
+                        }
                     }
                     return u32::from_le_bytes(buf);
                 }

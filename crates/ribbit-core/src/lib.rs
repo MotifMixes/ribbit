@@ -201,6 +201,10 @@ struct IdleTracker {
     /// Loop heads that failed a probe: the step count before which they are
     /// not probed again, and how many times in a row they failed.
     backoff: std::collections::HashMap<u32, (u64, u8), std::hash::BuildHasherDefault<PcHasher>>,
+    /// The last `backoff` entry `watch` found in force, as (head, until):
+    /// a busy loop asks about the same head every iteration (speed only;
+    /// cleared whenever `backoff` changes).
+    last_backoff: Option<(u32, u64)>,
     /// The probe write log's storage, kept between probes.
     log_buf: Vec<(u32, u8)>,
     skipped_steps: u64,
@@ -220,11 +224,24 @@ impl IdleTracker {
             self.recent_next = (self.recent_next + 1) % self.recent.len();
             return false;
         }
-        !self.backoff.get(&pc).is_some_and(|&(until, _)| cycles < until)
+        if let Some((head, until)) = self.last_backoff
+            && head == pc
+            && cycles < until
+        {
+            return false;
+        }
+        match self.backoff.get(&pc) {
+            Some(&(until, _)) if cycles < until => {
+                self.last_backoff = Some((pc, until));
+                false
+            }
+            _ => true,
+        }
     }
 
     /// A probe of `head` failed at `cycles`.
     fn back_off(&mut self, head: u32, cycles: u64) {
+        self.last_backoff = None;
         let e = self.backoff.entry(head).or_insert((0, 0));
         // A failure long after the last one starts over.
         let shift = if cycles > e.0 + (IDLE_BACKOFF_STEPS << IDLE_BACKOFF_MAX_SHIFT) {
@@ -1002,6 +1019,7 @@ impl Machine {
                 return;
             }
             self.idle.backoff.remove(&p.head);
+            self.idle.last_backoff = None;
             // One iteration: its cycles (absolute, so correct even when the
             // probe spans several `run` calls) and its steps (instructions,
             // interrupt entries, sleeps), which differ now that an instruction

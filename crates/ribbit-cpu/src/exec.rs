@@ -250,7 +250,10 @@ impl Cpu {
                 Some(h) => h,
                 None => Hot::of(uncached.insert(decode(bus, pc))),
             };
-            if hot.stop || (hot.branchy && self.delay_target.is_some()) {
+            if hot.stop
+                || (hot.branchy && self.delay_target.is_some())
+                || (hot.flag_reg != crate::icache::NO_REG && self.regs[(hot.flag_reg & 31) as usize] & status32::H != 0)
+            {
                 out.exit = BlockExit::Slow;
                 break;
             }
@@ -298,7 +301,7 @@ impl Cpu {
                 Flow::Halt(_) | Flow::Exception(_) => unreachable!("halt or exception in run_block at {pc:#x}"),
             }
             n += 1;
-            if bus.block_exit() {
+            if bus.block_exit() || (hot.recheck && self.pending_interrupt().is_some()) {
                 out.from = pc;
                 out.exit = BlockExit::Bus;
                 break;

@@ -242,6 +242,12 @@ pub struct Hot {
     pub delay: bool,
     /// Left to `Cpu::step_with` (changes interrupt state, halts, or raises).
     pub stop: bool,
+    /// May make an interrupt pending (FLAG, SR): the batch ends after it if
+    /// one is, as stepping would take it next.
+    pub recheck: bool,
+    /// FLAG with a register operand: halts if that register's bit 0 (H) is
+    /// set, so the batch stops before it then (`NO_REG` otherwise).
+    pub flag_reg: u8,
     /// A branch, jump or LP: unpredictable in a delay slot.
     pub branchy: bool,
     /// Pipeline timing (`Instr::reg_reads`, `load_dst`, `is_compare_branch`).
@@ -258,12 +264,47 @@ impl Hot {
             next: i.next(),
             target: i.target,
             delay: i.delay,
-            stop: i.op.block_unsafe() || (matches!(i.op, Op::J | Op::Jl) && i.set_flags),
+            stop: (i.op.block_unsafe() && !in_block(i)) || (matches!(i.op, Op::J | Op::Jl) && i.set_flags),
+            recheck: matches!(i.op, Op::Flag | Op::Sr),
+            flag_reg: match (i.op, i.src2) {
+                (Op::Flag, Src::Reg(r)) => r,
+                _ => NO_REG,
+            },
             branchy: i.is_branch() || matches!(i.op, Op::Lp),
             reads: i.reg_reads(),
             load_dst: i.load_dst(),
             compare_branch: i.is_compare_branch(),
         }
+    }
+}
+
+/// `Hot::flag_reg`: none.
+pub const NO_REG: u8 = 0xFF;
+
+/// FLAG, LR and SR that a batch (`Cpu::run_block`) can run: they only
+/// touch CPU state that nothing in a batch reads ahead of time. FLAG must
+/// not halt (a constant without H, or a core register checked when it runs);
+/// LR and SR need a constant register number from the list below. Not the
+/// processor timers (0x21-0x23, 0x100-0x102: a batch brings them up to date
+/// only at its end), DEBUG, PC or anything handled outside the CPU.
+fn in_block(i: &Instr) -> bool {
+    let aux = match i.src2 {
+        Src::Imm(n) | Src::Limm(n) => Some(n),
+        _ => None,
+    };
+    let xy = |n: u32| (crate::xy::AUX_BASE..crate::xy::AUX_BASE + crate::xy::AUX_COUNT).contains(&n);
+    match i.op {
+        Op::Flag => match i.src2 {
+            Src::Imm(v) | Src::Limm(v) => v & crate::status32::H == 0,
+            Src::Reg(r) => r < 32,
+            Src::None => false,
+        },
+        // LP_START, LP_END, IDENTITY, STATUS32, STATUS32_L1/L2, INT_VECTOR_BASE,
+        // AUX_MACMODE, AUX_IRQ_LV12, AUX_IRQ_LEV, AUX_IRQ_HINT, XY.
+        Op::Lr => aux.is_some_and(|n| matches!(n, 0x02..=0x04 | 0x0A..=0x0C | 0x25 | 0x41 | 0x43 | 0x200 | 0x201) || xy(n)),
+        // As LR, with MULHI and without the read-only ones.
+        Op::Sr => aux.is_some_and(|n| matches!(n, 0x02 | 0x03 | 0x0B | 0x0C | 0x12 | 0x25 | 0x41 | 0x43 | 0x200 | 0x201) || xy(n)),
+        _ => false,
     }
 }
 
@@ -409,6 +450,8 @@ const EMPTY: Hot = Hot {
     target: 0,
     delay: false,
     stop: false,
+    recheck: false,
+    flag_reg: NO_REG,
     branchy: false,
     reads: 0,
     load_dst: crate::isa::NO_LOAD,
@@ -490,17 +533,20 @@ impl ICache {
     /// `pc` is not in a read-only range.
     #[inline(always)]
     fn slot(&mut self, pc: u32, decode: impl FnOnce() -> Instr) -> Option<usize> {
+        let slot = (pc as usize >> 1) & (SETS - 1);
+        // A hit needs no range check: only cacheable addresses are stored
+        // (and `set_rom_ranges` empties the cache).
+        if self.hot.get(slot).is_some_and(|h| h.addr == pc) {
+            return Some(slot);
+        }
         if self.hot.is_empty() || !self.cacheable(pc) {
             return None;
         }
-        let slot = (pc as usize >> 1) & (SETS - 1);
-        if self.hot[slot].addr != pc {
-            self.misses += 1;
-            let i = decode();
-            self.hot[slot] = Hot::of(&i);
-            self.hot[slot].stop |= self.stops.contains(&pc);
-            self.instrs[slot] = i;
-        }
+        self.misses += 1;
+        let i = decode();
+        self.hot[slot] = Hot::of(&i);
+        self.hot[slot].stop |= self.stops.contains(&pc);
+        self.instrs[slot] = i;
         Some(slot)
     }
 
