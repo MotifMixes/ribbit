@@ -61,6 +61,10 @@ struct Nand {
     log: Vec<String>,
 }
 
+/// The NAND controller in a snapshot: port, column, row, page register,
+/// cursor, DMA address and length, other registers.
+type NandState = (Port, u32, u32, Vec<u8>, usize, u32, u32, Vec<(u32, u32)>);
+
 /// Everything needed to carry on from a point in a run (ZIPBOOT_SAVE,
 /// ZIPBOOT_LOAD), apart from the flash itself.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -71,7 +75,7 @@ struct Snapshot {
     sram: Vec<u8>,
     iram: Vec<u8>,
     io: Vec<(u32, u32)>,
-    nand: (Port, u32, u32, Vec<u8>, usize, u32, u32, Vec<(u32, u32)>),
+    nand: NandState,
     video_status: u32,
     dma_status: u32,
     gfx_done: bool,
