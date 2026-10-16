@@ -36,6 +36,7 @@ const HD_DRAIN_MS: u64 = 50;
 /// colourful early screen.
 const TITLE_CARD_MS: &[(u32, u64)] = &[
     (0x0ef6_1cbb, 13_500), // Spider-Man - The Case of the Sinister Speller
+    (0xd4a7_e5d4, 7_000), // Disney/Pixar Cars (stops after its LeapFrog logo, which is its art)
     (0x0f2a_d725, 9_000), // SpongeBob SquarePants - Saves the Day (USA, alt)
     (0x0f6d_55cf, 10_500), // Number Raiders
     (0x19da_3dd8, 11_250), // Scooby-Doo! - Spooky Snacks
@@ -84,7 +85,7 @@ const ART_PROFILE: &[u8; 256] = include_bytes!("art_profile.eeprom");
 
 /// Where a game's art is cached (the suffix changes whenever the way art
 /// is made changes, so old pictures are made again).
-const ART_SUFFIX: &str = "-4.png";
+const ART_SUFFIX: &str = "-6.png";
 
 fn art_file(art_dir: &Path, key: &str) -> PathBuf {
     art_dir.join(format!("{key}{ART_SUFFIX}"))
@@ -458,17 +459,24 @@ fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Shot> {
         }
         return Some(cap.shot());
     }
-    let mut best: Option<(usize, Shot)> = None;
+    // The game's own screens (once its code runs) win over the BIOS's, then
+    // still frames (unchanged since the last sample) over frames caught
+    // mid-animation, then the most colourful.
+    let mut best: Option<((bool, bool), usize, Shot)> = None;
+    let mut last = cap.frame.clone();
     for i in 1..=ART_SEARCH_MS / ART_SAMPLE_MS {
         if !cap.run_to(i * ART_SAMPLE_MS) {
-            return best.map(|b| b.1);
+            return best.map(|b| b.2);
         }
         cap.drain();
+        let still = (cap.m.first_cart_pc.is_some(), *cap.frame == *last);
+        last.copy_from_slice(&cap.frame[..]);
         let colours = colourfulness(&cap.frame);
-        if best.as_ref().is_none_or(|b| colours > b.0) {
-            best = Some((colours, cap.shot()));
+        if best.as_ref().is_none_or(|b| (still, colours) > (b.0, b.1)) {
+            best = Some((still, colours, cap.shot()));
         }
     }
+    let best = best.map(|(_, colours, shot)| (colours, shot));
     // A blank or near-blank screen is no art.
     best.filter(|b| b.0 >= 16).map(|b| b.1)
 }

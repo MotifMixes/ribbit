@@ -362,11 +362,22 @@ pub struct HdCanvas {
     pub pixels: Vec<u32>,
     solid_painter: u32,
     pub passes: u64,
+    /// The LCD frame at the last `reconcile`, and the LCD pixels renders
+    /// have covered since: an LCD pixel that changed where no render drew
+    /// was drawn some way the capture missed, so its HD block is stale.
+    prev_lcd: Vec<u32>,
+    covered: Vec<bool>,
 }
 
 impl HdCanvas {
     pub fn new(hooks: Hooks) -> Self {
-        Self { pixels: vec![0xFF00_0000; HD_SIZE * HD_SIZE], solid_painter: hooks.solid_painter, passes: 0 }
+        Self {
+            pixels: vec![0xFF00_0000; HD_SIZE * HD_SIZE],
+            solid_painter: hooks.solid_painter,
+            passes: 0,
+            prev_lcd: vec![],
+            covered: vec![false; 160 * 160],
+        }
     }
 
     /// Draws `pass` inside its redraw rectangle. `lcd` (160x160, 0xAARRGGBB)
@@ -388,6 +399,9 @@ impl HdCanvas {
         let (x0, x1, y0, y1) = (clamp(x0), clamp(x1), clamp(y0), clamp(y1));
         if x0 >= x1 || y0 >= y1 {
             return;
+        }
+        for py in y0 / Q..y1.div_ceil(Q) {
+            self.covered[py * 160 + x0 / Q..py * 160 + x1.div_ceil(Q)].fill(true);
         }
         // Fills bottom to top.
         let mut order: Vec<(&u32, &Fill)> = pass.fills.iter().collect();
@@ -498,7 +512,8 @@ const AGREE: i32 = 40;
 impl HdCanvas {
     /// Makes the HD picture agree with the BIOS's frame `lcd` (160x160): each
     /// 4x4 block whose average differs from its LCD pixel by more than
-    /// `AGREE` becomes that pixel. Covers whatever the edges did not
+    /// `AGREE` becomes that pixel, as does one that changed on the LCD where
+    /// no captured render drew. Covers whatever the edges did not
     /// (bitmaps drawn another way, undecoded fills, stale areas), so the HD
     /// picture is never wrong where the LCD is right. Returns the number of
     /// blocks replaced.
@@ -528,7 +543,9 @@ impl HdCanvas {
                         }
                     }
                 }
-                if (0..3).any(|k| sum[k] / n < lo[k] - AGREE || sum[k] / n > hi[k] + AGREE) {
+                let i = by * 160 + bx;
+                let stale = !self.covered[i] && self.prev_lcd.get(i).is_some_and(|&p| p != l);
+                if stale || (0..3).any(|k| sum[k] / n < lo[k] - AGREE || sum[k] / n > hi[k] + AGREE) {
                     replaced += 1;
                     for y in by * Q..(by + 1) * Q {
                         self.pixels[y * HD_SIZE + bx * Q..y * HD_SIZE + (bx + 1) * Q].fill(0xFF00_0000 | l);
@@ -536,6 +553,9 @@ impl HdCanvas {
                 }
             }
         }
+        self.prev_lcd.clear();
+        self.prev_lcd.extend_from_slice(&lcd[..160 * 160]);
+        self.covered.fill(false);
         replaced
     }
 }
