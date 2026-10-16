@@ -106,22 +106,30 @@ fn remove_stale_art(art_dir: &Path) {
     }
 }
 
-/// Which consoles a game runs on.
+/// Which consoles a game runs on (and the library's tabs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     /// A Leapster cartridge: the Leapster, Leapster TV, L-MAX and Leapster 2.
     Leapster,
+    /// A cartridge made for the Leapster 2 only (LEAPSTER2_ONLY).
+    Leapster2,
     /// A Zippity cartridge (a FAT16 image with KERNEL.BIN).
     Zippity,
 }
 
+/// Cartridges made for the Leapster 2 alone, by CRC32: the "Leapster 2
+/// Gaming Pop" kiosk cartridge (MAME: lgamingpop; its file is named "Leapster
+/// 2 Cartridge 2010"). Whether the original Leapster boots it is UNVERIFIED.
+const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
+
 impl Family {
     /// The library tabs, in order.
-    pub const ALL: [Family; 2] = [Family::Leapster, Family::Zippity];
+    pub const ALL: [Family; 3] = [Family::Leapster, Family::Leapster2, Family::Zippity];
 
     pub fn name(self) -> &'static str {
         match self {
             Family::Leapster => "Leapster",
+            Family::Leapster2 => "Leapster 2",
             Family::Zippity => "Zippity",
         }
     }
@@ -130,8 +138,24 @@ impl Family {
     pub fn runs_on(self, hw: Hardware) -> bool {
         match self {
             Family::Leapster => hw != Hardware::Zippity,
+            Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
         }
+    }
+
+    /// The console a tab is about: its page lists every game this console
+    /// plays (the Leapster 2 page has the Leapster games too).
+    pub fn console(self) -> Hardware {
+        match self {
+            Family::Leapster => Hardware::Leapster,
+            Family::Leapster2 => Hardware::Leapster2,
+            Family::Zippity => Hardware::Zippity,
+        }
+    }
+
+    /// Whether a tab's page lists a game of family `game`.
+    pub fn lists(self, game: Family) -> bool {
+        game.runs_on(self.console())
     }
 }
 
@@ -271,22 +295,30 @@ impl Library {
         self.bios.iter().find(|(h, _)| *h == hw).map(|(_, p)| p.as_path())
     }
 
-    /// The consoles that can play a family's games here: the original
-    /// Leapster (on the chosen BIOS) and the Zippity always, the other
-    /// Leapster models when their BIOS is in a games folder.
-    pub fn consoles(&self, family: Family) -> Vec<Hardware> {
+    /// The consoles that can play games here: the original Leapster (on
+    /// the chosen BIOS) and the Zippity always, the other Leapster models
+    /// when their BIOS is in a games folder.
+    pub fn consoles(&self) -> Vec<Hardware> {
         CONSOLES
             .into_iter()
-            .filter(|&hw| family.runs_on(hw))
             .filter(|&hw| matches!(hw, Hardware::Leapster | Hardware::Zippity) || self.bios_for(hw).is_some())
             .collect()
     }
 
-    /// The console that plays a family's games: the one chosen in the
-    /// library (`chosen`, a console name) when it can, else the first.
-    pub fn console_for(&self, family: Family, chosen: &str) -> Hardware {
-        let options = self.consoles(family);
-        options.iter().copied().find(|hw| hw.name() == chosen).or(options.first().copied()).unwrap_or(Hardware::Leapster)
+    /// The console chosen in the library (`chosen`, a console name), or the
+    /// original Leapster when that one is not available.
+    pub fn selected_console(&self, chosen: &str) -> Hardware {
+        self.consoles().into_iter().find(|hw| hw.name() == chosen).unwrap_or(Hardware::Leapster)
+    }
+
+    /// The tab that lists a console's games: the Leapster 2 page only when
+    /// there are games for the Leapster 2 alone.
+    pub fn tab_for(&self, hw: Hardware) -> Family {
+        match hw {
+            Hardware::Zippity => Family::Zippity,
+            Hardware::Leapster2 if self.games.iter().any(|g| g.family == Family::Leapster2) => Family::Leapster2,
+            _ => Family::Leapster,
+        }
     }
 
     /// Forgets a game's cached art, so the next scan makes it again.
@@ -432,6 +464,16 @@ fn classify(path: &Path) -> Option<Found> {
     read_cartridge(data).map(Found::Cart)
 }
 
+/// Which consoles a game file runs on (None: not a game).
+pub fn family_of(path: &Path) -> Option<Family> {
+    match classify(path)? {
+        Found::Cart(c) if c.known().is_some_and(|k| LEAPSTER2_ONLY.contains(&k.crc32)) => Some(Family::Leapster2),
+        Found::Cart(_) => Some(Family::Leapster),
+        Found::Zippity(_) => Some(Family::Zippity),
+        Found::Bios(_) => None,
+    }
+}
+
 /// A Leapster cartridge image, or None for anything else.
 fn read_cartridge(data: Vec<u8>) -> Option<Cartridge> {
     // Later cartridges have no "LEAP" header; any power-of-two image of a
@@ -502,7 +544,8 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     details.push(("Size", size));
     details.push(("CRC32", key.clone()));
     details.push(("File", path.display().to_string()));
-    Game { path: path.to_path_buf(), family: Family::Leapster, title, subtitle, details, key, art }
+    let family = if known.is_some_and(|k| LEAPSTER2_ONLY.contains(&k.crc32)) { Family::Leapster2 } else { Family::Leapster };
+    Game { path: path.to_path_buf(), family, title, subtitle, details, key, art }
 }
 
 /// Boots the game unseen and returns its most colourful early screen.

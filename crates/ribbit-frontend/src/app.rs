@@ -351,28 +351,53 @@ impl App {
         }
     }
 
+    /// Plays a game on the console chosen in the library's console menu
+    /// (unless a BIOS was given on the command line).
     fn open_cart(&mut self, path: PathBuf) {
+        if self.opts.firmware.is_none() {
+            match self.console_bios(&path) {
+                Ok(bios) => self.next_bios = bios,
+                Err(msg) => {
+                    self.ui.error = Some(msg);
+                    return;
+                }
+            }
+        }
         if let Err(e) = self.boot(Some(path)) {
             self.ui.error = Some(format!("{e:#}"));
         }
     }
 
-    /// A game chosen in the library: on the console chosen in the library
-    /// (the original Leapster uses the chosen BIOS; the other models the
-    /// BIOS found in the games folders).
-    fn open_from_library(&mut self, path: PathBuf) {
+    /// The BIOS to play `path` on the chosen console with (None: the chosen
+    /// BIOS, for the original Leapster), or why it can't be played there.
+    fn console_bios(&self, path: &Path) -> std::result::Result<Option<PathBuf>, String> {
         use crate::library::Family;
         use ribbit_memory::known::Hardware;
-        let family = self.library.games.iter().find(|g| g.path == path).map_or(Family::Leapster, |g| g.family);
-        if family == Family::Zippity {
-            self.ui.toast("Zippity emulation is in progress: Zippity games can't run yet.");
-            return;
+        let console = self.library.selected_console(&self.settings.library_console);
+        let game = self.library.games.iter().find(|g| g.path == path);
+        // Files that are not recognised are tried as Leapster cartridges.
+        let family = game.map(|g| g.family).or_else(|| crate::library::family_of(path)).unwrap_or(Family::Leapster);
+        let title = game.map_or_else(
+            || path.file_stem().map_or_else(|| "This game".to_string(), |s| s.to_string_lossy().into_owned()),
+            |g| g.title.clone(),
+        );
+        if !family.runs_on(console) {
+            let fits: Vec<&str> = self.library.consoles().into_iter().filter(|&h| family.runs_on(h)).map(Hardware::name).collect();
+            let choose = match fits.as_slice() {
+                [] => format!("It needs a {} BIOS in your games folder.", family.console().name()),
+                names => format!("Choose {} in the console menu next to Open Cartridge.", names.join(" or ")),
+            };
+            return Err(format!("{title} is a {} game: it can't run on the {}. {choose}", family.name(), console.name()));
         }
-        self.next_bios = match self.library.console_for(family, &self.settings.library_console) {
-            Hardware::Leapster => None,
-            hw => self.library.bios_for(hw).map(Path::to_path_buf),
-        };
-        self.open_cart(path);
+        match console {
+            Hardware::Zippity => Err("Zippity emulation is in progress: Zippity games can't run yet.".into()),
+            Hardware::Leapster => Ok(None),
+            hw => self
+                .library
+                .bios_for(hw)
+                .map(|p| Some(p.to_path_buf()))
+                .ok_or_else(|| format!("No {} BIOS found in your games folders.", hw.name())),
+        }
     }
 
     fn pick(&mut self, what: Pick) {
@@ -410,10 +435,12 @@ impl App {
         match a {
             Action::Pick(w) => self.pick(w),
             Action::OpenCartridge(p) => self.open_cart(p),
-            Action::PlayFromLibrary(p) => self.open_from_library(p),
+            Action::PlayFromLibrary(p) => self.open_cart(p),
             Action::SetLibraryConsole(hw) => {
                 self.settings.library_console = hw.name().to_string();
                 self.save_settings();
+                // The page with the games this console plays.
+                self.ui.library.tab = Some(self.library.tab_for(hw));
             }
             Action::SetBios(p) => self.set_bios(p),
             Action::CloseCartridge => {

@@ -6,6 +6,7 @@ use crate::gpu::Display;
 use crate::library::{Art, Family, Library};
 use crate::settings::{self, BINDABLE, Settings};
 use ribbit_input::Button;
+use ribbit_memory::known::Hardware;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 pub enum Action {
     Pick(Pick),
     OpenCartridge(PathBuf),
-    /// A game chosen in the library (on the open console page's BIOS).
+    /// A game chosen in the library (on the console chosen in its menu).
     PlayFromLibrary(PathBuf),
     /// The console the library plays Leapster games on.
     SetLibraryConsole(ribbit_memory::known::Hardware),
@@ -75,14 +76,23 @@ pub struct UiState {
     pub browser: Browser,
     toasts: Vec<(String, Instant)>,
     pub error: Option<String>,
-    /// The library page: None for all games, else one family's games.
-    pub library_tab: Option<crate::library::Family>,
+    /// The library's page and search.
+    pub library: LibraryView,
     /// The game (title) that was closed because the Leapster turned itself
     /// off; shown above the library until dismissed.
     pub idle_closed: Option<String>,
     /// When the library last appeared (its cards grow in from then).
     library_since: Option<Instant>,
     was_running: bool,
+}
+
+/// What the library shows.
+#[derive(Default)]
+pub struct LibraryView {
+    /// The page: None for all games, else the games of one family's console.
+    pub tab: Option<Family>,
+    /// Search text.
+    pub search: String,
 }
 
 const TOAST_TIME: Duration = Duration::from_millis(2500);
@@ -125,7 +135,7 @@ pub fn draw(
                 st.library_since = Some(Instant::now());
             }
             let since = st.library_since.unwrap_or_else(Instant::now);
-            library_screen(ui, settings, library, &mut st.library_tab, st.idle_closed.as_deref(), since, actions);
+            library_screen(ui, settings, library, &mut st.library, st.idle_closed.as_deref(), since, actions);
         } else if !info.running {
             welcome(ui, settings, info, actions);
         } else if info.rewinding {
@@ -175,11 +185,13 @@ fn idle_countdown(ui: &egui::Ui, area: egui::Rect, left: u32) {
 }
 
 /// The library's pages: all games, then each family that has games (all
-/// the Leapster models share one page; the console is chosen in the
-/// header's dropdown).
-fn console_tabs(ui: &mut egui::Ui, library: &Library, tab: &mut Option<Family>) {
-    let count = |f: Option<Family>| library.games.iter().filter(|g| f.is_none_or(|f| g.family == f)).count();
-    let families: Vec<Family> = Family::ALL.into_iter().filter(|&f| count(Some(f)) > 0).collect();
+/// the Leapster models share one page; the Leapster 2 has its own when there
+/// are games for it alone). The console is chosen in the header's menu.
+fn console_tabs(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: &mut Option<Family>, actions: &mut Vec<Action>) {
+    let count = |f: Option<Family>| library.games.iter().filter(|g| f.is_none_or(|f| f.lists(g.family))).count();
+    // A page for each family that has games of its own.
+    let families: Vec<Family> =
+        Family::ALL.into_iter().filter(|&f| library.games.iter().any(|g| g.family == f)).collect();
     if tab.is_some_and(|t| !families.contains(&t)) {
         *tab = None;
     }
@@ -216,6 +228,15 @@ fn console_tabs(ui: &mut egui::Ui, library: &Library, tab: &mut Option<Family>) 
             }
             if resp.clicked() {
                 *tab = choice;
+                // A page whose games the chosen console can't play switches
+                // to the page's console.
+                let console = library.selected_console(&settings.library_console);
+                if let Some(f) = choice
+                    && !f.runs_on(console)
+                    && library.consoles().contains(&f.console())
+                {
+                    actions.push(Action::SetLibraryConsole(f.console()));
+                }
             }
         }
     });
@@ -564,11 +585,12 @@ fn library_screen(
     ui: &mut egui::Ui,
     settings: &Settings,
     library: &mut Library,
-    tab: &mut Option<Family>,
+    view: &mut LibraryView,
     idle_closed: Option<&str>,
     since: Instant,
     actions: &mut Vec<Action>,
 ) {
+    let LibraryView { tab, search } = view;
     let ctx = ui.ctx().clone();
     for g in &mut library.games {
         if let Art::Image(img) = &g.art {
@@ -595,21 +617,48 @@ fn library_screen(
                 idle_banner(ui, title, actions);
                 ui.add_space(14.0);
             }
-            let last = settings.recent_carts.first();
+            let last = settings.recent_carts.first().filter(|_| search.is_empty());
             if let Some(game) = last.and_then(|p| library.games.iter().find(|g| &g.path == p)) {
                 hero(ui, game, actions);
                 ui.add_space(28.0);
             }
-            console_tabs(ui, library, tab);
+            console_tabs(ui, settings, library, tab, actions);
             ui.add_space(14.0);
+            let query = search.trim().to_lowercase();
+            let matches = |g: &crate::library::Game| {
+                query.is_empty() || g.title.to_lowercase().contains(&query) || g.subtitle.to_lowercase().contains(&query)
+            };
             let shown_games: Vec<&crate::library::Game> =
-                library.games.iter().filter(|g| tab.is_none_or(|f| g.family == f)).collect();
+                library.games.iter().filter(|g| tab.is_none_or(|f| f.lists(g.family)) && matches(g)).collect();
             let heading = match tab {
                 None => "ALL GAMES".to_string(),
                 Some(f) => f.name().to_uppercase(),
             };
-            ui.label(egui::RichText::new(format!("{heading}  ·  {}", shown_games.len())).size(13.0).strong().color(ACCENT));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{heading}  ·  {}", shown_games.len())).size(13.0).strong().color(ACCENT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !search.is_empty()
+                        && ui.add(egui::Button::new("×").frame(false)).on_hover_text("Clear the search").clicked()
+                    {
+                        search.clear();
+                    }
+                    let field = egui::TextEdit::singleline(search)
+                        .hint_text("🔍  Search games")
+                        .desired_width(240.0)
+                        .margin(egui::vec2(10.0, 6.0));
+                    let resp = ui.add(field);
+                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        search.clear();
+                    }
+                });
+            });
             ui.add_space(12.0);
+            if shown_games.is_empty() && !query.is_empty() {
+                ui.add_space(30.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new(format!("No games match \"{}\"", search.trim())).size(16.0).weak());
+                });
+            }
             let avail = ui.available_width();
             let cols = (((avail + CARD_GAP) / (CARD_WIDTH + CARD_GAP)).floor() as usize).max(1);
             let card_w = ((avail - CARD_GAP * (cols - 1) as f32) / cols as f32).floor().min(CARD_WIDTH * 1.4);
@@ -696,37 +745,40 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     ui.add_space(10.0);
 }
 
-/// The console the library plays games on: only consoles that run the
-/// open page's games (on "All games", the Leapster models, the one family
-/// with a choice, unless there are only Zippity games).
+/// The console games play on (from the library and Open Cartridge): only
+/// consoles that run the open page's games (all of them on "All games").
+/// Choosing one opens the page with its games.
 fn console_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
-    let family = tab.unwrap_or(if library.games.iter().any(|g| g.family == Family::Leapster) || library.games.is_empty() {
-        Family::Leapster
+    let current = library.selected_console(&settings.library_console);
+    let options: Vec<_> = library.consoles().into_iter().filter(|&hw| tab.is_none_or(|f| f.runs_on(hw))).collect();
+    let usable = options.contains(&current);
+    let label = if usable {
+        current.name().to_string()
+    } else if let [only] = options.as_slice() {
+        only.name().to_string()
     } else {
-        Family::Zippity
-    });
-    let options = library.consoles(family);
-    let current = library.console_for(family, &settings.library_console);
-    let only = if family == Family::Leapster {
-        "Add a Leapster TV, L-MAX or Leapster 2 BIOS to your games folder to play on those"
-    } else {
-        "The only console these games play on"
+        format!("{} (no BIOS)", tab.map_or(Hardware::Leapster, Family::console).name())
     };
-    ui.add_enabled_ui(options.len() > 1, |ui| {
+    let hint = match tab {
+        Some(Family::Leapster2) if options.is_empty() => "Add a Leapster 2 BIOS to your games folder to play these games",
+        Some(Family::Zippity) => "The only console these games play on",
+        _ => "Add a Leapster TV, L-MAX or Leapster 2 BIOS to your games folder to play on those",
+    };
+    ui.add_enabled_ui(options.len() > 1 || (!usable && !options.is_empty()), |ui| {
         ui.spacing_mut().interact_size.y = 32.0;
         ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
         egui::ComboBox::from_id_salt("library console")
-            .selected_text(format!("🎮  {}", current.name()))
+            .selected_text(format!("🎮  {label}"))
             .show_ui(ui, |ui| {
                 for hw in options {
-                    if ui.selectable_label(hw == current, hw.name()).clicked() && hw != current {
+                    if ui.selectable_label(hw == current, hw.name()).clicked() {
                         actions.push(Action::SetLibraryConsole(hw));
                     }
                 }
             })
             .response
             .on_hover_text("The console your games play on")
-            .on_disabled_hover_text(only);
+            .on_disabled_hover_text(hint);
     });
 }
 
