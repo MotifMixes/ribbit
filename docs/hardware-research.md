@@ -1016,6 +1016,12 @@ VERIFIED-FW (BIOS 0.6 unless stated). The boot problems, in the order they were 
    | 11 | USB | "USB Attach Reboot." |
 
    Model (HYPOTHESIS): B004 = 0xFFFF_FFFF (MAME), B008 = 3 with a cartridge, 1 without.
+   The system menu starts a cartridge itself (VERIFIED-FW, BIOS 0.6 0x4005_3498): its launch native compares the
+   target with "BaseROM", "TheCartridge", "ExtStorage", "USBConnect"; for "TheCartridge" (present when straps bit 26
+   is clear, 0x4003_FE2C) it writes `(B008 & !6) | 2` and restarts. So bits 0-2 are writable and survive the restart.
+   A real Leapster 2 with a cartridge powers on into the system (recordings: the warning, the Leapster 2 and LeapFrog
+   logos, then the main menu, where the cartridge is the top-left icon); Ribbit does too (00) unless "Leapster 2:
+   start games directly" is on (01). In Ribbit the menu's cartridge icon starts Talking Words Factory (2026-10-16).
 3. **Internal SPI flash on GPIO** (`io/spiflash.rs`, driver `BBSPIFlash` 0x4005_81E0): see the module for pins,
    accepted chips (PMC, SST, EON, Macronix) and commands. GPIO output registers named by the BIOS's own debug
    output (GIODataOut 0x40, GIOPull 0x44, GIODire 0x48, GIOSel0 0x50, GIOSel1 0x54, GIOSel2 0x60, all at

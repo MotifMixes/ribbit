@@ -354,8 +354,10 @@ impl Peripherals {
     /// console start again and B008 bit 0 survives that. Whether it is a
     /// restart or a power-off waiting for the button is UNKNOWN (the idle
     /// power-off uses the same routine); see `Machine::power_request`.
-    /// Only bit 0 of B008 is taken as writable (bits 1-2 are the boot
-    /// selection the controller reports); reads of B000 stay unmodelled.
+    /// B008 bits 0-2 are writable: the system menu starts a cartridge by
+    /// writing 01 to bits 1-2 ("Cart selected") and restarting (BIOS 0.6
+    /// 0x4005_3498: `(B008 & !6) | 2`, then the restart call); the
+    /// selection survives the restart. Reads of B000 stay unmodelled.
     fn leapster2_power_write(&mut self, addr: u32, value: u32) -> bool {
         let Some(p) = self.leapster2_power.as_mut() else {
             return false;
@@ -366,7 +368,7 @@ impl Peripherals {
                 true
             }
             0x0180_B008 => {
-                p[1] = (p[1] & !1) | (value & 1);
+                p[1] = (p[1] & !7) | (value & 7);
                 true
             }
             _ => false,

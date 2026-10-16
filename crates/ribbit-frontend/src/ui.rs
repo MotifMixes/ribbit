@@ -18,6 +18,8 @@ pub enum Action {
     PlayFromLibrary(PathBuf),
     /// The console the library plays Leapster games on.
     SetLibraryConsole(ribbit_memory::known::Hardware),
+    /// Start a console's own system (its BIOS), no cartridge needed.
+    StartSystem(ribbit_memory::known::Hardware),
     SetBios(PathBuf),
     CloseCartridge,
     Reset,
@@ -419,6 +421,13 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 actions.push(Action::SettingsChanged);
             }
             if ui
+                .checkbox(&mut settings.leapster2_skip_menu, "Leapster 2: start games directly")
+                .on_hover_text("Skip the Leapster 2's start-up screens and main menu and go straight into the cartridge. Off: games start from the cartridge icon in the menu, as on a real Leapster 2. Applies at the next start.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+            if ui
                 .checkbox(&mut settings.auto_calibrate, "Calibrate automatically")
                 .on_hover_text("Ribbit presses the calibration targets for you when the calibration screen appears.")
                 .changed()
@@ -795,6 +804,19 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
                 actions.push(Action::Pick(Pick::RomFolder));
             }
             console_picker(ui, settings, library, tab, actions);
+            // The Leapster 2 chosen: its own system (main menu, drawing,
+            // games from the cartridge icon), with or without a cartridge.
+            let console = library.selected_console(&settings.library_console);
+            if console == Hardware::Leapster2
+                && library.bios_for(console).is_some()
+                && tab.is_none_or(|f| f.runs_on(console))
+                && ui
+                    .add(egui::Button::new("▶  Leapster 2 menu").corner_radius(8).min_size(egui::vec2(0.0, 32.0)))
+                    .on_hover_text("Start the Leapster 2's own system: its start-up screens and main menu (no cartridge needed)")
+                    .clicked()
+            {
+                actions.push(Action::StartSystem(console));
+            }
         });
     });
     ui.add_space(10.0);

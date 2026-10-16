@@ -50,6 +50,9 @@ pub struct Settings {
     /// saved calibration instead of forcing calibration at every boot.
     /// Ribbit's machine default (a Leapster 2 measurement) has it clear.
     pub skip_boot_calibration: bool,
+    /// Leapster 2: start a cartridge directly instead of through the
+    /// system's start-up screens and main menu (as a real one does).
+    pub leapster2_skip_menu: bool,
     /// Press the calibration targets automatically (needs the touchscreen).
     pub auto_calibrate: bool,
     /// Show the game being played on Discord.
@@ -101,6 +104,7 @@ impl Default for Settings {
             keys: default_keys(),
             experimental_touch: true,
             skip_boot_calibration: false,
+            leapster2_skip_menu: false,
             auto_calibrate: true,
             discord_presence: true,
             cpu_mhz: 96,

@@ -385,6 +385,18 @@ impl Machine {
         self.io.spi_flash.as_ref().is_none_or(|f| f.has_touch_calibration(at))
     }
 
+    /// Leapster 2: boot the system (its start-up screens and main menu,
+    /// where the cartridge is started from its icon) instead of going
+    /// straight to the cartridge. A real Leapster 2 does this at power-on
+    /// with a cartridge in (recordings: the warning, the Leapster 2 and
+    /// LeapFrog logos, then the menu); the BIOS reads the choice from
+    /// 0x0180_B008 bits 1-2 (00 the system, 01 the cartridge).
+    pub fn boot_leapster2_system(&mut self) {
+        if let Some(p) = self.io.leapster2_power.as_mut() {
+            p[1] &= !6;
+        }
+    }
+
     /// Leapster 2: gives a console with no stored touch calibration the
     /// factory one (`io::spiflash::FACTORY_TOUCH_CALIBRATION`); true if it
     /// did. Call after loading saved storage, before running.
@@ -1231,7 +1243,8 @@ impl Machine {
     /// starts again (HYPOTHESIS: as a restart, the case of the fatal-assert
     /// handler, which expects to see its saved message on the next boot):
     /// devices and CPU reset, memory kept (the saved assert lives at
-    /// 0x0300_FF00), B008 bit 0 kept, time carries on. Before this was
+    /// 0x0300_FF00), B008 bits 0-2 kept (the saved-assert flag and the
+    /// boot selection the system menu writes), time carries on. Before this was
     /// modelled the BIOS ran on after the assert with the asserting task's
     /// interrupt-disable count leaked, so that task always ran masked: the
     /// Leapster 2's PCM interrupts were lost (clicks every 256 samples).
@@ -1249,7 +1262,7 @@ impl Machine {
         self.reset();
         self.bus.restore_memory(&ram, &vram, &sram);
         if let (Some(v), Some(p)) = (b008, self.io.leapster2_power.as_mut()) {
-            p[1] = (p[1] & !1) | (v & 1);
+            p[1] = (p[1] & !7) | (v & 7);
         }
         self.cpu.cycles = cycles;
         self.cpu.instructions_retired = retired;

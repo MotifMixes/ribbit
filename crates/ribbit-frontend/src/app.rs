@@ -272,6 +272,11 @@ impl App {
         if machine.ensure_touch_calibration() {
             tracing::info!(target: "ribbit::boot", "new Leapster 2: factory touch calibration stored");
         }
+        // Leapster 2: through its start-up screens and main menu, as a real
+        // one starts, unless the player chose to go straight to the game.
+        if !self.settings.leapster2_skip_menu {
+            machine.boot_leapster2_system();
+        }
         if let Some(straps) = machine.straps()
             && straps & ribbit_core::io::straps::SKIP_CALIBRATION == 0
             && machine.io.spi_flash.is_some()
@@ -288,6 +293,7 @@ impl App {
             (Some(c), Some(path)) => c.known().map(|k| short_name(k.name)).unwrap_or_else(|| {
                 path.file_stem().map_or_else(|| "Cartridge".into(), |s| s.to_string_lossy().into_owned())
             }),
+            _ if machine.io.leapster2_power.is_some() => "Leapster 2".to_string(),
             _ => "Leapster (no cartridge)".to_string(),
         };
         if let Some(path) = &cart {
@@ -390,6 +396,23 @@ impl App {
             self.set_bios(path);
         } else {
             self.open_cart(path);
+        }
+    }
+
+    /// Starts a console's own system (its BIOS from the library), no
+    /// cartridge.
+    fn start_system(&mut self, hw: ribbit_memory::known::Hardware) {
+        let Some(bios) = self.library.bios_for(hw).map(Path::to_path_buf) else {
+            return self.ui.problem(
+                "No BIOS for this console",
+                "Add the folder that holds its BIOS dump with \"Add games folder\".",
+                "",
+            );
+        };
+        self.next_bios = Some(bios);
+        if let Err(e) = self.boot(None) {
+            let (title, explain) = explain_load_error(&e);
+            self.ui.problem(title, explain, format!("{e:#}"));
         }
     }
 
@@ -579,6 +602,7 @@ impl App {
                 self.ui.library.tab = Some(self.library.tab_for(hw));
             }
             Action::SetBios(p) => self.set_bios(p),
+            Action::StartSystem(hw) => self.start_system(hw),
             Action::CloseCartridge => {
                 self.end_session();
                 self.update_title();
