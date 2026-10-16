@@ -1016,8 +1016,22 @@ Result: with a cartridge it shows the seizure warning, then runs the cartridge (
      answered, voltage window bit 20) until busy clears, CMD2, CMD3, then QueryCardParameters (CSD:
      "Bad CSD_STRUCT number"). Sector I/O: CMD17 read, CMD24 write. Volumes are formatted FAT ("MSDOS5.0", labels
      "System Sd", "Leapster SD"). This is the path for the planned virtual SD card.
-   * Model: an empty slot. EC reads bit 6 = 1, bit 1 = 1. The BIOS prints "!! Card Not Inserted !!" and, from the
-     media layer, "GetToStandbyState Failed" (expected with no card).
+   * Model (2026-10-16, io/sd.rs): every 0.6/B5 unit has a card in this slot. Without one the base system (no
+     cartridge) stops at "SD Card Error: Not Inserted. Please call Customer Service". The card is a 128 MiB
+     standard-capacity card (size UNVERIFIED), commands complete at once, and a command the card does not answer
+     leaves status bit 0 clear: after every access the BIOS deselects with CMD7 and RCA 0 (0x400C_F12C), which
+     cards do not answer, and with bit 0 set for it the driver gives the card up. The data-type bits: bit 0 = read,
+     bit 1 = write (CMD24 is 0x0A). It starts formatted (io/fat.rs): the FAT mount (0x400D_46E4) needs a partition
+     table whose first entry is active (0x80) or a boot sector at sector 0; 0.6 never formats the SD volume (only the
+     volatile RAM disk). The boot sector copies what B5's own formatter writes (media 0xF0, 8 sectors/track, 16
+     heads, serial 0x1BAD_CAFE, 2 FATs of 256 sectors, 512 root entries, label "Leapster SD").
+   * Result (0.6): with no cartridge the base system runs its first-time setup (country, name, Sign In) and the home
+     screen, and writes its profile log to the card ("Writing Log Header for User: 0"). The card is not yet saved
+     between runs (needs a frontend change). Research: `scenes` commands `sdlog`, `sdsector N`, the FAT library's
+     logger 0x400D_3854 on B5 (`logtrace 400d3854 r0 MS`).
+   * Open (B5): B5 reformats the card at boot (even its own format) and then fails to create `b:\Leapster` ("No free
+     directory entry for new directory": its free-cluster search 0x400D_5250 returns 0 on an empty FAT); cause not
+     found yet. Its games run.
 5. **On-chip RAM at 0x0400_0000** (map::SRAM_BASE). The USB driver (strings "UsbMPI", "USB Device Init OK") creates
    its MQX memory pool with the constants `1 << 26` and `1 << 13` (0x400B_E964): 8 KiB at 0x0400_0000. Without it
    the pool header read 0, allocations returned 0 and the driver wrote its endpoint structures through null

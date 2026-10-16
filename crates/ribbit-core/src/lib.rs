@@ -405,13 +405,15 @@ impl Machine {
         // screen; with 01 it boots). B004 MAME's 0xFFFF_FFFF.
         let selection = if cart_present { 0b011 } else { 0b001 };
         io.leapster2_power = Some([0xFFFF_FFFF, selection]);
-        // The pin block of the SD slot (empty) or, on CIP3, the NAND's
-        // ready/busy line (io/sd.rs).
-        io.sd = Some(Default::default());
+        // The SD slot with its card (io/sd.rs) or, on CIP3, no SD slot: the
+        // pin block carries the NAND's ready/busy line instead (io/nand.rs).
         // The USB device controller, no cable (io/usb.rs).
         io.usb = Some(Default::default());
         if firmware.leapster2_nand() {
+            io.sd = Some(Default::default());
             io.nand = Some(Default::default());
+        } else {
+            io.sd = Some(io::sd::SdSlot::with_card());
         }
     }
 
@@ -561,6 +563,7 @@ impl Machine {
         // The Leapster 2's internal flashes are non-volatile too.
         let flash = self.io.spi_flash.take();
         let nand = self.io.nand.take();
+        let sd_card = self.io.sd.as_mut().and_then(|s| s.card.take());
         self.io = Peripherals::default();
         Self::install_leapster2(&mut self.io, &self.firmware, self.cartridge.is_some());
         if let (Some(f), Some(slot)) = (flash, self.io.spi_flash.as_mut()) {
@@ -568,6 +571,12 @@ impl Machine {
         }
         if nand.is_some() {
             self.io.nand = nand;
+        }
+        if let (Some(card), Some(slot)) = (sd_card, self.io.sd.as_mut())
+            && slot.card.is_some()
+        {
+            // The card keeps its sectors; the card powers up in its idle state.
+            slot.card = Some(card.powered_on());
         }
         self.io.straps = straps;
         self.io.gpio.unresolved_lines = lines;
@@ -601,6 +610,7 @@ impl Machine {
             self.run_framebuffer_dma(dma);
             self.io.sync_needed = true;
         }
+        self.run_sd_command();
         let ticks = self.clock.ticks(self.cpu.cycles - start);
         // Voice engine: needs memory (speech stream, samples), so it runs
         // here, after the instruction, like the framebuffer DMA.
@@ -843,6 +853,7 @@ impl Machine {
             self.run_framebuffer_dma(dma);
             self.io.sync_needed = true;
         }
+        self.run_sd_command();
         let ticks = self.clock.ticks(self.cpu.cycles - synced);
         if self.io.voices.lfc_start_pending {
             self.io.voices.start_lfc(&mut self.bus);
@@ -1088,6 +1099,15 @@ impl Machine {
     /// Idle probe outcomes (see `IdleTracker::stats`).
     pub fn idle_stats(&self) -> [u64; 7] {
         self.idle.stats
+    }
+
+    /// Leapster 2: runs an SD command descriptor the program started (io/sd.rs).
+    fn run_sd_command(&mut self) {
+        if let Some(slot) = self.io.sd.as_mut()
+            && let Some(d) = slot.pending.take()
+        {
+            slot.run(d, &mut self.bus);
+        }
     }
 
     /// Framebuffer DMA: copies `words` words, then signals completion through

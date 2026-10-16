@@ -413,6 +413,31 @@ fn main() {
                     }
                 }
             }
+            Some("sdsector") => {
+                // sdsector N: hex dump of SD card sector N (Leapster 2).
+                let n: u32 = w[1].parse().unwrap();
+                let card = m.io.sd.as_ref().and_then(|s| s.card.as_ref()).expect("no SD card");
+                let data = card.sectors.get(&n).cloned().unwrap_or_else(|| vec![0; 512]);
+                for (i, row) in data.chunks(16).enumerate() {
+                    if row.iter().any(|&b| b != 0) {
+                        println!("sd {n}+{:03x}: {}", i * 16, row.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
+                    }
+                }
+            }
+            Some("sdlog") => {
+                // sdlog: the SD commands so far (Leapster 2), runs collapsed.
+                let log = m.io.sd.as_ref().map(|s| s.log.clone()).unwrap_or_default();
+                let mut i = 0;
+                while i < log.len() {
+                    let (c, a, st) = log[i];
+                    let mut n = 1;
+                    while i + n < log.len() && log[i + n].0 == c && log[i + n].2 == st && (c != 17 && c != 24 || log[i + n].1 == a + 512 * n as u32) {
+                        n += 1;
+                    }
+                    println!("sd cmd{c} arg {a:#x} status {st:#06x}{}", if n > 1 { format!(" x{n}") } else { String::new() });
+                    i += n;
+                }
+            }
             Some("lcdregs") => {
                 // lcdregs: the LCD controller and its last framebuffer DMA.
                 let l = &m.io.lcd;

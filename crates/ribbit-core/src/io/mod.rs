@@ -9,6 +9,7 @@
 pub mod adc;
 pub mod audio;
 pub mod eeprom;
+pub mod fat;
 pub mod gpio;
 pub mod intc;
 pub mod lcd;
