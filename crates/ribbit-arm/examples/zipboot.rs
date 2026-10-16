@@ -38,7 +38,7 @@ const PAGE_DATA: usize = 0x800;
 const PAGES_PER_BLOCK: usize = 64;
 const NAND_ID: [u8; 5] = [0x2C, 0xDA, 0x80, 0x15, 0x50];
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Port {
     Idle,
     Id,
@@ -59,6 +59,70 @@ struct Nand {
     dma_len: u32,
     regs: BTreeMap<u32, u32>,
     log: Vec<String>,
+}
+
+/// Everything needed to carry on from a point in a run (ZIPBOOT_SAVE,
+/// ZIPBOOT_LOAD), apart from the flash itself.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Snapshot {
+    cpu: Arm,
+    ran: u64,
+    ram: Vec<u8>,
+    sram: Vec<u8>,
+    iram: Vec<u8>,
+    io: Vec<(u32, u32)>,
+    nand: (Port, u32, u32, Vec<u8>, usize, u32, u32, Vec<(u32, u32)>),
+    video_status: u32,
+    dma_status: u32,
+    gfx_done: bool,
+    timer_due: [u64; 4],
+    timer_flags: u32,
+    rx: Vec<u8>,
+    radio_due: u64,
+}
+
+impl Snapshot {
+    fn take(cpu: &Arm, bus: &Bus, ran: u64) -> Self {
+        let n = &bus.nand;
+        Self {
+            cpu: cpu.clone(),
+            ran,
+            ram: bus.ram.clone(),
+            sram: bus.sram.clone(),
+            iram: bus.iram.clone(),
+            io: bus.io.iter().map(|(a, e)| (*a, e.last_write)).collect(),
+            nand: (n.port, n.column, n.row, n.buf.clone(), n.cursor, n.dma_addr, n.dma_len, n.regs.iter().map(|(a, v)| (*a, *v)).collect()),
+            video_status: bus.video_status,
+            dma_status: bus.dma_status,
+            gfx_done: bus.gfx_done,
+            timer_due: bus.timer_due,
+            timer_flags: bus.timer_flags,
+            rx: bus.rx.iter().copied().collect(),
+            radio_due: bus.radio_due,
+        }
+    }
+
+    fn restore(self, cpu: &mut Arm, bus: &mut Bus) -> u64 {
+        *cpu = self.cpu;
+        bus.ram = self.ram;
+        bus.sram = self.sram;
+        bus.iram = self.iram;
+        for (a, v) in self.io {
+            bus.io.insert(a, Access { last_write: v, ..Default::default() });
+        }
+        let n = &mut bus.nand;
+        (n.port, n.column, n.row, n.buf, n.cursor, n.dma_addr, n.dma_len) =
+            (self.nand.0, self.nand.1, self.nand.2, self.nand.3, self.nand.4, self.nand.5, self.nand.6);
+        n.regs = self.nand.7.into_iter().collect();
+        bus.video_status = self.video_status;
+        bus.dma_status = self.dma_status;
+        bus.gfx_done = self.gfx_done;
+        bus.timer_due = self.timer_due;
+        bus.timer_flags = self.timer_flags;
+        bus.rx = self.rx.into_iter().collect();
+        bus.radio_due = self.radio_due;
+        self.ran
+    }
 }
 
 impl Nand {
@@ -174,6 +238,23 @@ struct Bus {
     gfx_done: bool,
     /// ZIPBOOT_WATCH=lo-hi (hex): every access in that range is logged.
     watch: Option<(u32, u32)>,
+    /// Timers 0-3 (0xC0020000 + 0x20 n): when each next overflows (0: not
+    /// running), and their overflow flags (control bit 15).
+    timer_due: [u64; 4],
+    timer_flags: u32,
+    /// Bytes received by the serial port, not yet read.
+    rx: std::collections::VecDeque<u8>,
+    /// The controllers' state (10 bits) over time: (state, from, to), from
+    /// ZIPBOOT_PAD=state:from:to[;...] (hex state, instruction counts).
+    pad: Vec<(u16, u64, u64)>,
+    /// When the radio receiver next sends a packet.
+    radio_due: u64,
+    /// ZIPBOOT_PRESS=port:mask:from:to[;...] (port a/b/c, hex mask,
+    /// instruction counts): those input bits are flipped from their idle
+    /// level in that window, for finding what the inputs do.
+    presses: Vec<(u32, u32, u64, u64)>,
+    /// ZIPBOOT_WATCH_FROM=n: watching starts after n instructions.
+    watch_from: u64,
     watched: Vec<String>,
     /// ZIPBOOT_RWATCH=lo-hi (hex): CPU writes to memory in that range are logged.
     rwatch: Option<(u32, u32)>,
@@ -189,6 +270,21 @@ const POWER_HOLD: u64 = 20_000_000;
 const IRQ_VIDEO: u32 = 27;
 /// The DMA controller's completion interrupt line.
 const IRQ_DMA: u32 = 24;
+/// The timers' interrupt lines (timer 0 to 3).
+const IRQ_TIMER: [u32; 4] = [25, 17, 10, 9];
+/// The serial port's interrupt line.
+const IRQ_UART: u32 = 14;
+/// Instructions per second (FRAME a 60th of a second; a stand-in).
+const CLOCK: u64 = FRAME * 60;
+/// The timers' clock: 32768 Hz assumed. With the kernel's reload of 0xFFE0
+/// that is one interrupt per millisecond, which suits its 2000-tick
+/// controller timeout. UNVERIFIED.
+const TIMER_HZ: u64 = 32_768;
+/// How often the radio receiver sends the controllers' state: UNKNOWN; once
+/// a frame here.
+const RADIO_PERIOD: u64 = FRAME;
+/// The serial port's receive FIFO size (16 assumed, as in ARM's PL011).
+const RX_FIFO: usize = 16;
 /// The 0xD0800000 engine's completion interrupt line.
 const IRQ_GFX: u32 = 12;
 /// What the analogue-to-digital converter reads: the batteries (the kernel
@@ -213,6 +309,15 @@ impl Bus {
         if self.gfx_done {
             lines |= 1 << IRQ_GFX;
         }
+        for (n, line) in IRQ_TIMER.iter().enumerate() {
+            if self.timer_flags & (1 << n) != 0 {
+                lines |= 1 << line;
+            }
+        }
+        // Serial receive interrupts enabled by control bits 6/5.
+        if !self.rx.is_empty() && self.latch(0xC006_0008) & 0x60 != 0 {
+            lines |= 1 << IRQ_UART;
+        }
         lines
     }
 
@@ -220,6 +325,40 @@ impl Bus {
     fn pending_irq(&self) -> u32 {
         let mask = self.latch(0xD010_0030);
         (1..=32).find(|&n| self.raised() & (1 << n) != 0 && mask & (1u32 << (32 - n)) == 0).unwrap_or(0)
+    }
+
+    /// Runs the timers and the radio receiver up to now. Called every few
+    /// hundred instructions.
+    fn tick(&mut self) {
+        for n in 0..4 {
+            let ctrl = self.latch(0xC002_0000 + 0x20 * n as u32);
+            if ctrl & 0x6000 != 0x6000 {
+                self.timer_due[n] = 0;
+                continue;
+            }
+            let count = 0x1_0000 - (self.latch(0xC002_0008 + 0x20 * n as u32) & 0xFFFF) as u64;
+            let period = (count * CLOCK / TIMER_HZ).max(1);
+            if self.timer_due[n] == 0 {
+                self.timer_due[n] = self.now + period;
+            } else if self.now >= self.timer_due[n] {
+                self.timer_flags |= 1 << n;
+                self.timer_due[n] += period;
+            }
+        }
+        // The radio receiver (the mat and joystick are wireless) sends 4
+        // bytes: a 16-bit word A, little-endian, then A ^ 1. The state's
+        // bits 9-5 are A's bits 15-11 and bits 4-0 A's bits 7-3 (from the
+        // kernel's decoder at 0x2B154).
+        if self.now >= self.radio_due {
+            self.radio_due = self.now + RADIO_PERIOD;
+            let state = self.pad.iter().find(|p| (p.1..p.2).contains(&self.now)).map_or(0, |p| p.0);
+            let a = ((state >> 5) & 31) << 11 | (state & 31) << 3;
+            for b in [a as u8, (a >> 8) as u8, (a ^ 1) as u8, ((a ^ 1) >> 8) as u8] {
+                if self.rx.len() < RX_FIFO {
+                    self.rx.push_back(b);
+                }
+            }
+        }
     }
 
     /// The CPU's IRQ input: a pending line, interrupts not disabled at the
@@ -335,6 +474,7 @@ impl Bus {
             }
         };
         if let Some((lo, hi)) = self.watch
+            && self.now >= self.watch_from
             && (lo..=hi).contains(&a)
             && self.watched.len() < 400_000
         {
@@ -345,6 +485,27 @@ impl Bus {
             self.log.push(line);
         }
         match (a, write) {
+            // Timers (0xC0020000 + 0x20 n): +0 control (bits 14 and 13 on,
+            // bit 15 the overflow flag, cleared by writing 1), +8 reload
+            // (counts up from it to 0x10000).
+            (0xC002_0000 | 0xC002_0020 | 0xC002_0040 | 0xC002_0060, None) => {
+                latched | (self.timer_flags >> ((a >> 5) & 3) & 1) << 15
+            }
+            (0xC002_0000 | 0xC002_0020 | 0xC002_0040 | 0xC002_0060, Some(v)) => {
+                if v & 0x8000 != 0 {
+                    self.timer_flags &= !(1 << ((a >> 5) & 3));
+                }
+                if let Some(e) = self.io.get_mut(&a) {
+                    e.last_write = v & !0x8000;
+                }
+                0
+            }
+            // Serial port (like ARM's PL011): +0 data (reads take a received
+            // byte), +8 control (bits 6/5 receive interrupts), +0x10 status:
+            // bit 4 receive FIFO empty, bit 5 transmit FIFO full (never),
+            // bit 15 receive interrupt.
+            (0xC006_0000, None) => self.rx.pop_front().unwrap_or(0) as u32,
+            (0xC006_0010, None) => if self.rx.is_empty() { 0x10 } else { 0x8000 },
             (0xC006_0000, Some(v)) => {
                 self.uart.push(v as u8 as char);
                 0
@@ -408,13 +569,18 @@ impl Bus {
             // logs port C as R_IOC_I_DATA). Nothing pressed: port C bit 10 is
             // the power button (low: held); A bit 6 and B bit 5 are read
             // inverted too, A bit 4 as is (meanings UNKNOWN). Idle levels
-            // UNVERIFIED.
-            (0xC000_0000, None) => 0xFFEF,
-            (0xC000_0020, None) => 0xFFFF,
-            // The power button is held at power-on (the bootloader powers
-            // off unless it is), then released (the kernel enters a test
-            // mode if it is still held).
-            (0xC000_0040, None) => if self.now < POWER_HOLD { 0xFBFF } else { 0xFFFF },
+            // UNVERIFIED. The power button is held at power-on (the
+            // bootloader powers off unless it is), then released (the kernel
+            // enters a test mode if it is still held).
+            (0xC000_0000 | 0xC000_0020 | 0xC000_0040, None) => {
+                let idle = match a {
+                    0xC000_0000 => 0xFFEF,
+                    0xC000_0020 => 0xFFFF,
+                    _ if self.now < POWER_HOLD => 0xFBFF,
+                    _ => 0xFFFF,
+                };
+                self.presses.iter().filter(|p| p.0 == a && (p.2..p.3).contains(&self.now)).fold(idle, |v, p| v ^ p.1)
+            }
             // Interrupt controller: the pending IRQ's number (0: none).
             (0xD010_0028, None) => self.pending_irq(),
             // Analogue-to-digital converter (0xC00C0000; interrupt lines 28
@@ -437,11 +603,16 @@ impl Bus {
             // corners (x at +0x300/+0x308/+0x310/+0x318, y at +0x304/..,
             // centred coordinates, y up) and stores five results (+0x320..
             // +0x330) in a sprite's words 1, 2, 5, 6 and 7. What the
-            // hardware returns is UNKNOWN: this gives the first corner's x
-            // and y (words 1 and 2) and 0 for the rest.
+            // hardware returns is UNKNOWN. This gives its own encoding, which
+            // only this tool's renderer reads: the first corner's x and y
+            // (words 1 and 2), the third corner's (words 5 and 6), and 0x8000
+            // in word 7. The kernel shrinks sprites this way (a 64x64 sprite
+            // sent as a single point is hidden).
             (0xD050_0320, None) => self.latch(0xD050_0300) & 0xFFFF,
             (0xD050_0324, None) => self.latch(0xD050_0304) & 0xFFFF,
-            (0xD050_0328 | 0xD050_032C | 0xD050_0330, None) => 0,
+            (0xD050_0328, None) => self.latch(0xD050_0310) & 0xFFFF,
+            (0xD050_032C, None) => self.latch(0xD050_0314) & 0xFFFF,
+            (0xD050_0330, None) => 0x8000,
             (0xD010_002C, None) => 0,
             (0xD050_018C, None) => self.video_status,
             (0xD050_018C, Some(v)) => {
@@ -449,7 +620,6 @@ impl Bus {
                 0
             }
             // Serial status: always ready.
-            (0xC006_0010, None) => 0,
             // Other registers read back what was last written (a latch:
             // e.g. the interrupt controller's disable flag, 0xD0100038).
             (_, None) => latched,
@@ -535,7 +705,7 @@ impl Bus {
             }
         }
 
-        // Sprites (control +0x108, bit 0 on): 512 entries of 32 bytes at
+        // Sprites (control +0x108, bit 0 on): up to 512 entries of 32 bytes at
         // 0xD0502000. Halfword 0 and byte 8 bits 6-0: the picture's address
         // in halfwords; halfwords 1 and 2: x and y; halfword 3: attributes
         // (bits 1-0 depth 2/4/6/8 bits, 2/3 flips, 5-4 width and 7-6 height
@@ -545,8 +715,12 @@ impl Bus {
             return img;
         }
         let half = |n: u32, k: u32| (self.latch(0xD050_2000 + n * 32 + k / 2 * 4) >> (16 * (k & 1))) as u16;
+        // Control bits 15-8: the number of sprites drawn, in fours (the
+        // kernel sends that many entries by DMA each frame; later ones are
+        // stale).
+        let count = ((self.latch(0xD050_0108) >> 8) & 0xFF) * 4;
         let mut order: Vec<(u16, u32)> =
-            (0..512).filter(|&n| half(n, 0) != 0 || half(n, 4) & 0x7F != 0).map(|n| ((half(n, 3) >> 12) & 3, n)).collect();
+            (0..count.min(512)).filter(|&n| half(n, 0) != 0 || half(n, 4) & 0x7F != 0).map(|n| ((half(n, 3) >> 12) & 3, n)).collect();
         order.sort();
         for (_, n) in order {
             let attr = half(n, 3) as u32;
@@ -554,21 +728,40 @@ impl Bus {
             let x0 = SCREEN_W as i32 / 2 + half(n, 1) as i16 as i32;
             let y0 = SCREEN_H as i32 / 2 - half(n, 2) as i16 as i32;
             let (w, h) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
-            // 8 bits with palette bit 0 set: 16 bits per pixel, bits 7-0 a
-            // colour, bits 13-8 its opacity (0-63).
+            // The size on screen: the corner converter's third corner (this
+            // tool's own encoding, see the converter), or the picture's.
+            let (sw, sh) = if half(n, 7) == 0x8000 {
+                let x2 = SCREEN_W as i32 / 2 + half(n, 5) as i16 as i32;
+                let y2 = SCREEN_H as i32 / 2 - half(n, 6) as i16 as i32;
+                ((x2 - x0 + 1).max(0) as u32, (y2 - y0 + 1).max(0) as u32)
+            } else {
+                (w, h)
+            };
+            // 8 bits with palette bit 0 set: 16 bits per pixel. In bank 0x200
+            // (bit 15 set) bits 7-0 are a colour and bits 13-8 its opacity
+            // (0-63); otherwise the pixel is the colour itself, 0RRRRRGGGGG
+            // BBBBB, 0 transparent (bit 15 is set in some light pixels; its
+            // meaning is UNKNOWN).
             let wide = attr & 3 == 3 && attr & 0x100 != 0;
             let bpp = if wide { 16 } else { 2 * ((attr & 3) + 1) };
             let bank = if attr & 0x8000 != 0 { 0x200 } else { 0x100 };
             let pal_base = bank + ((((attr >> 8) & 15) << 4) >> bpp << bpp);
-            for py in 0..h {
-                for px in 0..w {
-                    let x = x0 + if attr & 4 != 0 { (w - 1 - px) as i32 } else { px as i32 };
-                    let y = y0 + if attr & 8 != 0 { (h - 1 - py) as i32 } else { py as i32 };
+            for sy in 0..sh {
+                for sx in 0..sw {
+                    let (px, py) = (sx * w / sw, sy * h / sh);
+                    let x = x0 + if attr & 4 != 0 { (sw - 1 - sx) as i32 } else { sx as i32 };
+                    let y = y0 + if attr & 8 != 0 { (sh - 1 - sy) as i32 } else { sy as i32 };
                     if x < 0 || y < 0 || x >= SCREEN_W as i32 || y >= SCREEN_H as i32 {
                         continue;
                     }
                     let o = (y as usize * SCREEN_W + x as usize) * 3;
-                    if wide {
+                    if wide && bank == 0x100 {
+                        let a = addr + (py * w + px) * 2;
+                        let v = self.peek8(a) as u16 | (self.peek8(a + 1) as u16) << 8;
+                        if v != 0 {
+                            img[o..o + 3].copy_from_slice(&rgb555(v & 0x7FFF));
+                        }
+                    } else if wide {
                         let a = addr + (py * w + px) * 2;
                         let v = self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8;
                         let alpha = (v >> 8) & 63;
@@ -664,10 +857,30 @@ fn main() {
         log: Vec::new(),
     };
 
-    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
+    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, presses: Vec::new(), timer_due: [0; 4], timer_flags: 0, rx: Default::default(), pad: Vec::new(), radio_due: 0, watch_from: 0, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
     if let Ok(w) = std::env::var("ZIPBOOT_RWATCH") {
         let (lo, hi) = w.split_once('-').expect("ZIPBOOT_RWATCH=lo-hi");
         bus.rwatch = Some((u32::from_str_radix(lo, 16).unwrap(), u32::from_str_radix(hi, 16).unwrap()));
+    }
+    if let Ok(p) = std::env::var("ZIPBOOT_PAD") {
+        for item in p.split(';') {
+            let f: Vec<&str> = item.split(':').collect();
+            bus.pad.push((u16::from_str_radix(f[0], 16).unwrap(), f[1].parse().unwrap(), f[2].parse().unwrap()));
+        }
+    }
+    if let Ok(p) = std::env::var("ZIPBOOT_PRESS") {
+        for item in p.split(';') {
+            let f: Vec<&str> = item.split(':').collect();
+            let port = match f[0] {
+                "a" => 0xC000_0000,
+                "b" => 0xC000_0020,
+                _ => 0xC000_0040,
+            };
+            bus.presses.push((port, u32::from_str_radix(f[1], 16).unwrap(), f[2].parse().unwrap(), f[3].parse().unwrap()));
+        }
+    }
+    if let Some(n) = std::env::var("ZIPBOOT_WATCH_FROM").ok().and_then(|s| s.parse().ok()) {
+        bus.watch_from = n;
     }
     if let Ok(w) = std::env::var("ZIPBOOT_WATCH") {
         let (lo, hi) = w.split_once('-').expect("ZIPBOOT_WATCH=lo-hi");
@@ -676,11 +889,23 @@ fn main() {
     bus.ram[..len].copy_from_slice(&data[start..start + len]);
     let mut cpu = Arm::new();
     cpu.reset();
+    // ZIPBOOT_LOAD=file: carry on from a snapshot; ZIPBOOT_SAVE=file:n: save
+    // one after n instructions. Instruction counts (and so the step limit)
+    // carry on from the snapshot's.
+    let mut ran = 0u64;
+    if let Ok(path) = std::env::var("ZIPBOOT_LOAD") {
+        let snap: Snapshot = bincode::deserialize(&std::fs::read(&path).expect("read the snapshot")).expect("a snapshot");
+        ran = snap.restore(&mut cpu, &mut bus);
+    }
+    let save: Option<(String, u64)> = std::env::var("ZIPBOOT_SAVE").ok().map(|s| {
+        let (p, n) = s.rsplit_once(':').expect("ZIPBOOT_SAVE=file:n");
+        (p.to_string(), n.parse().expect("an instruction count"))
+    });
 
     let mut hist: BTreeMap<u32, u64> = BTreeMap::new();
-    let mut ran = 0u64;
-    // Jumps (from, to, times), the last JUMPS kept; consecutive repeats collapse.
-    const JUMPS: usize = 600;
+    // Jumps (from, to, times), the last ZIPBOOT_JUMPS (600) kept;
+    // consecutive repeats collapse.
+    let jumps_max: usize = std::env::var("ZIPBOOT_JUMPS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
     let mut jumps: std::collections::VecDeque<(u32, u32, u32)> = std::collections::VecDeque::new();
     let mut prev = 0u32;
     // ZIPBOOT_EVERY=n (with ZIPBOOT_DUMP): RAM is also saved every n
@@ -691,6 +916,11 @@ fn main() {
     // instructions, as frame_<millions>.ppm.
     let frames: Option<u64> = std::env::var("ZIPBOOT_FRAMES").ok().and_then(|s| s.parse().ok());
     while ran < steps {
+        if let Some((path, at)) = &save
+            && ran == *at
+        {
+            std::fs::write(path, bincode::serialize(&Snapshot::take(&cpu, &bus, ran)).unwrap()).unwrap();
+        }
         if let (Some(n), Some(dir)) = (frames, &dump_dir)
             && ran > 0
             && ran.is_multiple_of(n)
@@ -710,6 +940,9 @@ fn main() {
             // their spacing, are UNKNOWN.
             bus.video_status |= 0x801;
         }
+        if ran.is_multiple_of(256) {
+            bus.tick();
+        }
         cpu.irq_line = bus.irq_line();
         if !cpu.step(&mut bus) {
             ran += 1;
@@ -722,7 +955,7 @@ fn main() {
                 Some(j) if (j.0, j.1) == (prev, cpu.current) => j.2 += 1,
                 _ => {
                     jumps.push_back((prev, cpu.current, 1));
-                    if jumps.len() > JUMPS {
+                    if jumps.len() > jumps_max {
                         jumps.pop_front();
                     }
                 }

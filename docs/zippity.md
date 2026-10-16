@@ -75,8 +75,9 @@ down and jumps to the on-chip RAM at 0xF8000000, which ends in a loop.
 |---|---|
 | 0x00000000 | SDRAM (64 MB assumed, as in MAME's stub) |
 | 0x20000000 | SRAM (stage 1; size unknown, 2 MB assumed) |
-| 0xC0000000 | GPIO: port A +0x00 (data in) / +0x04 (out) / +0x08 / +0x0C, port B +0x20.., port C +0x40.. (the kernel logs port C as R_IOC_I_DATA). Port C bit 10 is the power button (low: pressed); port A bit 6 and port B bit 5 are read active-low, port A bit 4 active-high (meanings UNKNOWN). Also clock or pad registers at 0xA0-0xAC, 0x104/0x108, 0x124, 0x140 |
-| 0xC0060000 | Serial port: +0x00 transmit byte, +0x08 control, +0x0C divisor? (0x7530 written), +0x10 status (reads 0: ready) |
+| 0xC0000000 | GPIO: port A +0x00 (data in) / +0x04 (out) / +0x08 / +0x0C, port B +0x20.., port C +0x40.. (the kernel logs port C as R_IOC_I_DATA). Port C bit 10 is the power button (low: pressed); port A bit 6 is a TV-standard strap (low: 50 Hz; its callers choose 50 or 60 and 5000 or 5994); port B bit 5 is read active-low and port A bit 4 active-high (meanings UNKNOWN). Port B bit 0, port C bits 5/4 and bits 6/5 of 0xC00000C4 drive five LEDs (the factory test mode's "Leds:"). Also clock or pad registers at 0xA0-0xAC, 0x104/0x108, 0x124, 0x140 |
+| 0xC0020000 | Timers (below) |
+| 0xC0060000 | Serial port (below): the debug log goes out, the controllers' radio receiver comes in |
 | 0xC00C0000 | Analogue-to-digital converter (below) |
 | 0xD0100000 | Interrupt controller (below) |
 | 0xD0300000 | DMA controller (below) |
@@ -126,8 +127,19 @@ pointers at 0xFFFF74/0xFFFF78 in RAM):
 | +0x34 | 0xF written at start (the FIQ mask?) |
 | +0x38 | Bit 0: interrupts disabled. Read-write: the kernel's "disable" stores 1 and returns the old bit; "restore" writes it back |
 
-Lines with handlers: 6, 9, 12 (graphics engine), 14, 24 (DMA), 27 (video),
-28, 29, 30, 31.
+Lines with handlers (registered through the kernel's function at 0x31564):
+
+| Line | Source |
+|---|---|
+| 2 | 0xC0030000 (two flags at +0x00/+0x04, bit 15; masked) |
+| 6 | Power button (interrupt controller +0x20; "Noise on Power Button pin") |
+| 9, 10, 17, 25 | Timers 3, 2, 1, 0 (only 9 is unmasked) |
+| 12 | Graphics engine (0xD0800000) |
+| 14 | Serial port receive |
+| 24 | DMA controller |
+| 27 | Video |
+| 28, 29 | Analogue-to-digital converter |
+| 30, 31 | 0xC00D0000 channels 1 and 0: probably the sound output (two channels fed by DMA; the test mode reports "Audio: left CH failed" and "right CH") |
 
 ## Analogue-to-digital converter (0xC00C0000)
 
@@ -145,6 +157,44 @@ have handlers.
 The kernel warns at a reading of 0x5BCB or less and gives up at 0x5928 or
 less. What full batteries read is UNKNOWN; Ribbit's research tool returns
 0x7000 at once.
+
+## Timers (0xC0020000)
+
+Four timers at 0xC0020000 + 0x20 n: +0x00 control (0x6062 written: bits 14
+and 13 on; bit 15 the overflow flag, cleared by writing 1), +0x08 the reload
+value (the counter runs from it up to 0x10000). Timer n interrupts on line
+25, 17, 10 or 9. The kernel runs timer 3 with reload 0xFFE0 (32 counts) and
+polls the controllers from its interrupt. The research tool assumes a 32768 Hz
+clock, one interrupt a millisecond, which fits the controller code's timeout
+of 2000 interrupts. The clock is UNVERIFIED.
+
+## Serial port (0xC0060000)
+
+Like ARM's PL011 UART, except the status register's place:
+
+| Offset | Use |
+|---|---|
+| +0x00 | Data: writes send a byte (the log), reads take a received byte |
+| +0x08 | Control (0xB070 at the end): bits 6 and 5 enable receive interrupts (the kernel has helpers to set and clear them) |
+| +0x0C | 0x7530 written (baud divisor?) |
+| +0x10 | Status: bit 4 receive FIFO empty, bit 5 transmit FIFO full (the log waits while set), bit 15 and bit 13 receive interrupts (both read the FIFO until it is empty) |
+
+The receive interrupt (line 14) copies bytes into a 32-byte ring at
+0x002D72E4.
+
+## Controllers
+
+The mat and the joystick ("bopper") are wireless; the console's radio
+receiver sends their state to the serial port. Every millisecond the timer
+interrupt calls the kernel's decoder (0x2B154), which takes 4-byte packets:
+a 16-bit word A, little-endian, then A ^ 1. The state is 10 bits: A's bits
+15-11 become bits 9-5 and A's bits 7-3 bits 4-0 (A's bits 10-8 and 2-1 are
+not used). When the state changes, it is queued as an event. With no packets
+the menu shows a picture of the mat and joystick with radio waves (asking for
+them to be switched on); with packets of state 0 it does not, and the start-up
+goes on to the "Sign In" menu as in the recording. How often the receiver
+sends, and which bit is which button, are UNKNOWN (the research tool sends
+once a frame; `ZIPBOOT_PAD=state:from:to` sets the state).
 
 ## DMA controller (0xD0300000)
 
@@ -183,7 +233,7 @@ UNVERIFIED on hardware.
 | +0xC0 | 0x7030 | Fade (written each frame, 0 so far; not modelled) |
 | +0xE8 | 0x703A | Palette control (0x10 written) |
 | +0xF0 | 0x703C | TV control |
-| +0x108 | 0x7042 | Sprite control (bit 0 on; 0x00031935 written) |
+| +0x108 | 0x7042 | Sprite control: bit 0 on; bits 15-8 the number of sprites drawn, in fours (0x2F: 188 sprites, matching the 188 x 8 words the kernel sends by DMA that frame); 0x00031935 written |
 | +0x188/+0x18C | 0x7062/0x7063 | Interrupt enable and status (below) |
 | +0x1C0-0x1C8 | 0x7070-0x7072 | Video DMA: source, destination, 32-bit words minus 1 |
 | +0x1E0/+0x1E8 | 0x7078/0x707A | Frame buffers: the one being drawn and the one shown (below) |
@@ -263,12 +313,12 @@ Sprite RAM entries are 32 bytes (the kernel keeps a copy of the list at
   64-pixel grid of these sprites) is blended over text layer 1 this way, and
   recolouring entries 0x200-0x27F gives each screen its colour. Which
   attribute bit really selects this mode is UNVERIFIED.
-- **Unknown format:** on the dance-pad and "Sign In" screens a panel showing
-  the joystick and pad with "wireless" arcs (attributes 0x33F3, 0x2073 and
-  others; 16 bits per pixel by its size, but with bit 14 not set) does not
-  come out right either as 8-bit or as colour-and-opacity. It is not in the
-  recording, and is probably a "connect the controllers" prompt shown because
-  the research tool has no controllers.
+- **Direct colour:** a 16-bit sprite in bank 0x100 (bit 15 clear, e.g.
+  0x33F3) holds colours, not indices: 0RRRRRGGGGGBBBBB, 0 transparent. Bit 15
+  is set in some light pixels; its meaning is UNKNOWN. The menu's panels and
+  buttons use it.
+- **Count:** only the first (control bits 15-8) x 4 entries are drawn; the
+  rest of sprite RAM holds stale entries from earlier screens.
 - **Order:** priority 0 to 3, and within a priority later sprites on top.
 
 **Corner converter (+0x300-0x330):** for each sprite the kernel writes four
@@ -277,5 +327,36 @@ coordinates; a 64x64 sprite gives (-275, 61), (-212, 61), (-212, -2),
 (-275, -2)). It then reads five halfwords (+0x320 to +0x330) into the
 sprite's halfwords 1, 2, 5, 6 and 7. This looks like the 16-bit chip's
 "virtual 3D" sprites (PPU-enable bit 9, set). What the hardware returns is
-UNKNOWN. The research tool returns the first corner as x and y and 0 for the
-rest, which places flat sprites as recordings show.
+UNKNOWN. The kernel shrinks sprites with it: a 64x64 sprite sent as four
+equal corners is hidden. The research tool returns its own encoding, which
+only its renderer reads: the first corner (halfwords 1 and 2), the third
+corner (5 and 6) and 0x8000 (7); its renderer scales the sprite to that
+rectangle. Skewed quads are not handled.
+
+**Open question:** after a player is chosen on "Sign In", the recording
+shows the chosen name's button grown wide at the top and a row of round
+buttons (Learning Path, back, cancel, forward). The research tool shows the
+name's ellipse at the top and, below it, a 320x192 panel of direct-colour
+sprites (a blue gradient) with the forward button on it. No corner converter
+input is scaled there, so how the hardware turns those sprites into the wide
+button is UNKNOWN.
+
+## Research tool
+
+`crates/ribbit-arm/examples/zipboot.rs <nand image> [instructions]`, with
+environment variables:
+
+| Variable | Use |
+|---|---|
+| `ZIPBOOT_DUMP=dir` | Save RAM (`ram.bin`), on-chip RAM and the logs below at the end |
+| `ZIPBOOT_FRAMES=n` | Save the picture every n instructions (`frame_<millions>.ppm`) |
+| `ZIPBOOT_EVERY=n` | Save RAM every n instructions |
+| `ZIPBOOT_SAVE=file:n`, `ZIPBOOT_LOAD=file` | Save the machine after n instructions; carry on from such a file |
+| `ZIPBOOT_PAD=state:from:to[;...]` | The controllers' 10-bit state (hex) over instruction counts |
+| `ZIPBOOT_PRESS=port:mask:from:to[;...]` | Flip GPIO input bits (port a, b or c) for a while |
+| `ZIPBOOT_WATCH=lo-hi`, `ZIPBOOT_WATCH_FROM=n` | Log I/O accesses in that range (`watch.log`) |
+| `ZIPBOOT_RWATCH=lo-hi` | Log CPU writes to memory in that range (`rwatch.log`) |
+| `ZIPBOOT_JUMPS[=n]` | Print the last n jumps (600) |
+
+Of the controller bits, only bit 4 has shown an effect so far: on "Sign In"
+it chooses the highlighted player.

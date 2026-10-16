@@ -2623,6 +2623,7 @@ dependencies = [
 name = "ribbit-arm"
 version = "1.0.0"
 dependencies = [
+ "bincode",
  "serde",
 ]
 
