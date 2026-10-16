@@ -54,9 +54,10 @@ fn main() {
         ribbit_memory::Firmware::from_bytes(image)
     }
     .unwrap();
-    let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap();
+    // `none`: no cartridge inserted.
+    let cart = (cart != "none").then(|| ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap());
     let straps = std::env::var("RIBBIT_STRAPS").map_or(0x63FF_FFFF, |s| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap());
-    let mut m = Machine::with_straps(fw, Some(cart), straps);
+    let mut m = Machine::with_straps(fw, cart, straps);
     if let Some(p) = rest.first() {
         m.io.eeprom.load(&std::fs::read(p).unwrap());
     }

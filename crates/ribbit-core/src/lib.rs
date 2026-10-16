@@ -408,6 +408,8 @@ impl Machine {
         // The pin block of the SD slot (empty) or, on CIP3, the NAND's
         // ready/busy line (io/sd.rs).
         io.sd = Some(Default::default());
+        // The USB device controller, no cable (io/usb.rs).
+        io.usb = Some(Default::default());
         if firmware.leapster2_nand() {
             io.nand = Some(Default::default());
         }

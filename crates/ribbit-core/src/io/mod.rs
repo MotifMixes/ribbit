@@ -22,6 +22,7 @@ pub mod nand;
 pub mod sd;
 pub mod spiflash;
 pub mod uart;
+pub mod usb;
 pub mod voices;
 
 use adc::Adc;
@@ -174,6 +175,9 @@ pub struct Peripherals {
     /// Leapster 2: the SD card slot's pins (sd.rs; None on other models).
     #[serde(default)]
     pub sd: Option<sd::SdSlot>,
+    /// Leapster 2: the USB device controller, no host connected (usb.rs).
+    #[serde(default)]
+    pub usb: Option<usb::UsbDevice>,
     /// Leapster 2 CIP3: NAND flash at 0xE000_0000 (nand.rs).
     #[serde(default)]
     pub nand: Option<nand::Nand>,
@@ -250,6 +254,7 @@ impl Default for Peripherals {
             leapster2_power: None,
             sd: None,
             nand: None,
+            usb: None,
             battery: touch::BATTERY_LEVEL,
             touch: None,
             lmax_tv: None,
@@ -305,6 +310,7 @@ impl Peripherals {
             .or_else(|| self.voices.read(addr))
             .or_else(|| self.tv_link.as_mut().and_then(|l| l.read(addr)))
             .or_else(|| self.sd.as_ref().and_then(|s| s.read(addr)))
+            .or_else(|| self.usb.as_ref().and_then(|u| u.read(addr)))
     }
 
     /// 32-bit register write; `false` if no device implements `addr`.
@@ -326,6 +332,7 @@ impl Peripherals {
                     || self.voices.write(addr, value)
                     || self.tv_link.as_mut().is_some_and(|l| l.write(addr, value))
                     || self.sd.as_mut().is_some_and(|s| s.write(addr, value))
+                    || self.usb.as_mut().is_some_and(|u| u.write(addr, value))
             }
         }
     }
