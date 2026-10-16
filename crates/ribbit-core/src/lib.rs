@@ -461,14 +461,9 @@ impl Machine {
 
     /// The idle count and its reload value, once the BIOS's timer is found.
     fn idle_state(&mut self) -> Option<(u32, u32, u32)> {
-        // Verified on the original Leapster and Leapster TV BIOSes only
-        // (idle_timer.rs); on the Leapster 2 the same lookup finds something
-        // else and reads as "switched off" at once.
-        if self.firmware.known().is_some_and(|k| {
-            matches!(k.hardware, ribbit_memory::known::Hardware::Leapster2 | ribbit_memory::known::Hardware::LeapsterLmax)
-        }) {
-            return None;
-        }
+        // Verified on every BIOS family (idle_timer.rs): original, Leapster
+        // TV, L-MAX (same layout as US v2.1) and Leapster 2 (state at
+        // [0x3C7F_ACBC], reload +0xD8, count +0xE0, BIOS 0.6 0x4005_5AC4).
         if self.idle_timer.is_none() {
             self.idle_timer = idle_timer::IdleTimer::find(self.cpu.regs[ribbit_cpu::reg::GP], |a| self.bus.peek8(a));
         }

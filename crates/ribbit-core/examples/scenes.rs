@@ -177,6 +177,11 @@ fn main() {
                     print!("r{i}={r:08x}{}", if i % 8 == 7 { "\n" } else { " " });
                 }
             }
+            Some("idlecap") => {
+                // idlecap SECS: cut the BIOS's idle count to at most SECS (to see
+                // its power-off without waiting).
+                m.cap_idle_count(num(1, 3) as u32);
+            }
             Some("idlewatch") => {
                 // idlewatch MS N: N times, run MS then print the idle count and
                 // the screen's mean brightness.

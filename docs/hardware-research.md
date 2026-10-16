@@ -956,7 +956,8 @@ effects; `.di` accesses; multiplier latency; DMA bus contention; the cartridge c
 
 It boots on the original's model unchanged: L-MAX logo, LeapFrog logo, then the cartridge (Sonic X tested). The
 app now accepts the BIOS (experimental). Its TV output chip (`io/lmax_tv.rs`, research) is not needed for the
-handheld picture. The idle power-off detection is disabled (not verified on this BIOS).
+handheld picture. Idle timer (2026-10-16): same layout as US v2.1 (state `[0x3C1F_ED2C]`, reload +0xCC, count
++0xD4); with the count cut to 3 s the BIOS powers off (white flash, then black), as on the original.
 
 ### Leapster 2 (`152-12206` 0.6, `152-12659` m9, Connected B5 `152-12076`)
 
@@ -1044,6 +1045,12 @@ Result: with a cartridge it shows the seizure warning, then runs the cartridge (
 11. **PCM DMA** (voices.rs, MAME's model): with The Talking Words Factory the BIOS programs both PCM channels
     (0x0180_3000-300C) and its title waits for the stream; before PCM DMA was modelled no half-buffer interrupt came
     and the title never moved on. The same game runs the dual 16x16 MAC instructions and RND16 (isa-arcompact.md).
+
+12. **Idle timer**: the SysMgr's reset routine (0.6 0x4005_5AC4, reached as on the original through
+    `[[gp+4]+0xAC]+0x14`) copies reload +0xD8 to count +0xE0 of the state at `[0x3C7F_ACBC]`; the count starts at 300
+    s and games set 900. When it reaches 0 the BIOS powers off (white flash, then black). Ribbit's idle-timer
+    lookup (idle_timer.rs) finds it unchanged; it had been disabled for the Leapster 2 and L-MAX. As on the
+    original, games that bring their own system code (Sonic X) have no BIOS timer to find.
 
 Open (Leapster 2):
 * "No Cartridge Long Term Memory found" (with no cartridge).
