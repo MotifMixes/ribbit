@@ -39,9 +39,11 @@ pub const SPU_CLOCK: u64 = 281_250;
 /// The output rate, SPU_CLOCK / 4.
 pub const OUTPUT_RATE: f64 = SPU_CLOCK as f64 / 4.0;
 
-/// OKI ADPCM: the step sizes and how each nibble moves the step index.
+/// OKI ADPCM: the step sizes (index 0-48) and how each nibble moves the
+/// step index.
 fn oki_step(i: i32) -> i32 {
-    (16.0 * 1.1f64.powi(i)) as i32
+    static STEPS: std::sync::OnceLock<[i32; 49]> = std::sync::OnceLock::new();
+    STEPS.get_or_init(|| std::array::from_fn(|i| (16.0 * 1.1f64.powi(i as i32)) as i32))[i as usize]
 }
 const OKI_INDEX: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
 

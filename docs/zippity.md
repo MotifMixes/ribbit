@@ -269,10 +269,27 @@ dump file itself ("Start fresh?"). Clearing keeps the original next to it as
 `<name>.with-saves.bak`; "Keep" is remembered (settings
 `zippity_keep_saves`).
 
-The emulation runs about 1.4 times faster than real time on a free P-core
-(about 85 million instructions a second against an assumed 60 million). With
-every core busy it drops to about 83% and the sound runs dry several times
-a second, so a faster CPU core is still wanted.
+## Speed
+
+The system spends most of its time waiting: about 77-87% of its
+instructions (menus and Mickey Says alike) are a three-instruction loop at
+0x2CFF8 polling a flag in RAM (0x2D2AE8 + 0x74) that the video interrupt
+sets. `Zippity::run` skips such idle loops: a jump back of under 64 bytes,
+with no write and no I/O access since the last time round and every
+register and flag the same, can only end when a device tick or frame
+changes something, so time moves on to the next one at once. Sound and
+pictures come out bit-identical with and without it (`zrun` prints hashes
+of both; `ZRUN_NO_SKIP` turns skipping off).
+
+On an i9-13900K P-core the emulation now runs about 4.5-6 times faster than
+real time (menus and Mickey Says; assumed 60 million instructions a
+second), against 1.3 before. With every core busy the app holds 100% speed
+with no sound gaps. Of what is left, most is the CPU core itself
+(instruction fetch through the MMU, RAM reads, the decode switch).
+
+`zrun <nand> <frames> <out.ppm> [pad script]` times a run (`ZRUN_FROM=n`
+times frames n onwards only); `zpc <nand> <frames>` histograms where the
+program counter spends its time.
 
 ## Sound unit (0xD0400000)
 

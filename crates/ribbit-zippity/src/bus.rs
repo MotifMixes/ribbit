@@ -292,7 +292,10 @@ impl Bus {
     /// The lowest raised line not masked (0xD0100030: bit 32-n masks line n).
     fn pending_irq(&self) -> u32 {
         let (raised, mask) = (self.raised(), self.latch(0xD010_0030));
-        (1..=32).find(|&n| raised & (1 << n) != 0 && mask & (1u32 << (32 - n)) == 0).unwrap_or(0)
+        // Line n is unmasked when mask bit 32 - n is clear: reversed, bit n.
+        let unmasked = ((!mask).reverse_bits() as u64) << 1;
+        let pending = raised & unmasked & 0x1_FFFF_FFFE;
+        if pending == 0 { 0 } else { pending.trailing_zeros() }
     }
 
     /// The pending fast interrupt's number (1-4), 0 if none: 0xD0100034
