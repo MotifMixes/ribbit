@@ -585,7 +585,7 @@ fn status_bar(ui: &mut egui::Ui, info: &Info) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if info.running {
-                let text = if info.paused { "paused".to_string() } else { format!("{:.0}% speed", info.speed) };
+                let text = if info.paused { "Paused".to_string() } else { format!("{:.0}% speed", info.speed) };
                 ui.label(text);
             }
         });

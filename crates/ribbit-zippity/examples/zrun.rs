@@ -7,7 +7,7 @@
 //! starve the sound in the app); ZRUN_RENDER draws every frame, as the app
 //! does.
 
-use ribbit_zippity::{SCREEN_H, SCREEN_W, Zippity};
+use ribbit_zippity::{CLOCK, SCREEN_H, SCREEN_W, Zippity};
 use std::time::Instant;
 
 fn main() {
@@ -54,9 +54,10 @@ fn main() {
     let secs = start.elapsed().as_secs_f64();
     let timed = z.instructions() - timed_from;
     println!(
-        "{timed} instructions in {secs:.2} s: {:.1} M/s ({:.2}x real time at 60 M/s); {samples} sound samples",
+        "{timed} instructions in {secs:.2} s: {:.1} M/s ({:.2}x real time at {} M/s); {samples} sound samples",
         timed as f64 / secs / 1e6,
-        timed as f64 / secs / 60e6
+        timed as f64 / secs / CLOCK as f64,
+        CLOCK / 1_000_000
     );
     let mut img = vec![0u32; SCREEN_W * SCREEN_H];
     z.render(&mut img);
