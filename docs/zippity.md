@@ -2,10 +2,10 @@
 
 The Zippity (2009) is a TV console unrelated to the Leapster hardware. Its
 system-on-chip is a GeneralPlus GPL32300A with an ARM9 core (ARMv5TE, emulated
-by `crates/ribbit-arm`). There is no public documentation for the chip, and
+by `crates/ribbit-arm`; the machine is `crates/ribbit-zippity`). There is no public documentation for the chip, and
 MAME only has a stub (`tvgames/generalplus_gpl32612.cpp`). Everything below
 was learned by running the dumped firmware on the ARM model with
-`crates/ribbit-arm/examples/zipboot.rs`, and is UNVERIFIED on hardware unless
+`crates/ribbit-zippity/examples/zipboot.rs`, and is UNVERIFIED on hardware unless
 it says otherwise.
 
 ## Dumps
@@ -278,7 +278,7 @@ checked against a recording of a real Zippity starting up (the warning, the
 LeapFrog and Disney logos, the Zippity logo, the credits, the dance-pad
 picture and the "Sign In" menu with the unit's saved players, the top band's
 colour changing per screen). Ribbit's research tool draws these screens
-(`render` in `crates/ribbit-arm/examples/zipboot.rs`). All of it is
+(`crates/ribbit-zippity/src/video.rs`). All of it is
 UNVERIFIED on hardware.
 
 | Offset | 16-bit chip | Use |
@@ -443,7 +443,7 @@ real CPU clock is UNKNOWN (the tool assumes 60 million a second).
 
 ## Research tool
 
-`crates/ribbit-arm/examples/zipboot.rs <nand image> [instructions]`, with
+`crates/ribbit-zippity/examples/zipboot.rs <nand image> [instructions]`, with
 environment variables:
 
 | Variable | Use |

@@ -2623,7 +2623,6 @@ dependencies = [
 name = "ribbit-arm"
 version = "1.0.0"
 dependencies = [
- "bincode",
  "serde",
 ]
 
@@ -2742,6 +2741,15 @@ dependencies = [
 name = "ribbit-video"
 version = "1.0.0"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ribbit-zippity"
+version = "1.0.0"
+dependencies = [
+ "bincode",
+ "ribbit-arm",
  "serde",
 ]
 

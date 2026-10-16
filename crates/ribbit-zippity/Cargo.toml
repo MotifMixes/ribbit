@@ -1,0 +1,12 @@
+[package]
+name = "ribbit-zippity"
+description = "LeapFrog Zippity (GeneralPlus GPL32300A, ARM9) machine model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ribbit-arm.workspace = true
+serde.workspace = true
+bincode = "1.3"

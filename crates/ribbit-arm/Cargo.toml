@@ -9,5 +9,3 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 
-[dev-dependencies]
-bincode = "1.3"

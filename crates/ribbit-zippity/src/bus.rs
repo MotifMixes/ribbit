@@ -1,0 +1,599 @@
+//! The Zippity's memory map and devices, as far as they are known
+//! (docs/zippity.md). Everything here is UNVERIFIED on hardware unless the
+//! documentation says otherwise; it is what the system software needs, and
+//! matches recordings of real units where noted there.
+
+use crate::nand::Nand;
+use crate::probe::Probe;
+use crate::sound::{RAMP_FRAMES, Voice};
+use ribbit_arm::ArmBus;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// SDRAM (64 MB assumed, as in MAME's stub).
+pub const RAM_SIZE: usize = 64 << 20;
+pub const SRAM_BASE: u32 = 0x2000_0000;
+pub const SRAM_SIZE: usize = 0x20_0000;
+/// The bootloader copies code to 0xF8000000 and runs it: on-chip RAM
+/// (size UNKNOWN; 64 KB assumed).
+pub const IRAM_BASE: u32 = 0xF800_0000;
+pub const IRAM_SIZE: usize = 0x1_0000;
+
+/// Instructions between video frames (a stand-in: the CPU clock and the
+/// frame rate are UNKNOWN; about 60 Hz at 60 MIPS).
+pub const FRAME: u64 = 1_000_000;
+/// Instructions per second (FRAME a 60th of a second; a stand-in).
+pub const CLOCK: u64 = FRAME * 60;
+/// Instructions the power button stays held from power-on (the bootloader
+/// powers off unless it is held; the kernel enters a test mode if it still is).
+const POWER_HOLD: u64 = 20_000_000;
+const IRQ_VIDEO: u32 = 27;
+const IRQ_DMA: u32 = 24;
+/// The timers' interrupt lines (timer 0 to 3).
+const IRQ_TIMER: [u32; 4] = [25, 17, 10, 9];
+const IRQ_UART: u32 = 14;
+/// The 0xD0800000 engine's completion interrupt line.
+const IRQ_GFX: u32 = 12;
+/// The timers' clock: 32768 Hz assumed. With the kernel's reload of 0xFFE0
+/// that is one interrupt per millisecond, which suits its 2000-tick
+/// controller timeout. UNVERIFIED.
+const TIMER_HZ: u64 = 32_768;
+/// How often the radio receiver sends the controllers' state: UNKNOWN; once
+/// a frame here.
+const RADIO_PERIOD: u64 = FRAME;
+/// The controllers' state with nothing pressed: the buttons are active-low
+/// (the kernel turns 1-to-0 changes into presses; 0x3FF is all released).
+pub const PAD_IDLE: u16 = 0x3FF;
+/// The serial port's receive FIFO size (16 assumed, as in ARM's PL011).
+const RX_FIFO: usize = 16;
+/// What the analogue-to-digital converter reads: the batteries (the kernel
+/// warns at 0x5BCB or less and gives up at 0x5928 or less). Full batteries'
+/// reading is UNKNOWN; this is comfortably above both.
+const ADC_BATTERY: u32 = 0x7000;
+
+const SPU_WORDS: usize = 0x2000 / 4;
+const PPU_WORDS: usize = 0x8000 / 4;
+
+/// Which register array an address is in (true: the sound unit's), and
+/// its index; None for other registers and addresses not word-aligned.
+#[inline]
+fn block(a: u32) -> Option<(bool, usize)> {
+    if a & 3 != 0 {
+        return None;
+    }
+    let s = a.wrapping_sub(0xD040_0000) as usize;
+    if s < 0x2000 {
+        return Some((true, s / 4));
+    }
+    let p = a.wrapping_sub(0xD050_0000) as usize;
+    if p < 0x8000 {
+        return Some((false, p / 4));
+    }
+    None
+}
+
+/// A cheap hasher for register addresses.
+#[derive(Default, Clone, Copy)]
+pub struct AddrHasher(u64);
+
+impl Hasher for AddrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0100_0000_01B3);
+        }
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.0 = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16;
+    }
+}
+
+pub type Regs = HashMap<u32, u32, BuildHasherDefault<AddrHasher>>;
+
+#[derive(Serialize, Deserialize)]
+pub struct Bus {
+    pub(crate) ram: Vec<u8>,
+    pub(crate) sram: Vec<u8>,
+    pub(crate) iram: Vec<u8>,
+    /// The instruction being run (for logs).
+    #[serde(skip)]
+    pub(crate) pc: u32,
+    /// Instructions run (time).
+    pub(crate) now: u64,
+    /// What each I/O register last had written (most read it back: e.g. the
+    /// interrupt controller's disable flag, 0xD0100038).
+    pub(crate) regs: Regs,
+    /// The sound unit's and the video chip's register blocks
+    /// (0xD0400000-0xD0401FFF and 0xD0500000-0xD0507FFF), as arrays: they are
+    /// read many times a sample and a frame.
+    pub(crate) spu_regs: Vec<u32>,
+    pub(crate) ppu_regs: Vec<u32>,
+    pub(crate) nand: Nand,
+    /// Text written to the serial port (the system's log).
+    #[serde(skip)]
+    pub uart: String,
+    /// Video interrupt status (0xD050018C; write 1s to clear): bits 0 and
+    /// 11 come each frame (bit 11 counts frames shown).
+    pub(crate) video_status: u32,
+    /// DMA completion flags (0xD03001FC; write 1s to clear), one per channel.
+    pub(crate) dma_status: u32,
+    /// The 0xD0800000 engine's done flag (+0x7C bit 0, write 1 to clear).
+    pub(crate) gfx_done: bool,
+    /// Timers 0-3 (0xC0020000 + 0x20 n): when each next overflows (0: not
+    /// running), and their overflow flags (control bit 15).
+    pub(crate) timer_due: [u64; 4],
+    pub(crate) timer_flags: u32,
+    /// Bytes received by the serial port, not yet read.
+    pub(crate) rx: VecDeque<u8>,
+    /// The controllers' state (active-low, 10 bits), and when the radio
+    /// receiver next sends it.
+    pub(crate) pad: u16,
+    pub(crate) radio_due: u64,
+    pub(crate) voices: [Voice; 32],
+    pub(crate) spu_stopped: [u32; 2],
+    /// The beat counter: ticks left of the base count, and the beat flag
+    /// (+0xE14 bit 14), which is fast interrupt (FIQ) line 2.
+    pub(crate) beat_base: u32,
+    pub(crate) beat_flag: bool,
+    /// Mixed sound (stereo, interleaved) not yet taken, and when the next
+    /// output sample is due.
+    #[serde(skip)]
+    pub(crate) audio: Vec<i16>,
+    pub(crate) audio_due: u64,
+    pub(crate) audio_frac: u64,
+    /// Interrupt lines need working out again (after I/O or a tick).
+    #[serde(skip)]
+    pub(crate) lines_dirty: bool,
+    #[serde(skip)]
+    pub probe: Probe,
+}
+
+impl Bus {
+    pub fn new(flash: Vec<u8>) -> Self {
+        Self {
+            ram: vec![0; RAM_SIZE],
+            sram: vec![0; SRAM_SIZE],
+            iram: vec![0; IRAM_SIZE],
+            pc: 0,
+            now: 0,
+            regs: Regs::default(),
+            spu_regs: vec![0; SPU_WORDS],
+            ppu_regs: vec![0; PPU_WORDS],
+            nand: Nand::new(flash),
+            uart: String::new(),
+            video_status: 0,
+            dma_status: 0,
+            gfx_done: false,
+            timer_due: [0; 4],
+            timer_flags: 0,
+            rx: VecDeque::new(),
+            pad: PAD_IDLE,
+            radio_due: 0,
+            voices: [Voice::default(); 32],
+            spu_stopped: [0; 2],
+            beat_base: 0,
+            beat_flag: false,
+            audio: Vec::new(),
+            audio_due: 0,
+            audio_frac: 0,
+            lines_dirty: true,
+            probe: Probe::default(),
+        }
+    }
+
+    pub(crate) fn latch(&self, a: u32) -> u32 {
+        match block(a) {
+            Some((true, i)) => self.spu_regs[i],
+            Some((false, i)) => self.ppu_regs[i],
+            None => self.regs.get(&a).copied().unwrap_or(0),
+        }
+    }
+
+    pub(crate) fn set_latch(&mut self, a: u32, v: u32) {
+        match block(a) {
+            Some((true, i)) => self.spu_regs[i] = v,
+            Some((false, i)) => self.ppu_regs[i] = v,
+            None => {
+                self.regs.insert(a, v);
+            }
+        }
+    }
+
+    /// Interrupt lines raised (bit n for line n).
+    fn raised(&self) -> u64 {
+        let mut lines = 0u64;
+        if self.video_status != 0 {
+            lines |= 1 << IRQ_VIDEO;
+        }
+        if self.dma_status != 0 {
+            lines |= 1 << IRQ_DMA;
+        }
+        if self.gfx_done {
+            lines |= 1 << IRQ_GFX;
+        }
+        for (n, line) in IRQ_TIMER.iter().enumerate() {
+            if self.timer_flags & (1 << n) != 0 {
+                lines |= 1 << line;
+            }
+        }
+        // Serial receive interrupts enabled by control bits 6/5.
+        if !self.rx.is_empty() && self.latch(0xC006_0008) & 0x60 != 0 {
+            lines |= 1 << IRQ_UART;
+        }
+        lines
+    }
+
+    /// The lowest raised line not masked (0xD0100030: bit 32-n masks line n).
+    fn pending_irq(&self) -> u32 {
+        let (raised, mask) = (self.raised(), self.latch(0xD010_0030));
+        (1..=32).find(|&n| raised & (1 << n) != 0 && mask & (1u32 << (32 - n)) == 0).unwrap_or(0)
+    }
+
+    /// The pending fast interrupt's number (1-4), 0 if none: 0xD0100034
+    /// bit 4-n masks line n. Only the sound unit's beat counter (line 2)
+    /// is modelled.
+    fn pending_fiq(&self) -> u32 {
+        if self.beat_flag && self.latch(0xD010_0034) & (1 << 2) == 0 { 2 } else { 0 }
+    }
+
+    /// The CPU's IRQ and FIQ inputs: a pending line, with interrupts not
+    /// disabled at the controller (0xD0100038 bit 0, which holds off both:
+    /// the FIQ handler returns at once while it is set).
+    pub(crate) fn lines(&self) -> (bool, bool) {
+        let enabled = self.latch(0xD010_0038) & 1 == 0;
+        (enabled && self.pending_irq() != 0, enabled && self.pending_fiq() != 0)
+    }
+
+    /// A video frame: the frame interrupt's bits 0 and 11 (which edge each
+    /// is, and their spacing, are UNKNOWN).
+    pub(crate) fn frame(&mut self) {
+        self.video_status |= 0x801;
+        self.lines_dirty = true;
+    }
+
+    /// Runs the timers, the sound unit and the radio receiver up to now.
+    /// Called every few hundred instructions.
+    pub(crate) fn tick(&mut self) {
+        self.lines_dirty = true;
+        for n in 0..4 {
+            let ctrl = self.latch(0xC002_0000 + 0x20 * n as u32);
+            if ctrl & 0x6000 != 0x6000 {
+                self.timer_due[n] = 0;
+                continue;
+            }
+            let count = 0x1_0000 - (self.latch(0xC002_0008 + 0x20 * n as u32) & 0xFFFF) as u64;
+            let period = (count * CLOCK / TIMER_HZ).max(1);
+            if self.timer_due[n] == 0 {
+                self.timer_due[n] = self.now + period;
+            } else if self.now >= self.timer_due[n] {
+                self.timer_flags |= 1 << n;
+                self.timer_due[n] += period;
+            }
+        }
+        while self.now >= self.audio_due {
+            // CLOCK / 70312.5 instructions per output sample (exact on
+            // average: audio_frac keeps the remainder in 140625ths).
+            self.audio_frac += CLOCK * 2;
+            self.audio_due += self.audio_frac / (crate::sound::SPU_CLOCK / 2);
+            self.audio_frac %= crate::sound::SPU_CLOCK / 2;
+            // One beat tick per output sample (both are SPU_CLOCK / 4).
+            self.beat_tick();
+            let (l, r) = self.spu_mix();
+            if self.audio.len() < 1 << 24 {
+                self.audio.extend_from_slice(&[l.clamp(-32768, 32767) as i16, r.clamp(-32768, 32767) as i16]);
+            }
+        }
+        // The radio receiver (the mat and joystick are wireless) sends 4
+        // bytes: a 16-bit word A, little-endian, then A ^ 1. The state's
+        // bits 9-5 are A's bits 15-11 and bits 4-0 A's bits 7-3 (from the
+        // kernel's decoder at 0x2B154).
+        if self.now >= self.radio_due {
+            self.radio_due = self.now + RADIO_PERIOD;
+            let now = self.now;
+            let state = self.probe.pad_script.iter().find(|p| (p.1..p.2).contains(&now)).map_or(self.pad, |p| p.0);
+            let a = ((state >> 5) & 31) << 11 | (state & 31) << 3;
+            for b in [a as u8, (a >> 8) as u8, (a ^ 1) as u8, ((a ^ 1) >> 8) as u8] {
+                if self.rx.len() < RX_FIFO {
+                    self.rx.push_back(b);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn mem(&mut self, a: u32, n: usize) -> Option<&mut [u8]> {
+        let a = a as usize;
+        if a + n <= RAM_SIZE {
+            return Some(&mut self.ram[a..a + n]);
+        }
+        let s = a.wrapping_sub(SRAM_BASE as usize);
+        if s + n <= SRAM_SIZE {
+            return Some(&mut self.sram[s..s + n]);
+        }
+        let i = a.wrapping_sub(IRAM_BASE as usize);
+        if i + n <= IRAM_SIZE {
+            return Some(&mut self.iram[i..i + n]);
+        }
+        None
+    }
+
+    /// A byte of RAM, SRAM or on-chip RAM, without side effects.
+    pub(crate) fn peek8(&self, a: u32) -> u8 {
+        let a = a as usize;
+        if a < RAM_SIZE {
+            return self.ram[a];
+        }
+        let s = a.wrapping_sub(SRAM_BASE as usize);
+        if s < SRAM_SIZE {
+            return self.sram[s];
+        }
+        let i = a.wrapping_sub(IRAM_BASE as usize);
+        if i < IRAM_SIZE {
+            return self.iram[i];
+        }
+        0
+    }
+
+    pub(crate) fn peek16(&self, a: u32) -> u32 {
+        self.peek8(a) as u32 | (self.peek8(a.wrapping_add(1)) as u32) << 8
+    }
+
+    pub(crate) fn peek32(&self, a: u32) -> u32 {
+        self.peek16(a) | self.peek16(a.wrapping_add(2)) << 16
+    }
+
+    /// The NAND controller's registers (0xD0900000); None: not one of them.
+    fn nand_io(&mut self, a: u32, write: Option<u32>) -> Option<u32> {
+        let off = a.checked_sub(0xD090_0000).filter(|&o| o < 0x200)?;
+        if off == 0 {
+            // DMA, done at once (never busy).
+            if let Some(v) = write
+                && v & 1 != 0
+            {
+                let (addr, len) = (self.nand.dma_addr, self.nand.dma_len);
+                let to_nand = v & 2 != 0;
+                for i in 0..len {
+                    let at = addr.wrapping_add(i);
+                    if to_nand {
+                        let b = self.mem(at, 1).map_or(0xFF, |m| m[0]);
+                        self.nand.write_data(b);
+                    } else {
+                        let b = self.nand.read_data();
+                        if let Some(m) = self.mem(at, 1) {
+                            m[0] = b;
+                        }
+                    }
+                }
+                let dir = if to_nand { "to NAND" } else { "from NAND" };
+                self.nand.note(|| format!("DMA {dir} {len:#x} bytes at {addr:08x}"));
+            }
+            return Some(0);
+        }
+        Some(self.nand.reg(off, write))
+    }
+
+    pub(crate) fn io(&mut self, a: u32, write: Option<u32>, size: u32) -> u32 {
+        self.lines_dirty = true;
+        self.probe.io(self.now, self.pc, a, write, size);
+        if let Some(v) = self.nand_io(a, write) {
+            return v;
+        }
+        let latched = self.latch(a);
+        if let Some(v) = write {
+            self.set_latch(a, v);
+        }
+        match (a, write) {
+            // Sound unit control (see sound.rs): beat counter, enable, ramp
+            // down, stop flags (write 1s to clear), busy.
+            (0xD040_0E14, None) => (latched & !0x4000) | if self.beat_flag { 0x4000 } else { 0 },
+            (0xD040_0E14, Some(v)) => {
+                if v & 0x4000 != 0 {
+                    self.beat_flag = false;
+                }
+                self.set_latch(a, v & !0x4000);
+                0
+            }
+            (0xD040_0E00 | 0xD040_0E80, Some(v)) => {
+                self.spu_enable(((a >> 7) & 1) as usize, v & 0xFFFF);
+                0
+            }
+            (0xD040_0E28 | 0xD040_0EA8, Some(v)) => {
+                let bank = ((a >> 7) & 1) as usize;
+                let busy = (0..16).filter(|&i| self.voices[bank * 16 + i].playing).fold(0u32, |m, i| m | 1 << i);
+                let new = v & 0xFFFF & busy;
+                for i in 0..16 {
+                    if (new & !latched) & (1 << i) != 0 {
+                        let ch = bank * 16 + i;
+                        let clock = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0xC) & 7;
+                        self.voices[ch].ramp_frame = RAMP_FRAMES[clock as usize];
+                    }
+                }
+                self.set_latch(a, new);
+                0
+            }
+            (0xD040_0E2C | 0xD040_0EAC, None) => self.spu_stopped[((a >> 7) & 1) as usize],
+            (0xD040_0E2C | 0xD040_0EAC, Some(v)) => {
+                self.spu_stopped[((a >> 7) & 1) as usize] &= !v;
+                0
+            }
+            (0xD040_0E3C | 0xD040_0EBC, None) => {
+                let bank = ((a >> 7) & 1) as usize;
+                (0..16).filter(|&i| self.voices[bank * 16 + i].playing).fold(0, |m, i| m | 1 << i)
+            }
+            // Timers (0xC0020000 + 0x20 n): +0 control (bits 14 and 13 on,
+            // bit 15 the overflow flag, cleared by writing 1), +8 reload
+            // (counts up from it to 0x10000).
+            (0xC002_0000 | 0xC002_0020 | 0xC002_0040 | 0xC002_0060, None) => {
+                latched | (self.timer_flags >> ((a >> 5) & 3) & 1) << 15
+            }
+            (0xC002_0000 | 0xC002_0020 | 0xC002_0040 | 0xC002_0060, Some(v)) => {
+                if v & 0x8000 != 0 {
+                    self.timer_flags &= !(1 << ((a >> 5) & 3));
+                }
+                self.set_latch(a, v & !0x8000);
+                0
+            }
+            // Serial port (like ARM's PL011): +0 data (reads take a received
+            // byte), +8 control (bits 6/5 receive interrupts), +0x10 status:
+            // bit 4 receive FIFO empty, bit 5 transmit FIFO full (never),
+            // bit 15 receive interrupt.
+            (0xC006_0000, None) => self.rx.pop_front().unwrap_or(0) as u32,
+            (0xC006_0010, None) => {
+                if self.rx.is_empty() {
+                    0x10
+                } else {
+                    0x8000
+                }
+            }
+            (0xC006_0000, Some(v)) => {
+                if self.uart.len() < 1 << 20 {
+                    self.uart.push(v as u8 as char);
+                }
+                0
+            }
+            // Video DMA (0xD05001C0 source, 0x1C4 destination, 0x1C8 words
+            // minus 1): copies at once; the count reads 0 when done.
+            (0xD050_01C8, Some(v)) => {
+                let (src, dst) = (self.latch(0xD050_01C0), self.latch(0xD050_01C4));
+                for i in 0..=v {
+                    let w = self.read32(src.wrapping_add(4 * i));
+                    self.write32(dst.wrapping_add(4 * i), w);
+                }
+                self.set_latch(a, 0);
+                0
+            }
+            // DMA controller, 4 channels at 0xD0300000 + 0x40 * n: +0 control
+            // (bit 0 start, bit 1 busy, bit 7 source fixed (a fill), bit 8
+            // interrupt?, bits 13-12 unit: 0 bytes, 1 halfwords), +4 source,
+            // +8 destination, +C count of units.
+            (0xD030_0000 | 0xD030_0040 | 0xD030_0080 | 0xD030_00C0, Some(v)) if v & 1 != 0 => {
+                let (src, dst, count) = (self.latch(a + 4), self.latch(a + 8), self.latch(a + 12));
+                let fixed = v & 0x80 != 0;
+                let bytes = count << ((v >> 12) & 3);
+                for i in 0..bytes {
+                    let b = self.read8(if fixed { src } else { src.wrapping_add(i) });
+                    self.write8(dst.wrapping_add(i), b);
+                }
+                self.dma_status |= 1 << ((a >> 6) & 3);
+                self.set_latch(a, v & !3);
+                0
+            }
+            (0xD030_01FC, None) => self.dma_status,
+            (0xD030_01FC, Some(v)) => {
+                self.dma_status &= !v;
+                0
+            }
+            // 0xD0800000 engine (given the frame being drawn; a scaler or TV
+            // encoder?): operations finish at once and do nothing.
+            (0xD080_0000, Some(v)) if v & 1 != 0 => {
+                self.probe.gfx_ops += 1;
+                self.gfx_done = true;
+                0
+            }
+            (0xD080_007C, None) => self.gfx_done as u32,
+            (0xD080_007C, Some(v)) => {
+                if v & 1 != 0 {
+                    self.gfx_done = false;
+                }
+                0
+            }
+            // GPIO inputs (0xC0000000 port A, +0x20 B, +0x40 C). Port C bit
+            // 10 is the power button (low: held), held at power-on; port A
+            // bit 6 the 50/60 Hz strap (high: 60). Idle levels UNVERIFIED.
+            (0xC000_0000 | 0xC000_0020 | 0xC000_0040, None) => {
+                let idle = match a {
+                    0xC000_0000 => 0xFFEF,
+                    0xC000_0020 => 0xFFFF,
+                    _ if self.now < POWER_HOLD => 0xFBFF,
+                    _ => 0xFFFF,
+                };
+                let now = self.now;
+                self.probe.presses.iter().filter(|p| p.0 == a && (p.2..p.3).contains(&now)).fold(idle, |v, p| v ^ p.1)
+            }
+            // Interrupt controller: the pending IRQ's and FIQ's numbers.
+            (0xD010_0028, None) => self.pending_irq(),
+            (0xD010_002C, None) => self.pending_fiq(),
+            // Analogue-to-digital converter (0xC00C0000): +4 conversion: bit
+            // 6 starts one, bit 15 done, bits 5 and 4 errors, all three
+            // cleared by writing 1; +8 the result. Conversions finish at
+            // once and read the batteries.
+            (0xC00C_0004, Some(v)) => {
+                let mut r = latched & !(v & 0x8030) | (v & !0x8070);
+                if v & 0x40 != 0 {
+                    r |= 0x8000;
+                }
+                self.set_latch(a, r);
+                0
+            }
+            (0xC00C_0008, None) => ADC_BATTERY,
+            // Sprite corner converter: four corners in (x at +0x300/+0x308/
+            // +0x310/+0x318, y at +0x304/..), five results out (+0x320-
+            // +0x330) that the kernel stores in a sprite's halfwords 1, 2, 5,
+            // 6 and 7. What the hardware returns is UNKNOWN: this gives its
+            // own encoding, which only this crate's renderer reads (the first
+            // and third corners, and 0x8000).
+            (0xD050_0320, None) => self.latch(0xD050_0300) & 0xFFFF,
+            (0xD050_0324, None) => self.latch(0xD050_0304) & 0xFFFF,
+            (0xD050_0328, None) => self.latch(0xD050_0310) & 0xFFFF,
+            (0xD050_032C, None) => self.latch(0xD050_0314) & 0xFFFF,
+            (0xD050_0330, None) => 0x8000,
+            (0xD050_018C, None) => self.video_status,
+            (0xD050_018C, Some(v)) => {
+                self.video_status &= !v;
+                0
+            }
+            (_, None) => latched,
+            _ => 0,
+        }
+    }
+}
+
+impl ArmBus for Bus {
+    fn read8(&mut self, a: u32) -> u8 {
+        match self.mem(a, 1) {
+            Some(m) => m[0],
+            None => self.io(a, None, 8) as u8,
+        }
+    }
+    fn read16(&mut self, a: u32) -> u16 {
+        match self.mem(a, 2) {
+            Some(m) => u16::from_le_bytes([m[0], m[1]]),
+            None => self.io(a, None, 16) as u16,
+        }
+    }
+    fn read32(&mut self, a: u32) -> u32 {
+        match self.mem(a, 4) {
+            Some(m) => u32::from_le_bytes([m[0], m[1], m[2], m[3]]),
+            None => self.io(a, None, 32),
+        }
+    }
+    fn write8(&mut self, a: u32, v: u8) {
+        self.probe.mem_write(self.now, self.pc, a, v as u32, 8);
+        match self.mem(a, 1) {
+            Some(m) => m[0] = v,
+            None => {
+                self.io(a, Some(v as u32), 8);
+            }
+        }
+    }
+    fn write16(&mut self, a: u32, v: u16) {
+        self.probe.mem_write(self.now, self.pc, a, v as u32, 16);
+        match self.mem(a, 2) {
+            Some(m) => m.copy_from_slice(&v.to_le_bytes()),
+            None => {
+                self.io(a, Some(v as u32), 16);
+            }
+        }
+    }
+    fn write32(&mut self, a: u32, v: u32) {
+        self.probe.mem_write(self.now, self.pc, a, v, 32);
+        match self.mem(a, 4) {
+            Some(m) => m.copy_from_slice(&v.to_le_bytes()),
+            None => {
+                self.io(a, Some(v), 32);
+            }
+        }
+    }
+}
