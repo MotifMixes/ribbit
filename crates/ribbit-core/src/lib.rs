@@ -118,8 +118,8 @@ const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 /// Bumped whenever the machine state's layout changes (bincode is
 /// positional): 2 = UART transmit timing (divisor, busy) and CPU pipeline
 /// timing (pending load, config flag); 3 = memory timing (caches, register
-/// ready times, load latency).
-pub const STATE_VERSION: u32 = 3;
+/// ready times, load latency); 4 = GPIO output latches, Leapster 2 flash.
+pub const STATE_VERSION: u32 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -342,6 +342,18 @@ impl Machine {
         let bus = SystemBus::new(&firmware, cartridge.as_ref());
         let mut io = Peripherals::default();
         io.straps = Some(io::straps::Straps::new(straps, cartridge.is_some()));
+        if firmware.known().is_some_and(|k| k.hardware == ribbit_memory::known::Hardware::Leapster2) {
+            // EXPERIMENTAL: the Leapster 2's internal flash and power status.
+            io.spi_flash = Some(Default::default());
+            // B008 bits 1-2 select what boots (BIOS 0.6 0x4005_35D4, strings at
+            // 0x400F_F8D0): 00 "Base selected", 01 "Cart selected", 10 a
+            // developer load from SD, 11 "USB Attach Reboot". HYPOTHESIS: the
+            // power controller reports a cartridge as 01 (with 00, Sonic X
+            // never starts and the base system shows its LeapFrog Connect
+            // screen; with 01 it boots). B004 MAME's 0xFFFF_FFFF.
+            let selection = if cartridge.is_some() { 0b011 } else { 0b001 };
+            io.leapster2_power = Some([0xFFFF_FFFF, selection]);
+        }
         if cartridge.is_some() {
             io.eeprom.insert_cart(None);
         }
@@ -432,6 +444,14 @@ impl Machine {
 
     /// The idle count and its reload value, once the BIOS's timer is found.
     fn idle_state(&mut self) -> Option<(u32, u32, u32)> {
+        // Verified on the original Leapster and Leapster TV BIOSes only
+        // (idle_timer.rs); on the Leapster 2 the same lookup finds something
+        // else and reads as "switched off" at once.
+        if self.firmware.known().is_some_and(|k| {
+            matches!(k.hardware, ribbit_memory::known::Hardware::Leapster2 | ribbit_memory::known::Hardware::LeapsterLmax)
+        }) {
+            return None;
+        }
         if self.idle_timer.is_none() {
             self.idle_timer = idle_timer::IdleTimer::find(self.cpu.regs[ribbit_cpu::reg::GP], |a| self.bus.peek8(a));
         }

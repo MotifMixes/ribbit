@@ -118,7 +118,7 @@ impl SystemBus {
             cart: cart.map(|c| c.rom().to_vec()),
             // Power-on SDRAM contents are undefined; zero keeps runs
             // deterministic. HYPOTHESIS: firmware does not depend on them.
-            ram: vec![0; RAM_SIZE as usize],
+            ram: vec![0; firmware.ram_size() as usize],
             vram: vec![0; VRAM_SIZE as usize],
             unmapped: Vec::new(),
             unmapped_total: 0,
@@ -137,7 +137,7 @@ impl SystemBus {
         let in_window = |base: u32, size: u32| addr.wrapping_sub(base) < size;
         // The windows are disjoint, so the order only affects speed: RAM
         // (stack, data) first.
-        if in_window(RAM_BASE, RAM_SIZE) {
+        if in_window(RAM_BASE, self.ram.len() as u32) {
             return Region::Ram((addr - RAM_BASE) as usize);
         }
         if in_window(BIOS_BASE, BIOS_WINDOW) || in_window(BIOS_MIRROR, BIOS_WINDOW) {
@@ -371,7 +371,7 @@ mod tests {
         // `decode` tests RAM first for speed; that is only equivalent
         // because no two windows overlap.
         let w = [
-            (RAM_BASE, RAM_SIZE),
+            (RAM_BASE, RAM_WINDOW),
             (BIOS_BASE, BIOS_WINDOW),
             (BIOS_MIRROR, BIOS_WINDOW),
             (MMIO_BASE, MMIO_SIZE),

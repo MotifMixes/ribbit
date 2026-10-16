@@ -475,7 +475,7 @@ fn print_report(machine: &Machine, report: &RunReport, tail: usize) {
 }
 
 fn save_paths(config: &Config) -> ribbit_frontend::saves::SavePaths {
-    ribbit_frontend::saves::SavePaths { system: config.system_eeprom.clone(), cart: config.cart_save.clone() }
+    ribbit_frontend::saves::SavePaths { system: config.system_eeprom.clone(), cart: config.cart_save.clone(), flash: None }
 }
 
 /// The GUI's start options from the command line and config file.

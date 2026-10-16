@@ -947,3 +947,47 @@ BIOS boot milestones moved later (`examples/milestones.rs`; the BIOS regression 
 Open: second calibration points (other scenes, other games, a handheld reference); line prefetch; SDRAM row
 effects; `.di` accesses; multiplier latency; DMA bus contention; the cartridge chip-select timing registers
 (0x0180_C0xx) that should set the ROM cost per cartridge.
+
+## Leapster 2 and L-MAX (EXPERIMENTAL, 2026-10-15)
+
+### L-MAX (`152-11238` US v2.1, `152-11476` v2.2)
+
+It boots on the original's model unchanged: L-MAX logo, LeapFrog logo, then the cartridge (Sonic X tested). The
+app now accepts the BIOS (experimental). Its TV output chip (`io/lmax_tv.rs`, research) is not needed for the
+handheld picture. The idle power-off detection is disabled (not verified on this BIOS).
+
+### Leapster 2 (`152-12206` 0.6, `152-12659` m9, Connected B5 `152-12076`)
+
+VERIFIED-FW (BIOS 0.6 unless stated). The boot problems, in the order they were found:
+
+1. **16 MB RAM.** The BIOS tests RAM at every 1 MiB up to 0x3D00_0000 (0x4004_0624) and on failure beeps
+   (voice 6, BIOS tone at 0x400F_EB30-0x400F_F712, routine 0x4003_FF8C) every 862 ms with a black screen
+   (error 2, reported through 0x4004_1654). `map::RAM_SIZE_LEAPSTER2`, chosen by `Firmware::ram_size`.
+2. **Power controller status.** 0x0180_B004 must read non-zero (0x4004_083A; zero leads to the power-off routine
+   0x4003_FD80, which writes 0x0180_B000 bit 8 when straps bit 21 is set). 0x0180_B008 bits 1-2 select what boots
+   (0x4005_35D4; straps bit 11 clear forces 4, bit 10 clear forces 2):
+
+   | Bits 1-2 | Boots | String |
+   |---|---|---|
+   | 00 | the base system (shows "Click Eject on the LeapFrog Connect Application to disconnect") | "Base selected." |
+   | 01 | the cartridge | "Cart selected." |
+   | 10 | a developer load from SD | "CopyGameFromSdFatToRam failed!!!" (on failure) |
+   | 11 | USB | "USB Attach Reboot." |
+
+   Model (HYPOTHESIS): B004 = 0xFFFF_FFFF (MAME), B008 = 3 with a cartridge, 1 without.
+3. **Internal SPI flash on GPIO** (`io/spiflash.rs`, driver `BBSPIFlash` 0x4005_81E0): see the module for pins,
+   accepted chips (PMC, SST, EON, Macronix) and commands. GPIO output registers named by the BIOS's own debug
+   output (GIODataOut 0x40, GIOPull 0x44, GIODire 0x48, GIOSel0 0x50, GIOSel1 0x54, GIOSel2 0x60, all at
+   0x0180_00xx) are now latches for every model. The frontend saves the flash as `flash-<bios crc>.bin`.
+
+Result: with a cartridge it shows the seizure warning, then runs the cartridge (Sonic X reaches name entry).
+
+Open (Leapster 2):
+* **Touch**: the touch driver (around 0x400B_5400) is table-driven. Configuration resources give the GPIO pins
+  that switch the panel's X/Y drive between ADC conversions (0x0180_0040/0048 toggled per sample; ADC FIFO
+  0x0180_00A0/A8 and channel control 0x0180_0090 as on the original). The MAME-derived touch model ignores the
+  pins, so calibration never accepts a press. "Skip calibration at boot" avoids the calibration screen.
+* "!ASSERT: FlashPlayer: imageBuf format [6] unsupported" (an LCD/image format 6), "Cmd=0 DMA Active bit
+  still set" / "GetToStandbyState Failed" (a DMA engine, maybe USB), "No Cartridge Long Term Memory found"
+  (with no cartridge).
+* The Leapster 2 debug UART log (`scenes uart`) is the main source; keep reading it.

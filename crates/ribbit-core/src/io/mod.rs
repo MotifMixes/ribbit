@@ -18,6 +18,7 @@ pub mod straps;
 pub mod timer;
 pub mod touch;
 pub mod memtiming;
+pub mod spiflash;
 pub mod uart;
 pub mod voices;
 
@@ -164,6 +165,11 @@ pub struct Peripherals {
     pub uart: DebugUart,
     /// Caches and memory costs (CPU timing).
     pub mem: memtiming::MemTiming,
+    /// Leapster 2: its internal SPI flash on GPIO pins (spiflash.rs).
+    pub spi_flash: Option<spiflash::SpiFlash>,
+    /// Leapster 2: values of the power-controller status registers
+    /// 0x0180_B004 and 0x0180_B008 (None on other models).
+    pub leapster2_power: Option<[u32; 2]>,
     /// EXPERIMENTAL, UNVERIFIED MAME-derived touch/ADC sample source. None
     /// (the default) = no ADC conversions and channel controls unmodelled.
     pub touch: Option<MameTouch>,
@@ -226,6 +232,8 @@ impl Default for Peripherals {
             clock_control: ClockControl::default(),
             uart: DebugUart::default(),
             mem: memtiming::MemTiming::default(),
+            spi_flash: None,
+            leapster2_power: None,
             touch: None,
             lmax_tv: None,
             tv_link: None,
@@ -251,6 +259,23 @@ impl Peripherals {
         if let Some((n, reg)) = timer::decode(addr) {
             return Some(self.timers[n].read(reg));
         }
+        if addr == gpio::ADDR
+            && let Some(f) = &self.spi_flash
+        {
+            let v = self.gpio.read(addr).unwrap_or(0) & !spiflash::PIN_MISO;
+            return Some(v | if f.miso() { spiflash::PIN_MISO } else { 0 });
+        }
+        if let Some([b004, b008]) = self.leapster2_power {
+            // HYPOTHESIS (MAME's values; MAME: "leapster2 BIOS checks if this
+            // is 0"). VERIFIED-FW (BIOS 0.6): B004 must read non-zero to boot
+            // on (0x4004_083A; zero takes the power-off path); B008 bits 1-2
+            // select a boot mode (0x4005_35D4). Meanings UNKNOWN.
+            match addr {
+                0x0180_B004 => return Some(b004),
+                0x0180_B008 => return Some(b008),
+                _ => {}
+            }
+        }
         self.intc
             .read(addr)
             .or_else(|| self.lcd.read(addr))
@@ -274,6 +299,7 @@ impl Peripherals {
             }
             None => {
                 self.intc.write(addr, value)
+                    || self.gpio_write(addr, value)
                     || self.uart.write(addr, value)
                     || self.lcd.write(addr, value)
                     || self.clock_control.write(addr, value)
@@ -303,6 +329,18 @@ impl Peripherals {
         }
         if let Some(c) = self.audio.last_command {
             self.voices.command(c.command, c.voice);
+        }
+        true
+    }
+
+    fn gpio_write(&mut self, addr: u32, value: u32) -> bool {
+        if !self.gpio.write(addr, value) {
+            return false;
+        }
+        if addr == gpio::DATA_OUT
+            && let Some(f) = &mut self.spi_flash
+        {
+            f.pins(value);
         }
         true
     }

@@ -71,6 +71,10 @@ fn main() {
             m.io.stubs.insert(hex(a), hex(v));
         }
     }
+    if let (Ok(v), Some(p)) = (std::env::var("RIBBIT_L2_B008"), m.io.leapster2_power.as_mut()) {
+        // Research: the Leapster 2's 0x0180_B008 (bits 1-2 = boot selection).
+        p[1] = u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap();
+    }
     m.record_trace_tail = false;
     if std::env::var_os("RIBBIT_TV").is_some() {
         // EXPERIMENTAL: Leapster TV (video chip and controller link).
@@ -323,6 +327,18 @@ fn main() {
                     println!("aux {reg:#06x} {kind:5} {value:#010x} pc {pc:08x} x{n}");
                 }
                 println!("({} unmodelled accesses in all)", m.cpu.diag.aux_unmodelled_total);
+            }
+            Some("uart") => {
+                // uart: everything sent to the debug UART so far.
+                println!("--- uart ({} bytes) ---
+{}
+---", m.io.uart.tx.len(), m.io.uart.text());
+            }
+            Some("unmapped") => {
+                // unmapped: distinct accesses to unmapped addresses so far.
+                for ((addr, width, kind), s) in m.bus.unmapped_summary() {
+                    println!("unmapped {addr:#010x} w{width} {kind:?} {s:?}");
+                }
             }
             Some("lcdregs") => {
                 // lcdregs: the LCD controller and its last framebuffer DMA.

@@ -1,4 +1,5 @@
-//! Save files (system EEPROM, cartridge save chip): written atomically
+//! Save files (system EEPROM, cartridge save chip, the Leapster 2's
+//! internal flash): written atomically
 //! (temporary file, then rename) so a crash or forced close mid-write can
 //! never leave a truncated save, and soon after the game changes them.
 
@@ -13,6 +14,8 @@ pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 pub struct SavePaths {
     pub system: Option<PathBuf>,
     pub cart: Option<PathBuf>,
+    /// Leapster 2 internal SPI flash (`io::spiflash`), when the machine has one.
+    pub flash: Option<PathBuf>,
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -32,6 +35,7 @@ impl SavePaths {
         Self {
             system: Some(dir.join(format!("system-{bios:08x}.eeprom"))),
             cart: machine.cartridge().map(|c| dir.join(format!("cart-{:08x}.sav", c.id().crc32))),
+            flash: machine.io.spi_flash.as_ref().map(|_| dir.join(format!("flash-{bios:08x}.bin"))),
         }
     }
 
@@ -49,6 +53,11 @@ impl SavePaths {
         {
             let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
             machine.io.eeprom.insert_cart(Some(&bytes));
+        }
+        if let (Some(path), Some(flash)) = (&self.flash, machine.io.spi_flash.as_mut())
+            && path.exists()
+        {
+            flash.load(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?);
         }
         Ok(())
     }
@@ -74,6 +83,14 @@ impl SavePaths {
             written += 1;
             tracing::info!(target: "ribbit::saves", path = %path.display(), "cartridge save written");
         }
+        if let (Some(path), Some(flash)) = (&self.flash, machine.io.spi_flash.as_mut())
+            && flash.dirty
+        {
+            write_atomic(path, &flash.data)?;
+            flash.dirty = false;
+            written += 1;
+            tracing::info!(target: "ribbit::saves", path = %path.display(), "internal flash saved");
+        }
         Ok(written)
     }
 }
@@ -88,7 +105,8 @@ impl AutoSave {
     /// Call once per frame; writes the saves `SETTLE` after the last change.
     pub fn tick(&mut self, paths: &SavePaths, machine: &mut Machine, now: std::time::Instant) -> Result<()> {
         let e = &machine.io.eeprom;
-        if !(e.dirty || e.cart_dirty) {
+        let flash = machine.io.spi_flash.as_ref().is_some_and(|f| f.dirty);
+        if !(e.dirty || e.cart_dirty || flash) {
             self.changed_at = None;
             return Ok(());
         }
@@ -117,7 +135,7 @@ mod tests {
     fn flush_writes_only_changed_saves_atomically() {
         let dir = std::env::temp_dir().join(format!("ribbit-saves-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), cart: Some(dir.join("game.sav")) };
+        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), cart: Some(dir.join("game.sav")), flash: None };
         let mut m = machine_with_cart();
         assert_eq!(paths.flush(&mut m).unwrap(), 0, "nothing changed");
         m.io.eeprom.data[3] = 0x42;
@@ -132,7 +150,7 @@ mod tests {
     fn autosave_waits_for_changes_to_settle() {
         let dir = std::env::temp_dir().join(format!("ribbit-autosave-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), cart: None };
+        let paths = SavePaths { system: Some(dir.join("sys.eeprom")), cart: None, flash: None };
         let mut m = machine_with_cart();
         let mut auto = AutoSave::default();
         let t0 = std::time::Instant::now();

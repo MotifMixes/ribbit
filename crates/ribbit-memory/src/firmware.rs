@@ -13,8 +13,6 @@ pub enum FirmwareError {
     TooLarge { size: usize, max: usize },
     #[error("firmware size {0:#x} is not a multiple of 4 bytes")]
     Misaligned(usize),
-    #[error("'{name}' is {hardware:?} firmware; Ribbit runs the original Leapster and (experimentally) the Leapster TV")]
-    WrongHardware { name: &'static str, hardware: Hardware },
 }
 
 #[derive(Debug, Clone)]
@@ -26,22 +24,21 @@ pub struct Firmware {
 
 impl Firmware {
     /// Validates a firmware image. Unknown dumps are accepted (there may be
-    /// undumped revisions) but reported as unverified by `known()`. The
-    /// Leapster TV BIOS is accepted (EXPERIMENTAL: see `is_leapster_tv`);
-    /// L-MAX and Leapster 2 BIOSes are refused.
+    /// undumped revisions) but reported as unverified by `known()`. Besides
+    /// the original Leapster, the Leapster TV, L-MAX and Leapster 2 BIOSes
+    /// are accepted (EXPERIMENTAL: `is_experimental_model`).
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, FirmwareError> {
-        let fw = Self::from_bytes_any_model(data)?;
-        if let Some(k) = fw.known
-            && !matches!(k.hardware, Hardware::Leapster | Hardware::LeapsterTv)
-        {
-            return Err(FirmwareError::WrongHardware { name: k.name, hardware: k.hardware });
-        }
-        Ok(fw)
+        Self::from_bytes_any_model(data)
     }
 
-    /// EXPERIMENTAL: also accepts the BIOS of the Leapster TV, L-MAX and
-    /// Leapster 2, which run on the original's emulated hardware (as in MAME,
-    /// which marks them all not working). For research; not for players.
+    /// A known BIOS of a model other than the original Leapster, whose
+    /// emulation is EXPERIMENTAL.
+    pub fn is_experimental_model(&self) -> bool {
+        self.known.is_some_and(|k| k.hardware != Hardware::Leapster)
+    }
+
+    /// Any model's BIOS (now the same as `from_bytes`; kept for the research
+    /// tools that name it).
     pub fn from_bytes_any_model(data: Vec<u8>) -> Result<Self, FirmwareError> {
         if data.is_empty() {
             return Err(FirmwareError::Empty);
@@ -67,6 +64,15 @@ impl Firmware {
 
     pub fn known(&self) -> Option<&'static KnownImage> {
         self.known
+    }
+
+    /// SDRAM size for this firmware's model (`map::RAM_SIZE`; 16 MiB for a
+    /// known Leapster 2 BIOS). Unknown dumps get the original's 2 MiB.
+    pub fn ram_size(&self) -> u32 {
+        match self.known.map(|k| k.hardware) {
+            Some(Hardware::Leapster2) => map::RAM_SIZE_LEAPSTER2,
+            _ => map::RAM_SIZE,
+        }
     }
 
     /// A known Leapster TV BIOS: the machine needs the TV video chip and

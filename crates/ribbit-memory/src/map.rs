@@ -28,6 +28,12 @@ pub const VRAM_OVERRUN_END: u32 = 0x0303_0000;
 /// Main SDRAM. 2 MiB on the original Leapster (ISSI IS42S16100 on the PCB).
 pub const RAM_BASE: u32 = 0x3C00_0000;
 pub const RAM_SIZE: u32 = 0x0020_0000;
+/// Leapster 2 SDRAM: 16 MiB. VERIFIED-FW: its BIOS (0.6, 0x4004_0624) tests
+/// RAM by writing a pattern at every 1 MiB from 0x3C00_0000 to 0x3D00_0000
+/// and reports error 2 (a repeating double beep) if any reads back wrong.
+pub const RAM_SIZE_LEAPSTER2: u32 = 0x0100_0000;
+/// Largest RAM window (the decode window for any model).
+pub const RAM_WINDOW: u32 = RAM_SIZE_LEAPSTER2;
 
 /// Cartridge ROM window. Retail carts are 4, 8 or 16 MiB.
 pub const CART_BASE: u32 = 0x8000_0000;
