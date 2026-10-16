@@ -362,6 +362,16 @@ impl Peripherals {
         true
     }
 
+    /// Latches interrupt flags the PCM DMA raised (voices.rs); call after
+    /// each `voices.advance`.
+    pub fn deliver_pcm_irq(&mut self) {
+        let bits = self.voices.take_pcm_irq();
+        if bits != 0 {
+            self.intc.raise(bits);
+            self.sync_needed = true;
+        }
+    }
+
     /// Applies the deferred ticks (the CPU was running during all of them).
     pub fn catch_up(&mut self) {
         if self.deferred > 0 {
@@ -506,6 +516,7 @@ impl MachineBus<'_> {
             self.synced = self.cycle;
             self.io.deferred += ticks;
             self.io.voices.advance(ticks, clock.peripheral_hz, self.sys);
+            self.io.deliver_pcm_irq();
         }
         self.io.catch_up();
     }

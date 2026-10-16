@@ -11,7 +11,7 @@
 | Reset code puts the stack in VRAM (`mov sp,0x3000800`) | VERIFIED | Reset handler, first instruction (confirms MAME's comment) |
 | Extended-arithmetic, MUL64, NORM, SWAP options present | HYPOTHESIS (MAME enables them; the BIOS contains MUL64_S and NORM) | Option presence is a build-time choice; BCRs/IDENTITY not yet read from hardware |
 | XY memory extension present (core registers r32-r55, aux 0x80-0x9F) | VERIFIED-FW | The v1.5 MQX context switch saves r32-r59 (0x4007_3CA0) and restores them (0x4007_3D74). See "XY memory extension" |
-| DSP (dual 16-bit MAC) instructions present | SOURCED (MAME) | No specification found |
+| DSP (dual 16-bit MAC) instructions present | SOURCED (MAME) | No specification found; MULDW/MACDW/MSUBDW follow MAME's `dsp_multiply` (UNVERIFIED), see below |
 | IDENTITY register value | UNKNOWN | Ribbit returns 0x0000_0010 (ARCVER in the A5 range 0x10-0x1F) |
 
 ## Sources and licences
@@ -124,8 +124,16 @@ ld.aw bset and_s rsub bmsk and.f sub sth jeq bl.d st.di mov.f lsr.f lpne bne.d b
 ldh.di bset_s bmsk_s add3 st.di.as ldh.ab jl_s j b.d. No oracle exists for these results yet: running without
 error is **not** proof that they are correct.
 
-**Unsupported (stop with a diagnostic):** DIVAW (PRM does not state signedness), RND16 (PRM table and text
-disagree), MULDW/MACDW/MSUBDW and all other DSP/XMAC extension instructions, XY burst transfers (aux 0x9B), extension
+**Executed since 2026-10-16:** MULDW/MACDW/MSUBDW (SOURCED: MAME `dsp_multiply`, UNVERIFIED: per lane a signed
+16x16 product into a 64-bit accumulator, set/added/subtracted; result = (acc + (AUX_MACMODE bit 2 ? 0x4000 : 0))
+>> (bit 3 ? 15 : 16), saturated to 16 bits with sticky S1/S2) and RND16 (PRM instruction page,
+`(sat32(src + 0x8000) & 0xFFFF0000) >> 16`; the shift is VERIFIED-FW by the Leapster 2 BIOS 0.6, which follows
+`rnd16 r10,r9` with `asl r10,r10,16; sub r11,r9,r10` at 0x4003_E0B8; the upper 16 bits are UNVERIFIED). The Leapster
+2 BIOS runs both in XY-memory filter loops (0x4003_E080-0x4003_E6D4) for The Talking Words Factory. Tests:
+`dual_16x16_multiply_accumulate` (vector `t_dsp`).
+
+**Unsupported (stop with a diagnostic):** DIVAW (PRM does not state signedness), all other DSP/XMAC extension
+instructions, XY burst transfers (aux 0x9B), extension
 core registers r32-r56 when the XY extension is not configured, r61, writes to PCL, timer watchdog reset, any undefined major-0x05-0x0B extension.
 
 **Illegal on the A5 (Instruction Error):** MPY family, EX, SYNC, RTIE, TRAP_S, UNIMP_S and the encodings listed

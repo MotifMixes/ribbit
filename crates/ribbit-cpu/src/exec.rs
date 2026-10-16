@@ -967,13 +967,7 @@ impl Cpu {
             }
             Op::Unimp => return self.illegal(i, "UNIMP_S"),
             Op::Extension { .. } => return Err(self.unsupported(i, "extension instruction with no known definition")),
-            Op::Muldw | Op::Macdw | Op::Msubdw => {
-                return Err(self.unsupported(i, "dual 16-bit DSP multiply (no authoritative specification)"));
-            }
             Op::Divaw => return Err(self.unsupported(i, "DIVAW: PRM does not state whether the comparison is signed")),
-            Op::Rnd16 => {
-                return Err(self.unsupported(i, "RND16: PRM tables and description disagree on the result format"));
-            }
             _ => {}
         }
         self.check_dst(i.dst, i)?;
@@ -1244,6 +1238,36 @@ impl Cpu {
                 self.sticky_saturation(s1, s2);
                 (Some(((hi as u32) << 16) | lo as u32), None, Some(s1 || s2))
             }
+            Op::Muldw | Op::Macdw | Op::Msubdw => {
+                // SOURCED (MAME `arcompact_device::dsp_multiply`), UNVERIFIED:
+                // no specification of the dual 16x16 MAC option was found (the
+                // PRM documents only AUX_MACMODE and the dual 16-bit format).
+                // Each lane (low = channel 2, high = channel 1) multiplies the
+                // signed 16-bit halves; MULDW sets the lane's accumulator, MACDW
+                // adds to it, MSUBDW subtracts. The lane's result is the
+                // accumulator plus 0x4000 if AUX_MACMODE bit 2 is set, shifted
+                // right by 15 (bit 3 set) or 16, saturated to 16 bits (sticky
+                // S2 / S1 on saturation). The Leapster 2 BIOS runs them in its
+                // XY-memory filter loops (0.6 0x4003_E604 onwards).
+                let mut r = 0u32;
+                let mut sat = [false; 2];
+                for (lane, saturated) in sat.iter_mut().enumerate() {
+                    let product = (b >> (16 * lane)) as u16 as i16 as i64 * (c >> (16 * lane)) as u16 as i16 as i64;
+                    let acc = &mut self.mac_acc[lane];
+                    *acc = match i.op {
+                        Op::Muldw => product,
+                        Op::Macdw => acc.wrapping_add(product),
+                        _ => acc.wrapping_sub(product),
+                    };
+                    let round = if self.macmode & (1 << 2) != 0 { 0x4000 } else { 0 };
+                    let scaled = (*acc + round) >> if self.macmode & (1 << 3) != 0 { 15 } else { 16 };
+                    let out = scaled.clamp(i16::MIN as i64, i16::MAX as i64);
+                    *saturated = out != scaled;
+                    r |= (out as u16 as u32) << (16 * lane);
+                }
+                self.sticky_saturation(sat[1], sat[0]);
+                (Some(r), None, None)
+            }
             Op::Asls | Op::Asrs => {
                 let n = c as i32;
                 let left = if matches!(i.op, Op::Asls) { n } else { n.wrapping_neg() };
@@ -1264,6 +1288,16 @@ impl Cpu {
                 };
                 self.sticky_saturation(s, s);
                 (Some(r), None, Some(s))
+            }
+            Op::Rnd16 => {
+                // PRM instruction page: (sat32(src + 0x8000) & 0xFFFF0000) >> 16;
+                // the summary tables omit the shift. VERIFIED-FW for the
+                // shift: the Leapster 2 BIOS 0.6 follows `rnd16 r10,r9` with
+                // `asl r10,r10,16; sub r11,r9,r10` (0x4003_E0B8). The upper 16
+                // bits (zero here, as the formula reads) are UNVERIFIED.
+                let (r, s) = sat32(c as i32 as i64 + 0x8000);
+                self.sticky_saturation(s, s);
+                (Some((r & 0xFFFF_0000) >> 16), None, Some(s))
             }
             Op::Sat16 => {
                 let (r, s) = sat16(c as i32);

@@ -438,3 +438,28 @@ t_options:
 	mov	r15,-2
 	asls	r14,r1,r15
 	brk_s
+
+; ---- dual 16x16 multiply-accumulate (MULDW/MACDW/MSUBDW) ---------------------
+	.global t_dsp
+t_dsp:
+	mov	r1,8
+	sr	r1,[aux_macmode]
+	mov	r1,0x40004000
+	mov	r2,0x20002000
+	muldw	r3,r1,r2
+	macdw	r4,r1,r2
+	msubdw	r5,r1,r2
+	mov	r6,0x7fff7fff
+	muldw	r7,r6,r6
+	macdw	r8,r6,r6
+	lr	r9,[aux_macmode]
+	mov	r1,0
+	sr	r1,[aux_macmode]
+	mov	r1,0x7fff8000
+	mov	r2,0x7fff7fff
+	muldw	r10,r1,r2
+	mov	r1,0x12348000
+	rnd16	r11,r1
+	mov	r1,0x7fffc000
+	rnd16	r12,r1
+	brk_s

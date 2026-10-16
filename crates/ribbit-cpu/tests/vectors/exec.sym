@@ -48,4 +48,5 @@
 40000516 timer_resume
 40000518 vec3_handler
 40000528 t_options
-400026b0 __SDATA_BEGIN__
+400005ae t_dsp
+4000271c __SDATA_BEGIN__

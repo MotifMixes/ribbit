@@ -49,6 +49,17 @@ const INTERP: [[f64; 16]; 4] = [
     ],
 ];
 
+/// One step of `Upsample4x` on caller-held state (most recent input first),
+/// for emulated state that has to be saved.
+pub fn upsample4x(history: &mut [f64; 16], sample: i16) -> [i16; 4] {
+    history.copy_within(0..15, 1);
+    history[0] = sample as f64;
+    INTERP.map(|taps| {
+        let v: f64 = taps.iter().zip(history.iter()).map(|(t, x)| t * x).sum();
+        v.round().clamp(-32768.0, 32767.0) as i16
+    })
+}
+
 /// Raises 8 kHz samples to 32 kHz (four outputs per input) as MAME does.
 #[derive(Debug, Clone, Default)]
 pub struct Upsample4x {
@@ -63,12 +74,7 @@ impl Upsample4x {
 
     /// Takes one 8 kHz sample and returns the next four 32 kHz samples.
     pub fn push(&mut self, sample: i16) -> [i16; 4] {
-        self.history.copy_within(0..15, 1);
-        self.history[0] = sample as f64;
-        INTERP.map(|taps| {
-            let v: f64 = taps.iter().zip(&self.history).map(|(t, x)| t * x).sum();
-            v.round().clamp(-32768.0, 32767.0) as i16
-        })
+        upsample4x(&mut self.history, sample)
     }
 }
 

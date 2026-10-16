@@ -258,7 +258,7 @@ pub enum Op {
 impl Op {
     /// Basecase or optional operation Ribbit executes.
     pub fn is_executable(self) -> bool {
-        !matches!(self, Op::Muldw | Op::Macdw | Op::Msubdw | Op::Extension { .. })
+        !matches!(self, Op::Extension { .. })
     }
 
     /// Operations `Cpu::run_block` leaves to `Cpu::step_with`: they can
@@ -278,11 +278,7 @@ impl Op {
                 | Op::Illegal(_)
                 | Op::Arc700Only(_)
                 | Op::Extension { .. }
-                | Op::Muldw
-                | Op::Macdw
-                | Op::Msubdw
                 | Op::Divaw
-                | Op::Rnd16
         )
     }
 }

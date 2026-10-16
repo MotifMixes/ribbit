@@ -410,6 +410,26 @@ fn norm_swap_and_saturating_arithmetic() {
     assert_eq!((r.r(13), r.r(14)), (0xFFFF_FFFC, 0xFFFF_FFFC));
 }
 
+#[test]
+fn dual_16x16_multiply_accumulate() {
+    // SOURCED (MAME `dsp_multiply`), UNVERIFIED: no specification of the dual
+    // 16x16 MAC option is available (see exec.rs). AUX_MACMODE = 8: Q15
+    // results (shift 15). Each lane: 0x4000 * 0x2000 = 2^27.
+    let r = run("t_dsp");
+    assert_eq!(r.r(3), 0x1000_1000, "MULDW: 2^27 >> 15 per lane");
+    assert_eq!(r.r(4), 0x2000_2000, "MACDW accumulates");
+    assert_eq!(r.r(5), 0x1000_1000, "MSUBDW subtracts");
+    assert_eq!(r.r(7), 0x7FFE_7FFE, "0x7FFF^2 >> 15");
+    assert_eq!(r.r(8), 0x7FFF_7FFF, "twice that saturates in both lanes");
+    assert_eq!(r.r(9) & 0x120, 0x120, "sticky S1 (high) and S2 (low) set");
+    // AUX_MACMODE = 0: shift 16. High 0x7FFF^2 >> 16 = 0x3FFF; low
+    // -0x8000 * 0x7FFF = -0x3FFF_8000, >> 16 = -0x4000 (floor).
+    assert_eq!(r.r(10), 0x3FFF_C000);
+    // RND16 (PRM instruction page): 0x1234_8000 rounds up to 0x1235; near the
+    // top it saturates first (0x7FFF_FFFF) and gives 0x7FFF.
+    assert_eq!((r.r(11), r.r(12)), (0x1235, 0x7FFF));
+}
+
 // ---- diagnostics: nothing silently becomes a no-op ---------------------------
 
 fn halves(words: &[u16]) -> Vec<u8> {

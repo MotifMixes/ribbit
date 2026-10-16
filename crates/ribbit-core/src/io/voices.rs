@@ -20,10 +20,32 @@
 //! | A-law | standard G.711 (`ribbit_audio::alaw_to_linear`); MAME's table is the same curve at half amplitude and opposite sign |
 //! | Mix | sum of voice * 0.125 * volume / 0x4000, clamped to 16 bits (MAME) |
 //!
-//! Not modelled: PCM DMA (0x0180_3000; no BIOS or SpongeBob access seen),
-//! analog output, the other 0x0180_4000 registers. MAME's 8 to 32 kHz
-//! interpolation is applied by the host output (`ribbit_audio::Upsample4x`),
-//! since without PCM DMA nothing emulated observes the 32 kHz stream.
+//! PCM DMA (0x0180_3000-300C), SOURCED from MAME (same source, UNVERIFIED;
+//! MAME: "the observed 0x7f01 configuration runs at 32 kHz, with an interrupt
+//! after each half-buffer. Other control settings ... need further hardware
+//! verification"). VERIFIED-FW that it is used: the Leapster 2 BIOS 0.6
+//! programs both channels for The Talking Words Factory (its title waits for
+//! the stream). Two circular channels, n = (control bits 8-14) + 1 samples
+//! per half-buffer, bit 0 = on:
+//!
+//! | Register | Use |
+//! |---|---|
+//! | 0x3000 / 0x3008 | channel 0 / 1 control (read back) |
+//! | 0x3004 / 0x300C | channel 0 / 1 base; reads return base + position (MAME) |
+//!
+//! While a channel is on, a 32 kHz DAC clock runs: every fourth tick takes an
+//! 8 kHz voice-mix sample, raised to 32 kHz with MAME's interpolator
+//! (`ribbit_audio::upsample4x`). Channel 0 writes that 16-bit mix to memory
+//! (for software to mix with its own audio); channel 1 reads the DAC's signed
+//! 16-bit sample from memory. A channel interrupts (flag bit 20 + channel, CPU
+//! line 0x13 if enabled) each time its position reaches a half-buffer
+//! boundary (MAME uses a timer of the same period from the control write).
+//! Host output: while channel 1 plays, the 32 kHz DAC stream is reduced to
+//! the 8 kHz host ring by averaging four samples (until frontends take 32
+//! kHz); otherwise the 8 kHz mix as before, which the host raises to 32 kHz
+//! with the same interpolator.
+//!
+//! Not modelled: analog output, the other 0x0180_4000 registers.
 
 use ribbit_memory::Bus;
 
@@ -32,6 +54,10 @@ pub const STATUS_ADDR: u32 = 0x0180_2078;
 pub const CODEBOOK_LO: u32 = 0x0180_20E0;
 pub const CODEBOOK_HI: u32 = 0x0180_20E4;
 pub const SAMPLE_HZ: u64 = 8_000;
+pub const PCM_BASE: u32 = 0x0180_3000;
+pub const PCM_HZ: u64 = 32_000;
+/// Interrupt flag bit of PCM channel 0 (channel 1 is the next bit).
+pub const PCM_FLAG_SHIFT: u32 = 20;
 pub const START_COMMAND: u8 = 0x10;
 
 const LFC_FRAME: usize = 192;
@@ -86,6 +112,8 @@ pub struct VoiceEngine {
     /// Fractional sample-clock state, in peripheral ticks x SAMPLE_HZ.
     phase: u64,
     pub samples_generated: u64,
+    #[serde(default)]
+    pub pcm: Pcm,
     /// Mixed output at 8 kHz, for the host audio backend (not saved).
     #[serde(skip, default = "default_output")]
     pub output: ribbit_audio::SampleRing,
@@ -110,6 +138,7 @@ impl Default for VoiceEngine {
             lfc_start_pending: false,
             phase: 0,
             samples_generated: 0,
+            pcm: Pcm::default(),
             output: default_output(),
         }
     }
@@ -126,11 +155,25 @@ impl VoiceEngine {
     }
 
     pub fn read(&self, addr: u32) -> Option<u32> {
+        if let Some((ch, base)) = pcm_register(addr) {
+            let p = &self.pcm;
+            return Some(if base { p.base[ch].wrapping_add(p.position[ch]) } else { p.control[ch] });
+        }
         (addr == STATUS_ADDR).then(|| self.status())
     }
 
     /// Register writes (16-bit values; the BIOS uses `sth`).
     pub fn write(&mut self, addr: u32, value: u32) -> bool {
+        if let Some((ch, base)) = pcm_register(addr) {
+            let p = &mut self.pcm;
+            if base {
+                p.base[ch] = value;
+            } else {
+                p.control[ch] = value;
+            }
+            p.position[ch] = 0;
+            return true;
+        }
         let v = value as u16;
         match addr {
             CODEBOOK_LO => self.codebook_page = (self.codebook_page & 0xFFFF_0000) | v as u32,
@@ -367,6 +410,9 @@ impl VoiceEngine {
         if ticks == 0 {
             return;
         }
+        if self.pcm.running() {
+            return self.advance_dac(ticks, peripheral_hz, bus);
+        }
         self.phase += ticks * SAMPLE_HZ;
         if !self.active() {
             // Idle: keep the clock phase; avoid a division on every step.
@@ -398,13 +444,102 @@ impl VoiceEngine {
         }
     }
 
+    /// The 32 kHz DAC clock while a PCM channel is on.
+    fn advance_dac(&mut self, ticks: u64, peripheral_hz: u64, bus: &mut impl Bus) {
+        self.pcm.phase += ticks * PCM_HZ;
+        while self.pcm.phase >= peripheral_hz {
+            self.pcm.phase -= peripheral_hz;
+            if self.pcm.sub == 0 {
+                let legacy = if self.active() {
+                    self.samples_generated += 1;
+                    self.sample(bus)
+                } else {
+                    0
+                };
+                self.pcm.upsampled = ribbit_audio::upsample4x(&mut self.pcm.history, legacy);
+            }
+            let mut dac = self.pcm.upsampled[self.pcm.sub as usize];
+            self.pcm.sub = (self.pcm.sub + 1) & 3;
+            let p = &mut self.pcm;
+            if p.control[0] & 1 != 0 {
+                bus.write16(p.base[0].wrapping_add(p.position[0]), dac as u16);
+            }
+            if p.control[1] & 1 != 0 {
+                dac = bus.read16(p.base[1].wrapping_add(p.position[1])) as i16;
+            }
+            for ch in 0..2 {
+                if p.control[ch] & 1 != 0 {
+                    let half = p.half_bytes(ch);
+                    p.position[ch] = (p.position[ch] + 2) % (2 * half);
+                    if p.position[ch].is_multiple_of(half) {
+                        p.irq |= 1 << (PCM_FLAG_SHIFT + ch as u32);
+                    }
+                }
+            }
+            if p.control[1] & 1 != 0 {
+                p.host_sum += dac as i32;
+                if self.pcm.sub == 0 {
+                    let avg = self.pcm.host_sum / 4;
+                    self.pcm.host_sum = 0;
+                    self.output.push(avg as i16);
+                }
+            } else if self.pcm.sub == 0 {
+                let s = self.pcm.upsampled[0];
+                self.output.push(s);
+            }
+        }
+    }
+
+    /// Interrupt flag bits raised by PCM DMA since the last call.
+    pub fn take_pcm_irq(&mut self) -> u32 {
+        std::mem::take(&mut self.pcm.irq)
+    }
+
     /// Peripheral ticks until the sample clock next fires (for schedulers).
     pub fn ticks_to_next_sample(&self, peripheral_hz: u64) -> u64 {
+        if self.pcm.running() {
+            return (peripheral_hz - self.pcm.phase).div_ceil(PCM_HZ);
+        }
         if !self.active() {
             return u64::MAX;
         }
         (peripheral_hz - self.phase).div_ceil(SAMPLE_HZ)
     }
+}
+
+/// PCM DMA channel state (see the module notes).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Pcm {
+    pub control: [u32; 2],
+    pub base: [u32; 2],
+    /// Byte offset of the next sample in each channel's buffer.
+    pub position: [u32; 2],
+    /// Fractional DAC clock, in peripheral ticks x PCM_HZ.
+    phase: u64,
+    /// DAC tick within the current 8 kHz sample (0-3).
+    sub: u8,
+    upsampled: [i16; 4],
+    history: [f64; 16],
+    host_sum: i32,
+    /// Interrupt flag bits not yet delivered.
+    irq: u32,
+}
+
+impl Pcm {
+    pub fn running(&self) -> bool {
+        self.control.iter().any(|c| c & 1 != 0)
+    }
+
+    /// Bytes per half-buffer of channel `ch`.
+    fn half_bytes(&self, ch: usize) -> u32 {
+        (((self.control[ch] >> 8) & 0x7F) + 1) * 2
+    }
+}
+
+/// (channel, is the base register) for 0x0180_3000-300C.
+fn pcm_register(addr: u32) -> Option<(usize, bool)> {
+    let off = addr.checked_sub(PCM_BASE).filter(|&o| o < 0x10 && o % 4 == 0)?;
+    Some(((off / 8) as usize, off % 8 == 4))
 }
 
 #[cfg(test)]
@@ -423,12 +558,70 @@ mod tests {
         fn read32(&mut self, a: u32) -> u32 {
             self.read16(a) as u32 | (self.read16(a + 2) as u32) << 16
         }
-        fn write8(&mut self, _: u32, _: u8) {}
-        fn write16(&mut self, _: u32, _: u16) {}
-        fn write32(&mut self, _: u32, _: u32) {}
+        fn write8(&mut self, a: u32, v: u8) {
+            if let Some(b) = self.0.get_mut(a as usize) {
+                *b = v;
+            }
+        }
+        fn write16(&mut self, a: u32, v: u16) {
+            self.write8(a, v as u8);
+            self.write8(a + 1, (v >> 8) as u8);
+        }
+        fn write32(&mut self, a: u32, v: u32) {
+            self.write16(a, v as u16);
+            self.write16(a + 2, (v >> 16) as u16);
+        }
     }
 
     const HZ: u64 = 16_000_000;
+    /// Peripheral ticks per 32 kHz DAC sample.
+    const DAC_TICKS: u64 = HZ / PCM_HZ;
+
+    #[test]
+    fn pcm_registers_read_back_and_base_reads_include_the_position() {
+        let mut e = VoiceEngine::default();
+        assert!(e.write(0x0180_300C, 0x1000));
+        assert!(e.write(0x0180_3008, 0x7F01));
+        assert_eq!(e.read(0x0180_3008), Some(0x7F01));
+        let mut mem = Mem(vec![0; 0x2000]);
+        e.advance(DAC_TICKS * 3, HZ, &mut mem);
+        assert_eq!(e.read(0x0180_300C), Some(0x1006), "three 16-bit samples played");
+        assert!(!e.write(0x0180_3010, 0));
+    }
+
+    #[test]
+    fn pcm_channel_1_plays_memory_and_interrupts_each_half_buffer() {
+        let mut e = VoiceEngine::default();
+        let mut mem = Mem(vec![0; 0x2000]);
+        for i in 0..256u32 {
+            mem.write16(0x1000 + 2 * i, 4000);
+        }
+        e.write(0x0180_300C, 0x1000);
+        e.write(0x0180_3008, 0x7F01); // 2 x 128 samples
+        e.advance(DAC_TICKS * 127, HZ, &mut mem);
+        assert_eq!(e.take_pcm_irq(), 0);
+        assert_eq!(e.ticks_to_next_sample(HZ), DAC_TICKS);
+        e.advance(DAC_TICKS, HZ, &mut mem);
+        assert_eq!(e.take_pcm_irq(), 1 << 21, "first half played");
+        e.advance(DAC_TICKS * 128, HZ, &mut mem);
+        assert_eq!(e.take_pcm_irq(), 1 << 21, "second half played");
+        assert_eq!(e.pcm.position[1], 0, "wrapped");
+        let mut out = vec![0i16; 64];
+        e.output.pop_into(&mut out);
+        assert_eq!(out[10], 4000, "host output: the DAC stream at 8 kHz");
+    }
+
+    #[test]
+    fn pcm_channel_0_captures_the_voice_mix() {
+        let mut e = VoiceEngine::default();
+        let mut mem = Mem(vec![0x55; 0x2000]);
+        e.write(0x0180_3004, 0x1000);
+        e.write(0x0180_3000, 0x0301); // 2 x 4 samples
+        e.advance(DAC_TICKS * 4, HZ, &mut mem);
+        assert_eq!(e.take_pcm_irq(), 1 << 20);
+        assert_eq!(mem.read32(0x1000), 0, "silence captured");
+        assert_eq!(mem.read16(0x1008), 0x5555, "not yet reached");
+    }
 
     #[test]
     fn register_map_matches_the_bios_writes() {

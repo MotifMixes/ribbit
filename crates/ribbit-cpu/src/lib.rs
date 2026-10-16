@@ -257,6 +257,10 @@ pub struct Cpu {
     pub semaphore: u32,
     pub debug: u32,
     pub macmode: u32,
+    /// Dual 16x16 multiply-accumulate accumulators, [low lane, high lane]
+    /// (MULDW/MACDW/MSUBDW). SOURCED (MAME `dsp_multiply`), UNVERIFIED.
+    #[serde(default)]
+    pub mac_acc: [i64; 2],
     pub timers: [Timer; 2],
     /// Level-sensitive interrupt inputs IRQ3-IRQ31 driven by the machine.
     pub irq_lines: u32,
@@ -309,6 +313,7 @@ impl Cpu {
             semaphore: 0,
             debug: 0,
             macmode: 0,
+            mac_acc: [0; 2],
             timers: [Timer::reset(); 2],
             irq_lines: 0,
             delay_target: None,
@@ -352,6 +357,7 @@ impl Cpu {
             semaphore: 0,
             debug: 0,
             macmode: 0,
+            mac_acc: [0; 2],
             timers: [Timer::reset(); 2],
             irq_lines: 0,
             delay_target: None,

@@ -1036,9 +1036,17 @@ Result: with a cartridge it shows the seizure warning, then runs the cartridge (
 9. **Boot-image scan**: at 8 ms the BIOS compares 18 bytes at several addresses, among them 0xE000_0100, with a
    signature (0x4005_28A4). Nothing is there on a retail unit; reads return 0.
 
+10. **"!ASSERT: FlashPlayer: imageBuf format [6] unsupported"** is BIOS behaviour, not an emulation fault: the
+    FlashPlayer's image-buffer setup (0x4009_9780) asks LcdMPI for the display's pixel format
+    (`[[gp+4]+0xB8]+0x14`) and has cases for 0-5 and 9 only. LcdMPI reports 6 while the calibration screen is up
+    (hardware format 3, 8-bit RGB332) and 9 otherwise (hardware format 4, 12-bit); the FlashPlayer initialises
+    during calibration (2.0 s), asserts and returns (straps bit 21 set: asserts continue).
+11. **PCM DMA** (voices.rs, MAME's model): with The Talking Words Factory the BIOS programs both PCM channels
+    (0x0180_3000-300C) and its title waits for the stream; before PCM DMA was modelled no half-buffer interrupt came
+    and the title never moved on. The same game runs the dual 16x16 MAC instructions and RND16 (isa-arcompact.md).
+
 Open (Leapster 2):
-* "!ASSERT: FlashPlayer: imageBuf format [6] unsupported" (on the calibration screen), "No Cartridge Long Term
-  Memory found" (with no cartridge).
+* "No Cartridge Long Term Memory found" (with no cartridge).
 * "Invalid User ID" / "Log not opened yet" from games' APEX logging: no LeapFrog Connect user profile exists (a
   fresh console); UNVERIFIED whether a real unit prints the same.
 * The USB controller (0x0180_F000), the SD host controller (for a card), NAND persistence, the delay counters.

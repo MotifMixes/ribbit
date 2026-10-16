@@ -417,4 +417,26 @@ Disassembly of section .text:
 400005a4:	278a 1fbf           	mov	r15,-2
 400005a8:	290a 03ce           	asls	r14,r1,r15
 400005ac:	7fff                	brk_s
-400005ae:	78e0                	nop_s
+
+400005ae <t_dsp>:
+400005ae:	214a 0200           	mov	r1,0x8
+400005b2:	21ab 0041           	sr	r1,[aux_macmode]
+400005b6:	210a 0f80 4000 4000 	mov	r1,0x40004000
+400005be:	220a 0f80 2000 2000 	mov	r2,0x20002000
+400005c6:	290c 0083           	muldw	r3,r1,r2
+400005ca:	2910 0084           	macdw	r4,r1,r2
+400005ce:	2914 0085           	msubdw	r5,r1,r2
+400005d2:	260a 0f80 7fff 7fff 	mov	r6,0x7fff7fff
+400005da:	2e0c 0187           	muldw	r7,r6,r6
+400005de:	2e10 0188           	macdw	r8,r6,r6
+400005e2:	21aa 1041           	lr	r9,[aux_macmode]
+400005e6:	214a 0000           	mov	r1,0
+400005ea:	21ab 0041           	sr	r1,[aux_macmode]
+400005ee:	210a 0f80 7fff 8000 	mov	r1,0x7fff8000
+400005f6:	220a 0f80 7fff 7fff 	mov	r2,0x7fff7fff
+400005fe:	290c 008a           	muldw	r10,r1,r2
+40000602:	210a 0f80 1234 8000 	mov	r1,0x12348000
+4000060a:	2b2f 1043           	rnd16	r11,r1
+4000060e:	210a 0f80 7fff c000 	mov	r1,0x7fffc000
+40000616:	2c2f 1043           	rnd16	r12,r1
+4000061a:	7fff                	brk_s

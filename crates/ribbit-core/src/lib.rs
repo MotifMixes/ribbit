@@ -119,8 +119,8 @@ const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 /// positional): 2 = UART transmit timing (divisor, busy) and CPU pipeline
 /// timing (pending load, config flag); 3 = memory timing (caches, register
 /// ready times, load latency); 4 = GPIO output latches, Leapster 2 flash;
-/// 5 = Leapster 2 on-chip RAM and SD slot.
-pub const STATE_VERSION: u32 = 5;
+/// 5 = Leapster 2 on-chip RAM and SD slot; 6 = dual-MAC accumulators, PCM DMA.
+pub const STATE_VERSION: u32 = 6;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -614,6 +614,7 @@ impl Machine {
         // 96:16 MHz have no tick.)
         if ticks > 0 {
             self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+            self.io.deliver_pcm_irq();
         }
         if self.cpu.halted() {
             // Earlier deferred ticks ran with the CPU active; this step's not.
@@ -851,6 +852,7 @@ impl Machine {
         }
         if ticks > 0 {
             self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+            self.io.deliver_pcm_irq();
         }
         self.io.deferred += ticks;
         if self.io.sync_needed || self.io.deferred >= self.io.horizon {
@@ -949,7 +951,12 @@ impl Machine {
             // Largest number of iterations that ends strictly before the next
             // device event, CPU-timer event and the step budget.
             let to_event = self.io.horizon.saturating_sub(self.io.deferred);
-            let budget_cycles = self.clock.max_cycles_below(to_event).min(self.cpu.cycles_to_timer_event());
+            let mut budget_cycles = self.clock.max_cycles_below(to_event).min(self.cpu.cycles_to_timer_event());
+            // PCM DMA moves memory and raises interrupts at each DAC tick.
+            if self.io.voices.pcm.running() {
+                let to_dac = self.io.voices.ticks_to_next_sample(self.clock.peripheral_hz);
+                budget_cycles = budget_cycles.min(self.clock.max_cycles_below(to_dac));
+            }
             let budget_steps = max_steps.saturating_sub(report.steps + 2);
             let k = (budget_cycles / cycles).min(budget_steps / steps);
             if k == 0 {
@@ -962,6 +969,7 @@ impl Machine {
             let ticks = self.clock.ticks(skip_cycles);
             self.io.deferred += ticks;
             self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+            self.io.deliver_pcm_irq();
             report.steps += skip_steps;
             report.instructions += k * instructions;
             self.idle.skipped_steps += skip_steps;
