@@ -314,6 +314,12 @@ impl Zippity {
         &self.bus.ram
     }
 
+    /// Research: an I/O register's last written value (what the video
+    /// and sound units are drawn and played from).
+    pub fn io_reg(&self, addr: u32) -> u32 {
+        self.bus.latch(addr)
+    }
+
     /// Research: writes RAM (e.g. to turn on a game's debug flags).
     pub fn ram_mut(&mut self) -> &mut [u8] {
         &mut self.bus.ram

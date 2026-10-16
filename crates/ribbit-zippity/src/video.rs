@@ -136,9 +136,16 @@ impl Bus {
         // The size on screen: the corner converter's third corner (this
         // crate's own encoding, see the converter in bus.rs), or the
         // picture's.
+        // 0xD0500358 moves sprites down by its value / 64 lines (0x400: 16).
+        // Mickey Mouse Clubhouse sets 0x400 and the system menus 0; with it,
+        // Mickey stands on his pedestal and the windows' sky meets the hills,
+        // as in recordings, where without it they float 16 lines high and a
+        // black band crosses the windows. Its real meaning is UNVERIFIED.
+        let dy = (self.latch(0xD050_0358) as i32) >> 6;
+        let y0 = y0 + dy;
         let (sw, sh) = if half(7) == 0x8000 {
             let x2 = SCREEN_W as i32 / 2 + half(5) as i16 as i32;
-            let y2 = SCREEN_H as i32 / 2 - half(6) as i16 as i32;
+            let y2 = SCREEN_H as i32 / 2 - half(6) as i16 as i32 + dy;
             ((x2 - x0 + 1).max(0) as u32, (y2 - y0 + 1).max(0) as u32)
         } else {
             (w, h)

@@ -545,6 +545,14 @@ Sprite RAM entries are 32 bytes (the kernel keeps a copy of the list at
 
 - **Pixels** are one bit stream, most significant bit first: the 6-bit Zippity
   logo only comes out right this way.
+- **0xD0500358** moves every sprite down by its value / 64 lines. The
+  system menus leave it 0; the system sets 0x400 (16 lines) before starting
+  Mickey Mouse Clubhouse, whose rooms need it: without it Mickey floats 16
+  lines above his pedestal and a black band crosses the windows (the sky
+  sprites' lower rows are transparent and the wall's painted hills begin 16
+  lines lower), as recordings show neither. The neighbouring registers
+  (0x340-0x35C, written in fours by the same routines; 0x348 = 0x400 on most
+  screens) are UNKNOWN, and so is 0x358's real meaning (UNVERIFIED).
 - **Picture number 0** (bytes 0-1 zero) is no sprite, whatever byte 8 holds,
   as in the GPL162xx. The kernel leaves old entries at the end of the list
   with bytes 0-1 cleared but byte 8 kept. Drawing them put pink boxes on the

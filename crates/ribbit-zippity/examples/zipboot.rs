@@ -22,6 +22,7 @@
 //! | ZIPBOOT_RESET | Clear the user data first (`Zippity::factory_reset`) |
 //! | ZIPBOOT_SPRITES | Print the sprites in use at the end |
 //! | ZIPBOOT_POKE=addr:byte[;...] | Write RAM bytes (hex) after loading, e.g. a game's debug flag |
+//! | ZIPBOOT_REGS=lo-hi | Print the I/O registers' values in that range (hex) at the end |
 //! | ZIPBOOT_CART=file | Put a cartridge (a raw dump of its NAND) in the slot |
 
 use ribbit_zippity::{OUTPUT_RATE, SCREEN_H, SCREEN_W, Zippity};
@@ -221,6 +222,15 @@ fn main() {
             "{a:08x}  reads {:>8}  writes {:>8}  last {:08x}  first pc {:08x}",
             e.reads, e.writes, e.last_write, e.first_pc
         );
+    }
+    if let Some((lo, hi)) = range("ZIPBOOT_REGS") {
+        println!("--- registers ---");
+        for a in (lo..=hi).step_by(4) {
+            let v = z.io_reg(a);
+            if v != 0 {
+                println!("{a:08x} = {v:08x}");
+            }
+        }
     }
     if std::env::var_os("ZIPBOOT_SPRITES").is_some() {
         println!("--- sprites ---");
