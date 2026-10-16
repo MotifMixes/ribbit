@@ -11,6 +11,15 @@ use crate::bus::Bus;
 /// centred: x to the right and y up from the middle of the screen.
 pub const SCREEN_W: usize = 640;
 pub const SCREEN_H: usize = 480;
+/// A sprite's top line is this minus its y (y up). 255, not 240 (half the
+/// screen): the system menus' top band starts at y 255 (line 0), Mickey
+/// Mouse Clubhouse's mat picture ends exactly at the bottom line (its last
+/// row of sprites holds 9 lines of picture), Mickey stands on his pedestal
+/// and the windows' sky meets the hills, as in recordings of real units. At
+/// 240 these were 15 lines high (a black band across the windows, the mat's
+/// straight bottom edge showing). The game sets 0xD0500358 to 0x400 on one
+/// way into it and not on another; it was taken for a 16-line shift before.
+const SPRITE_Y0: i32 = 255;
 
 /// A 15-bit colour (bit 15 ignored) as 0x00RRGGBB.
 fn rgb555(c: u32) -> u32 {
@@ -189,7 +198,7 @@ impl Bus {
                 let h: Vec<String> = (0..16).map(|k| format!("{:04x}", half(n, k))).collect();
                 let attr = half(n, 3);
                 let x0 = SCREEN_W as i32 / 2 + half(n, 1) as i16 as i32;
-                let y0 = SCREEN_H as i32 / 2 - half(n, 2) as i16 as i32;
+                let y0 = SPRITE_Y0 - half(n, 2) as i16 as i32;
                 let (w, hh) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
                 format!("{n:3} {}  at ({x0},{y0}) {w}x{hh} depth {} pal {} prio {}", h.join(" "), attr & 3, (attr >> 8) & 15, (attr >> 12) & 3)
             })
@@ -200,21 +209,14 @@ impl Bus {
         let attr = half(3);
         let addr = (half(0) | (half(4) & 0x7F) << 16) * 2;
         let x0 = SCREEN_W as i32 / 2 + half(1) as i16 as i32;
-        let y0 = SCREEN_H as i32 / 2 - half(2) as i16 as i32;
+        let y0 = SPRITE_Y0 - half(2) as i16 as i32;
         let (w, h) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
         // The size on screen: the corner converter's third corner (this
         // crate's own encoding, see the converter in bus.rs), or the
         // picture's.
-        // 0xD0500358 moves sprites down by its value / 64 lines (0x400: 16).
-        // Mickey Mouse Clubhouse sets 0x400 and the system menus 0; with it,
-        // Mickey stands on his pedestal and the windows' sky meets the hills,
-        // as in recordings, where without it they float 16 lines high and a
-        // black band crosses the windows. Its real meaning is UNVERIFIED.
-        let dy = (self.latch(0xD050_0358) as i32) >> 6;
-        let y0 = y0 + dy;
         let (sw, sh) = if half(7) == 0x8000 {
             let x2 = SCREEN_W as i32 / 2 + half(5) as i16 as i32;
-            let y2 = SCREEN_H as i32 / 2 - half(6) as i16 as i32 + dy;
+            let y2 = SPRITE_Y0 - half(6) as i16 as i32;
             ((x2 - x0 + 1).max(0) as u32, (y2 - y0 + 1).max(0) as u32)
         } else {
             (w, h)
