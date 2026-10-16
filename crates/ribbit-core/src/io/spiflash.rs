@@ -77,18 +77,52 @@ impl Default for SpiFlash {
     }
 }
 
-/// The 4 KB sector holding the touch calibration (Leapster 2 BIOS 0.6).
+/// The touch calibration (Leapster 2), at 0x1000 for BIOS 0.6 and m9 and
+/// 0x0000 for B5 (`Firmware::touch_calibration_offset`).
 /// VERIFIED-FW by experiment (2026-10-16): calibrating writes a 0x30-byte
-/// record there twice (0x1000 and 0x1030, starting 00 01 00 00 40 06 40 06);
-/// a boot with straps bit 14 set (skip calibration) reads it back and touch
-/// works, while with the sector erased the BIOS's calibration matrix stays
-/// all zeros and every tap is dropped. The record's layout is UNKNOWN.
-pub const TOUCH_CALIBRATION: usize = 0x1000;
+/// record twice (+0x00 and +0x30); a boot with straps bit 14 set
+/// (skip calibration) reads it back and touch works, while with the sector
+/// erased the BIOS's calibration matrix stays all zeros and every tap is
+/// dropped. Layout, as far as it matches the touch task's context (+0x74..):
+/// u16 1, u16 1600, u16 1600 (the transform's units per screen, +0x74/+0x76),
+/// i32 divisor and six matrix terms (+0x78..+0x90), i32 1, then one byte
+/// that changes with the contents (HYPOTHESIS: a checksum), 0xFF padding.
+pub const TOUCH_CALIBRATION_LEN: usize = 0x60;
+
+/// The calibration record the BIOS 0.6 itself writes when its five targets
+/// are pressed exactly on Ribbit's (ideal, linear) touch panel model
+/// (captured 2026-10-16; B5 writes the identical bytes). Used as the factory calibration of a new console:
+/// a Leapster 2 cannot finish calibrating at boot (its Flash player asserts
+/// about 2 s in and the BIOS restarts the console, lib.rs
+/// `power_request`), so retail units must ship with one stored. The real
+/// factory record is UNKNOWN; this one maps Ribbit's panel exactly.
+pub const FACTORY_TOUCH_CALIBRATION: [u8; 0x60] = {
+    let rec: [u8; 0x30] = [
+        0x00, 0x01, 0x00, 0x00, 0x40, 0x06, 0x40, 0x06, 0xe7, 0x9c, 0xf3, 0xff, 0xa8, 0xc0, 0xec, 0xff, //
+        0x00, 0x00, 0x00, 0x00, 0x3c, 0x20, 0xf9, 0xff, 0x00, 0x00, 0x00, 0x00, 0xa8, 0xc0, 0xec, 0xff, //
+        0x3c, 0x20, 0xf9, 0xff, 0x01, 0x00, 0x00, 0x00, 0xae, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ];
+    let mut both = [0u8; 0x60];
+    let mut i = 0;
+    while i < 0x30 {
+        both[i] = rec[i];
+        both[0x30 + i] = rec[i];
+        i += 1;
+    }
+    both
+};
 
 impl SpiFlash {
-    /// Whether a touch calibration has been saved (see TOUCH_CALIBRATION).
-    pub fn has_touch_calibration(&self) -> bool {
-        self.data[TOUCH_CALIBRATION..TOUCH_CALIBRATION + 0x30].iter().any(|&b| b != 0xFF)
+    /// Whether a touch calibration has been saved at `at` (see
+    /// `TOUCH_CALIBRATION_LEN`).
+    pub fn has_touch_calibration(&self, at: usize) -> bool {
+        self.data[at..at + 0x30].iter().any(|&b| b != 0xFF)
+    }
+
+    /// Stores `FACTORY_TOUCH_CALIBRATION` at `at` (marks the flash changed).
+    pub fn store_factory_touch_calibration(&mut self, at: usize) {
+        self.data[at..at + TOUCH_CALIBRATION_LEN].copy_from_slice(&FACTORY_TOUCH_CALIBRATION);
+        self.dirty = true;
     }
 
     /// Loads saved contents (shorter data is padded with erased bytes).
@@ -242,11 +276,15 @@ mod tests {
     #[test]
     fn touch_calibration_is_seen_in_its_sector() {
         let mut f = SpiFlash::default();
-        assert!(!f.has_touch_calibration(), "erased");
+        assert!(!f.has_touch_calibration(0x1000), "erased");
         let mut image = vec![0xFF; SIZE];
-        image[TOUCH_CALIBRATION..TOUCH_CALIBRATION + 8].copy_from_slice(&[0, 1, 0, 0, 0x40, 6, 0x40, 6]);
+        image[0x1000..0x1008].copy_from_slice(&[0, 1, 0, 0, 0x40, 6, 0x40, 6]);
         f.load(&image);
-        assert!(f.has_touch_calibration());
+        assert!(f.has_touch_calibration(0x1000) && !f.has_touch_calibration(0));
+        let mut g = SpiFlash::default();
+        g.store_factory_touch_calibration(0);
+        assert!(g.has_touch_calibration(0) && g.dirty);
+        assert_eq!(g.data[0x30..0x38], [0, 1, 0, 0, 0x40, 6, 0x40, 6]);
     }
 
     #[test]

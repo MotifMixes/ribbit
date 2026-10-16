@@ -328,6 +328,12 @@ pub struct Machine {
     /// calling LF_ResetIdleTimeout would (idle_timer.rs). Off by default
     /// (the emulated BIOS behaves as on hardware).
     pub keep_awake: bool,
+    /// Leapster 2: straps to use from the next BIOS-requested restart on
+    /// (see `power_request`), e.g. to boot normally after a calibration
+    /// boot. Frontend policy, not hardware.
+    pub restart_straps: Option<u32>,
+    /// Leapster 2: restarts the BIOS requested (0x0180_B000 bit 8).
+    pub restarts: u64,
     /// The BIOS's idle timer, once found.
     idle_timer: Option<idle_timer::IdleTimer>,
     firmware: Firmware,
@@ -354,10 +360,25 @@ impl Machine {
 
     /// Whether skipping touch calibration at boot leaves a working touch
     /// screen: false on a Leapster 2 whose internal flash holds no
-    /// calibration yet (see `io::spiflash::TOUCH_CALIBRATION`). Other models
+    /// calibration yet (see `Firmware::touch_calibration_offset`). Other models
     /// are assumed to have one (their storage is not modelled this way).
     pub fn touch_calibration_stored(&self) -> bool {
-        self.io.spi_flash.as_ref().is_none_or(|f| f.has_touch_calibration())
+        let at = self.firmware.touch_calibration_offset();
+        self.io.spi_flash.as_ref().is_none_or(|f| f.has_touch_calibration(at))
+    }
+
+    /// Leapster 2: gives a console with no stored touch calibration the
+    /// factory one (`io::spiflash::FACTORY_TOUCH_CALIBRATION`); true if it
+    /// did. Call after loading saved storage, before running.
+    pub fn ensure_touch_calibration(&mut self) -> bool {
+        let at = self.firmware.touch_calibration_offset();
+        match self.io.spi_flash.as_mut() {
+            Some(f) if !f.has_touch_calibration(at) => {
+                f.store_factory_touch_calibration(at);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn with_straps(firmware: Firmware, cartridge: Option<Cartridge>, straps: u32) -> Self {
@@ -399,6 +420,8 @@ impl Machine {
             coverage: None,
             hd: None,
             keep_awake: false,
+            restart_straps: None,
+            restarts: 0,
             idle_timer: None,
             firmware,
             cartridge,
@@ -631,6 +654,10 @@ impl Machine {
             self.io.sync_needed = true;
         }
         self.run_sd_command();
+        if self.io.restart_requested {
+            self.power_request();
+            return result;
+        }
         let ticks = self.clock.ticks(self.cpu.cycles - start);
         // Voice engine: needs memory (speech stream, samples), so it runs
         // here, after the instruction, like the framebuffer DMA.
@@ -874,6 +901,10 @@ impl Machine {
             self.io.sync_needed = true;
         }
         self.run_sd_command();
+        if self.io.restart_requested {
+            self.power_request();
+            return Some(Ok(()));
+        }
         let ticks = self.clock.ticks(self.cpu.cycles - synced);
         if self.io.voices.lfc_start_pending {
             self.io.voices.start_lfc(&mut self.bus);
@@ -1119,6 +1150,39 @@ impl Machine {
     /// Idle probe outcomes (see `IdleTracker::stats`).
     pub fn idle_stats(&self) -> [u64; 7] {
         self.idle.stats
+    }
+
+    /// Leapster 2: the BIOS wrote 0x0180_B000 bit 8 (see
+    /// `io::Peripherals::leapster2_power_write`). If its idle timer has run
+    /// out this is the inactivity power-off: nothing happens here and the
+    /// frontend ends the session (`idle_powered_off`). Otherwise the console
+    /// starts again (HYPOTHESIS: as a restart, the case of the fatal-assert
+    /// handler, which expects to see its saved message on the next boot):
+    /// devices and CPU reset, memory kept (the saved assert lives at
+    /// 0x0300_FF00), B008 bit 0 kept, time carries on. Before this was
+    /// modelled the BIOS ran on after the assert with the asserting task's
+    /// interrupt-disable count leaked, so that task always ran masked: the
+    /// Leapster 2's PCM interrupts were lost (clicks every 256 samples).
+    fn power_request(&mut self) {
+        self.io.restart_requested = false;
+        if self.idle_powered_off() {
+            return;
+        }
+        let b008 = self.io.leapster2_power.map(|p| p[1]);
+        let (ram, vram, sram) = (self.bus.ram().to_vec(), self.bus.vram().to_vec(), self.bus.sram().to_vec());
+        let (cycles, retired) = (self.cpu.cycles, self.cpu.instructions_retired);
+        if let Some(s) = self.restart_straps.take() {
+            self.set_straps(s);
+        }
+        self.reset();
+        self.bus.restore_memory(&ram, &vram, &sram);
+        if let (Some(v), Some(p)) = (b008, self.io.leapster2_power.as_mut()) {
+            p[1] = (p[1] & !1) | (v & 1);
+        }
+        self.cpu.cycles = cycles;
+        self.cpu.instructions_retired = retired;
+        self.restarts += 1;
+        tracing::info!(target: "ribbit::boot", restarts = self.restarts, "the BIOS restarted the console (0x0180_B000 bit 8)");
     }
 
     /// Leapster 2: runs an SD command descriptor the program started (io/sd.rs).

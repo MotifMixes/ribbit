@@ -264,15 +264,24 @@ impl App {
             saves.cart = Some(p.clone());
         }
         saves.load(&mut machine)?;
-        if self.opts.straps.is_none()
-            && let Some(straps) = machine.straps()
-            && straps & ribbit_core::io::straps::SKIP_CALIBRATION != 0
-            && !machine.touch_calibration_stored()
+        // Leapster 2: it cannot finish calibrating at boot (its Flash player
+        // asserts about 2 s in and the BIOS restarts the console), so it
+        // boots with the stored calibration, a new console getting the
+        // factory one, as a retail unit ships (core: spiflash.rs).
+        if machine.ensure_touch_calibration() {
+            tracing::info!(target: "ribbit::boot", "new Leapster 2: factory touch calibration stored");
+        }
+        if let Some(straps) = machine.straps()
+            && straps & ribbit_core::io::straps::SKIP_CALIBRATION == 0
+            && machine.io.spi_flash.is_some()
         {
-            // A Leapster 2 with no saved calibration ignores every tap when
-            // calibration is skipped: calibrate this once (the BIOS saves it).
-            tracing::info!(target: "ribbit::boot", "no saved touch calibration: calibrating at boot");
-            machine.set_straps(straps & !ribbit_core::io::straps::SKIP_CALIBRATION);
+            if self.opts.straps.is_none() {
+                machine.set_straps(straps | ribbit_core::io::straps::SKIP_CALIBRATION);
+            } else {
+                // Calibration asked for on the command line: after the
+                // BIOS's restart, boot normally.
+                machine.restart_straps = Some(straps | ribbit_core::io::straps::SKIP_CALIBRATION);
+            }
         }
         let title = match (machine.cartridge(), &cart) {
             (Some(c), Some(path)) => c.known().map(|k| short_name(k.name)).unwrap_or_else(|| {

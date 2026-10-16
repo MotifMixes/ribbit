@@ -174,6 +174,10 @@ pub struct Peripherals {
     /// Leapster 2: values of the power-controller status registers
     /// 0x0180_B004 and 0x0180_B008 (None on other models).
     pub leapster2_power: Option<[u32; 2]>,
+    /// Leapster 2: the program wrote 0x0180_B000 bit 8 (restart / power
+    /// off); the machine acts on it after the instruction (lib.rs).
+    #[serde(skip)]
+    pub restart_requested: bool,
     /// Leapster 2: the SD card slot's pins (sd.rs; None on other models).
     #[serde(default)]
     pub sd: Option<sd::SdSlot>,
@@ -254,6 +258,7 @@ impl Default for Peripherals {
             mem: memtiming::MemTiming::default(),
             spi_flash: None,
             leapster2_power: None,
+            restart_requested: false,
             sd: None,
             nand: None,
             usb: None,
@@ -335,7 +340,36 @@ impl Peripherals {
                     || self.tv_link.as_mut().is_some_and(|l| l.write(addr, value))
                     || self.sd.as_mut().is_some_and(|s| s.write(addr, value))
                     || self.usb.as_mut().is_some_and(|u| u.write(addr, value))
+                    || self.leapster2_power_write(addr, value)
             }
+        }
+    }
+
+    /// Leapster 2 power controller writes. VERIFIED-FW (BIOS 0.6): the fatal
+    /// assert handler (0x4004_1F04) masks interrupts, saves its message at
+    /// 0x0300_FF00 with a checksum, sets 0x0180_B008 bit 0, and calls
+    /// 0x4003_FD80, which ORs 0x100 into 0x0180_B000 and returns; at boot
+    /// (0x4004_2FCA) the BIOS checks B008 bit 0, prints "!SAVED ASSERT"
+    /// after verifying the checksum and clears the bit. So bit 8 makes the
+    /// console start again and B008 bit 0 survives that. Whether it is a
+    /// restart or a power-off waiting for the button is UNKNOWN (the idle
+    /// power-off uses the same routine); see `Machine::power_request`.
+    /// Only bit 0 of B008 is taken as writable (bits 1-2 are the boot
+    /// selection the controller reports); reads of B000 stay unmodelled.
+    fn leapster2_power_write(&mut self, addr: u32, value: u32) -> bool {
+        let Some(p) = self.leapster2_power.as_mut() else {
+            return false;
+        };
+        match addr {
+            0x0180_B000 => {
+                self.restart_requested |= value & 0x100 != 0;
+                true
+            }
+            0x0180_B008 => {
+                p[1] = (p[1] & !1) | (value & 1);
+                true
+            }
+            _ => false,
         }
     }
 

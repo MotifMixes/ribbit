@@ -21,7 +21,8 @@
 //!   logtrace PC rF MS   print a printf-style debug log call (format in rF, args after)
 //!   tvdump PATH         write the L-MAX TV chip's memory (RIBBIT_LMAX_TV=1)
 //!   record / wav PREFIX record the host sound, then write it as the frontend
-//!                       plays it with Leapster 2 PCM at 32 kHz and at 8 kHz
+//!                       plays it with Leapster 2 PCM at 32 kHz (as emulated and
+//!                       clean) and at 8 kHz
 //! RIBBIT_MAME_GPIO=1 reads unresolved GPIO lines as 1 (MAME's workaround);
 //! RIBBIT_GPIO_LINES=hex sets them; RIBBIT_BATTERY=hex sets the ADC battery input.
 //! Every 250 ms of emulated time prints the speed (percent of real time at
@@ -146,6 +147,17 @@ fn main() {
         m.io.lmax_tv = Some(Default::default());
     }
     m.keep_awake = std::env::var_os("RIBBIT_KEEP_AWAKE").is_some();
+    // As the frontend: a new Leapster 2 gets the factory touch calibration
+    // (RIBBIT_NO_FACTORY_CAL=1 leaves the flash blank), and after a
+    // calibration boot the BIOS's restart skips calibration.
+    if std::env::var_os("RIBBIT_NO_FACTORY_CAL").is_none() {
+        m.ensure_touch_calibration();
+    }
+    if straps & ribbit_core::io::straps::SKIP_CALIBRATION == 0 {
+        m.restart_straps = Some(straps | ribbit_core::io::straps::SKIP_CALIBRATION);
+    }
+    // Research: RIBBIT_IDLE_SKIP=0 turns off idle-loop fast-forwarding.
+    m.idle_skip = std::env::var("RIBBIT_IDLE_SKIP").map_or(true, |v| v != "0");
     if let Ok(v) = std::env::var("RIBBIT_BATTERY") {
         // Research: the ADC's battery input level (hex, 0..=0x7FF).
         m.io.battery = u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap();
@@ -211,6 +223,10 @@ fn main() {
                 let r = meter.rec.take().expect("no `record`");
                 write_wav(&format!("{}-32k.wav", w[1]), &r.pcm32, 32_000);
                 write_wav(&format!("{}-8k.wav", w[1]), &r.pcm8, 32_000);
+                // The frontend's "clean" option: the 32 kHz file low-passed.
+                let mut lp = ribbit_audio::LowPass32k::new();
+                let clean: Vec<i16> = r.pcm32.iter().map(|&x| lp.push(x)).collect();
+                write_wav(&format!("{}-32k-clean.wav", w[1]), &clean, 32_000);
                 println!("wav: {} frames, {} with the 32 kHz DAC stream, {:.1} s", r.frames, r.dac_frames, r.pcm8.len() as f64 / 32_000.0);
             }
             Some("snap") => kept.push(frame(&m)),
@@ -500,10 +516,13 @@ fn main() {
                 let none = Breakpoints::default();
                 for _ in 0..num(1, 100) * 100 {
                     m.run_cycles(step, &none);
-                    *h.entry(m.cpu.pc & !std::env::var("PCHIST_MASK").map_or(0xFF, |v| u32::from_str_radix(&v, 16).unwrap())).or_default() += 1;
+                    let masked = m.cpu.status32 & (ribbit_cpu::status32::E1 | ribbit_cpu::status32::E2) == 0;
+                    if std::env::var_os("PCHIST_MASKED").is_none() || masked {
+                        *h.entry(m.cpu.pc & !std::env::var("PCHIST_MASK").map_or(0xFF, |v| u32::from_str_radix(&v, 16).unwrap())).or_default() += 1;
+                    }
                 }
                 let mut v: Vec<_> = h.into_iter().collect();
-                v.sort_by(|a, b| b.1.cmp(&a.1));
+                v.sort_by_key(|a| std::cmp::Reverse(a.1));
                 for (pc, n) in v.iter().take(12) {
                     println!("pchist {pc:#010x} {n}");
                 }
@@ -528,6 +547,60 @@ fn main() {
                 // flashload PATH: load the SPI flash from a file (as the frontend does).
                 let data = std::fs::read(w[1]).unwrap();
                 m.io.spi_flash.as_mut().expect("no SPI flash").load(&data);
+            }
+            Some("irqrate") => {
+                // irqrate MS: interrupts taken per line over the next MS.
+                let before = m.interrupt_counts;
+                run_ms(&mut m, num(1, 1000), &mut meter);
+                let per: Vec<String> =
+                    (0..64).filter(|&i| m.interrupt_counts[i] != before[i]).map(|i| format!("{i}:{}", m.interrupt_counts[i] - before[i])).collect();
+                println!("irqrate {}", per.join(" "));
+            }
+            Some("maskspans") => {
+                // maskspans MS: single-step for MS; print each stretch with
+                // interrupts masked longer than 1 ms (start PC, length).
+                let none = Breakpoints::default();
+                let end = m.cpu.cycles + num(1, 1000) * (m.clock.cpu_hz / 1000);
+                let per_us = m.clock.cpu_hz / 1_000_000;
+                let mut start: Option<(u64, u32)> = None;
+                let mut prev_pc = 0u32;
+                let mut pcs: std::collections::HashMap<u32, u64> = Default::default();
+                while m.cpu.cycles < end {
+                    let masked = m.cpu.status32 & (ribbit_cpu::status32::E1 | ribbit_cpu::status32::E2) == 0;
+                    match (masked, start) {
+                        (true, None) => {
+                            start = Some((m.cpu.cycles, m.cpu.pc));
+                            pcs.clear();
+                            if let Ok(n) = std::env::var("MASK_PATH") {
+                                // Research: the first N PCs of every masked stretch.
+                                let (save, mut path) = (m.save_state(), vec![]);
+                                for _ in 0..n.parse::<usize>().unwrap() {
+                                    path.push(format!("{:x}", m.cpu.pc));
+                                    m.run(1, &none);
+                                }
+                                if m.cpu.status32 & (ribbit_cpu::status32::E1 | ribbit_cpu::status32::E2) == 0 {
+                                    println!("  path {}", path.join(" "));
+                                }
+                                m.load_state(&save).unwrap();
+                            }
+                        }
+                        (true, Some(_)) => *pcs.entry(m.cpu.pc & !0xFF).or_default() += 1,
+                        (false, Some((c0, pc0))) => {
+                            let us = (m.cpu.cycles - c0) / per_us;
+                            if us >= 1000 {
+                                println!("  unmasked at pc {:#010x} (previous pc {:#010x})", m.cpu.pc, prev_pc);
+                                let mut v: Vec<_> = pcs.iter().collect();
+                                v.sort_by(|a, b| b.1.cmp(a.1));
+                                let top: Vec<String> = v.iter().take(4).map(|(p, n)| format!("{p:08x}x{n}")).collect();
+                                println!("masked {us} us from pc {pc0:#010x}, mostly {}", top.join(" "));
+                            }
+                            start = None;
+                        }
+                        _ => {}
+                    }
+                    prev_pc = m.cpu.pc;
+                    m.run(1, &none);
+                }
             }
             Some("logtrace") => {
                 // logtrace PC FMTREG MS: each time PC runs, print the printf-style
@@ -707,7 +780,11 @@ fn main() {
                     m.run(1, &none);
                     let v = rd(&m);
                     if v != last {
-                        println!("{:10.3} ms  [{addr:08x}] {last:08x} -> {v:08x}  pc {pc:08x}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64);
+                        println!(
+                            "{:10.3} ms  [{addr:08x}] {last:08x} -> {v:08x}  pc {pc:08x} blink {:08x}",
+                            m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64,
+                            m.cpu.regs[31]
+                        );
                         last = v;
                     }
                 }
@@ -763,7 +840,22 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
         left -= chunk;
         let skipped0 = m.idle_skipped_steps();
         let t = Instant::now();
-        let r = m.run_cycles(chunk * per_ms, &Breakpoints::default());
+        let r = match std::env::var("REC_CHUNK_US").ok().filter(|_| meter.rec.is_some()) {
+            // Research: run the window in small slices, as the frontend does.
+            Some(us) => {
+                let slice = us.parse::<u64>().unwrap() * per_ms / 1000;
+                let end = m.cpu.cycles + chunk * per_ms;
+                let mut last = m.run_cycles(slice.min(end - m.cpu.cycles), &Breakpoints::default());
+                let mut steps = last.steps;
+                while m.cpu.cycles < end {
+                    last = m.run_cycles(slice.min(end - m.cpu.cycles), &Breakpoints::default());
+                    steps += last.steps;
+                }
+                last.steps = steps;
+                last
+            }
+            None => m.run_cycles(chunk * per_ms, &Breakpoints::default()),
+        };
         let wall = t.elapsed().as_secs_f64();
         assert_eq!(r.stop, ribbit_core::StopReason::StepLimit, "{r:?}");
         let speed = 100.0 * (chunk as f64 / 1000.0) / wall;
@@ -779,7 +871,7 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
             }
             meter.rows.push((meter.label.clone(), speed, idle));
             if std::env::var_os("VERBOSE").is_some() {
-                println!("{t_ms:8} ms {:24} {speed:6.0}% idle {idle:3.0}%", meter.label);
+                println!("{t_ms:8} ms {:24} {speed:6.0}% idle {idle:3.0}% {:.1} ns/step {} steps", meter.label, wall * 1e9 / r.steps as f64, r.steps);
             }
         }
     }

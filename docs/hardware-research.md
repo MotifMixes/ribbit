@@ -1175,12 +1175,35 @@ Results: the Leapster 2 (0.6) accepts all five calibration targets in order and 
 tapped letter and accepts OK (previously no press was ever accepted). US v2.1 and v1.5 calibrate as before
 (tests `v15_touch_calibration_then_splash_screen`, `v21_touch_calibration_then_splash_screen`).
 
-Stored calibration (Leapster 2 0.6, 2026-10-16, by experiment): calibrating writes a 0x30-byte record twice into
-the internal SPI flash's sector at 0x1000 (0x1000 and 0x1030, starting 00 01 00 00 40 06 40 06; layout UNKNOWN). A
-boot with straps bit 14 set (skip calibration) reads it back. With that sector erased, the touch task still reports
-positions (+0xC0/+0xC4) but its calibration matrix (+0x78..+0x90) stays all zero, so every tap is dropped and the
-setup screens only move on by their own timeouts (this looked like a broken name entry). The frontend therefore
-calibrates once when skipping is asked for but no calibration is saved (`Machine::touch_calibration_stored`).
+Stored calibration (Leapster 2, 2026-10-16, by experiment): calibrating writes a 0x30-byte record twice into the
+internal SPI flash, at 0x1000 on BIOS 0.6 and m9 and at 0x0000 on B5 (`Firmware::touch_calibration_offset`; the
+same storage routine, 0.6 0x400B_8158 / B5 0x400B_6BC4, with different region tables). Layout as far as it matches
+the touch task's context: u16 1, u16 1600, u16 1600 (+0x74/+0x76, units per screen), the divisor and six matrix
+terms (+0x78..+0x90), i32 1, one byte that changes with the contents (HYPOTHESIS: checksum). A boot with straps bit
+14 set (skip calibration) reads it back (0.6 0x400B_6F68). With it erased, the touch task still reports positions
+(+0xC0/+0xC4) but its matrix stays all zero, so every tap is dropped and the setup screens only move on by their own
+timeouts (this looked like a broken name entry).
+
+A Leapster 2 cannot finish calibrating at boot: while the calibration screen is up the Flash player asserts about
+2 s in ("imageBuf format [6] unsupported", item 10 below) and the assert handler restarts the console (see "Power
+controller writes"). So retail units must boot with bit 14 set and a calibration stored. Ribbit gives a new console
+the record the BIOS itself writes for its ideal panel model (`FACTORY_TOUCH_CALIBRATION`, identical from 0.6 and
+B5; the real factory record is UNKNOWN) and the frontend boots Leapster 2s with bit 14 set. All three BIOSes then
+accept taps.
+
+#### Power controller writes (0x0180_B000 / B008, 2026-10-16)
+
+VERIFIED-FW (0.6): the fatal-assert handler (0x4004_1F04) masks interrupts (`flag 0`), saves its message at
+0x0300_FF00 with a checksum, sets 0x0180_B008 bit 0, prints "!ASSERT: ...", waits, and calls 0x4003_FD80, which ORs
+0x100 into 0x0180_B000 and returns. At boot (0x4004_2FCA) the BIOS checks B008 bit 0, verifies the checksum, prints
+"!SAVED ASSERT" and clears the bit. So B000 bit 8 makes the console start again and B008 bit 0 survives it. Ribbit
+models it as a restart (devices and CPU reset, memory and B008 bit 0 kept; HYPOTHESIS: it could also be a power-off
+that waits for the button) unless the BIOS's idle timer has run out, which is the inactivity power-off the
+frontend already handles (`Machine::power_request`). Before this, the BIOS ran on after the calibration-time assert:
+the asserting task's interrupt-disable count (task descriptor +0x68, MQX `_int_disable` 0x4004_79DC) stayed at 1,
+so whenever that task ran interrupts stayed masked for up to 200 ms; PCM half-buffer interrupts were lost (103 a
+second instead of 250) and the stream replayed stale halves: a click every 256 samples in The Talking Words
+Factory. Found with `scenes` `irqrate`, `maskspans` and `watch` (which now prints blink).
 
 ### Board lines on GIODataIn (VERIFIED-FW)
 

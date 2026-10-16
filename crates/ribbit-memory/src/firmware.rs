@@ -91,6 +91,17 @@ impl Firmware {
         self.known.is_some_and(|k| k.sha1 == "4b5eaac1e40bc605eb4cf6d4ad212343334762fd")
     }
 
+    /// Leapster 2: where in its internal SPI flash the BIOS keeps the touch
+    /// calibration. VERIFIED by experiment (2026-10-16): 0.6 and m9 write
+    /// the record at 0x1000, Connected B5 the identical record at 0x0000
+    /// (each BIOS's storage-region table differs). Unknown dumps: 0x1000.
+    pub fn touch_calibration_offset(&self) -> usize {
+        match self.known.map(|k| k.sha1) {
+            Some("bdc10ad70aa7641716e16fbea16bd0ef35f6e85e") => 0x0000,
+            _ => 0x1000,
+        }
+    }
+
     /// A known Leapster TV BIOS: the machine needs the TV video chip and
     /// controller link (EXPERIMENTAL).
     pub fn is_leapster_tv(&self) -> bool {

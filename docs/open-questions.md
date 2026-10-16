@@ -32,6 +32,7 @@ Ordered roughly by how much they block progress.
 | Q27 | Leapster 2 SD host controller timing and error behaviour, and which NAND chip the CIP3 board carries | Needed for a virtual SD card; NAND ID 0x98 0xD1 vs 0x20 0xF1 | A real CIP3 board; an SD card trace |
 | Q28 | How the L-MAX US v2.1 BIOS senses a TV on its jack | Ribbit cannot offer the L-MAX TV picture without v2.1 thinking a TV is plugged in | Trace `LF_GetTvPlugState` (v2.1 0x4007_6EB4 → TV MPI table) to the register it reads; a real L-MAX with and without a TV |
 | Q29 | Leapster 2 LCD colours: real units look blue where Ribbit's 12-bit decode (MAME's) shows purple, green and yellow (warning screen, LeapFrog logo) | Every Leapster 2/L-MAX picture | A straight-on daylight photo of a known screen; see hardware-research.md, "Leapster 2 real-hardware reference" |
+| Q31 | Leapster 2: is 0x0180_B000 bit 8 a restart or a power-off waiting for the button? And the real factory touch-calibration record | Ribbit restarts (memory kept) and stores its own ideal-panel record | A real unit: trigger an assert; dump the SPI flash at 0x1000 (B5: 0x0000) |
 | Q30 | Size of the Leapster 2's SD card (modelled 1 GiB; B5's format parameters require more than 512 MiB) | Free space shown to games; nothing else found | A real 0.6/B5 unit's card |
 | Q15 | Hardware revisions and LCD panel variants among original Leapsters | Behaviour may differ per unit | Catalogue PCB markings and BIOS versions from several consoles |
 
