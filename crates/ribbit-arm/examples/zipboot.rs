@@ -85,6 +85,8 @@ struct Snapshot {
     radio_due: u64,
     voices: [Voice; 32],
     spu_stopped: [u32; 2],
+    beat_base: u32,
+    beat_flag: bool,
 }
 
 impl Snapshot {
@@ -107,6 +109,8 @@ impl Snapshot {
             radio_due: bus.radio_due,
             voices: bus.voices,
             spu_stopped: bus.spu_stopped,
+            beat_base: bus.beat_base,
+            beat_flag: bus.beat_flag,
         }
     }
 
@@ -131,6 +135,8 @@ impl Snapshot {
         bus.radio_due = self.radio_due;
         bus.voices = self.voices;
         bus.spu_stopped = self.spu_stopped;
+        bus.beat_base = self.beat_base;
+        bus.beat_flag = self.beat_flag;
         bus.audio_due = self.ran;
         self.ran
     }
@@ -264,8 +270,13 @@ struct Bus {
     /// mixed output (ZIPBOOT_WAV) and when the next output sample is due.
     voices: [Voice; 32],
     spu_stopped: [u32; 2],
+    /// The beat counter: ticks left of the base count, and the beat flag
+    /// (+0xE14 bit 14), which is fast interrupt (FIQ) line 2.
+    beat_base: u32,
+    beat_flag: bool,
     audio: Vec<i16>,
     audio_due: u64,
+    audio_frac: u64,
     /// ZIPBOOT_PRESS=port:mask:from:to[;...] (port a/b/c, hex mask,
     /// instruction counts): those input bits are flipped from their idle
     /// level in that window, for finding what the inputs do.
@@ -367,7 +378,13 @@ impl Bus {
         }
         // The sound unit, one output sample at a time.
         while self.now >= self.audio_due {
-            self.audio_due += CLOCK / MIX_RATE;
+            // CLOCK / 70312.5 instructions per output sample (exact on
+            // average: audio_frac keeps the remainder in 140625ths).
+            self.audio_frac += CLOCK * 2;
+            self.audio_due += self.audio_frac / (SPU_CLOCK / 2);
+            self.audio_frac %= SPU_CLOCK / 2;
+            // One beat tick per output sample (both are SPU_CLOCK / 4).
+            self.beat_tick();
             let (l, r) = self.spu_mix();
             if self.audio.len() < 200_000_000 {
                 self.audio.extend_from_slice(&[l as i16, r as i16]);
@@ -386,6 +403,41 @@ impl Bus {
                     self.rx.push_back(b);
                 }
             }
+        }
+    }
+
+    /// The sound unit's beat counter, one tick (4 cycles of its 281250 Hz
+    /// clock, as in MAME's model): the base count (+0xE10) runs down; at 0
+    /// it reloads and the beat count (+0xE14 bits 13-0) drops by one; at 0,
+    /// with bit 15 set, the beat flag rises.
+    fn beat_tick(&mut self) {
+        if self.beat_base > 0 {
+            self.beat_base -= 1;
+        }
+        if self.beat_base == 0 {
+            self.beat_base = self.latch(0xD040_0E10) & 0xFFFF;
+            let reg = self.latch(0xD040_0E14);
+            let mut count = reg & 0x3FFF;
+            if count > 0 {
+                count -= 1;
+                if let Some(e) = self.io.get_mut(&0xD040_0E14) {
+                    e.last_write = (reg & !0x3FFF) | count;
+                }
+            }
+            if count == 0 && reg & 0x8000 != 0 {
+                self.beat_flag = true;
+            }
+        }
+    }
+
+    /// The pending fast interrupt's number (1-4), 0 if none: 0xD0100034
+    /// bit 4-n masks line n (0xF written at start, then 0xB).
+    fn pending_fiq(&self) -> u32 {
+        let mask = self.latch(0xD010_0034);
+        if self.beat_flag && mask & (1 << 2) == 0 {
+            2
+        } else {
+            0
         }
     }
 
@@ -515,8 +567,34 @@ impl Bus {
         match (a, write) {
             // Sound unit control (see Voice): enable, stop flags (write 1s
             // to clear), busy.
+            (0xD040_0E14, None) => (latched & !0x4000) | if self.beat_flag { 0x4000 } else { 0 },
+            (0xD040_0E14, Some(v)) => {
+                if v & 0x4000 != 0 {
+                    self.beat_flag = false;
+                }
+                if let Some(e) = self.io.get_mut(&a) {
+                    e.last_write = v & !0x4000;
+                }
+                0
+            }
             (0xD040_0E00 | 0xD040_0E80, Some(v)) => {
                 self.spu_enable(((a >> 7) & 1) as usize, v & 0xFFFF);
+                0
+            }
+            (0xD040_0E28 | 0xD040_0EA8, Some(v)) => {
+                let bank = ((a >> 7) & 1) as usize;
+                let busy = (0..16).filter(|&i| self.voices[bank * 16 + i].playing).fold(0u32, |m, i| m | 1 << i);
+                let new = v & 0xFFFF & busy;
+                for i in 0..16 {
+                    if (new & !latched) & (1 << i) != 0 {
+                        let ch = bank * 16 + i;
+                        let clock = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0xC) & 7;
+                        self.voices[ch].ramp_frame = RAMP_FRAMES[clock as usize];
+                    }
+                }
+                if let Some(e) = self.io.get_mut(&a) {
+                    e.last_write = new;
+                }
                 0
             }
             (0xD040_0E2C | 0xD040_0EAC, None) => self.spu_stopped[((a >> 7) & 1) as usize],
@@ -656,7 +734,7 @@ impl Bus {
             (0xD050_0328, None) => self.latch(0xD050_0310) & 0xFFFF,
             (0xD050_032C, None) => self.latch(0xD050_0314) & 0xFFFF,
             (0xD050_0330, None) => 0x8000,
-            (0xD010_002C, None) => 0,
+            (0xD010_002C, None) => self.pending_fiq(),
             (0xD050_018C, None) => self.video_status,
             (0xD050_018C, Some(v)) => {
                 self.video_status &= !v;
@@ -865,13 +943,20 @@ struct Voice {
     sample: i32,
     /// The sample before, for interpolating between the two.
     prev: i32,
+    /// The envelope's next address (halfwords), and ticks until the next
+    /// envelope and ramp-down steps.
+    env_addr: u32,
+    env_frame: u32,
+    ramp_frame: u32,
 }
 
 /// The sound unit's base clock: a channel plays phase * SPU_CLOCK / 2^19
-/// samples a second (as MAME's model has it; UNVERIFIED on the Zippity).
+/// samples a second, and output samples come at SPU_CLOCK / 4 (as MAME's
+/// model has it; UNVERIFIED on the Zippity), so each output sample a
+/// channel moves on phase / 2^17 samples.
 const SPU_CLOCK: u64 = 281_250;
-/// The rate the research tool mixes at (a stand-in).
-const MIX_RATE: u64 = 35_156;
+/// The output rate, SPU_CLOCK / 4 (70312.5 Hz), rounded for the WAV header.
+const MIX_RATE: u64 = 70_312;
 
 /// OKI ADPCM: the step sizes and how each nibble moves the step index.
 fn oki_step(i: i32) -> i32 {
@@ -894,7 +979,11 @@ impl Bus {
                     let phase = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0x10);
                     println!("spu {:>10} ch {ch} mode {:04x} addr {:06x} loop {:06x} phase {phase:05x} vol {:04x}", self.now, self.spu_reg(ch, 1), self.spu_reg(ch, 0), self.spu_reg(ch, 2), self.spu_reg(ch, 3));
                 }
-                self.voices[ch] = Voice { playing: true, addr: self.spu_reg(ch, 0) & 0x3F_FFFF, ..Default::default() };
+                let env_addr = (self.spu_reg(ch, 7) & 0x3F) << 16 | (self.spu_reg(ch, 8) & 0xFFFF);
+                self.voices[ch] = Voice { playing: true, addr: self.spu_reg(ch, 0) & 0x3F_FFFF, env_addr, env_frame: 4, ..Default::default() };
+                // The envelope count starts at its load value.
+                let r5 = self.spu_reg(ch, 5);
+                self.spu_set(ch, 5, (self.spu_reg(ch, 6) & 0xFF) << 8 | (r5 & 0x7F));
             } else if !on {
                 self.voices[ch].playing = false;
             }
@@ -959,31 +1048,133 @@ impl Bus {
         }
     }
 
-    /// Mixes one output sample (left, right).
+    /// Writes a sound unit channel register (the envelope engine updates
+    /// them as it runs).
+    fn spu_set(&mut self, ch: usize, r: u32, v: u32) {
+        let a = 0xD040_1000 + 0x40 * ch as u32 + 4 * r;
+        self.io.entry(a).or_default().last_write = v;
+    }
+
+    fn spu_ctl(&self, bank: usize, off: u32) -> u32 {
+        self.latch(0xD040_0E00 + 0x80 * bank as u32 + off)
+    }
+
+    fn spu_word(&self, halfword: u32) -> u32 {
+        let a = halfword * 2;
+        self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8
+    }
+
+    /// Stops a channel: busy and enable clear, the stop flag sets, and any
+    /// ramp-down ends.
+    fn spu_stop(&mut self, ch: usize) {
+        let (bank, bit) = (ch / 16, 1u32 << (ch % 16));
+        self.voices[ch].playing = false;
+        self.spu_stopped[bank] |= bit;
+        for off in [0x00, 0x28] {
+            if let Some(e) = self.io.get_mut(&(0xD040_0E00 + 0x80 * bank as u32 + off)) {
+                e.last_write &= !bit;
+            }
+        }
+    }
+
+    /// One step of a channel's envelope (MAME's spg2xx_audio, as facts):
+    /// the level (register 5 bits 6-0) moves by the increment (register 4
+    /// bits 6-0, down if bit 7) towards the target (bits 14-8) every
+    /// "load" ticks (register 6 bits 7-0); at the target the next envelope
+    /// pair is read from memory (address in registers 7 and 8), repeating
+    /// a stretch if register 6 bit 8 asks. Falling to 0 stops the channel.
+    fn spu_envelope(&mut self, ch: usize) {
+        let (r4, r5, r6) = (self.spu_reg(ch, 4), self.spu_reg(ch, 5), self.spu_reg(ch, 6));
+        let (mut count, edd) = ((r5 >> 8) & 0xFF, (r5 & 0x7F) as i32);
+        if count > 0 {
+            count -= 1;
+            self.spu_set(ch, 5, count << 8 | edd as u32);
+        }
+        if count != 0 {
+            return;
+        }
+        let (target, inc) = (((r4 >> 8) & 0x7F) as i32, (r4 & 0x7F) as i32);
+        let mut new = edd;
+        if new != target {
+            if r4 & 0x80 != 0 {
+                new = (edd - inc).max(0);
+                if new != 0 && new < target {
+                    new = target;
+                }
+                if new == 0 {
+                    self.spu_set(ch, 5, r5 & 0xFF00);
+                    self.spu_stop(ch);
+                    return;
+                }
+            } else {
+                new = (edd + inc).min(target);
+            }
+        }
+        let mut r6 = r6;
+        if new == target {
+            if r6 & 0x100 != 0 {
+                let repeat = (r6 >> 9).wrapping_sub(1) & 0x7F;
+                if repeat == 0 {
+                    let ea = self.voices[ch].env_addr;
+                    let (e4, e6, e10) = (self.spu_word(ea), self.spu_word(ea + 1), self.spu_word(ea + 2));
+                    self.spu_set(ch, 4, e4);
+                    self.spu_set(ch, 6, e6);
+                    self.spu_set(ch, 10, e10);
+                    r6 = e6;
+                    let base = (self.spu_reg(ch, 7) & 0x3F) << 16 | (self.spu_reg(ch, 8) & 0xFFFF);
+                    self.voices[ch].env_addr = base + (e10 & 0x1FF);
+                } else {
+                    r6 = (r6 & 0x1FF) | repeat << 9;
+                    self.spu_set(ch, 6, r6);
+                }
+            } else {
+                let ea = self.voices[ch].env_addr;
+                let (e4, e6) = (self.spu_word(ea), self.spu_word(ea + 1));
+                self.spu_set(ch, 4, e4);
+                self.spu_set(ch, 6, e6);
+                r6 = e6;
+                self.voices[ch].env_addr = ea + 2;
+            }
+        }
+        self.spu_set(ch, 5, (r6 & 0xFF) << 8 | new as u32);
+    }
+
+    /// One ramp-down step: the level falls by register 10 bits 15-9; at 0
+    /// the channel stops.
+    fn spu_rampdown(&mut self, ch: usize) {
+        let r5 = self.spu_reg(ch, 5);
+        let new = (r5 & 0x7F) as i32 - ((self.spu_reg(ch, 10) >> 9) & 0x7F) as i32;
+        if new > 0 {
+            self.spu_set(ch, 5, (r5 & 0xFF00) | new as u32);
+            let clock = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0xC) & 7;
+            self.voices[ch].ramp_frame = RAMP_FRAMES[clock as usize];
+        } else {
+            self.spu_set(ch, 5, r5 & 0xFF00);
+            self.spu_stop(ch);
+        }
+    }
+
+    /// Mixes one output sample (left, right) at SPU_CLOCK / 4, as MAME's
+    /// model does: each channel's sample interpolated, times its envelope
+    /// level, volume and pan; the sum scaled by the control register's
+    /// volume select and the main volume.
     fn spu_mix(&mut self) -> (i32, i32) {
-        let (mut l, mut r) = (0i64, 0i64);
+        let (mut l, mut r) = (0i32, 0i32);
         for ch in 0..32 {
             if !self.voices[ch].playing {
                 continue;
             }
-            let phase = (self.latch(0xD040_1800 + 0x40 * ch as u32 + 0x10) & 0x7_FFFF) as u64;
-            self.voices[ch].accum += phase * SPU_CLOCK;
-            while self.voices[ch].accum >= MIX_RATE << 19 {
-                self.voices[ch].accum -= MIX_RATE << 19;
+            let phase = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0x10) & 0x7_FFFF;
+            self.voices[ch].accum += phase as u64;
+            while self.voices[ch].accum >= 1 << 17 {
+                self.voices[ch].accum -= 1 << 17;
                 match self.spu_fetch(ch) {
                     Some(s) => {
                         self.voices[ch].prev = self.voices[ch].sample;
                         self.voices[ch].sample = s;
                     }
                     None => {
-                        self.voices[ch].playing = false;
-                        // The stop flag; the channel's enable bit clears.
-                        let (bank, bit) = (ch / 16, ch % 16);
-                        self.spu_stopped[bank] |= 1 << bit;
-                        let en = 0xD040_0E00 + 0x80 * bank as u32;
-                        if let Some(e) = self.io.get_mut(&en) {
-                            e.last_write &= !(1 << bit);
-                        }
+                        self.spu_stop(ch);
                         break;
                     }
                 }
@@ -991,20 +1182,48 @@ impl Bus {
             if !self.voices[ch].playing {
                 continue;
             }
-            let pv = self.spu_reg(ch, 3);
-            let (vol, pan) = ((pv & 0x7F) as i64, ((pv >> 8) & 0x7F) as i64);
-            // Linear interpolation between the last two samples (holding
-            // each sample adds images of it above 8 kHz).
+            let (bank, bit) = (ch / 16, 1u32 << (ch % 16));
             let v = self.voices[ch];
-            let frac = (v.accum >> 19) as i64;
-            let s = v.prev as i64 + (v.sample - v.prev) as i64 * frac / MIX_RATE as i64;
-            let s = s * vol / 127;
-            l += s * (127 - pan) / 64;
-            r += s * pan.max(1) / 64;
+            let mut s = v.sample;
+            if self.spu_ctl(0, 0x34) & 0x200 == 0 {
+                let f = (v.accum * 256 >> 17) as i32;
+                s = (v.prev * (256 - f) >> 8) + (v.sample * f >> 8);
+            }
+            let s = s * (self.spu_reg(ch, 5) & 0x7F) as i32 >> 7;
+            let pv = self.spu_reg(ch, 3);
+            let (vol, pan) = ((pv & 0x7F) as i32, ((pv >> 8) & 0x7F) as i32);
+            let (pl, pr) = if pan < 0x40 { (0x7F * vol, pan * 2 * vol) } else { ((0x7F - pan) * 2 * vol, 0x7F * vol) };
+            l += s * pl >> 14;
+            r += s * pr >> 14;
+            if self.spu_ctl(bank, 0x28) & bit != 0 {
+                if self.voices[ch].ramp_frame > 0 {
+                    self.voices[ch].ramp_frame -= 1;
+                }
+                if self.voices[ch].ramp_frame == 0 {
+                    self.spu_rampdown(ch);
+                }
+            } else if self.spu_ctl(bank, 0x54) & bit == 0 {
+                if self.voices[ch].env_frame > 0 {
+                    self.voices[ch].env_frame -= 1;
+                }
+                if self.voices[ch].env_frame == 0 {
+                    self.spu_envelope(ch);
+                    let i = ch % 16;
+                    let clock = (self.spu_ctl(bank, 0x18 + 4 * (i as u32 / 4)) >> (4 * (i % 4))) & 15;
+                    self.voices[ch].env_frame = ENV_FRAMES[clock as usize];
+                }
+            }
         }
-        (l.clamp(-32768 * 4, 32767 * 4) as i32 / 4, r.clamp(-32768 * 4, 32767 * 4) as i32 / 4)
+        let shift = if (self.spu_ctl(0, 0x34) >> 6) & 3 == 0 { 4 } else { 2 };
+        let main = (self.spu_ctl(0, 0x04) & 0x7F) as i32;
+        ((l >> shift) * main >> 7, (r >> shift) * main >> 7)
     }
 }
+
+/// Ticks between envelope steps for each envelope clock setting, and
+/// between ramp-down steps for each ramp-down clock (MAME's tables).
+const ENV_FRAMES: [u32; 16] = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 8192, 8192, 8192, 8192];
+const RAMP_FRAMES: [u32; 8] = [13 * 4, 13 * 16, 13 * 64, 13 * 256, 13 * 1024, 13 * 4096, 13 * 8192, 13 * 8192];
 
 /// Saves interleaved 16-bit stereo samples as a WAV file.
 fn save_wav(path: &str, samples: &[i16], rate: u32) {
@@ -1096,7 +1315,7 @@ fn main() {
         log: Vec::new(),
     };
 
-    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, presses: Vec::new(), timer_due: [0; 4], timer_flags: 0, rx: Default::default(), pad: Vec::new(), radio_due: 0, voices: [Voice::default(); 32], spu_stopped: [0; 2], audio: Vec::new(), audio_due: 0, watch_from: 0, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
+    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, presses: Vec::new(), timer_due: [0; 4], timer_flags: 0, rx: Default::default(), pad: Vec::new(), radio_due: 0, voices: [Voice::default(); 32], spu_stopped: [0; 2], beat_base: 0, beat_flag: false, audio: Vec::new(), audio_due: 0, audio_frac: 0, watch_from: 0, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
     if let Ok(w) = std::env::var("ZIPBOOT_RWATCH") {
         let (lo, hi) = w.split_once('-').expect("ZIPBOOT_RWATCH=lo-hi");
         bus.rwatch = Some((u32::from_str_radix(lo, 16).unwrap(), u32::from_str_radix(hi, 16).unwrap()));
@@ -1183,6 +1402,9 @@ fn main() {
             bus.tick();
         }
         cpu.irq_line = bus.irq_line();
+        // 0xD0100038 bit 0 holds off fast interrupts too (the FIQ handler
+        // returns at once while it is set).
+        cpu.fiq_line = bus.pending_fiq() != 0 && bus.latch(0xD010_0038) & 1 == 0;
         if !cpu.step(&mut bus) {
             ran += 1;
             continue;

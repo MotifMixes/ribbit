@@ -239,11 +239,22 @@ taken high first: low first decodes to noise, high first to clean tones.
 When a one-shot ends the channel stops, its enable bit clears and its stop
 flag sets.
 
-Ribbit's research tool plays the channels (ADPCM, 8- and 16-bit PCM, loops,
-volume and pan; envelopes, the beat counter and FIQs are not modelled),
-mixes them at 35156 Hz with linear interpolation, and saves the result with
-`ZIPBOOT_WAV=file`. Its start-up audio has the timing and the spectrum of a
-recording of a real unit.
+The music comes from a sequencer in the kernel run by the beat counter:
++0xE10 the base count (0x160), +0xE14 the beat count (0x30) with bit 15
+enabling and bit 14 flagging (write 1 to clear) its interrupt, which is fast
+interrupt (FIQ) line 2 (handler 0x1DE18; FIQ mask 0xD0100034: bit 4-n masks
+line n). Each tick (4 cycles of the 281250 Hz clock) the base count runs
+down; when it reloads the beat count drops; at 0 the flag rises. The music
+uses looping ADPCM instruments (modes like 0xE1C7) with hardware envelopes
+and ramp-downs (+0xE28 written 0xFFFFFFFF to fade everything).
+
+Ribbit's research tool plays all of this as MAME's model does (envelopes,
+ramp-down, interpolation, volume and pan, the control register's volume
+select and the main volume), at 70312.5 Hz, and saves it with
+`ZIPBOOT_WAV=file`. Its start-up audio follows a recording of a real unit:
+the loudness over time correlates 0.64 with the recording's at one offset
+and about 0 at others. Envelope IRQs, channel FIQs and the compressor are
+not modelled. MAME keeps OKI ADPCM to 12 bits; the tool scales it to 16.
 
 ## DMA controller (0xD0300000)
 
