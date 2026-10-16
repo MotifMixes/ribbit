@@ -151,6 +151,17 @@ fn main() {
                     print!("r{i}={r:08x}{}", if i % 8 == 7 { "\n" } else { " " });
                 }
             }
+            Some("idlewatch") => {
+                // idlewatch MS N: N times, run MS then print the idle count and
+                // the screen's mean brightness.
+                for _ in 0..num(2, 10) {
+                    run_ms(&mut m, num(1, 100), &mut meter);
+                    let left = m.idle_seconds_left();
+                    let f = frame(&m);
+                    let light = f.iter().map(|p| ((p >> 16) & 0xFF).max((p >> 8) & 0xFF).max(p & 0xFF) as u64).sum::<u64>() / f.len() as u64;
+                    println!("{:10.1} ms  idle left {left:?}  brightness {light}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64);
+                }
+            }
             Some("idletimer") => {
                 // The BIOS's inactivity timer (idle_timer.rs), if found.
                 let t = ribbit_core::idle_timer::IdleTimer::find(m.cpu.regs[26], |a| m.bus.peek8(a));

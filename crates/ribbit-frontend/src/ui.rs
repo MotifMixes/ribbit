@@ -519,7 +519,8 @@ fn library_screen(
                     ui.spacing_mut().item_spacing.x = CARD_GAP;
                     for (c, game) in row.iter().enumerate() {
                         // Each card grows in a moment after the one before.
-                        let t = ((shown - CARD_STAGGER * (r * cols + c) as f32) / CARD_GROW).clamp(0.0, 1.0);
+                        let n = (r * cols + c).min(CARD_STAGGER_MAX);
+                        let t = ((shown - CARD_STAGGER * n as f32) / CARD_GROW).clamp(0.0, 1.0);
                         if t < 1.0 {
                             ui.ctx().request_repaint();
                         }
@@ -824,8 +825,11 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
 /// One game: its art, title, region and a line of info. Click to play.
 /// Library cards appear one after another (seconds between cards, and
 /// each card's grow-in).
-const CARD_STAGGER: f32 = 0.035;
-const CARD_GROW: f32 = 0.35;
+const CARD_STAGGER: f32 = 0.02;
+const CARD_GROW: f32 = 0.28;
+/// Cards after this many start together (the whole library is in place
+/// within about half a second).
+const CARD_STAGGER_MAX: usize = 12;
 
 /// `appear`: 0 to 1 as the card grows in (smaller and transparent at 0).
 fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, actions: &mut Vec<Action>) {
