@@ -55,7 +55,7 @@ fn main() {
                     let mut ps: Vec<String> = p.fills.values().map(|f| format!("{:x}{}", f.painter, if f.bitmap.is_some() { "b" } else { "" })).collect();
                     ps.sort();
                     ps.dedup();
-                    println!("{t:6} pass rect {:?} rows {:?} scale {} edges {} fills {} painters {ps:?}", p.rect, p.rows, p.scale, p.edges.len(), p.fills.len());
+                    println!("{t:6} pass renderer {:08x} rect {:?} rows {:?} scale {} edges {} fills {} painters {ps:?}", p.renderer, p.rect, p.rows, p.scale, p.edges.len(), p.fills.len());
                 }
                 for f in p.fills.values() {
                     *painters.entry(f.painter).or_insert(0usize) += 1;

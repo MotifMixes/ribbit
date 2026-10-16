@@ -122,6 +122,8 @@ pub struct Pass {
     /// Scanlines this render swept, first and last + 1, in the pass's units
     /// (the BIOS may draw one rectangle in several sweeps).
     pub rows: Option<(i32, i32)>,
+    /// The renderer object (r14): which surface the render draws into.
+    pub renderer: u32,
     pub edges: Vec<Edge>,
     pub fills: HashMap<u32, Fill>,
 }
@@ -232,6 +234,7 @@ impl HdCapture {
             self.finish();
         }
         self.last_scan = y;
+        self.current.renderer = r;
         // r17 runs one ahead of the scanline being drawn.
         self.current.rows = Some(match self.current.rows {
             Some((a, _)) => (a, y),
@@ -335,9 +338,12 @@ enum Paint {
 
 /// What covers a stretch of a sub-row.
 enum Look {
-    /// The same everywhere: premultiplied colour of the plain fills, and the
-    /// weight of the BIOS pixel showing beneath or in their place.
-    Uniform([f32; 3], f32),
+    /// The same everywhere: premultiplied colour of the plain fills, the
+    /// weight left beneath them, and whether that weight is a fill the
+    /// canvas cannot draw (the BIOS's pixel) or nothing at all (the canvas
+    /// keeps what it has: like the BIOS's framebuffer, a render only paints
+    /// where it has fills, and one frame is often several renders layered).
+    Uniform([f32; 3], f32, bool),
     /// Depends on the pixel (a bitmap is involved): the covering fills, top
     /// first, down to the first that hides everything below.
     Varying(Vec<usize>),
@@ -455,12 +461,14 @@ impl HdCanvas {
         let w = x1 - x0;
         let mut acc = vec![[0f32; 3]; w];
         let mut lcd_w = vec![0f32; w];
+        let mut keep_w = vec![0f32; w];
         let mut xs: Vec<(f32, [i32; 2])> = vec![];
         let mut active = vec![false; paints.len()];
         for (r, list) in by_row.iter().enumerate() {
             let y = y0 + r;
             acc.iter_mut().for_each(|a| *a = [0.0; 3]);
             lcd_w.iter_mut().for_each(|a| *a = 0.0);
+            keep_w.iter_mut().for_each(|a| *a = 0.0);
             for j in 0..SUB {
                 let sy = y as f32 + (j as f32 + 0.5) / SUB as f32;
                 xs.clear();
@@ -478,7 +486,7 @@ impl HdCanvas {
                 for &(x, fills) in &xs {
                     let to = x.min(x1 as f32);
                     if to > from {
-                        span(&mut acc, &mut lcd_w, x0, from, to, &look, sy, &paints);
+                        span(&mut acc, &mut lcd_w, &mut keep_w, x0, (from, to), &look, sy, &paints);
                     }
                     for f in fills {
                         if f >= 0 {
@@ -489,7 +497,7 @@ impl HdCanvas {
                     from = from.max(x);
                 }
                 if (x1 as f32) > from {
-                    span(&mut acc, &mut lcd_w, x0, from, x1 as f32, &look, sy, &paints);
+                    span(&mut acc, &mut lcd_w, &mut keep_w, x0, (from, x1 as f32), &look, sy, &paints);
                 }
             }
             let row = &mut self.pixels[y * HD_SIZE..(y + 1) * HD_SIZE];
@@ -497,7 +505,11 @@ impl HdCanvas {
                 let x = x0 + i;
                 let l = lcd[(y / Q) * 160 + x / Q];
                 let lc = [(l >> 16) & 0xFF, (l >> 8) & 0xFF, l & 0xFF].map(|c| c as f32);
-                let c = |k: usize| ((acc[i][k] * 255.0 + lcd_w[i] * lc[k]) / SUB as f32).round().clamp(0.0, 255.0) as u32;
+                let o = row[x];
+                let oc = [(o >> 16) & 0xFF, (o >> 8) & 0xFF, o & 0xFF].map(|c| c as f32);
+                let c = |k: usize| {
+                    ((acc[i][k] * 255.0 + lcd_w[i] * lc[k] + keep_w[i] * oc[k]) / SUB as f32).round().clamp(0.0, 255.0) as u32
+                };
                 row[x] = 0xFF00_0000 | c(0) << 16 | c(1) << 8 | c(2);
             }
         }
@@ -508,6 +520,10 @@ impl HdCanvas {
 /// LCD pixel that still counts as the same picture (the LCD keeps 4 bits per
 /// channel, and the BIOS's anti-aliasing differs slightly from ours).
 const AGREE: i32 = 40;
+/// Largest difference from the block's own LCD pixel, whatever its
+/// neighbours: anti-aliasing never differs this much, but things drawn
+/// another way (the BIOS's pixel-font text) do.
+const FAR: i32 = 96;
 
 impl HdCanvas {
     /// Makes the HD picture agree with the BIOS's frame `lcd` (160x160): each
@@ -545,7 +561,9 @@ impl HdCanvas {
                 }
                 let i = by * 160 + bx;
                 let stale = !self.covered[i] && self.prev_lcd.get(i).is_some_and(|&p| p != l);
-                if stale || (0..3).any(|k| sum[k] / n < lo[k] - AGREE || sum[k] / n > hi[k] + AGREE) {
+                let lc = [(l >> 16) & 0xFF, (l >> 8) & 0xFF, l & 0xFF].map(|c| c as i32);
+                let far = (0..3).any(|k| (sum[k] / n - lc[k]).abs() > FAR);
+                if stale || far || (0..3).any(|k| sum[k] / n < lo[k] - AGREE || sum[k] / n > hi[k] + AGREE) {
                     replaced += 1;
                     for y in by * Q..(by + 1) * Q {
                         self.pixels[y * HD_SIZE + bx * Q..y * HD_SIZE + (bx + 1) * Q].fill(0xFF00_0000 | l);
@@ -586,7 +604,8 @@ fn composite(active: &[bool], paints: &[Paint]) -> Look {
             }
         }
     }
-    if varying { Look::Varying(stack) } else { Look::Uniform(c, rest) }
+    let on_lcd = stack.last().is_some_and(|&i| matches!(paints[i], Paint::Lcd));
+    if varying { Look::Varying(stack) } else { Look::Uniform(c, rest, on_lcd) }
 }
 
 /// A bitmap fill's colour at HD pixel (x, y) (centre), premultiplied, 0..1:
@@ -613,18 +632,30 @@ fn sample(b: &BitmapFill, x: f32, y: f32) -> [f32; 4] {
 /// Adds one sub-row's span [a, b) (HD pixels) of `look` at height `sy`
 /// to the row.
 #[allow(clippy::too_many_arguments)]
-fn span(acc: &mut [[f32; 3]], lcd_w: &mut [f32], x0: usize, a: f32, b: f32, look: &Look, sy: f32, paints: &[Paint]) {
+fn span(
+    acc: &mut [[f32; 3]],
+    lcd_w: &mut [f32],
+    keep_w: &mut [f32],
+    x0: usize,
+    (a, b): (f32, f32),
+    look: &Look,
+    sy: f32,
+    paints: &[Paint],
+) {
     let (first, last) = (a.floor() as usize, (b.ceil() as usize).min(x0 + acc.len()));
     for x in first.max(x0)..last {
         let cov = (b.min(x as f32 + 1.0) - a.max(x as f32)).max(0.0);
         let i = x - x0;
-        let (c, rest) = match look {
-            Look::Uniform(c, rest) => (*c, *rest),
+        let (c, rest, on_lcd) = match look {
+            Look::Uniform(c, rest, on_lcd) => (*c, *rest, *on_lcd),
             Look::Varying(stack) => {
-                let (mut c, mut rest) = ([0f32; 3], 1f32);
+                let (mut c, mut rest, mut on_lcd) = ([0f32; 3], 1f32, false);
                 for &f in stack {
                     match &paints[f] {
-                        Paint::Lcd => break,
+                        Paint::Lcd => {
+                            on_lcd = true;
+                            break;
+                        }
                         Paint::Solid(p) => {
                             for k in 0..3 {
                                 c[k] += rest * p[3] * p[k];
@@ -640,13 +671,17 @@ fn span(acc: &mut [[f32; 3]], lcd_w: &mut [f32], x0: usize, a: f32, b: f32, look
                         }
                     }
                 }
-                (c, rest)
+                (c, rest, on_lcd)
             }
         };
         for (a, c) in acc[i].iter_mut().zip(c) {
             *a += c * cov;
         }
-        lcd_w[i] += rest * cov;
+        if on_lcd {
+            lcd_w[i] += rest * cov;
+        } else {
+            keep_w[i] += rest * cov;
+        }
     }
 }
 
