@@ -1105,13 +1105,28 @@ impl Machine {
         self.io.intc.raise(io::intc::FLAG_DMA);
     }
 
-    /// Decodes the current LCD contents from emulated VRAM.
+    /// The console's picture: the LCD, or on a Leapster TV (no LCD) the TV
+    /// chip's picture.
     pub fn render_frame(&self, out: &mut [u32; WIDTH * HEIGHT]) -> FrameStatus {
-        // EXPERIMENTAL: a TV model shows the TV chip's picture, not the LCD.
-        if let Some(tv) = &self.io.lmax_tv {
-            tv.render_game(out);
-            return FrameStatus::Decoded { format: io::lmax_tv::FORMAT };
+        if self.is_leapster_tv()
+            && let Some(status) = self.render_tv(out)
+        {
+            return status;
         }
+        decode_frame(self.bus.vram(), &self.io.lcd.regs, out)
+    }
+
+    /// EXPERIMENTAL: the TV chip's picture (the 160x160 game area), on a
+    /// Leapster TV or an L-MAX; None without a TV chip.
+    pub fn render_tv(&self, out: &mut [u32; WIDTH * HEIGHT]) -> Option<FrameStatus> {
+        let tv = self.io.lmax_tv.as_ref()?;
+        tv.render_game(out);
+        Some(FrameStatus::Decoded { format: io::lmax_tv::FORMAT })
+    }
+
+    /// Decodes the handheld LCD, also when a TV chip supplies the picture
+    /// `render_frame` shows (the L-MAX can show a second picture there).
+    pub fn render_lcd(&self, out: &mut [u32; WIDTH * HEIGHT]) -> FrameStatus {
         decode_frame(self.bus.vram(), &self.io.lcd.regs, out)
     }
 

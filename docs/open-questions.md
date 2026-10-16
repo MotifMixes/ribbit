@@ -30,6 +30,7 @@ Ordered roughly by how much they block progress.
 | Q24 | Straps bit 14 on an original Leapster (0 = boot into touch calibration, per MAME) | Ribbit's default (MAME's raw Leapster 2 measurement) has it clear, so every boot calibrates; MAME's own default sets it | Observe whether a real unit calibrates on every power-on; read the register |
 | Q26 | Clock of the delay counters 0x0180_0010/0014/0018 (write a count with bit 7 set, poll until bit 7 clears; every BIOS uses them for LCD reset and NAND waits) | Unmodelled: they read 0, so those delays take no time | Measure on hardware; find a BIOS timing check |
 | Q27 | Leapster 2 SD host controller timing and error behaviour, and which NAND chip the CIP3 board carries | Needed for a virtual SD card; NAND ID 0x98 0xD1 vs 0x20 0xF1 | A real CIP3 board; an SD card trace |
+| Q28 | How the L-MAX US v2.1 BIOS senses a TV on its jack | Ribbit cannot offer the L-MAX TV picture without v2.1 thinking a TV is plugged in | Trace `LF_GetTvPlugState` (v2.1 0x4007_6EB4 → TV MPI table) to the register it reads; a real L-MAX with and without a TV |
 | Q15 | Hardware revisions and LCD panel variants among original Leapsters | Behaviour may differ per unit | Catalogue PCB markings and BIOS versions from several consoles |
 
 ## Leapster TV (experimental): guesses to resolve

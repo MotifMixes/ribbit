@@ -15,8 +15,15 @@
 //! is documented at `ycbcr565_to_rgb` and `FRAME`.
 //!
 //! Model: the ID register answers 0x0300_0000; everything else is plain
-//! memory that keeps what is written, and the machine shows the picture
-//! from it. Present only on a Leapster TV (`Machine::enable_leapster_tv`).
+//! memory that keeps what is written. Present on a Leapster TV (whose picture
+//! it is). On an L-MAX only on request (`RIBBIT_LMAX_TV` in the research
+//! tools), because how the L-MAX BIOS senses a connected TV is UNKNOWN: with
+//! the chip answering, v2.2 drives the TV and keeps the LCD (the same picture
+//! in SpongeBob and Dora Pinata Party), but US v2.1 treats the TV as connected
+//! and, for an original-Leapster cartridge, plays its TV pictures and blanks
+//! the LCD ("Tv check" / "TV Jack Inserted" strings). Neither GIODataIn's
+//! unknown bits nor registers +0x00/+0x08/+0x0C change that. `Machine::render_tv`
+//! shows the TV picture, `render_lcd` the LCD.
 
 pub const BASE: u32 = 0x2400_0000;
 pub const SIZE: u32 = 0x4_0000;
@@ -33,6 +40,7 @@ pub const GAME_SIZE: usize = 160;
 /// `FrameStatus::Decoded` format number reported for TV pictures (not an
 /// LCD format register value).
 pub const FORMAT: u32 = 0x565;
+const REG_LOG_LIMIT: usize = 4000;
 
 /// TV pixel: YCbCr 5:6:5, Cb in bits 15-11, Y in 10-5, Cr in 4-0, studio
 /// range (black Y=16, neutral chroma=128). VERIFIED-FW against the Leapster
@@ -61,11 +69,15 @@ pub struct LmaxTv {
     /// Research: accesses per instruction address (not saved).
     #[serde(skip)]
     pub pcs: std::collections::BTreeMap<u32, u64>,
+    /// Research: the first accesses to registers +0x00-+0x1F as
+    /// (pc, offset, value, write) (not saved).
+    #[serde(skip)]
+    pub reg_log: Vec<(u32, u32, u32, bool)>,
 }
 
 impl Default for LmaxTv {
     fn default() -> Self {
-        Self { mem: vec![0; SIZE as usize], reads: 0, writes: 0, pcs: Default::default() }
+        Self { mem: vec![0; SIZE as usize], reads: 0, writes: 0, pcs: Default::default(), reg_log: Vec::new() }
     }
 }
 
@@ -84,6 +96,9 @@ impl LmaxTv {
         }
         if addr & !3 == BASE + ID_REG {
             v |= ID >> (8 * (addr & 3));
+        }
+        if o < 0x20 && self.reg_log.len() < REG_LOG_LIMIT {
+            self.reg_log.push((pc, o as u32, v, false));
         }
         v
     }
@@ -110,6 +125,9 @@ impl LmaxTv {
         let o = (addr - BASE) as usize;
         for i in 0..width as usize {
             self.mem[(o + i) % SIZE as usize] = (value >> (8 * i)) as u8;
+        }
+        if o < 0x20 && self.reg_log.len() < REG_LOG_LIMIT {
+            self.reg_log.push((pc, o as u32, value, true));
         }
     }
 }

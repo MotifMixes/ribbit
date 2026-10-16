@@ -133,6 +133,18 @@ fn main() {
             }
             Some("shot") => shot(&m, w[1]),
             Some("snap") => kept.push(frame(&m)),
+            Some("tvsnap") => {
+                // tvsnap: keep the TV chip's picture (L-MAX / Leapster TV) for `sheet`.
+                let mut px = Box::new([0u32; WIDTH * HEIGHT]);
+                m.render_tv(&mut px).expect("no TV chip");
+                kept.push(px);
+            }
+            Some("lcdsnap") => {
+                // lcdsnap: keep the handheld LCD (not a TV picture) for `sheet`.
+                let mut px = Box::new([0u32; WIDTH * HEIGHT]);
+                m.render_lcd(&mut px);
+                kept.push(px);
+            }
             Some("every") => {
                 for _ in 0..num(2, 1) {
                     run_ms(&mut m, num(1, 0), &mut meter);
@@ -158,6 +170,13 @@ fn main() {
                 v.sort_by_key(|p| std::cmp::Reverse(*p.1));
                 for (pc, n) in v.iter().take(24) {
                     println!("  tv access pc {pc:08x} x{n}");
+                }
+                let mut seen = std::collections::BTreeMap::new();
+                for &(pc, off, val, wr) in &tv.reg_log {
+                    *seen.entry((off, wr, pc, val)).or_insert(0u32) += 1;
+                }
+                for ((off, wr, pc, val), n) in seen {
+                    println!("  tv reg +{off:02x} {} {val:#010x} pc {pc:08x} x{n}", if wr { "W" } else { "R" });
                 }
             }
             Some("break") => {
@@ -352,6 +371,23 @@ fn main() {
                 // unmapped: distinct accesses to unmapped addresses so far.
                 for ((addr, width, kind), s) in m.bus.unmapped_summary() {
                     println!("unmapped {addr:#010x} w{width} {kind:?} {s:?}");
+                }
+            }
+            Some("strtrace") => {
+                // strtrace LO HI MS: single-step MS; print each PC (once) at which
+                // one of r0-r3 points into LO..HI (who uses a string or table).
+                let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).unwrap();
+                let (lo, hi) = (hex(w[1]), hex(w[2]));
+                let end = m.cpu.cycles + num(3, 1000) * (m.clock.cpu_hz / 1000);
+                let (mut seen, none) = (std::collections::BTreeSet::new(), Breakpoints::default());
+                while m.cpu.cycles < end {
+                    let pc = m.cpu.pc;
+                    if let Some(r) = (0..4).find(|&r| (lo..hi).contains(&m.cpu.regs[r]))
+                        && seen.insert(pc)
+                    {
+                        println!("{:10.3} ms pc {pc:08x} r{r}={:08x} blink={:08x}", m.cpu.cycles as f64 / (m.clock.cpu_hz / 1000) as f64, m.cpu.regs[r], m.cpu.regs[31]);
+                    }
+                    m.run(1, &none);
                 }
             }
             Some("unmappedtrace") => {

@@ -956,7 +956,15 @@ effects; `.di` accesses; multiplier latency; DMA bus contention; the cartridge c
 
 It boots on the original's model unchanged: L-MAX logo, LeapFrog logo, then the cartridge (Sonic X tested). The
 app now accepts the BIOS (experimental). Its TV output chip (`io/lmax_tv.rs`, research) is not needed for the
-handheld picture. Idle timer (2026-10-16): same layout as US v2.1 (state `[0x3C1F_ED2C]`, reload +0xCC, count
+handheld picture. TV output (2026-10-16): with the chip answering (`RIBBIT_LMAX_TV=1`), v2.2 drives the TV
+frame and keeps the LCD (both show the same game picture in SpongeBob and Dora Piñata Party), and its TV code
+(0x4009_BBDE-0x4009_BCB0) only switches GPIO pin 10 on and sets bus timing. US v2.1 instead behaves as if a TV were
+plugged in: for an original-Leapster cartridge it shows TV pictures (handheld, then handheld with cable and TV) and
+blanks the LCD (strings "TV Jack Inserted", "Tv check: running DisableWithShutdown movie", `LF_GetTvPlugState`).
+How it senses the jack is UNKNOWN (not GIODataIn's unknown bits, not chip registers +0x00/+0x08/+0x0C; +0x18 is a
+bit-banged I2C link to the ADV7179: bit 0 clock, bit 4 data in). So Ribbit keeps the L-MAX without the chip by
+default ("TV HW not found", handheld only). `Machine::render_tv` / `render_lcd` give a frontend both pictures.
+Idle timer (2026-10-16): same layout as US v2.1 (state `[0x3C1F_ED2C]`, reload +0xCC, count
 +0xD4); with the count cut to 3 s the BIOS powers off (white flash, then black), as on the original.
 
 ### Leapster 2 (`152-12206` 0.6, `152-12659` m9, Connected B5 `152-12076`)
