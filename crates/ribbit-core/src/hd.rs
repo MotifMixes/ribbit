@@ -585,13 +585,14 @@ impl HdCanvas {
             .collect();
         // Edges flattened (finer as the canvas grows); each segment listed
         // under the rows it crosses.
+        let welded = weld(&pass.edges);
         let mut segs: Vec<Seg> = vec![];
-        for e in &pass.edges {
+        for (e, ends) in pass.edges.iter().zip(&welded) {
             let fills = e.fills.map(|f| if f == 0 { -1 } else { index.get(&f).copied().unwrap_or(-1) });
             if fills == [-1, -1] {
                 continue;
             }
-            let p = e.p.map(|(x, y)| (x as f32 * k, y as f32 * k));
+            let p = [ends[0], (e.p[1].0 as f32, e.p[1].1 as f32), ends[1]].map(|(x, y)| (x * k, y * k));
             let n = if e.line {
                 1
             } else {
@@ -850,6 +851,46 @@ impl HdCanvas {
         }
         out
     }
+}
+
+/// Each edge's start and end, with the ends of pieces of one outline that
+/// miss each other by a unit joined at their midpoint. The BIOS splits curves
+/// into pieces and rounds each piece's ends on its own (VERIFIED-FW: e.g.
+/// one piece ends at (584, 20), the next starts at (583, 20)); invisible on
+/// the LCD, it shows as steps on curves drawn larger. Ends join when they are
+/// on the same row, at most one unit apart, with the same fills and rule.
+fn weld(edges: &[Edge]) -> Vec<[(f32, f32); 2]> {
+    let mut out: Vec<[(f32, f32); 2]> = edges.iter().map(|e| [e.p[0], e.p[2]].map(|(x, y)| (x as f32, y as f32))).collect();
+    // Ends grouped by (fills, rule, row): (x, edge, which end).
+    let mut groups: HashMap<([u32; 2], u8, i16), Vec<(i16, usize, usize)>> = HashMap::new();
+    for (i, e) in edges.iter().enumerate() {
+        for (j, &(x, y)) in [e.p[0], e.p[2]].iter().enumerate() {
+            groups.entry((e.fills, e.rule, y)).or_default().push((x, i, j));
+        }
+    }
+    for ends in groups.values_mut() {
+        if ends.len() < 2 {
+            continue;
+        }
+        ends.sort_unstable();
+        let mut a = 0;
+        while a < ends.len() {
+            let mut b = a + 1;
+            while b < ends.len() && ends[b].0 - ends[b - 1].0 <= 1 && ends[b].0 - ends[a].0 <= 1 {
+                b += 1;
+            }
+            let run = &ends[a..b];
+            // Only ends that differ (equal ones are already joined).
+            if run.first().map(|e| e.0) != run.last().map(|e| e.0) {
+                let mid = run.iter().map(|e| e.0 as f32).sum::<f32>() / run.len() as f32;
+                for &(_, i, j) in run {
+                    out[i][j].0 = mid;
+                }
+            }
+            a = b;
+        }
+    }
+    out
 }
 
 /// What one render's rows need.

@@ -91,6 +91,14 @@ fn main() {
                 }
                 edges += p.edges.len();
                 passes += 1;
+                // RIBBIT_HD_EDGES=x0,y0,x1,y1 (pass units): print the edges
+                // with a point in that box.
+                if let Ok(b) = std::env::var("RIBBIT_HD_EDGES") {
+                    let v: Vec<i16> = b.split(',').map(|s| s.parse().unwrap()).collect();
+                    for e in p.edges.iter().filter(|e| e.p.iter().any(|&(x, y)| x >= v[0] && x <= v[2] && y >= v[1] && y <= v[3])) {
+                        println!("edge {:?} line {} rule {} dir {} fills {:08x?}", e.p, e.line, e.rule, e.dir, e.fills);
+                    }
+                }
                 c.apply(&p);
                 if let Ok(from) = std::env::var("RIBBIT_HD_EACH") {
                     if t >= from.parse::<u64>().unwrap() {
