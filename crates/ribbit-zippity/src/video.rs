@@ -18,6 +18,18 @@ fn rgb555(c: u32) -> u32 {
     f(c >> 10) << 16 | f(c >> 5) << 8 | f(c)
 }
 
+fn rgb565(c: u32) -> u32 {
+    let f = |v: u32| ((v & 31) << 3) | ((v & 31) >> 2);
+    let g = (c >> 5) & 63;
+    f(c >> 11) << 16 | ((g << 2) | (g >> 4)) << 8 | f(c)
+}
+
+/// BT.601 YUV (full range) to 0x00RRGGBB.
+fn yuv(y: i32, u: i32, v: i32) -> u32 {
+    let c = |x: i32| x.clamp(0, 255) as u32;
+    c(y + 1402 * v / 1000) << 16 | c(y - (344 * u + 714 * v) / 1000) << 8 | c(y + 1772 * u / 1000)
+}
+
 fn blend(over: u32, under: u32, alpha: u32, full: u32) -> u32 {
     let ch = |s: u32| {
         let (a, b) = ((over >> s) & 0xFF, (under >> s) & 0xFF);
@@ -59,16 +71,19 @@ impl Bus {
     /// byte offset from the picture base, 0 for none), pages of 1024x512
     /// pixels). Attributes: bits 1-0 depth (only 8 bits decoded), 5-4 and
     /// 7-6 tile width and height (8 << n), 13-12 priority, 23-22 the
-    /// palette's 256-colour bank.
+    /// palette's 256-colour bank. Control bit 7: 16-bit pixels instead,
+    /// RGB 5:6:5 (depth 1) or YUV 4:2:2 (depth 3).
     fn draw_text(&self, img: &mut [u32], pal: &[u32], rgb: &[u32], reg: u32, base_reg: u32) {
         let attr = self.latch(0xD050_0008 + reg);
-        if self.latch(0xD050_000C + reg) & 8 == 0 || attr & 3 != 3 {
+        let control = self.latch(0xD050_000C + reg);
+        if control & 8 == 0 || (attr & 3 != 3 && control & 0x80 == 0) {
             return;
         }
         let (map, base) = (self.latch(0xD050_0010 + reg), self.latch(0xD050_0000 + base_reg));
         let (tw, th) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
         let bank = ((attr >> 22) & 3) * 0x100;
         let (sx, sy) = (self.latch(0xD050_0000 + reg), self.latch(0xD050_0004 + reg));
+        let wide = control & 0x80 != 0;
         for y in 0..SCREEN_H as u32 {
             let py = (y + sy) % 512;
             let row = map + (py / th) * (1024 / tw) * 4;
@@ -80,7 +95,30 @@ impl Bus {
                 let px = (x + sx) % 1024;
                 let span = (tw - px % tw).min(SCREEN_W as u32 - x);
                 let entry = self.peek32(row + px / tw * 4);
-                if entry != 0 {
+                if entry != 0 && wide {
+                    // Control bit 7: 16-bit pixels, the colour itself (no
+                    // transparent colour; a tile entry of 0 is none). Depth
+                    // 1: RGB 5:6:5, which matches a real unit's Disney
+                    // Princess menu (blue at the top, pink and lavender
+                    // below; 5:5:5 and YUV do not). Depth 3: YUV 4:2:2, a
+                    // pixel pair in 4 bytes V Y0 U Y1, as The Princess and
+                    // the Frog's menu (as RGB its picture is noise). The
+                    // order of U and V is UNVERIFIED: this one gives a night
+                    // sky (the other a red sunset); no recording of a real
+                    // unit found.
+                    let p0 = (py % th) * tw + px % tw;
+                    let src = base + entry + p0 * 2;
+                    for i in 0..span {
+                        line[(x + i) as usize] = if attr & 3 == 3 {
+                            let pair = base + entry + ((p0 + i) & !1) * 2;
+                            let y = self.peek8(pair + 1 + 2 * ((p0 + i) & 1)) as i32;
+                            let (u, v) = (self.peek8(pair + 2) as i32 - 128, self.peek8(pair) as i32 - 128);
+                            yuv(y, u, v)
+                        } else {
+                            rgb565(self.peek16(src + i * 2))
+                        };
+                    }
+                } else if entry != 0 {
                     let src = base + entry + (py % th) * tw + px % tw;
                     let put = |line: &mut [u32], i: u32, v: u8| {
                         let k = (bank + v as u32) as usize & 2047;

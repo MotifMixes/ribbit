@@ -535,6 +535,21 @@ The menu's background is a 640x480 picture at 8 bits per pixel.
   (pages of 1024x512), each the tile's byte offset from the base at +0x80
   (0x400, 0x800, ...: 30 rows of 10 tiles), 0 for no tile.
 
+**16-bit layers.** Control bit 7 makes a layer's pixels 16-bit colours (no
+palette, no transparent colour; tiles with entry 0 are still none), whatever
+the depth bits say about 8-bit layers:
+
+- **Depth 1: RGB 5:6:5.** The Disney Princess cartridge's menu (control
+  0xAA, attributes 0x00408071). Drawn as RGB 5:6:5 it matches a recording
+  of a real unit (YouTube oI6xRa59rnM: blue at the top fading to pink and
+  lavender); as RGB 5:5:5 it is magenta and black, as YUV green rings.
+- **Depth 3: YUV 4:2:2,** a pair of pixels in 4 bytes, V Y0 U Y1 (BT.601,
+  full range). The Princess and the Frog's menu (control 0xAA, attributes
+  0x8073): as any RGB it is noise, with Y in the odd bytes a clean picture.
+  The order of U and V is UNVERIFIED: V first gives a night sky behind the
+  film's evening star, U first a red sunset; no recording of that cartridge
+  on a real unit was found.
+
 The kernel decompresses the picture with its own code: 16-bit commands for
 runs (filled by the DMA controller with a fixed source) and back-references
 (DMA copies, overlapping).
