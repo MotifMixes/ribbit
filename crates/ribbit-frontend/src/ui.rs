@@ -470,8 +470,8 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
         });
         ui.menu_button("Video", |ui| {
             if ui
-                .checkbox(&mut settings.hd_vectors, "HD vectors, 640x640 (experimental)")
-                .on_hover_text("Redraws the game's vector art at 4x from the BIOS's own shape data. Bitmaps and anything not yet understood show the normal picture. Replaces the scaling options below while on.")
+                .checkbox(&mut settings.hd_vectors, "HD vectors (experimental)")
+                .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the BIOS, text from the fonts' own outlines. Bitmaps and anything not yet understood show the console's own pixels, never upscaled. Replaces the scaling options below while on. Original Leapster and L-MAX BIOSes.")
                 .changed()
             {
                 actions.push(Action::HdChanged);
