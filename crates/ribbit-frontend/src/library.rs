@@ -13,6 +13,7 @@ use ribbit_debug::Breakpoints;
 use ribbit_memory::Cartridge;
 use ribbit_video::{HEIGHT, WIDTH};
 use std::collections::HashSet;
+use ribbit_memory::known::Hardware;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -32,48 +33,49 @@ const HD_DRAIN_MS: u64 = 50;
 
 /// When each known game shows its title card with no input (emulated ms
 /// from power-on, US BIOS v2.1, the built-in ART_PROFILE), by CRC32. Found
-/// by recording each game. Games not listed are searched for their most
-/// colourful early screen.
+/// by recording each game; re-timed for the CPU timing model (2026-10-15)
+/// with `examples/retitle.rs`, which matches each frame against the
+/// previous art. Games not listed are searched for their most colourful
+/// early screen.
 const TITLE_CARD_MS: &[(u32, u64)] = &[
-    (0x0ef6_1cbb, 13_500), // Spider-Man - The Case of the Sinister Speller
-    (0xd4a7_e5d4, 7_000), // Disney/Pixar Cars (stops after its LeapFrog logo, which is its art)
-    (0x0f2a_d725, 9_000), // SpongeBob SquarePants - Saves the Day (USA, alt)
-    (0x0f6d_55cf, 10_500), // Number Raiders
-    (0x19da_3dd8, 11_250), // Scooby-Doo! - Spooky Snacks
-    (0x2465_f01d, 24_000), // Disney Princess - Worlds of Enchantment
-    (0x2700_0674, 12_750), // Star Wars - The Clone Wars - Jedi Math
-    (0x29af_42ba, 24_000), // Cars 2
-    (0x2c1f_cf40, 9_750), // Learning with Leap
-    (0x3c42_8a13, 22_500), // Pet Pals
-    (0x5303_d366, 12_750), // Thomas & Friends - Calling All Engines!
-    (0x58d0_8f36, 15_000), // The Talking Words Factory
+    (0x0ef6_1cbb, 10_250), // Spider-Man - The Case of the Sinister Speller
+    (0xd4a7_e5d4, 21_000), // Disney/Pixar Cars (its "Disney presents a Pixar film" title)
+    (0x0f2a_d725, 8_750), // SpongeBob SquarePants - Saves the Day (USA, alt)
+    (0x0f6d_55cf, 11_750), // Number Raiders
+    (0x19da_3dd8, 10_750), // Scooby-Doo! - Spooky Snacks
+    (0x2465_f01d, 28_000), // Disney Princess - Worlds of Enchantment
+    (0x2700_0674, 13_500), // Star Wars - The Clone Wars - Jedi Math
+    (0x29af_42ba, 23_250), // Cars 2
+    (0x2c1f_cf40, 9_000), // Learning with Leap
+    (0x3c42_8a13, 28_000), // Pet Pals
+    (0x5303_d366, 13_000), // Thomas & Friends - Calling All Engines!
+    (0x58d0_8f36, 15_750), // The Talking Words Factory
     (0x5ccb_2ad3, 15_750), // Disney Princess - Enchanted Learning
-    (0x6239_a178, 18_750), // Star Wars - Jedi Reading
-    (0x6b24_a3ef, 9_000), // SpongeBob SquarePants - Through the Wormhole
-    (0x7177_8536, 12_000), // Dora the Explorer - Camping Adventure
-    (0x74af_5d57, 10_500), // Dora the Explorer - Wildlife Rescue
-    (0x9793_46d5, 12_000), // Cosmic Math
-    (0x9b86_a0fb, 12_000), // Letterpillar
-    (0x9e69_c26a, 24_000), // Outwit!
-    (0x9f08_d02a, 37_500), // Creature Create (no title card: the intro's monster, after taps)
-    (0xa0a3_62aa, 18_000), // The Batman - Multiply, Divide and Conquer (Germany)
-    (0xa9c7_5d90, 21_000), // Madagascar
-    (0xa9d2_cdbd, 16_500), // Sonic X
-    (0xb186_a3bf, 11_250), // Letters on the Loose
-    (0xd0c4_de47, 15_750), // Ratatouille
-    (0xd2f5_60c7, 12_750), // Disney Fairies (Spain)
+    (0x6239_a178, 24_000), // Star Wars - Jedi Reading
+    (0x6b24_a3ef, 8_250), // SpongeBob SquarePants - Through the Wormhole
+    (0x7177_8536, 12_250), // Dora the Explorer - Camping Adventure
+    (0x74af_5d57, 9_500), // Dora the Explorer - Wildlife Rescue
+    (0x9793_46d5, 12_250), // Cosmic Math
+    (0x9b86_a0fb, 9_500), // Letterpillar
+    (0x9e69_c26a, 27_750), // Outwit!
+    (0x9f08_d02a, 9_000), // Creature Create
+    (0xa0a3_62aa, 19_000), // The Batman - Multiply, Divide and Conquer (Germany)
+    (0xa9c7_5d90, 19_250), // Madagascar
+    (0xa9d2_cdbd, 15_500), // Sonic X
+    (0xb186_a3bf, 11_750), // Letters on the Loose
+    (0xd0c4_de47, 14_750), // Ratatouille
+    (0xd2f5_60c7, 12_500), // Disney Fairies (Spain)
     (0xda56_181c, 15_750), // I Spy Challenger!
-    (0xdb26_2164, 9_750), // Kindergarten
-    (0xdb36_283f, 9_750), // 1st Grade
-    (0xe62d_1684, 12_750), // Foster's Home for Imaginary Friends
-    (0xea54_4030, 11_250), // Dora the Explorer - Pinata Party
+    (0xdb26_2164, 8_500), // Kindergarten
+    (0xdb36_283f, 9_250), // 1st Grade
+    (0xe62d_1684, 11_250), // Foster's Home for Imaginary Friends
+    (0xea54_4030, 10_750), // Dora the Explorer - Pinata Party
 ];
 
-/// Stylus taps (emulated ms, LCD x, y) before a title card, by CRC32.
-/// Creature Create asks for a name first ("TOM", OK) and has no title card:
-/// its art is the intro's monster after that.
-const TITLE_CARD_TAPS: &[(u32, &[(u64, u32, u32)])] =
-    &[(0x9f08_d02a, &[(13_000, 74, 92), (13_700, 87, 74), (14_400, 61, 74), (15_100, 145, 141)])];
+/// Stylus taps (emulated ms, LCD x, y) before a title card, by CRC32 (none
+/// needed since the CPU timing model: Creature Create's title card now shows
+/// before its name entry).
+const TITLE_CARD_TAPS: &[(u32, &[(u64, u32, u32)])] = &[];
 /// How long each tap holds the stylus down.
 const TAP_MS: u64 = 200;
 
@@ -85,7 +87,7 @@ const ART_PROFILE: &[u8; 256] = include_bytes!("art_profile.eeprom");
 
 /// Where a game's art is cached (the suffix changes whenever the way art
 /// is made changes, so old pictures are made again).
-const ART_SUFFIX: &str = "-6.png";
+const ART_SUFFIX: &str = "-7.png";
 
 fn art_file(art_dir: &Path, key: &str) -> PathBuf {
     art_dir.join(format!("{key}{ART_SUFFIX}"))
@@ -104,8 +106,32 @@ fn remove_stale_art(art_dir: &Path) {
     }
 }
 
+/// Which consoles a game runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    /// A Leapster cartridge: the Leapster, Leapster TV, L-MAX and Leapster 2.
+    Leapster,
+    /// A Zippity cartridge (a FAT16 image with KERNEL.BIN).
+    Zippity,
+}
+
+impl Family {
+    /// Whether a console of this hardware runs the family's games.
+    pub fn runs_on(self, hw: Hardware) -> bool {
+        match self {
+            Family::Leapster => hw != Hardware::Zippity,
+            Family::Zippity => hw == Hardware::Zippity,
+        }
+    }
+}
+
+/// The consoles, in the order the library lists them.
+pub const CONSOLES: [Hardware; 5] =
+    [Hardware::Leapster, Hardware::LeapsterTv, Hardware::LeapsterLmax, Hardware::Leapster2, Hardware::Zippity];
+
 pub struct Game {
     pub path: PathBuf,
+    pub family: Family,
     pub title: String,
     /// One line under the title: part number, year, size.
     pub subtitle: String,
@@ -132,6 +158,7 @@ pub struct ArtSource {
 
 enum Msg {
     Game(Game),
+    Bios(Hardware, PathBuf),
     Art(String, Option<egui::ColorImage>),
     Scanned,
     Done,
@@ -139,6 +166,8 @@ enum Msg {
 
 pub struct Library {
     pub games: Vec<Game>,
+    /// BIOS (system) images found in the games folders, per console.
+    pub bios: Vec<(Hardware, PathBuf)>,
     pub scanning: bool,
     pub making_art: bool,
     art_dir: PathBuf,
@@ -150,7 +179,15 @@ pub struct Library {
 
 impl Library {
     pub fn new(data_dir: &Path) -> Self {
-        Self { games: Vec::new(), scanning: false, making_art: false, art_dir: data_dir.join("art"), rx: None, incoming: None }
+        Self {
+            games: Vec::new(),
+            bios: Vec::new(),
+            scanning: false,
+            making_art: false,
+            art_dir: data_dir.join("art"),
+            rx: None,
+            incoming: None,
+        }
     }
 
     /// Rescans `folders` (plus `extra` files, e.g. recent games) in the
@@ -182,6 +219,11 @@ impl Library {
                     let list = self.incoming.as_mut().unwrap_or(&mut self.games);
                     let at = list.partition_point(|o| o.title.to_lowercase() <= g.title.to_lowercase());
                     list.insert(at, g);
+                }
+                Msg::Bios(hw, path) => {
+                    if !self.bios.iter().any(|(h, _)| *h == hw) {
+                        self.bios.push((hw, path));
+                    }
                 }
                 Msg::Art(key, image) => {
                     let lists = self.games.iter_mut().chain(self.incoming.iter_mut().flatten());
@@ -215,6 +257,11 @@ impl Library {
     }
 
     /// Forgets a game's cached art, so the next scan makes it again.
+    /// A BIOS found for `hw`, if any.
+    pub fn bios_for(&self, hw: Hardware) -> Option<&Path> {
+        self.bios.iter().find(|(h, _)| *h == hw).map(|(_, p)| p.as_path())
+    }
+
     pub fn forget_art(&mut self, path: &Path) {
         for g in self.games.iter_mut().filter(|g| g.path == path) {
             let _ = std::fs::remove_file(art_file(&self.art_dir, &g.key));
@@ -238,8 +285,21 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
         if !seen_paths.insert(canonical) {
             continue;
         }
-        let Some(cart) = read_cartridge(&path) else {
-            continue;
+        let cart = match classify(&path) {
+            Some(Found::Cart(c)) => c,
+            Some(Found::Bios(hw)) => {
+                if tx.send(Msg::Bios(hw, path.clone())).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Some(Found::Zippity(game)) => {
+                if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            None => continue,
         };
         let key = format!("{:08x}", cart.id().crc32);
         if !seen_games.insert(key.clone()) {
@@ -305,27 +365,72 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// A Leapster cartridge image (plain or zipped), or None for anything else
-/// (a BIOS, other systems' ROMs, unreadable files).
-fn read_cartridge(path: &Path) -> Option<Cartridge> {
-    // Zipped images are smaller on disk; the size is checked again below.
+/// What a file in the games folders is.
+enum Found {
+    Cart(Cartridge),
+    /// A BIOS or system image of this console.
+    Bios(Hardware),
+    Zippity(Game),
+}
+
+/// Zippity images: the system NAND (with spare area) and cartridges.
+const ZIPPITY_NAND_SIZE: usize = 0x1080_0000;
+const ZIPPITY_CART_SIZE: usize = 0x420_0000;
+
+fn classify(path: &Path) -> Option<Found> {
+    // Zipped images are smaller on disk; sizes are checked again on the data.
     let size = std::fs::metadata(path).ok()?.len();
-    if !(0x100..=ribbit_memory::map::CART_WINDOW as u64).contains(&size) {
+    if !(0x100..=ZIPPITY_NAND_SIZE as u64).contains(&size) {
         return None;
     }
     let data = ribbit_core::read_image(path).ok()?;
     if data.len() < 0x1_0000 {
         return None;
     }
-    // Any known BIOS (also Leapster 2 ones, which Ribbit does not load).
-    if ribbit_memory::known::lookup(ribbit_memory::known::FIRMWARE, &ribbit_memory::ImageId::of(&data)).is_some() {
+    use ribbit_memory::known;
+    if data.len() == ZIPPITY_NAND_SIZE && data.starts_with(b"PGandnand") {
+        return Some(Found::Bios(Hardware::Zippity));
+    }
+    if data.len() == ZIPPITY_CART_SIZE && &data[0x36..0x3B] == b"FAT16" {
+        let id = ribbit_memory::ImageId::of(&data);
+        return Some(Found::Zippity(describe_zippity(path, known::lookup(known::ZIPPITY_CARTRIDGES, &id), &id)));
+    }
+    if data.len() > ribbit_memory::map::CART_WINDOW as usize {
         return None;
     }
+    if let Some(k) = known::lookup(known::FIRMWARE, &ribbit_memory::ImageId::of(&data)) {
+        return Some(Found::Bios(k.hardware));
+    }
+    read_cartridge(data).map(Found::Cart)
+}
+
+/// A Leapster cartridge image, or None for anything else.
+fn read_cartridge(data: Vec<u8>) -> Option<Cartridge> {
     // Later cartridges have no "LEAP" header; any power-of-two image of a
     // cartridge's size is taken (the BIOS decides whether it boots).
     let plausible = data.len().is_power_of_two() && data.len() >= 0x10_0000;
     let cart = Cartridge::from_bytes(data).ok()?;
     (cart.known().is_some() || cart.header().is_ok() || plausible).then_some(cart)
+}
+
+fn describe_zippity(path: &Path, known: Option<&ribbit_memory::known::KnownImage>, id: &ribbit_memory::ImageId) -> Game {
+    let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    // "500-13590-A - Name" -> "Name".
+    let from_file = stem.split_once(" - ").filter(|(p, _)| p.starts_with("500-")).map_or(stem.as_str(), |(_, n)| n);
+    let title = known.map_or_else(|| from_file.to_string(), |k| crate::app::short_name(k.name));
+    let part = stem.split_once(" - ").map(|(p, _)| p.to_string()).filter(|p| p.starts_with("500-"));
+    let size = format!("{} MB", id.size.div_ceil(1 << 20));
+    let subtitle = [part.clone(), Some(size.clone())].into_iter().flatten().collect::<Vec<_>>().join("  ·  ");
+    let key = format!("{:08x}", id.crc32);
+    let mut details = vec![("System", "Zippity".to_string())];
+    if let Some(p) = part {
+        details.push(("Part number", p));
+    }
+    details.push(("Dump", if known.is_some() { "verified (known checksum)" } else { "not in Ribbit's list" }.into()));
+    details.push(("Size", size));
+    details.push(("CRC32", key.clone()));
+    details.push(("File", path.display().to_string()));
+    Game { path: path.to_path_buf(), family: Family::Zippity, title, subtitle, details, key, art: Art::Missing }
 }
 
 fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
@@ -369,7 +474,7 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     details.push(("Size", size));
     details.push(("CRC32", key.clone()));
     details.push(("File", path.display().to_string()));
-    Game { path: path.to_path_buf(), title, subtitle, details, key, art }
+    Game { path: path.to_path_buf(), family: Family::Leapster, title, subtitle, details, key, art }
 }
 
 /// Boots the game unseen and returns its most colourful early screen.
@@ -553,7 +658,7 @@ mod tests {
         std::fs::write(dir.join("sub").join("game.bin"), &cart).unwrap();
         let mut files = Vec::new();
         collect(&dir, 0, &mut files);
-        let carts: Vec<_> = files.iter().filter(|p| read_cartridge(p).is_some()).collect();
+        let carts: Vec<_> = files.iter().filter(|p| matches!(classify(p), Some(Found::Cart(_)))).collect();
         assert_eq!(carts, [&dir.join("sub").join("game.bin")]);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 pub enum Action {
     Pick(Pick),
     OpenCartridge(PathBuf),
+    /// A game chosen in the library (on the open console page's BIOS).
+    PlayFromLibrary(PathBuf),
     SetBios(PathBuf),
     CloseCartridge,
     Reset,
@@ -71,6 +73,8 @@ pub struct UiState {
     pub browser: Browser,
     toasts: Vec<(String, Instant)>,
     pub error: Option<String>,
+    /// The library page: None for all games, else one console's games.
+    pub library_tab: Option<ribbit_memory::known::Hardware>,
     /// The game (title) that was closed because the Leapster turned itself
     /// off; shown above the library until dismissed.
     pub idle_closed: Option<String>,
@@ -119,7 +123,7 @@ pub fn draw(
                 st.library_since = Some(Instant::now());
             }
             let since = st.library_since.unwrap_or_else(Instant::now);
-            library_screen(ui, settings, library, st.idle_closed.as_deref(), since, actions);
+            library_screen(ui, settings, library, &mut st.library_tab, st.idle_closed.as_deref(), since, actions);
         } else if !info.running {
             welcome(ui, settings, info, actions);
         } else if info.rewinding {
@@ -166,6 +170,63 @@ fn idle_countdown(ui: &egui::Ui, area: egui::Rect, left: u32) {
     p.galley(egui::pos2(rect.center().x - g1.size().x / 2.0, rect.top() + 7.0), g1, egui::Color32::WHITE);
     let y = rect.bottom() - 7.0 - g2.size().y;
     p.galley(egui::pos2(rect.center().x - g2.size().x / 2.0, y), g2, egui::Color32::WHITE);
+}
+
+/// The library's pages: all games, then each console that has games (and,
+/// for the Leapster family, a BIOS to run them; the original Leapster uses
+/// the chosen BIOS).
+fn console_tabs(ui: &mut egui::Ui, library: &Library, tab: &mut Option<ribbit_memory::known::Hardware>) {
+    use ribbit_memory::known::Hardware;
+    let count = |hw: Option<Hardware>| library.games.iter().filter(|g| hw.is_none_or(|h| g.family.runs_on(h))).count();
+    let consoles: Vec<Hardware> = crate::library::CONSOLES
+        .into_iter()
+        .filter(|&hw| {
+            count(Some(hw)) > 0
+                && matches!(hw, Hardware::Leapster | Hardware::Zippity) | library.bios_for(hw).is_some()
+        })
+        .collect();
+    if tab.is_some_and(|t| !consoles.contains(&t)) {
+        *tab = None;
+    }
+    // Tabs: a label each over a shared rule; the open one in the accent
+    // colour with a bar under it.
+    let top = ui.cursor().min.y;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(26.0, 6.0);
+        for choice in std::iter::once(None).chain(consoles.into_iter().map(Some)) {
+            let selected = *tab == choice;
+            let name = choice.map_or("All games", |hw| hw.name());
+            let font = egui::FontId::proportional(16.0);
+            let name_g = ui.painter().layout_no_wrap(name.to_string(), font.clone(), egui::Color32::WHITE);
+            let count_g =
+                ui.painter().layout_no_wrap(count(choice).to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+            let size = egui::vec2(name_g.size().x + 6.0 + count_g.size().x, 34.0);
+            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let fg = if selected {
+                ACCENT
+            } else if resp.hovered() {
+                egui::Color32::from_gray(240)
+            } else {
+                egui::Color32::from_gray(165)
+            };
+            let p = ui.painter();
+            let y = rect.top() + 4.0;
+            p.galley(egui::pos2(rect.left(), y), name_g.clone(), fg);
+            let count_pos = egui::pos2(rect.left() + name_g.size().x + 6.0, y + name_g.size().y - count_g.size().y - 1.0);
+            p.galley(count_pos, count_g, fg.gamma_multiply(0.7));
+            if selected {
+                let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom());
+                p.rect_filled(bar, 2.0, ACCENT);
+            }
+            if resp.clicked() {
+                *tab = choice;
+            }
+        }
+    });
+    let bottom = ui.min_rect().bottom().max(top);
+    let rule = egui::Rect::from_min_max(egui::pos2(ui.max_rect().left(), bottom), egui::pos2(ui.max_rect().right(), bottom + 1.0));
+    ui.painter().rect_filled(rule, 0.0, egui::Color32::from_white_alpha(28));
 }
 
 fn item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
@@ -508,6 +569,7 @@ fn library_screen(
     ui: &mut egui::Ui,
     settings: &Settings,
     library: &mut Library,
+    tab: &mut Option<ribbit_memory::known::Hardware>,
     idle_closed: Option<&str>,
     since: Instant,
     actions: &mut Vec<Action>,
@@ -543,13 +605,21 @@ fn library_screen(
                 hero(ui, game, actions);
                 ui.add_space(28.0);
             }
-            ui.label(egui::RichText::new(format!("ALL GAMES  ·  {}", library.games.len())).size(13.0).strong().color(ACCENT));
+            console_tabs(ui, library, tab);
+            ui.add_space(14.0);
+            let shown_games: Vec<&crate::library::Game> =
+                library.games.iter().filter(|g| tab.is_none_or(|hw| g.family.runs_on(hw))).collect();
+            let heading = match tab {
+                None => "ALL GAMES".to_string(),
+                Some(hw) => hw.name().to_uppercase(),
+            };
+            ui.label(egui::RichText::new(format!("{heading}  ·  {}", shown_games.len())).size(13.0).strong().color(ACCENT));
             ui.add_space(12.0);
             let avail = ui.available_width();
             let cols = (((avail + CARD_GAP) / (CARD_WIDTH + CARD_GAP)).floor() as usize).max(1);
             let card_w = ((avail - CARD_GAP * (cols - 1) as f32) / cols as f32).floor().min(CARD_WIDTH * 1.4);
             let shown = since.elapsed().as_secs_f32();
-            for (r, row) in library.games.chunks(cols).enumerate() {
+            for (r, row) in shown_games.chunks(cols).enumerate() {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = CARD_GAP;
                     for (c, game) in row.iter().enumerate() {
@@ -824,7 +894,7 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
                 paint_play(ui.painter(), rect.center(), 40.0, 1.0);
             }
             if art.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                actions.push(Action::OpenCartridge(game.path.clone()));
+                actions.push(Action::PlayFromLibrary(game.path.clone()));
             }
             ui.add_space(24.0);
             ui.vertical(|ui| {
@@ -850,7 +920,7 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
                 });
                 ui.add_space(20.0);
                 if primary_button(ui, "▶   Play", egui::vec2(180.0, 46.0)).clicked() {
-                    actions.push(Action::OpenCartridge(game.path.clone()));
+                    actions.push(Action::PlayFromLibrary(game.path.clone()));
                 }
             });
         });
@@ -936,11 +1006,11 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.label(egui::RichText::new("Click to play · right-click for more").weak());
     });
     if response.clicked() {
-        actions.push(Action::OpenCartridge(game.path.clone()));
+        actions.push(Action::PlayFromLibrary(game.path.clone()));
     }
     response.context_menu(|ui| {
         if ui.button("▶ Play").clicked() {
-            actions.push(Action::OpenCartridge(game.path.clone()));
+            actions.push(Action::PlayFromLibrary(game.path.clone()));
             ui.close();
         }
         if ui.button("Get title screen again").clicked() {

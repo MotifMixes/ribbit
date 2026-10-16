@@ -3,16 +3,34 @@
 //! scripts/gen-known-carts.py). Only names and hashes are stored: no image data.
 
 /// Which hardware an image belongs to. `Leapster` is the supported target;
-/// `LeapsterTv` runs experimentally.
+/// the others run experimentally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hardware {
     /// The original 2003 Leapster (all regional BaseROM revisions).
     Leapster,
     /// EXPERIMENTAL: emulated with its TV video chip and controller link.
     LeapsterTv,
-    /// Recognised so we can refuse them clearly; not emulated.
+    /// EXPERIMENTAL: runs on the original's model (TV output not emulated).
     LeapsterLmax,
+    /// EXPERIMENTAL: 16 MB RAM, internal SPI flash, power-controller status.
     Leapster2,
+    /// LeapFrog Zippity (2009 TV console): a GeneralPlus GPL32300A (ARM9),
+    /// booting from NAND flash; its games are FAT16 images with a KERNEL.BIN.
+    /// Unrelated to the Leapster's hardware (MAME: `generalplus_gpl32612.cpp`).
+    Zippity,
+}
+
+impl Hardware {
+    /// The product name, as players know it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Hardware::Leapster => "Leapster",
+            Hardware::LeapsterTv => "Leapster TV",
+            Hardware::LeapsterLmax => "Leapster L-MAX",
+            Hardware::Leapster2 => "Leapster 2",
+            Hardware::Zippity => "Zippity",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,6 +148,55 @@ pub const FIRMWARE: &[KnownImage] = &[
 
 /// Leapster cartridges (generated from MAME's software list).
 pub use crate::known_carts::CARTRIDGES;
+
+/// Zippity system NAND dumps (MAME `zippity`, `zippityuk`; with the spare
+/// area, 0x10800000 bytes).
+pub const ZIPPITY_SYSTEM: &[KnownImage] = &[
+    fw(
+        "Zippity (US) NAND",
+        Hardware::Zippity,
+        0x1080_0000,
+        0x1624_8b63,
+        "3607337588a68052ef5c495b496aa3e0449d3eb6",
+        false,
+    ),
+    fw(
+        "Zippity (UK) NAND",
+        Hardware::Zippity,
+        0x1080_0000,
+        0x27d1_72ae,
+        "9ade19d7aa28fba13581e6879b39e3a7702260b0",
+        false,
+    ),
+];
+
+/// Zippity cartridges (MAME software list `leapfrog_zippity_cart`, CC0).
+pub const ZIPPITY_CARTRIDGES: &[KnownImage] = &[
+    fw(
+        "The Princess and the Frog - Magical Bayou Adventure (UK)",
+        Hardware::Zippity,
+        0x420_0000,
+        0xf417_15d0,
+        "c6654f021ac0b12fecb056f1d21058957a6e1e30",
+        false,
+    ),
+    fw(
+        "The World of Cars - Driven to Learn (UK)",
+        Hardware::Zippity,
+        0x420_0000,
+        0xf52e_613e,
+        "81da432cbdf6f80ac1a42656978d4027b50e0587",
+        false,
+    ),
+    fw(
+        "Disney Princess - Magical Movement & Learning (UK)",
+        Hardware::Zippity,
+        0x420_0000,
+        0xd060_a223,
+        "00f454b629d7bcc7f58a43dd453d410a8ed60a99",
+        false,
+    ),
+];
 
 pub fn lookup(table: &'static [KnownImage], id: &crate::ImageId) -> Option<&'static KnownImage> {
     let sha1 = id.sha1_hex();

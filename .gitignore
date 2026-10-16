@@ -19,3 +19,4 @@
 !crates/ribbit-cpu/tests/vectors/*.bin
 # The built-in art-capture profile (made by Ribbit; no personal data).
 !crates/ribbit-frontend/src/art_profile.eeprom
+zippity/

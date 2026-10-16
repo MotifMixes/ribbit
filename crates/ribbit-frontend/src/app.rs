@@ -11,7 +11,7 @@ use crate::ui::{self, Action, UiState};
 use anyhow::{Context, Result};
 use ribbit_core::Machine;
 use ribbit_video::{HEIGHT, WIDTH};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
@@ -62,6 +62,8 @@ struct Session {
     saves: SavePaths,
     autosave: AutoSave,
     title: String,
+    /// The console model (its BIOS), as players call it.
+    system: &'static str,
     /// When play started (Unix seconds), for Discord's timer.
     started: u64,
     /// Prefix for this game's save-state files.
@@ -84,6 +86,9 @@ pub struct App {
     ui: UiState,
     frame: Box<[u32; WIDTH * HEIGHT]>,
     paused: bool,
+    /// The BIOS for the next boot instead of the chosen one (a console page
+    /// in the library); used once.
+    next_bios: Option<PathBuf>,
     /// The window is not the active one (paused if `pause_in_background`).
     background: bool,
     /// The taskbar button is flashing for an upcoming idle power-off.
@@ -154,6 +159,7 @@ impl App {
             ui: UiState::new(),
             frame: Box::new([0; WIDTH * HEIGHT]),
             paused: false,
+            next_bios: None,
             background: false,
             flashing: false,
             fast_forward: false,
@@ -202,7 +208,10 @@ impl App {
     /// Starts (or restarts) the machine with the BIOS and `cart`.
     fn boot(&mut self, cart: Option<PathBuf>) -> Result<()> {
         self.end_session();
-        let bios = self.settings.bios.clone().context("Choose a BIOS first (File → Open BIOS…).")?;
+        let bios = match self.next_bios.take() {
+            Some(b) => b,
+            None => self.settings.bios.clone().context("Choose a BIOS first (File → Open BIOS…).")?,
+        };
         let firmware = ribbit_core::load_firmware(&bios)?;
         if firmware.known().is_none() {
             self.ui.toast("Unknown BIOS dump: it may not work");
@@ -256,7 +265,9 @@ impl App {
             Some(c) => format!("cart-{:08x}", c.id().crc32),
             None => format!("bios-{:08x}", machine.firmware().id().crc32),
         };
+        let system = machine.firmware().known().map_or("Leapster", |k| k.hardware.name());
         self.session = Some(Session {
+            system,
             idle_test_secs: std::env::var("RIBBIT_IDLE_TEST_SECS").ok().and_then(|v| v.parse().ok()),
             idle_snapshot: None,
             closing: None,
@@ -346,6 +357,22 @@ impl App {
         }
     }
 
+    /// A game chosen in the library: on the open console page's BIOS (the
+    /// chosen BIOS for the original Leapster and the "All games" page).
+    fn open_from_library(&mut self, path: PathBuf) {
+        use ribbit_memory::known::Hardware;
+        let family = self.library.games.iter().find(|g| g.path == path).map(|g| g.family);
+        if family == Some(crate::library::Family::Zippity) {
+            self.ui.toast("Zippity emulation is in progress: Zippity games can't run yet.");
+            return;
+        }
+        self.next_bios = match self.ui.library_tab {
+            Some(hw) if hw != Hardware::Leapster => self.library.bios_for(hw).map(Path::to_path_buf),
+            _ => None,
+        };
+        self.open_cart(path);
+    }
+
     fn pick(&mut self, what: Pick) {
         let start = match what {
             Pick::Bios => self.settings.bios.clone(),
@@ -381,6 +408,7 @@ impl App {
         match a {
             Action::Pick(w) => self.pick(w),
             Action::OpenCartridge(p) => self.open_cart(p),
+            Action::PlayFromLibrary(p) => self.open_from_library(p),
             Action::SetBios(p) => self.set_bios(p),
             Action::CloseCartridge => {
                 self.end_session();
@@ -1036,7 +1064,7 @@ impl App {
         self.library.poll();
         self.discord.set(match &self.session {
             _ if !self.settings.discord_presence => crate::discord::Presence::Off,
-            Some(s) => crate::discord::Presence::playing(&s.title, s.started),
+            Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
             None => crate::discord::Presence::Browsing,
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);

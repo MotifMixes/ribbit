@@ -19,16 +19,16 @@ pub enum Presence {
     Off,
     /// In the game library.
     Browsing,
-    /// Playing a game since `since` (seconds since the Unix epoch).
-    Playing { title: String, since: u64 },
+    /// Playing a game on `system` since `since` (seconds since the Unix epoch).
+    Playing { title: String, system: String, since: u64 },
 }
 
 impl Presence {
-    /// Playing `title` ("Name (Region)") since `since` (Unix seconds).
-    pub fn playing(title: &str, since: u64) -> Self {
+    /// Playing `title` ("Name (Region)") on `system` since `since` (Unix seconds).
+    pub fn playing(title: &str, system: &str, since: u64) -> Self {
         // Just the name: "Game (USA, alt)" -> "Game".
         let name = title.strip_suffix(')').and_then(|t| t.rsplit_once(" (")).map_or(title, |(n, _)| n);
-        Presence::Playing { title: name.to_string(), since }
+        Presence::Playing { title: name.to_string(), system: system.to_string(), since }
     }
 }
 
@@ -150,10 +150,11 @@ fn activity_json(p: &Presence) -> String {
             r#"{{"details":"Browsing games","assets":{{"large_image":"{LOGO}","large_text":{}}}}}"#,
             json_str(version)
         ),
-        Presence::Playing { title, since } => {
+        Presence::Playing { title, system, since } => {
             format!(
-                r#"{{"details":{},"state":"Leapster","timestamps":{{"start":{since}}},"assets":{{"large_image":"{LOGO}","large_text":{}}}}}"#,
+                r#"{{"details":{},"state":{},"timestamps":{{"start":{since}}},"assets":{{"large_image":"{LOGO}","large_text":{}}}}}"#,
                 json_str(&clip(title, 128)),
+                json_str(&clip(system, 128)),
                 json_str(version)
             )
         }
@@ -186,7 +187,7 @@ mod tests {
 
     #[test]
     fn playing_shows_the_name_and_system_and_escapes() {
-        let p = Presence::playing("SpongeBob SquarePants - Saves the Day (USA, alt)", 1_700_000_000);
+        let p = Presence::playing("SpongeBob SquarePants - Saves the Day (USA, alt)", "Leapster", 1_700_000_000);
         let Presence::Playing { title, .. } = &p else { panic!() };
         assert_eq!(title, "SpongeBob SquarePants - Saves the Day");
         let json = activity_json(&p);
@@ -201,8 +202,8 @@ mod tests {
     fn same_game_is_not_resent() {
         let (tx, rx) = channel();
         let mut d = Discord { tx, last: Presence::Off };
-        d.set(Presence::playing("Game (USA)", 5));
-        d.set(Presence::playing("Game (USA)", 5));
+        d.set(Presence::playing("Game (USA)", "Leapster", 5));
+        d.set(Presence::playing("Game (USA)", "Leapster", 5));
         d.set(Presence::Browsing);
         assert_eq!(rx.try_iter().count(), 2);
     }
