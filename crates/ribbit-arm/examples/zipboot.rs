@@ -83,6 +83,8 @@ struct Snapshot {
     timer_flags: u32,
     rx: Vec<u8>,
     radio_due: u64,
+    voices: [Voice; 32],
+    spu_stopped: [u32; 2],
 }
 
 impl Snapshot {
@@ -103,6 +105,8 @@ impl Snapshot {
             timer_flags: bus.timer_flags,
             rx: bus.rx.iter().copied().collect(),
             radio_due: bus.radio_due,
+            voices: bus.voices,
+            spu_stopped: bus.spu_stopped,
         }
     }
 
@@ -125,6 +129,9 @@ impl Snapshot {
         bus.timer_flags = self.timer_flags;
         bus.rx = self.rx.into_iter().collect();
         bus.radio_due = self.radio_due;
+        bus.voices = self.voices;
+        bus.spu_stopped = self.spu_stopped;
+        bus.audio_due = self.ran;
         self.ran
     }
 }
@@ -253,6 +260,12 @@ struct Bus {
     pad: Vec<(u16, u64, u64)>,
     /// When the radio receiver next sends a packet.
     radio_due: u64,
+    /// The sound unit's channels, their stop flags (per bank of 16), the
+    /// mixed output (ZIPBOOT_WAV) and when the next output sample is due.
+    voices: [Voice; 32],
+    spu_stopped: [u32; 2],
+    audio: Vec<i16>,
+    audio_due: u64,
     /// ZIPBOOT_PRESS=port:mask:from:to[;...] (port a/b/c, hex mask,
     /// instruction counts): those input bits are flipped from their idle
     /// level in that window, for finding what the inputs do.
@@ -350,6 +363,14 @@ impl Bus {
             } else if self.now >= self.timer_due[n] {
                 self.timer_flags |= 1 << n;
                 self.timer_due[n] += period;
+            }
+        }
+        // The sound unit, one output sample at a time.
+        while self.now >= self.audio_due {
+            self.audio_due += CLOCK / MIX_RATE;
+            let (l, r) = self.spu_mix();
+            if self.audio.len() < 200_000_000 {
+                self.audio.extend_from_slice(&[l as i16, r as i16]);
             }
         }
         // The radio receiver (the mat and joystick are wireless) sends 4
@@ -492,6 +513,21 @@ impl Bus {
             self.log.push(line);
         }
         match (a, write) {
+            // Sound unit control (see Voice): enable, stop flags (write 1s
+            // to clear), busy.
+            (0xD040_0E00 | 0xD040_0E80, Some(v)) => {
+                self.spu_enable(((a >> 7) & 1) as usize, v & 0xFFFF);
+                0
+            }
+            (0xD040_0E2C | 0xD040_0EAC, None) => self.spu_stopped[((a >> 7) & 1) as usize],
+            (0xD040_0E2C | 0xD040_0EAC, Some(v)) => {
+                self.spu_stopped[((a >> 7) & 1) as usize] &= !v;
+                0
+            }
+            (0xD040_0E3C | 0xD040_0EBC, None) => {
+                let bank = ((a >> 7) & 1) as usize;
+                (0..16).filter(|&i| self.voices[bank * 16 + i].playing).fold(0, |m, i| m | 1 << i)
+            }
             // Timers (0xC0020000 + 0x20 n): +0 control (bits 14 and 13 on,
             // bit 15 the overflow flag, cleared by writing 1), +8 reload
             // (counts up from it to 0x10000).
@@ -810,6 +846,188 @@ fn save_ppm(path: &str, img: &[u8]) {
     std::fs::write(path, out).unwrap();
 }
 
+/// The sound unit (0xD0400000): 32 channels like the 16-bit GeneralPlus
+/// chips' (MAME's spg2xx_audio), registers four bytes apart. Channel n's
+/// registers are at +0x1000 + 0x40 n (0: wave address in halfwords, 1: mode,
+/// 3: pan and volume, ...), its phase registers at +0x1800 + 0x40 n (4: the
+/// phase, 19-bit), and the control registers at +0xE00 for channels 0-15 and
+/// +0xE80 for 16-31 (+0x00 enable, +0x2C stop flags, +0x3C busy).
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct Voice {
+    playing: bool,
+    /// The next word's address, in halfwords.
+    addr: u32,
+    /// Nibbles (or bytes) of the word used so far, times 4 (or 8).
+    shift: u32,
+    signal: i32,
+    step: i32,
+    accum: u64,
+    sample: i32,
+    /// The sample before, for interpolating between the two.
+    prev: i32,
+}
+
+/// The sound unit's base clock: a channel plays phase * SPU_CLOCK / 2^19
+/// samples a second (as MAME's model has it; UNVERIFIED on the Zippity).
+const SPU_CLOCK: u64 = 281_250;
+/// The rate the research tool mixes at (a stand-in).
+const MIX_RATE: u64 = 35_156;
+
+/// OKI ADPCM: the step sizes and how each nibble moves the step index.
+fn oki_step(i: i32) -> i32 {
+    (16.0 * 1.1f64.powi(i)) as i32
+}
+const OKI_INDEX: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
+
+impl Bus {
+    fn spu_reg(&self, ch: usize, r: u32) -> u32 {
+        self.latch(0xD040_1000 + 0x40 * ch as u32 + 4 * r)
+    }
+
+    /// Channel enable writes: channels newly enabled start, ones cleared stop.
+    fn spu_enable(&mut self, bank: usize, v: u32) {
+        for i in 0..16 {
+            let ch = bank * 16 + i;
+            let on = v & (1 << i) != 0;
+            if on && !self.voices[ch].playing {
+                if std::env::var_os("ZIPBOOT_SPULOG").is_some() {
+                    let phase = self.latch(0xD040_1800 + 0x40 * ch as u32 + 0x10);
+                    println!("spu {:>10} ch {ch} mode {:04x} addr {:06x} loop {:06x} phase {phase:05x} vol {:04x}", self.now, self.spu_reg(ch, 1), self.spu_reg(ch, 0), self.spu_reg(ch, 2), self.spu_reg(ch, 3));
+                }
+                self.voices[ch] = Voice { playing: true, addr: self.spu_reg(ch, 0) & 0x3F_FFFF, ..Default::default() };
+            } else if !on {
+                self.voices[ch].playing = false;
+            }
+        }
+    }
+
+    /// The next sample of a channel, or None at the end of a one-shot.
+    fn spu_fetch(&mut self, ch: usize) -> Option<i32> {
+        let mode = self.spu_reg(ch, 1);
+        let tone = (mode >> 12) & 3;
+        // Tone mode 0: the CPU writes the samples (register 0xB, wave data).
+        if tone == 0 {
+            return Some((self.spu_reg(ch, 0xB) as u16 as i32) - 0x8000);
+        }
+        let v = self.voices[ch];
+        let a = v.addr * 2;
+        let word = self.peek8(a) as u32 | (self.peek8(a + 1) as u32) << 8;
+        if tone != 0 && word == 0xFFFF {
+            if tone == 1 {
+                return None;
+            }
+            // Loop: from the loop address (register 2).
+            self.voices[ch].addr = self.spu_reg(ch, 2) & 0x3F_FFFF;
+            self.voices[ch].shift = 0;
+            return Some(v.sample);
+        }
+        let vo = &mut self.voices[ch];
+        if mode & 0x8000 != 0 {
+            // 4-bit OKI ADPCM, high nibble first (low first, as in MAME's
+            // 16-bit chips, decodes to noise).
+            let n = ((word >> (12 - vo.shift)) & 15) as i32;
+            let step = oki_step(vo.step);
+            let mut diff = step >> 3;
+            if n & 1 != 0 {
+                diff += step >> 2;
+            }
+            if n & 2 != 0 {
+                diff += step >> 1;
+            }
+            if n & 4 != 0 {
+                diff += step;
+            }
+            vo.signal = (vo.signal + if n & 8 != 0 { -diff } else { diff }).clamp(-2048, 2047);
+            vo.step = (vo.step + OKI_INDEX[(n & 7) as usize]).clamp(0, 48);
+            vo.shift += 4;
+            if vo.shift == 16 {
+                vo.shift = 0;
+                vo.addr += 1;
+            }
+            Some(vo.signal << 4)
+        } else if mode & 0x4000 != 0 {
+            vo.addr += 1;
+            Some(word as i32 - 0x8000)
+        } else {
+            let b = (word >> vo.shift) & 0xFF;
+            vo.shift += 8;
+            if vo.shift == 16 {
+                vo.shift = 0;
+                vo.addr += 1;
+            }
+            Some(((b as i32) << 8) - 0x8000)
+        }
+    }
+
+    /// Mixes one output sample (left, right).
+    fn spu_mix(&mut self) -> (i32, i32) {
+        let (mut l, mut r) = (0i64, 0i64);
+        for ch in 0..32 {
+            if !self.voices[ch].playing {
+                continue;
+            }
+            let phase = (self.latch(0xD040_1800 + 0x40 * ch as u32 + 0x10) & 0x7_FFFF) as u64;
+            self.voices[ch].accum += phase * SPU_CLOCK;
+            while self.voices[ch].accum >= MIX_RATE << 19 {
+                self.voices[ch].accum -= MIX_RATE << 19;
+                match self.spu_fetch(ch) {
+                    Some(s) => {
+                        self.voices[ch].prev = self.voices[ch].sample;
+                        self.voices[ch].sample = s;
+                    }
+                    None => {
+                        self.voices[ch].playing = false;
+                        // The stop flag; the channel's enable bit clears.
+                        let (bank, bit) = (ch / 16, ch % 16);
+                        self.spu_stopped[bank] |= 1 << bit;
+                        let en = 0xD040_0E00 + 0x80 * bank as u32;
+                        if let Some(e) = self.io.get_mut(&en) {
+                            e.last_write &= !(1 << bit);
+                        }
+                        break;
+                    }
+                }
+            }
+            if !self.voices[ch].playing {
+                continue;
+            }
+            let pv = self.spu_reg(ch, 3);
+            let (vol, pan) = ((pv & 0x7F) as i64, ((pv >> 8) & 0x7F) as i64);
+            // Linear interpolation between the last two samples (holding
+            // each sample adds images of it above 8 kHz).
+            let v = self.voices[ch];
+            let frac = (v.accum >> 19) as i64;
+            let s = v.prev as i64 + (v.sample - v.prev) as i64 * frac / MIX_RATE as i64;
+            let s = s * vol / 127;
+            l += s * (127 - pan) / 64;
+            r += s * pan.max(1) / 64;
+        }
+        (l.clamp(-32768 * 4, 32767 * 4) as i32 / 4, r.clamp(-32768 * 4, 32767 * 4) as i32 / 4)
+    }
+}
+
+/// Saves interleaved 16-bit stereo samples as a WAV file.
+fn save_wav(path: &str, samples: &[i16], rate: u32) {
+    let data = samples.len() as u32 * 2;
+    let mut out = Vec::with_capacity(44 + data as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * 4).to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+    for s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, out).unwrap();
+}
+
 impl ArmBus for Bus {
     fn read8(&mut self, a: u32) -> u8 {
         match self.mem(a, 1) {
@@ -878,7 +1096,7 @@ fn main() {
         log: Vec::new(),
     };
 
-    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, presses: Vec::new(), timer_due: [0; 4], timer_flags: 0, rx: Default::default(), pad: Vec::new(), radio_due: 0, watch_from: 0, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
+    let mut bus = Bus { ram: vec![0; RAM_SIZE], sram: vec![0; SRAM_SIZE], iram: vec![0; IRAM_SIZE], pc: 0, now: 0, io: BTreeMap::new(), log: Vec::new(), uart: String::new(), nand, video_status: 0, dma_status: 0, gfx_ops: 0, gfx_done: false, watch: None, presses: Vec::new(), timer_due: [0; 4], timer_flags: 0, rx: Default::default(), pad: Vec::new(), radio_due: 0, voices: [Voice::default(); 32], spu_stopped: [0; 2], audio: Vec::new(), audio_due: 0, watch_from: 0, watched: Vec::new(), rwatch: None, rwatched: Vec::new() };
     if let Ok(w) = std::env::var("ZIPBOOT_RWATCH") {
         let (lo, hi) = w.split_once('-').expect("ZIPBOOT_RWATCH=lo-hi");
         bus.rwatch = Some((u32::from_str_radix(lo, 16).unwrap(), u32::from_str_radix(hi, 16).unwrap()));
@@ -1023,12 +1241,13 @@ fn main() {
     }
     println!("cp15 control {:08x} ttb {:08x}", cpu.cp15.control, cpu.cp15.ttb);
     if let Ok(dir) = std::env::var("ZIPBOOT_DUMP") {
-        std::fs::write(format!("{dir}/watch.log"), bus.watched.join("
-")).ok();
-        std::fs::write(format!("{dir}/rwatch.log"), bus.rwatched.join("
-")).ok();
+        std::fs::write(format!("{dir}/watch.log"), bus.watched.join("\n")).ok();
+        std::fs::write(format!("{dir}/rwatch.log"), bus.rwatched.join("\n")).ok();
         std::fs::write(format!("{dir}/ram.bin"), &bus.ram).unwrap();
         std::fs::write(format!("{dir}/iram.bin"), &bus.iram).unwrap();
+    }
+    if let Ok(path) = std::env::var("ZIPBOOT_WAV") {
+        save_wav(&path, &bus.audio, MIX_RATE as u32);
     }
     let mut hot: Vec<_> = hist.into_iter().collect();
     hot.sort_by_key(|h| std::cmp::Reverse(h.1));

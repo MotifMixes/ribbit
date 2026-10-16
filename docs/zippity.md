@@ -81,7 +81,7 @@ down and jumps to the on-chip RAM at 0xF8000000, which ends in a loop.
 | 0xC00C0000 | Analogue-to-digital converter (below) |
 | 0xD0100000 | Interrupt controller (below) |
 | 0xD0300000 | DMA controller (below) |
-| 0xD0400000 | USB controller? (endpoint-like registers at 0xE00-0xEFC, 0x1000..) |
+| 0xD0400000 | Sound unit (below) |
 | 0xD0500000 | Video chip (below): registers, palette RAM at +0x1000, sprite RAM at +0x2000 |
 | 0xD0800000 | Graphics engine? (MAME's stub feeds +0x18 random values): +0x00 control (0x901 starts), +0x04/+0x08/+0x0C parameters, +0x7C done (bit 0, write 1 to clear); interrupt line 12 |
 | 0xD0900000 | NAND controller (below) |
@@ -139,7 +139,7 @@ Lines with handlers (registered through the kernel's function at 0x31564):
 | 24 | DMA controller |
 | 27 | Video |
 | 28, 29 | Analogue-to-digital converter |
-| 30, 31 | 0xC00D0000 channels 1 and 0: probably the sound output (two channels fed by DMA; the test mode reports "Audio: left CH failed" and "right CH") |
+| 30, 31 | 0xC00D0000 channels 1 and 0: two DMA-fed channels, set up at start but not used by the menus (perhaps an audio codec link: the test mode has an "Audio CODEC test" and reports left and right channels) |
 
 ## Analogue-to-digital converter (0xC00C0000)
 
@@ -217,6 +217,33 @@ The kernel tests bits 5-7 together (0xE0) and bits 0-3 together (0xF). A
 guess (UNVERIFIED) is that bits 5-7 are the mat's red, green and blue pads,
 bits 8 and 9 its two foot pads (both held: standing on the mat), and bit 4
 the button on top of the joystick.
+
+## Sound unit (0xD0400000)
+
+A 32-channel sample player like the one in GeneralPlus's 16-bit chips
+(MAME's `spg2xx_audio`), each 16-bit register four bytes apart. The kernel's
+library for it is at 0x42B48 onward; `PlayAudio` (0x22F10) takes a free
+channel from 20 to 31.
+
+| Address | Use |
+|---|---|
+| +0x1000 + 0x40 n | Channel n: +0x00 wave address (halfwords, 22 bits), +0x04 mode (bit 15 ADPCM, bit 14 16-bit, bits 13-12 tone mode: 0 the CPU writes samples, 1 one-shot, 2 loop; bits 5-0 the address's top bits), +0x08 loop address, +0x0C pan (bits 14-8) and volume (bits 6-0), +0x10-0x28 envelope, +0x2C wave data, +0x34 ADPCM select |
+| +0x1800 + 0x40 n | Channel n's phase registers: +0x10 the phase (19 bits) |
+| +0xE00 / +0xE80 | Control for channels 0-15 / 16-31: +0x00 enable, +0x04 main volume, +0x08 FIQ enable, +0x0C FIQ status, +0x14 beat count (bit 15 interrupt enable, bit 14 its flag), +0x18-0x24 envelope clocks (4 bits a channel), +0x28 envelope ramp-down, +0x2C stop flags, +0x30 zero cross, +0x34 control, +0x3C busy |
+
+A channel plays phase x 281250 / 2^19 samples a second (MAME's figure;
+the menus use phase 0x7482: 16000 Hz). The menus' sounds are 4-bit OKI ADPCM,
+one-shot, ending at the word 0xFFFF; each starts with a 4-word header
+(0x007F 0x7F00 0x6440 0x8000). Unlike MAME's 16-bit chips, the nibbles are
+taken high first: low first decodes to noise, high first to clean tones.
+When a one-shot ends the channel stops, its enable bit clears and its stop
+flag sets.
+
+Ribbit's research tool plays the channels (ADPCM, 8- and 16-bit PCM, loops,
+volume and pan; envelopes, the beat counter and FIQs are not modelled),
+mixes them at 35156 Hz with linear interpolation, and saves the result with
+`ZIPBOOT_WAV=file`. Its start-up audio has the timing and the spectrum of a
+recording of a real unit.
 
 ## DMA controller (0xD0300000)
 
@@ -393,3 +420,5 @@ environment variables:
 | `ZIPBOOT_WATCH=lo-hi`, `ZIPBOOT_WATCH_FROM=n` | Log I/O accesses in that range (`watch.log`) |
 | `ZIPBOOT_RWATCH=lo-hi` | Log CPU writes to memory in that range (`rwatch.log`) |
 | `ZIPBOOT_JUMPS[=n]` | Print the last n jumps (600) |
+| `ZIPBOOT_WAV=file` | Save the sound as a WAV file |
+| `ZIPBOOT_SPULOG` | Print each sound channel start (mode, address, phase, volume) |
