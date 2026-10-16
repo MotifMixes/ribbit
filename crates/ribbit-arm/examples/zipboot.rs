@@ -1186,15 +1186,15 @@ impl Bus {
             let v = self.voices[ch];
             let mut s = v.sample;
             if self.spu_ctl(0, 0x34) & 0x200 == 0 {
-                let f = (v.accum * 256 >> 17) as i32;
-                s = (v.prev * (256 - f) >> 8) + (v.sample * f >> 8);
+                let f = ((v.accum * 256) >> 17) as i32;
+                s = ((v.prev * (256 - f)) >> 8) + ((v.sample * f) >> 8);
             }
-            let s = s * (self.spu_reg(ch, 5) & 0x7F) as i32 >> 7;
+            let s = (s * (self.spu_reg(ch, 5) & 0x7F) as i32) >> 7;
             let pv = self.spu_reg(ch, 3);
             let (vol, pan) = ((pv & 0x7F) as i32, ((pv >> 8) & 0x7F) as i32);
             let (pl, pr) = if pan < 0x40 { (0x7F * vol, pan * 2 * vol) } else { ((0x7F - pan) * 2 * vol, 0x7F * vol) };
-            l += s * pl >> 14;
-            r += s * pr >> 14;
+            l += (s * pl) >> 14;
+            r += (s * pr) >> 14;
             if self.spu_ctl(bank, 0x28) & bit != 0 {
                 if self.voices[ch].ramp_frame > 0 {
                     self.voices[ch].ramp_frame -= 1;
@@ -1216,7 +1216,7 @@ impl Bus {
         }
         let shift = if (self.spu_ctl(0, 0x34) >> 6) & 3 == 0 { 4 } else { 2 };
         let main = (self.spu_ctl(0, 0x04) & 0x7F) as i32;
-        ((l >> shift) * main >> 7, (r >> shift) * main >> 7)
+        (((l >> shift) * main) >> 7, ((r >> shift) * main) >> 7)
     }
 }
 
