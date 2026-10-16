@@ -16,7 +16,11 @@
 
 use crate::isa::{BrCond, COND_AL, Cond, Dst, Instr, Op, Size, Src, WriteBack};
 
-const SETS: usize = 1 << 16;
+/// Direct-mapped slots, one per halfword of 512 KiB of code (104 bytes
+/// each, 26 MiB). With 1 << 16 (128 KiB) the Leapster 2 BIOS's code 128 KiB
+/// apart evicted itself: Pet Pals and Outwit missed 2.3% of their fetches
+/// (26 M decodes per 1.15 G instructions; now 0.2 M), 10% of their time.
+const SETS: usize = 1 << 18;
 /// Longest instruction (32-bit word + long immediate).
 const MAX_LEN: u32 = 8;
 
