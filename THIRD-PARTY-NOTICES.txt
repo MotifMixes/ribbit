@@ -112,8 +112,9 @@ POSSIBILITY OF SUCH DAMAGE.
 Rust crates used by Ribbit carry their own licences (MIT and/or Apache-2.0
 for most); see each crate's metadata.
 
-Fredoka (crates/ribbit-frontend/src/fonts/Fredoka-Bold.ttf), from https://github.com/hafontia-zz/Fredoka-One
-(commit 35c584ff23450c9bcdf8819706e12fcdeefe1712):
+Fredoka: crates/ribbit-frontend/src/fonts/Fredoka-Bold.ttf from https://github.com/hafontia-zz/Fredoka-One
+(commit 35c584ff23450c9bcdf8819706e12fcdeefe1712), and Fredoka-Medium.ttf, the weight-500 instance served
+by Google Fonts (https://github.com/google/fonts/tree/main/ofl/fredoka). Both under:
 
 Copyright 2016 The Fredoka Project Authors (https://github.com/hafontia/Fredoka-One)
 

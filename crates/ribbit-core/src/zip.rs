@@ -7,7 +7,7 @@ use thiserror::Error;
 /// Extensions taken as the image inside an archive, best first.
 const IMAGE_EXTENSIONS: [&str; 4] = ["bin", "rom", "u3", "lst"];
 /// Nothing a Leapster uses is bigger.
-const MAX_IMAGE: usize = 64 << 20;
+const MAX_IMAGE: usize = 512 << 20;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ZipError {
