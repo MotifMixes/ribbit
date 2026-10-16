@@ -846,9 +846,8 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
             if console == Hardware::Leapster2
                 && library.bios_for(console).is_some()
                 && tab.is_none_or(|f| f.runs_on(console))
-                && ui
-                    .add(egui::Button::new("▶  Leapster 2 menu").corner_radius(8).min_size(egui::vec2(0.0, 32.0)))
-                    .on_hover_text("Start the Leapster 2's own system: its start-up screens and main menu (no cartridge needed)")
+                && system_button(ui, "Leapster 2 Main Menu")
+                    .on_hover_text("Turn on the Leapster 2 without a game: its start-up screens and main menu")
                     .clicked()
             {
                 actions.push(Action::StartSystem(console));
@@ -894,6 +893,21 @@ fn console_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
             .on_hover_text("The console your games play on")
             .on_disabled_hover_text(hint);
     });
+}
+
+/// A console's own system (no game), in the Leapster 2's purple.
+fn system_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    const PURPLE: egui::Color32 = egui::Color32::from_rgb(108, 72, 190);
+    const PURPLE_HOVER: egui::Color32 = egui::Color32::from_rgb(128, 92, 212);
+    let id = ui.next_auto_id();
+    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).strong().color(egui::Color32::WHITE))
+            .fill(if hovered { PURPLE_HOVER } else { PURPLE })
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(8)
+            .min_size(egui::vec2(0.0, 32.0)),
+    )
 }
 
 fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {

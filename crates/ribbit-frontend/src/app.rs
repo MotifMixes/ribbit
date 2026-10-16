@@ -524,7 +524,23 @@ impl App {
                         .to_string(),
                 )
             }),
-            Hardware::Leapster => Ok(None),
+            // The BIOS chosen in File > Open BIOS, if it is an original
+            // Leapster's; else one from the games folders (a Leapster 2 BIOS
+            // chosen there must not stand in for the Leapster).
+            Hardware::Leapster => {
+                let chosen = self.settings.bios.as_deref().and_then(|p| ribbit_core::load_firmware(p).ok());
+                if chosen.is_none_or(|f| f.known().is_none_or(|k| k.hardware == Hardware::Leapster)) {
+                    return Ok(None);
+                }
+                self.library.bios_for(Hardware::Leapster).map(|p| Some(p.to_path_buf())).ok_or_else(|| {
+                    (
+                        "No Leapster BIOS found".to_string(),
+                        "The BIOS chosen in File > Open BIOS belongs to another console. Add the folder that holds \
+                         an original Leapster BIOS with \"Add games folder\", or open one with File > Open BIOS."
+                            .to_string(),
+                    )
+                })
+            }
             hw => self.library.bios_for(hw).map(|p| Some(p.to_path_buf())).ok_or_else(|| {
                 (
                     format!("No {} BIOS found", hw.name()),
