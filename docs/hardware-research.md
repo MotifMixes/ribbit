@@ -1090,6 +1090,29 @@ Open (Leapster 2):
 * The USB controller (0x0180_F000), the delay counters.
 * The Leapster 2 debug UART log (`scenes uart`) is the main source; keep reading it.
 
+### Leapster 2 real-hardware reference (videos, 2026-10-16)
+
+Two YouTube sale demos by "nowthatsjustducky", supplied by the user: "eBay Item Demo - LeapFrog Leapster 2"
+(youtube.com/watch?v=i4ZHNyCUxoA, green unit, 242 s) and "Sale Item Demo - Leapster 2 Spongebob Squarepants
+Edition" (youtube.com/watch?v=4dHVsdGia-0, 367 s). 30 fps camera footage of the LCD; the BIOS versions are unknown.
+Both units had been set up before (profiles exist), so they skip first-time setup.
+
+* **Boot sequence and timing** (video 1, from the first lit frame): IMPORTANT warning about 8 s; the "2" animation
+  (cable plugging into a "2") about 4 s; the "Leapster2" logo about 3 s; the LeapFrog logo about 4-5 s; then the
+  Sign In list (MAICOL, MIGUEL, LOLE) and, after a name is picked, the home screen with four icons. Ribbit (0.6 and
+  B5, no cartridge) shows the same screens in the same order with the same durations to within the 1 s sampling
+  (warning 0-8 s, animation 8-11 s, logo 12-14 s, LeapFrog 15-19 s), then first-time setup (country) because its
+  console is new. With a cartridge (video 1, Disney Ariel) the order is warning, Leapster2 logo, LeapFrog, Sign In,
+  game.
+* **Power-off**: the screen turns blue with a shrinking white dot (both videos). Not yet compared.
+* **Colours, OPEN**: on both units the warning screen looks blue, its triangle light, and the LeapFrog logo and the
+  Leapster2 wordmark blue-grey, where Ribbit shows purple (0x60C), a yellow triangle (0xFF0), a green logo (0x073)
+  and slate/green (0x66A/0x3A4). No channel permutation of Ribbit's 12-bit decode (MAME's, UNVERIFIED) maps all four
+  colours onto what the videos show (R/G swap fits the background but turns the logo magenta), and the home
+  screen's purple looks purple in the same video. Camera white balance, exposure (it changes from frame to frame)
+  and the CSTN panel's viewing-angle colour shift could explain it; a straight-on photo of a known colour (e.g. the
+  setup screen's flags) under daylight would settle whether the decode is wrong.
+
 ## ADC, touch panel and board lines (2026-10-16)
 
 All models use the same ADC driver (v1.5 0x4007_CC6A, US v2.1 0x4008_EB78, L-MAX v2.2 0x4009_28A0, Leapster 2
