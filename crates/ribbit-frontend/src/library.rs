@@ -52,7 +52,10 @@ const TITLE_CARD_MS: &[(u32, u64)] = &[
     (0x58d0_8f36, 15_750), // The Talking Words Factory
     (0x5ccb_2ad3, 15_750), // Disney Princess - Enchanted Learning
     (0x6239_a178, 24_000), // Star Wars - Jedi Reading
-    (0x6b24_a3ef, 8_250), // SpongeBob SquarePants - Through the Wormhole
+    // Through the Wormhole has no title screen of its own (as recorded on a
+    // Leapster TV: LeapFrog, the Nickelodeon/SpongeBob legal screen, then
+    // the player menu); its player menu, before the buttons start pulsing.
+    (0x6b24_a3ef, 10_500), // SpongeBob SquarePants - Through the Wormhole
     (0x7177_8536, 12_250), // Dora the Explorer - Camping Adventure
     (0x74af_5d57, 9_500), // Dora the Explorer - Wildlife Rescue
     (0x9793_46d5, 12_250), // Cosmic Math
@@ -90,7 +93,21 @@ const ART_PROFILE: &[u8; 256] = include_bytes!("art_profile.eeprom");
 const ART_SUFFIX: &str = "-7.png";
 
 fn art_file(art_dir: &Path, key: &str) -> PathBuf {
-    art_dir.join(format!("{key}{ART_SUFFIX}"))
+    art_dir.join(art_name(key))
+}
+
+/// A game's art file name: its CRC32 (`key`), and for games with a known
+/// title card its moment, so re-timing a game makes its art again.
+fn art_name(key: &str) -> String {
+    match title_card_ms(key) {
+        Some(ms) => format!("{key}-t{ms}{ART_SUFFIX}"),
+        None => format!("{key}{ART_SUFFIX}"),
+    }
+}
+
+fn title_card_ms(key: &str) -> Option<u64> {
+    let crc = u32::from_str_radix(key, 16).ok()?;
+    TITLE_CARD_MS.iter().find(|(c, _)| *c == crc).map(|&(_, ms)| ms)
 }
 
 /// Deletes art made the old way.
@@ -100,7 +117,10 @@ fn remove_stale_art(art_dir: &Path) {
     };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".png") && !name.ends_with(ART_SUFFIX) {
+        // Old suffixes, and listed games' art from an earlier title moment.
+        let key = name.split(['-', '.']).next().unwrap_or_default();
+        let current = name == art_name(key) || title_card_ms(key).is_none();
+        if name.ends_with(".png") && (!name.ends_with(ART_SUFFIX) || !current) {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -603,7 +623,7 @@ impl Capture {
 }
 
 fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Shot> {
-    let title_card = TITLE_CARD_MS.iter().find(|(crc, _)| *crc == cart.id().crc32).map(|&(_, ms)| ms);
+    let title_card = title_card_ms(&format!("{:08x}", cart.id().crc32));
     let fw = ribbit_core::load_firmware(&src.bios).ok()?;
     // Straps bit 14 set: the BIOS takes the saved calibration (no targets).
     let mut m = Machine::with_straps(fw, Some(cart), 0x63FF_FFFF);
