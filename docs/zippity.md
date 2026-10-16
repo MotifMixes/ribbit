@@ -96,7 +96,7 @@ Modelled from its driver in the bootloader:
 
 | Offset | Use |
 |---|---|
-| +0x000 | DMA control: bit 0 start (reads 1 while busy), bit 1 direction (1: memory to NAND) |
+| +0x000 | DMA control: bit 0 start (reads 1 while busy), bit 1 direction (1: memory to NAND). Ribbit keeps it busy about 30 instructions a byte (2 MB/s): recordings' loading screens last 8.8 s and 4.6 s for 14.2 and 7.8 MB, where instant transfers took 1-2 s; data from the NAND lands when the transfer ends |
 | +0x004 | DMA memory address |
 | +0x008 | DMA length in bytes |
 | +0x140 | Status: bit 15 ready. Drivers wait for it after each command (if it is set, they poll once more, then wait until it is set) |
@@ -493,7 +493,15 @@ UNVERIFIED on hardware.
   frame mode in the 16-bit chip. The kernel rotates three 0x96000-byte buffers
   (640x480 at 16 bits): +0x1E0 is drawn into, +0x1E8 shown, and the 0xD0800000
   engine is given the drawn one (source and destination, +0x0C = 0x642;
-  perhaps a scaler or TV encoder). The buffers start filled with 0x8080. Their
+  perhaps a scaler or TV encoder). Ribbit draws the picture when the kernel
+  hands the chip the frame's sprite list (the video DMA, about 1100
+  instructions into each frame) and shows it until the next one. While it
+  loads a screen the kernel keeps interrupts off for frames on end; its
+  frame handler does not run and the TV keeps the last picture, though the
+  kernel is already decoding the next screen's pictures into the sprite
+  cache the shown one came from. Drawing that memory instead showed garbage
+  between the start-up screens (credits to mat, mat to Sign In), which
+  recordings do not. The buffers start filled with 0x8080. Their
   pixel format (PPU-enable bit 8: the 16-bit chip's "RGBG") is UNKNOWN; the
   research tool draws from the layers directly.
 - **Palette:** 2048 16-bit entries (0RRRRRGGGGGBBBBB; bit 15 set:

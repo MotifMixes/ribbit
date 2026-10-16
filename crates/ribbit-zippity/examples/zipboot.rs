@@ -23,6 +23,7 @@
 //! | ZIPBOOT_SPRITES | Print the sprites in use at the end |
 //! | ZIPBOOT_POKE=addr:byte[;...] | Write RAM bytes (hex) after loading, e.g. a game's debug flag |
 //! | ZIPBOOT_REGS=lo-hi | Print the I/O registers' values in that range (hex) at the end |
+//! | ZIPBOOT_HIDE_TEXT, ZIPBOOT_HIDE_SPRITES | Leave the text layers or the sprites out of saved pictures |
 //! | ZIPBOOT_CART=file | Put a cartridge (a raw dump of its NAND) in the slot |
 
 use ribbit_zippity::{OUTPUT_RATE, SCREEN_H, SCREEN_W, Zippity};
@@ -80,6 +81,8 @@ fn main() {
     if let Ok(path) = std::env::var("ZIPBOOT_LOAD") {
         z.load_state(&std::fs::read(&path).expect("read the state")).expect("a state");
     }
+    z.probe().hide_text = std::env::var_os("ZIPBOOT_HIDE_TEXT").is_some();
+    z.probe().hide_sprites = std::env::var_os("ZIPBOOT_HIDE_SPRITES").is_some();
     if let Ok(pokes) = std::env::var("ZIPBOOT_POKE") {
         for p in pokes.split(';') {
             let (a, v) = p.split_once(':').expect("addr:byte");

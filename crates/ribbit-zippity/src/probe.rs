@@ -43,6 +43,9 @@ pub struct Probe {
     /// Run idle loops instruction by instruction (to check that skipping
     /// them changes nothing).
     pub no_idle_skip: bool,
+    /// Research: leave the text layers or the sprites out of the picture.
+    pub hide_text: bool,
+    pub hide_sprites: bool,
 }
 
 impl Probe {

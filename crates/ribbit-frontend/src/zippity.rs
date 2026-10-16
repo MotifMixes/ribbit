@@ -302,6 +302,7 @@ fn run(s: &Shared) {
             let standing = if s.on_home.load(Ordering::Relaxed) { FEET } else { held & FEET };
             let feet = standing ^ s.moved.load(Ordering::Relaxed);
             z.set_pad(Pad::held(held & !FEET | feet));
+            z.set_want_picture(draw);
             z.run_frame();
             if draw {
                 z.render(&mut img);

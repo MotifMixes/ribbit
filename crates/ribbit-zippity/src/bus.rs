@@ -50,6 +50,13 @@ const RX_FIFO: usize = 16;
 /// warns at 0x5BCB or less and gives up at 0x5928 or less). Full batteries'
 /// reading is UNKNOWN; this is comfortably above both.
 const ADC_BATTERY: u32 = 0x7000;
+/// Instructions a NAND DMA transfer keeps the controller busy per byte:
+/// about 2 MB/s (at CLOCK). Measured from recordings of real units, whose
+/// loading screens last 8.8 s (Mickey Mouse Clubhouse, 14.2 MB read) and
+/// 4.6 s (its second, 7.8 MB) where instant transfers took 1-2 s. The
+/// system's sprite cache depends on it: with instant loads it reused the
+/// pictures of a screen still shown (garbage between the start-up screens).
+const NAND_DMA_COST: u64 = CLOCK / 2_000_000;
 
 const SPU_WORDS: usize = 0x2000 / 4;
 const PPU_WORDS: usize = 0x8000 / 4;
@@ -201,6 +208,23 @@ pub struct Bus {
     /// Interrupt lines need working out again (after I/O or a tick).
     #[serde(skip)]
     pub(crate) lines_dirty: bool,
+    /// When the NAND controller's DMA finishes (busy until then).
+    #[serde(default)]
+    pub(crate) nand_busy_until: u64,
+    /// Data of a NAND-to-memory transfer under way, and where it lands
+    /// when the transfer ends.
+    #[serde(default)]
+    pub(crate) nand_pending: Option<(u32, Vec<u8>)>,
+    /// The frame's picture, drawn when the kernel hands the chip the
+    /// frame's sprite list (see the video DMA), and when (instructions).
+    #[serde(skip)]
+    pub(crate) picture: Vec<u32>,
+    #[serde(skip)]
+    pub(crate) picture_at: Option<u64>,
+    /// Whether to draw that picture this frame (the app skips frames when
+    /// it falls behind).
+    #[serde(skip)]
+    pub(crate) want_picture: bool,
     /// CPU writes and I/O accesses so far: a loop that makes none changes
     /// nothing (see `Zippity::run`'s idle loops).
     #[serde(skip)]
@@ -241,6 +265,11 @@ impl Bus {
             audio_due: 0,
             audio_frac: 0,
             lines_dirty: true,
+            nand_busy_until: 0,
+            nand_pending: None,
+            picture: Vec::new(),
+            picture_at: None,
+            want_picture: true,
             activity: 0,
             skipped: 0,
             probe: Probe::default(),
@@ -323,6 +352,9 @@ impl Bus {
     /// Runs the timers, the sound unit and the radio receiver up to now.
     /// Called every few hundred instructions.
     pub(crate) fn tick(&mut self) {
+        if self.nand_pending.is_some() {
+            self.finish_nand_dma(false);
+        }
         self.lines_dirty = true;
         for n in 0..4 {
             let ctrl = self.latch(0xC002_0000 + 0x20 * n as u32);
@@ -414,35 +446,59 @@ impl Bus {
     fn nand_io(&mut self, a: u32, write: Option<u32>) -> Option<u32> {
         let off = a.checked_sub(0xD090_0000).filter(|&o| o < 0x200)?;
         if off == 0 {
-            // DMA, done at once (never busy).
+            // DMA: the controller reads busy (bit 0) for as long as the
+            // transfer takes (NAND_DMA_COST a byte); data read from the NAND
+            // lands in memory when it ends (the system starts loads into
+            // sprite-cache memory a screen still shows, which on hardware
+            // changes only once the transfer is through).
+            self.finish_nand_dma(false);
             if let Some(v) = write
                 && v & 1 != 0
             {
                 let (addr, len) = (self.nand.dma_addr, self.nand.dma_len);
                 let to_nand = v & 2 != 0;
-                for i in 0..len {
-                    let at = addr.wrapping_add(i);
-                    if to_nand {
-                        let b = self.mem(at, 1).map_or(0xFF, |m| m[0]);
+                if to_nand {
+                    for i in 0..len {
+                        let b = self.mem(addr.wrapping_add(i), 1).map_or(0xFF, |m| m[0]);
                         self.nand.write_data(b);
-                    } else {
-                        let b = self.nand.read_data();
-                        if let Some(m) = self.mem(at, 1) {
-                            m[0] = b;
-                        }
                     }
+                } else {
+                    let data = (0..len).map(|_| self.nand.read_data()).collect();
+                    self.nand_pending = Some((addr, data));
                 }
+                self.nand_busy_until = self.now + len as u64 * NAND_DMA_COST;
                 let dir = if to_nand { "to NAND" } else { "from NAND" };
                 self.nand.note(|| format!("DMA {dir} {len:#x} bytes at {addr:08x}"));
             }
-            return Some(0);
+            return Some((self.now < self.nand_busy_until) as u32);
         }
+        self.finish_nand_dma(false);
         Some(self.nand.reg(off, write))
+    }
+
+    /// Lands a NAND-to-memory transfer's data once it has ended (or now,
+    /// with `force`).
+    pub(crate) fn finish_nand_dma(&mut self, force: bool) {
+        if !force && self.now < self.nand_busy_until {
+            return;
+        }
+        if let Some((addr, data)) = self.nand_pending.take() {
+            for (i, b) in data.into_iter().enumerate() {
+                if let Some(m) = self.mem(addr.wrapping_add(i as u32), 1) {
+                    m[0] = b;
+                }
+            }
+        }
     }
 
     pub(crate) fn io(&mut self, a: u32, write: Option<u32>, size: u32) -> u32 {
         self.lines_dirty = true;
-        self.activity += 1;
+        // Polling the NAND controller's status changes nothing: a loop that
+        // only waits on it is idle (Zippity::run skips it, a device tick at
+        // a time, so the transfer's end is seen within 256 instructions).
+        if write.is_some() || !matches!(a, 0xD090_0000 | 0xD090_0140) {
+            self.activity += 1;
+        }
         self.probe.io(self.now, self.pc, a, write, size);
         if let Some(v) = self.nand_io(a, write) {
             return v;
@@ -529,6 +585,19 @@ impl Bus {
                     self.write32(dst.wrapping_add(4 * i), w);
                 }
                 self.set_latch(a, 0);
+                // The sprite list (copied after the palette, at the start of
+                // each frame): the chip draws the frame from this state, into
+                // a frame buffer the TV shows next. Drawn now, not at the
+                // frame's end, by when the kernel is already decoding the
+                // next screen's pictures into the sprite cache (which showed
+                // as scrambled and half-drawn sprites between screens).
+                if dst == 0xD050_2000 && self.want_picture {
+                    let mut img = std::mem::take(&mut self.picture);
+                    img.resize(crate::SCREEN_W * crate::SCREEN_H, 0);
+                    self.render(&mut img);
+                    self.picture = img;
+                    self.picture_at = Some(self.now);
+                }
                 0
             }
             // DMA controller, 4 channels at 0xD0300000 + 0x40 * n: +0 control

@@ -244,9 +244,29 @@ impl Zippity {
         self.bus.pad = pad.0 & bus::PAD_IDLE;
     }
 
-    /// Draws the picture: SCREEN_W x SCREEN_H pixels, 0x00RRGGBB.
+    /// The picture: SCREEN_W x SCREEN_H pixels, 0x00RRGGBB. It is the one
+    /// drawn when the kernel last handed the chip a frame's sprite list, as
+    /// the chip draws into a frame buffer the TV then shows. While the
+    /// kernel loads the next screen it keeps interrupts off for frames on
+    /// end, its frame handler does not run and the TV keeps showing the last
+    /// picture, though the sprite cache it came from is being overwritten
+    /// (drawing that memory instead showed garbage between the start-up
+    /// screens, which recordings do not). Drawn now only if no picture has
+    /// been handed over for 2 seconds (some screen might never do it).
     pub fn render(&self, out: &mut [u32]) {
-        self.bus.render(out);
+        match self.bus.picture_at {
+            Some(at) if self.bus.now - at < 120 * FRAME && self.bus.picture.len() == out.len() => {
+                out.copy_from_slice(&self.bus.picture)
+            }
+            _ => self.bus.render(out),
+        }
+    }
+
+    /// Whether to draw the coming frames' pictures (true by default). An app
+    /// that has fallen behind can skip them (`render` then gives the last
+    /// one drawn).
+    pub fn set_want_picture(&mut self, want: bool) {
+        self.bus.want_picture = want;
     }
 
     /// The sound made since the last call: stereo, interleaved, at

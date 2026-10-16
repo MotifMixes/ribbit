@@ -129,11 +129,11 @@ impl Bus {
         // and +0x58 and picture bases at +0x80 and +0x84.
         for d in 0..4 {
             for (reg, base_reg) in [(0x40, 0x80), (0x58, 0x84)] {
-                if (self.latch(0xD050_0008 + reg) >> 12) & 3 == d {
+                if (self.latch(0xD050_0008 + reg) >> 12) & 3 == d && !self.probe.hide_text {
                     self.draw_text(img, &pal, &rgb, reg, base_reg);
                 }
             }
-            for &(_, n) in order.iter().filter(|o| o.0 == d) {
+            for &(_, n) in order.iter().filter(|o| o.0 == d && !self.probe.hide_sprites) {
                 self.draw_sprite(img, &pal, &rgb, |k| half(n, k));
             }
         }
