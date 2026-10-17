@@ -431,6 +431,9 @@ impl App {
         match ribbit_core::load_firmware(&path) {
             Ok(fw) => {
                 let name = fw.known().map_or("unknown dump".to_string(), |k| k.name.to_string());
+                // Kept with every other BIOS opened, newest first.
+                self.settings.opened_bios.retain(|p| p != &path);
+                self.settings.opened_bios.insert(0, path.clone());
                 self.settings.bios = Some(path);
                 self.save_settings();
                 self.ui.toast(format!("BIOS: {name}"));
@@ -448,11 +451,19 @@ impl App {
     /// BIOS, if there is one.
     fn rescan_library(&mut self) {
         let art = self.settings.bios.clone().map(|bios| ArtSource { bios });
-        self.library.set_chosen_bios(self.settings.bios.as_deref());
+        // Every BIOS opened with File > Open BIOS that is still there, the
+        // one in use first.
+        let mut opened: Vec<PathBuf> = Vec::new();
+        for p in self.settings.bios.iter().chain(&self.settings.opened_bios) {
+            if !opened.contains(p) && p.is_file() {
+                opened.push(p.clone());
+            }
+        }
+        self.library.set_opened_bios(&opened);
         self.library.set_picked_bios(&self.settings.bios_picked);
-        // Recent games, and the BIOS chosen with File > Open BIOS (its
-        // built-in games are listed wherever it is).
-        let extra: Vec<PathBuf> = self.settings.recent_carts.iter().chain(&self.settings.bios).cloned().collect();
+        // Recent games, and the BIOSes opened (their built-in games are
+        // listed wherever they are).
+        let extra: Vec<PathBuf> = self.settings.recent_carts.iter().chain(&opened).cloned().collect();
         self.library.scan(&self.settings.rom_folders, &extra, self.settings.twist_content.clone(), art);
         // Outline fonts for HD device text, from the same folders.
         crate::device_fonts::load(self.settings.rom_folders.clone());

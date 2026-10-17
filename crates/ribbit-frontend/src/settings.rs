@@ -125,6 +125,9 @@ pub struct Settings {
     pub skipped_update: String,
     /// Android: the quick start's first page (the AI note) was read.
     pub ai_notice_seen: bool,
+    /// Every BIOS opened with File > Open BIOS, newest first: the library
+    /// keeps listing them all, not just the last one (`bios`).
+    pub opened_bios: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -173,6 +176,7 @@ impl Default for Settings {
             touch_controls: true,
             skipped_update: String::new(),
             ai_notice_seen: false,
+            opened_bios: Vec::new(),
         }
     }
 }

@@ -263,9 +263,9 @@ pub struct Library {
     pub games: Vec<Game>,
     /// BIOS (system) images found in the games folders, every one of them.
     pub bios: Vec<BiosFile>,
-    /// The BIOS chosen with File > Open BIOS (an unknown dump counts as an
-    /// original Leapster's).
-    chosen: Option<BiosFile>,
+    /// Every BIOS opened with File > Open BIOS, the one in use first (an
+    /// unknown dump counts as an original Leapster's).
+    opened: Vec<BiosFile>,
     /// The BIOS picked for each console (console name -> file), from the
     /// settings.
     picked: std::collections::BTreeMap<String, PathBuf>,
@@ -283,7 +283,7 @@ impl Library {
         Self {
             games: Vec::new(),
             bios: Vec::new(),
-            chosen: None,
+            opened: Vec::new(),
             picked: Default::default(),
             scanning: false,
             making_art: false,
@@ -361,10 +361,11 @@ impl Library {
         }
     }
 
-    /// Notes the BIOS chosen with File > Open BIOS (None: none), so its
-    /// console can be played on like one whose BIOS is in a games folder.
-    pub fn set_chosen_bios(&mut self, bios: Option<&Path>) {
-        self.chosen = bios.map(|p| {
+    /// Notes every BIOS opened with File > Open BIOS (the one in use first),
+    /// so their consoles can be played on like one whose BIOS is in a games
+    /// folder.
+    pub fn set_opened_bios(&mut self, opened: &[PathBuf]) {
+        self.opened = opened.iter().map(|p| {
             let known = ribbit_core::load_firmware(p).ok().and_then(|f| f.known().copied());
             let hardware = known.map_or(Hardware::Leapster, |k| k.hardware);
             let name = known.map_or_else(
@@ -372,7 +373,7 @@ impl Library {
                 |k| bios_name(k.name, k.hardware),
             );
             BiosFile { hardware, path: p.to_path_buf(), name }
-        });
+        }).collect();
     }
 
     /// Notes the BIOS picked for each console (console name -> file).
@@ -380,11 +381,11 @@ impl Library {
         self.picked = picked.clone();
     }
 
-    /// Every BIOS available for `hw`: the one chosen with File > Open BIOS
-    /// first, then those in the games folders.
+    /// Every BIOS available for `hw`: those opened with File > Open BIOS
+    /// (the one in use first), then those in the games folders.
     pub fn bios_list(&self, hw: Hardware) -> Vec<&BiosFile> {
         let mut list: Vec<&BiosFile> = Vec::new();
-        for b in self.chosen.iter().chain(&self.bios).filter(|b| b.hardware == hw) {
+        for b in self.opened.iter().chain(&self.bios).filter(|b| b.hardware == hw) {
             if !list.iter().any(|o| o.path == b.path) {
                 list.push(b);
             }
@@ -1095,7 +1096,7 @@ mod tests {
         assert_eq!(lib.consoles(), [Hardware::Leapster], "nothing yet: the original Leapster");
         // A Leapster 2 BIOS chosen with File > Open BIOS, none in the folders.
         let file = |hardware, path: &str, name: &str| BiosFile { hardware, path: PathBuf::from(path), name: name.into() };
-        lib.chosen = Some(file(Hardware::Leapster2, "l2.bin", "0.6"));
+        lib.opened = vec![file(Hardware::Leapster2, "l2.bin", "0.6")];
         assert_eq!(lib.consoles(), [Hardware::Leapster2]);
         assert_eq!(lib.selected_console("Leapster"), Hardware::Leapster2);
         assert_eq!(lib.bios_for(Hardware::Leapster2), Some(Path::new("l2.bin")));
@@ -1115,6 +1116,20 @@ mod tests {
         assert_eq!(lib.bios_for(Hardware::Leapster2), Some(Path::new("l2.bin")), "a missing pick is ignored");
         assert_eq!(bios_name("Leapster BaseROM US v2.1 (152-11265)", Hardware::Leapster), "US v2.1 (152-11265)");
         assert_eq!(file(Hardware::Leapster, "x", "US v2.1 (152-11265)").short_name(), "US v2.1");
+    }
+
+    #[test]
+    fn every_bios_opened_stays_listed() {
+        // Two Leapster BIOSes opened one after the other (newest first), and
+        // one in a games folder: all three listed, the newest in use.
+        let mut lib = Library::new(Path::new("."));
+        let file = |path: &str, name: &str| BiosFile { hardware: Hardware::Leapster, path: PathBuf::from(path), name: name.into() };
+        lib.opened = vec![file("uk.bin", "UK"), file("us.bin", "US")];
+        lib.bios.push(file("universal.bin", "Universal"));
+        lib.bios.push(file("us.bin", "US"));
+        let paths: Vec<&Path> = lib.bios_list(Hardware::Leapster).iter().map(|b| b.path.as_path()).collect();
+        assert_eq!(paths, [Path::new("uk.bin"), Path::new("us.bin"), Path::new("universal.bin")]);
+        assert_eq!(lib.bios_for(Hardware::Leapster), Some(Path::new("uk.bin")));
     }
 
     #[test]
