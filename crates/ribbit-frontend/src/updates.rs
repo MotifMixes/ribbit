@@ -217,7 +217,9 @@ fn plain(text: &str) -> String {
         rest = &rest[end + 1..];
     }
     out.push_str(rest);
-    out.replace("**", "").replace("__", "").replace('`', "")
+    // (The app's fonts have no arrow: "File → Open" reads "File > Open",
+    // as in Ribbit's own messages.)
+    out.replace("**", "").replace("__", "").replace('`', "").replace('→', ">")
 }
 
 #[cfg(test)]
@@ -253,6 +255,7 @@ mod tests {
     #[test]
     fn markdown_marks_are_dropped() {
         assert_eq!(plain("**Bold** and `code`, [a link](https://x) end"), "Bold and code, a link end");
+        assert_eq!(plain("File → Open BIOS"), "File > Open BIOS");
         assert_eq!(long_date("2026-10-07"), "7 October 2026");
     }
 }
