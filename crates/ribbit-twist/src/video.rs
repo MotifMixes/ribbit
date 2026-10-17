@@ -109,6 +109,28 @@ fn screen_to_frame(x: u32, y: u32) -> (i32, i32) {
     (FRAME_W as i32 - 1 - y as i32, x as i32)
 }
 
+/// A 12-bit signed coordinate.
+fn sign12(v: u32) -> i32 {
+    ((v & 0xFFF) as i32) << 20 >> 20
+}
+
+/// A text plane's turn and zoom words (+0x348/+0x34C for plane 0,
+/// +0x358/+0x35C for plane 1) as (sine, cosine) times the scale: the System
+/// stores a 4.12 value (0x1000 = 1.0) as its bits 13-2, or, from 2.0 up,
+/// bits 19-8 with bit 12 set (PPU_setTextPlaneRotAngZoomFix 0xCD18). EVIDENCE:
+/// (0, 1.0) for an ordinary plane, (0, -1.0) and (1.0, 0) for portrait
+/// screens (see `draw_text_plane`). Scales other than 1 are UNVERIFIED (none
+/// seen).
+fn plane_matrix(sin_word: u32, cos_word: u32) -> (f32, f32) {
+    let value = |w: u32| {
+        let v = sign12(w) as f32;
+        if w & 0x1000 != 0 { v * 256.0 / 4096.0 } else { v * 4.0 / 4096.0 }
+    };
+    let (s, c) = (value(sin_word), value(cos_word));
+    // Nothing set (planes 2 and 3 have no such words): unturned.
+    if s == 0.0 && c == 0.0 { (0.0, 1.0) } else { (s, c) }
+}
+
 /// A texel: colour (RGB 5:6:5) and alpha (0-255).
 type Texel = (u16, u32);
 
@@ -217,27 +239,54 @@ impl Bus {
             return;
         }
         let attr = self.latch(0xD050_0008 + reg);
+        // The turn and zoom words (the frame update 0xE2A0 copies plane 3's
+        // to 0xA0/0xA4; plane 2 has none).
+        let rz = match reg {
+            0x40 => Some((0x348, 0x34C)),
+            0x58 => Some((0x358, 0x35C)),
+            0x20 => Some((0xA0, 0xA4)),
+            _ => None,
+        };
+        let rz_words = rz.map_or((0, 0), |(a, b)| (self.latch(0xD050_0000 + a), self.latch(0xD050_0000 + b)));
+        self.note_mode(format!(
+            "plane {reg:#04x}: control {control:04x} attr {attr:05x} rot/zoom {:04x} {:04x} offsets {:x} {:x}",
+            rz_words.0,
+            rz_words.1,
+            self.latch(0xD050_0300 + reg),
+            self.latch(0xD050_0304 + reg)
+        ));
         let (map, base) = (self.latch(0xD050_0010 + reg), self.latch(0xD050_0000 + base_reg));
         let (tw, th) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
         let (pw, ph) = plane_size((attr >> 14) & 3 | (attr >> 16 & 1) << 2);
-        let (xpos, ypos) = (self.latch(0xD050_0000 + reg) & 0xFFF, self.latch(0xD050_0004 + reg) & 0xFFF);
+        let (xpos, ypos) = (self.latch(0xD050_0000 + reg), self.latch(0xD050_0004 + reg));
         let depth = attr & 3;
         let nibble = (attr >> 8) & 15;
         let direct = control & 0x80 != 0;
         let bpp = if direct { [16, 16, 32, 16][depth as usize] } else { 2 * (depth + 1) };
-        let pal_base = (nibble << 4) >> bpp << bpp;
+        // The palette: attribute bits 11-8, then bits 23-22 above them
+        // (PPU_setTextPlanePaletteAddr 0xDE84), 16 colours each.
+        let pal_base = ((((attr >> 22) & 3) << 4 | nibble) << 4) >> bpp << bpp;
         let level = (control & 0x300 != 0).then_some(((control >> 10) & 63).min(64));
+        // Where the plane lies: a screen point (x, y - 240), turned and
+        // scaled by the matrix words (`plane_matrix`), plus the position,
+        // is the point of the plane shown there. EVIDENCE: position (0,
+        // 240) unturned for a landscape picture; (319, 0) with a half turn
+        // for DJ Beat Jam's portrait title; (271, 0) with a quarter turn
+        // for the egg's portrait background, which then shows exactly the
+        // tiles its map fills (columns 256-511, rows 0-319).
+        let (m_sin, m_cos) = plane_matrix(rz_words.0, rz_words.1);
+        let (xpos, ypos) = (sign12(xpos) as f32, sign12(ypos) as f32);
         for y in 0..crate::SCREEN_H as u32 {
-            // The plane's lines from y position 240 down (UNVERIFIED for
-            // other positions: only 240 seen).
-            let py = (y + 240).wrapping_sub(ypos) % ph;
-            let row = map + (py / th) * (pw / tw) * 4;
-            let line = if bitmap { self.read_ram32(map + py * 4) } else { 0 };
-            if bitmap && line == 0 {
-                continue;
-            }
             for x in 0..crate::SCREEN_W as u32 {
-                let px = (x + xpos) % pw;
+                let (u, w) = (x as f32 + 0.5, y as f32 + 0.5 - 240.0);
+                let px = (m_cos * u - m_sin * w + xpos).floor() as i64;
+                let py = (m_sin * u + m_cos * w + ypos).floor() as i64;
+                let (px, py) = (px.rem_euclid(pw as i64) as u32, py.rem_euclid(ph as i64) as u32);
+                let row = map + (py / th) * (pw / tw) * 4;
+                let line = if bitmap { self.read_ram32(map + py * 4) } else { 0 };
+                if bitmap && line == 0 {
+                    continue;
+                }
                 let (at, i) = if bitmap {
                     (line, px)
                 } else {
@@ -285,8 +334,22 @@ impl Bus {
         self.peek8(a) | self.peek8(a + 1) << 8 | self.peek8(a + 2) << 16 | self.peek8(a + 3) << 24
     }
 
+    /// Research: notes a drawing mode (`Bus::modes_seen`).
+    fn note_mode(&self, key: String) {
+        let mut m = self.modes_seen.borrow_mut();
+        if m.len() < 500 {
+            m.entry(key).or_insert(self.now);
+        }
+    }
+
     fn draw_sprite(&self, out: &mut [u16], pal: &[u32], ext: u32, half: impl Fn(u32) -> u32) {
         let attr = half(3);
+        // Unusual bits: colour modes 5-8, windows, extended attributes
+        // other than "large".
+        let nib = (attr >> 8) & 15;
+        if (attr & 3 == 3 && matches!(nib, 1 | 3 | 7)) || half(4) & 0x300 != 0 || ext & !EXT_LARGE != 0 {
+            self.note_mode(format!("sprite: attr {attr:04x} h4 {:04x} ext {ext:08x}", half(4) & 0xFF80));
+        }
         // The picture: 16-byte units from the sprite segment (0x88), as the
         // System's sprite routine 0xF6CC stores it (address minus segment,
         // shifted right 4; bits 22-16 into halfword 4).
@@ -311,7 +374,11 @@ impl Bus {
             Mode::Argb4444 => 16,
             Mode::Argb8888 => 32,
         };
-        let pal_base = (((attr >> 8) & 15) << 4) >> bpp << bpp;
+        // The palette, 64 of 16 colours: attribute bits 11-8, then halfword
+        // 4 bit 7, then attribute bit 15 (PPU_setSpritePaletteAddr
+        // 0x107BC); colours from 16 x that, aligned to the depth.
+        let palette = ((attr >> 15) & 1) << 5 | ((half(4) >> 7) & 1) << 4 | nibble;
+        let pal_base = (palette << 4) >> bpp << bpp;
         // Blending (attribute bit 14, PPU_enableSpriteBlend 0x10088): the
         // level in halfword 4 bits 15-10, 0-63 (PPU_setSpriteBlendLevel
         // 0x100E4; with 0x1FC bit 13 on only bits 13-10, a quarter of it,
@@ -389,8 +456,10 @@ impl Bus {
             return;
         }
         // Each screen pixel takes the texel it falls on, turned back and
-        // shrunk. Turned anticlockwise as seen (UNVERIFIED).
-        let (sin, cos) = (rot as f32 * std::f32::consts::TAU / 64.0).sin_cos();
+        // shrunk. Turned clockwise in the frame's coordinates (EVIDENCE:
+        // Jumpin' Gertie's portrait title is 64-pixel tiles each turned
+        // by 48, which piece together only this way).
+        let (sin, cos) = (-(rot as f32) * std::f32::consts::TAU / 64.0).sin_cos();
         let reach = ((w * w + h * h) as f32).sqrt() * scale / 2.0 + 1.0;
         let (fx, fy) = (cx as f32, cy as f32);
         for y in (fy - reach) as i32..=(fy + reach) as i32 {
@@ -545,5 +614,15 @@ mod tests {
         assert_eq!((at(113, 247), at(114, 248)), (0, 0), "the transparent texel, 2 x 2");
         assert_eq!((at(115, 247), at(128, 262)), (0xF800, 0xF800));
         assert_eq!((at(112, 250), at(129, 250), at(120, 263)), (0, 0, 0));
+    }
+
+    #[test]
+    fn plane_turn_words_decode_as_the_system_stores_them() {
+        assert_eq!(plane_matrix(0, 0x400), (0.0, 1.0));
+        assert_eq!(plane_matrix(0, 0xC00), (0.0, -1.0));
+        assert_eq!(plane_matrix(0x400, 0), (1.0, 0.0));
+        // From 2.0 up: bits 19-8 of the value with bit 12 set.
+        assert_eq!(plane_matrix(0, 0x1000 | 0x20), (0.0, 2.0));
+        assert_eq!(plane_matrix(0, 0), (0.0, 1.0), "no words: unturned");
     }
 }

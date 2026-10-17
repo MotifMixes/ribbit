@@ -362,6 +362,15 @@ fn main() {
         }
     }
     println!("\n== audio: {} samples written to the DAC", t.bus.audio.len());
+    let modes = t.bus.modes_seen.borrow();
+    if !modes.is_empty() {
+        println!("== drawing modes seen (first time):");
+        let mut v: Vec<_> = modes.iter().collect();
+        v.sort_by_key(|e| *e.1);
+        for (k, &at) in v {
+            println!("  {:7.2} s  {k}", at as f64 / machine::CLOCK as f64);
+        }
+    }
     println!("== video decoder: {} frames decoded, {} failed", t.bus.mpeg_frames.0, t.bus.mpeg_frames.1);
     println!(
         "== video: {} frames drawn by the video chip, {} sent to the panel",

@@ -146,6 +146,11 @@ pub struct Bus {
     pub frames_drawn: u64,
     /// Research: leave the video chip's frames undrawn (to time the rest).
     pub skip_drawing: bool,
+    /// Research: the drawing modes met (`video`), each with when first
+    /// seen: text planes as (register base, control, attributes, the
+    /// rotation/zoom words), sprites as (attributes, halfword 4's top
+    /// bits, extended attributes) with bits that `video` does not decode.
+    pub modes_seen: std::cell::RefCell<std::collections::BTreeMap<String, u64>>,
     /// The panel controller's registers, as set through its command port.
     pub panel: Panel,
     /// The geometry the last frame was streamed with.
@@ -428,6 +433,7 @@ impl Bus {
             frame: Vec::new(),
             frames_drawn: 0,
             skip_drawing: false,
+            modes_seen: Default::default(),
             panel: Panel::default(),
             panel_shown: Panel::default(),
             keys: 0,
