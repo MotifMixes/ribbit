@@ -750,12 +750,12 @@ impl Gpu {
         let Some(surface) = &self.surface else {
             return Ok(());
         };
-        let output = match surface.get_current_texture() {
-            Cst::Success(t) => t,
-            Cst::Suboptimal(t) => {
-                surface.configure(&self.device, &self.config);
-                t
-            }
+        // Suboptimal: this frame is still shown, and the surface is set up
+        // again once it is presented (wgpu refuses while the frame is held:
+        // a validation error that ended Ribbit on some OpenGL drivers).
+        let (output, suboptimal) = match surface.get_current_texture() {
+            Cst::Success(t) => (t, false),
+            Cst::Suboptimal(t) => (t, true),
             Cst::Outdated => {
                 surface.configure(&self.device, &self.config);
                 return Ok(());
@@ -865,6 +865,9 @@ impl Gpu {
         }
         self.queue.submit(extra.into_iter().chain([encoder.finish()]));
         self.queue.present(output);
+        if suboptimal {
+            surface.configure(&self.device, &self.config);
+        }
         for id in &textures.free {
             self.egui.free_texture(id);
         }
