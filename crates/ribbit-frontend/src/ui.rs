@@ -968,11 +968,19 @@ fn status_bar(ui: &mut egui::Ui, info: &Info, message: Option<&str>) {
 }
 
 fn welcome(ui: &mut egui::Ui, settings: &Settings, info: &Info, actions: &mut Vec<Action>) {
-    ui.vertical_centered(|ui| {
-        ui.add_space((ui.available_height() * 0.18).max(12.0));
+    // Scrolls when it doesn't fit (a phone held sideways, a small window).
+    let gap = (ui.available_height() * 0.18).max(12.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| ui.vertical_centered(|ui| {
+        ui.add_space(if cfg!(target_os = "android") { 12.0 } else { gap });
         ui.heading(egui::RichText::new("🐸 Ribbit").size(34.0));
         ui.label("An emulator for LeapFrog's handhelds and TV consoles");
         ui.add_space(18.0);
+        // On a phone the screen is short: the AI note comes first, before
+        // the BIOS and games, so it is read before anything is loaded.
+        if cfg!(target_os = "android") {
+            ai_notice(ui);
+            ui.add_space(18.0);
+        }
         match &info.bios_name {
             Some(name) => ui.label(format!("BIOS: {name}")),
             None => ui.label("Step 1: choose the BIOS dumped from your own Leapster."),
@@ -999,9 +1007,12 @@ fn welcome(ui: &mut egui::Ui, settings: &Settings, info: &Info, actions: &mut Ve
         ui.add_space(14.0);
         ui.label(egui::RichText::new("You can also drop a BIOS or cartridge file onto this window.").weak());
         ui.label(egui::RichText::new("No firmware or games are included: use dumps of hardware you own.").weak());
-        ui.add_space(22.0);
-        ai_notice(ui);
-    });
+        if !cfg!(target_os = "android") {
+            ui.add_space(22.0);
+            ai_notice(ui);
+        }
+        ui.add_space(12.0);
+    }));
 }
 
 /// The README's "This project was made with AI", shortened, on the first
