@@ -632,6 +632,7 @@ impl App {
             &self.twist_known(),
             self.settings.twist_content.clone(),
             self.audio.as_ref(),
+            Some(self.save_dir().join("rockit-twist.emmc")),
         );
         let running = session.machine.is_some();
         self.twist = Some(session);

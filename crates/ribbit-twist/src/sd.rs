@@ -45,8 +45,10 @@ pub struct Card {
     /// A write in progress: the sector, the bytes so far, and whether more
     /// sectors follow (CMD25).
     writing: Option<(u64, Vec<u8>, bool)>,
-    /// Sectors read and commands received (research log).
+    /// Sectors read and commands received (research log, kept only with
+    /// `logging` on: it grows with every command).
     pub log: Vec<String>,
+    pub logging: bool,
     /// The machine's time, set by the host before each command (for the log).
     pub now: u64,
 }
@@ -67,6 +69,7 @@ impl Card {
             reading: None,
             writing: None,
             log: Vec::new(),
+            logging: false,
             now: 0,
         }
     }
@@ -96,6 +99,14 @@ impl Card {
             out[at..at + SECTOR].copy_from_slice(&data[..]);
         }
         out
+    }
+
+    /// Every sector written since power-on (for saving what the console
+    /// stored), sorted.
+    pub fn written(&self) -> Vec<(u64, [u8; SECTOR])> {
+        let mut v: Vec<_> = self.written.iter().map(|(&n, d)| (n, **d)).collect();
+        v.sort_by_key(|e| e.0);
+        v
     }
 
     pub fn write_sector(&mut self, n: u64, data: &[u8; SECTOR]) {
@@ -144,7 +155,9 @@ impl Card {
 
     /// Runs command `index` with `arg`.
     pub fn command(&mut self, index: u32, arg: u32) -> Response {
-        self.log.push(format!("CMD{index} {arg:08X} ({:?}) t={}", self.state, self.now));
+        if self.logging {
+            self.log.push(format!("CMD{index} {arg:08X} ({:?}) t={}", self.state, self.now));
+        }
         match index {
             0 => {
                 self.state = State::Idle;
@@ -189,7 +202,9 @@ impl Card {
                 Response::Short(self.status())
             }
             24 | 25 => {
-                self.log.push(format!("  write sector {arg}"));
+                if self.logging {
+                    self.log.push(format!("  write sector {arg}"));
+                }
                 self.writing = Some((arg as u64, Vec::with_capacity(SECTOR), index == 25));
                 Response::Short(self.status())
             }
@@ -198,7 +213,9 @@ impl Card {
             17 | 18 => {
                 let n = arg as u64;
                 let s = self.sector(n);
-                self.log.push(format!("  read sector {n}"));
+                if self.logging {
+                    self.log.push(format!("  read sector {n}"));
+                }
                 self.queue(&s);
                 self.reading = (index == 18).then_some(n + 1);
                 Response::Short(self.status())
@@ -224,7 +241,9 @@ impl Card {
         self.write_sector(sector, &data);
         self.writing = multi.then(|| (sector + 1, Vec::with_capacity(SECTOR), true));
         if multi {
-            self.log.push(format!("  write sector {}", sector + 1));
+            if self.logging {
+                self.log.push(format!("  write sector {}", sector + 1));
+            }
         }
         true
     }
@@ -234,7 +253,9 @@ impl Card {
     pub fn next_block(&mut self) {
         if let Some(n) = self.reading {
             let s = self.sector(n);
-            self.log.push(format!("  read sector {n}"));
+            if self.logging {
+                self.log.push(format!("  read sector {n}"));
+            }
             self.queue(&s);
             self.reading = Some(n + 1);
         }

@@ -324,7 +324,9 @@ pub struct Machine {
 
 impl Machine {
     /// `content`: a folder written onto the storage (the volume's root).
-    pub fn start(packages: SystemPackages, content: Option<PathBuf>, sink: Option<AudioSink>) -> Self {
+    /// `save`: the file holding what the console stored (profiles,
+    /// progress), loaded at power-on and written as it changes.
+    pub fn start(packages: SystemPackages, content: Option<PathBuf>, sink: Option<AudioSink>, save: Option<PathBuf>) -> Self {
         let shared = Arc::new(Shared {
             screen: Mutex::new(vec![0; ribbit_twist::SCREEN_W * ribbit_twist::SCREEN_H]),
             running: AtomicBool::new(true),
@@ -341,7 +343,7 @@ impl Machine {
         let thread = std::thread::Builder::new()
             .name("rockit-twist".into())
             .spawn(move || {
-                if let Err(e) = Self::run(&packages, content.as_deref(), &s) {
+                if let Err(e) = Self::run(&packages, content.as_deref(), save.as_deref(), &s) {
                     *s.error.lock().unwrap() = Some(format!("{e:#}"));
                 }
             })
@@ -349,7 +351,7 @@ impl Machine {
         Self { shared, thread, speed_from: Mutex::new((Instant::now(), 0)), speed_shown: AtomicU64::new(0) }
     }
 
-    fn run(p: &SystemPackages, content: Option<&Path>, s: &Shared) -> anyhow::Result<()> {
+    fn run(p: &SystemPackages, content: Option<&Path>, save: Option<&Path>, s: &Shared) -> anyhow::Result<()> {
         use ribbit_twist::{image, machine};
         let boot = package_file(&p.bootloader, None)?;
         let base = package_file(&p.base, None)?;
@@ -362,7 +364,17 @@ impl Machine {
             ribbit_twist::fat::add_host_folder(&mut volume, dir)
                 .map_err(|e| anyhow::anyhow!("adding the content folder {}: {e}", dir.display()))?;
         }
+        let key = volume_key(&volume);
         let mut t = machine::Twist::boot(image::code(&boot), image::code(&base), &test, volume);
+        // What the console stored last time, if the storage is built the
+        // same way (the same packages and content).
+        let mut saved = save.and_then(|p| load_save(p, key)).unwrap_or_default();
+        if let Some(card) = &mut t.bus.emmc {
+            for (n, d) in &saved {
+                card.write_sector(*n, d);
+            }
+        }
+        let mut save_check = Instant::now();
         let slice = machine::CLOCK / 120;
         let mut pixels = vec![0u32; ribbit_twist::SCREEN_W * ribbit_twist::SCREEN_H];
         // The console's time follows the clock from `origin` (moved on
@@ -411,7 +423,12 @@ impl Machine {
             if let Some(sink) = s.sink.lock().unwrap().as_mut() {
                 sink.push_32k(&mono, gain);
             }
+            if save_check.elapsed() > Duration::from_secs(30) {
+                save_check = Instant::now();
+                store_save(save, key, &t, &mut saved);
+            }
         }
+        store_save(save, key, &t, &mut saved);
         Ok(())
     }
 
@@ -473,6 +490,66 @@ impl Drop for Machine {
     }
 }
 
+/// The console's stored sectors: "RTWS", the storage's key (`volume_key`),
+/// the count, then each sector's number and 512 bytes.
+fn load_save(path: &Path, key: u64) -> Option<Vec<(u64, [u8; 512])>> {
+    let d = std::fs::read(path).ok()?;
+    if d.get(..4)? != b"RTWS" || u64::from_le_bytes(d.get(4..12)?.try_into().ok()?) != key {
+        return None;
+    }
+    let n = u32::from_le_bytes(d.get(12..16)?.try_into().ok()?) as usize;
+    (0..n)
+        .map(|i| {
+            let at = 16 + i * 520;
+            let num = u64::from_le_bytes(d.get(at..at + 8)?.try_into().ok()?);
+            Some((num, d.get(at + 8..at + 520)?.try_into().ok()?))
+        })
+        .collect()
+}
+
+/// Writes the save when the console has stored anything new.
+fn store_save(path: Option<&Path>, key: u64, t: &ribbit_twist::machine::Twist, saved: &mut Vec<(u64, [u8; 512])>) {
+    let (Some(path), Some(card)) = (path, &t.bus.emmc) else {
+        return;
+    };
+    let now = card.written();
+    if now == *saved {
+        return;
+    }
+    let mut d = Vec::with_capacity(16 + now.len() * 520);
+    d.extend_from_slice(b"RTWS");
+    d.extend_from_slice(&key.to_le_bytes());
+    d.extend_from_slice(&(now.len() as u32).to_le_bytes());
+    for (n, s) in &now {
+        d.extend_from_slice(&n.to_le_bytes());
+        d.extend_from_slice(s);
+    }
+    let tmp = path.with_extension("tmp");
+    let ok = path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok())
+        && std::fs::write(&tmp, &d).is_ok()
+        && std::fs::rename(&tmp, path).is_ok();
+    if ok {
+        *saved = now;
+    }
+}
+
+/// A key for the storage as built (its size, and samples through it): a
+/// save applies only to storage laid out the same.
+fn volume_key(v: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ v.len() as u64;
+    let mut eat = |b: &[u8]| {
+        for &x in b {
+            h = (h ^ x as u64).wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    // The start (boot area, FATs, root folder), then every MB.
+    eat(&v[..v.len().min(1 << 22)]);
+    for at in (0..v.len()).step_by(1 << 20) {
+        eat(&v[at..(at + 512).min(v.len())]);
+    }
+    h
+}
+
 /// A RockIt Twist session: the controls, and the console running when its
 /// system packages were found.
 pub struct TwistSession {
@@ -492,14 +569,22 @@ pub struct TwistSession {
     pub machine: Option<Machine>,
     /// A folder written onto the storage at power-on (`Settings::twist_content`).
     pub content: Option<PathBuf>,
+    /// Where the console's stored data is kept.
+    save: Option<PathBuf>,
 }
 
 impl TwistSession {
     /// A session; `known` lists the library's RockIt Twist files, among
     /// which (and next to `package`) the system packages are looked for.
-    pub fn start(package: Option<PathBuf>, known: &[PathBuf], content: Option<PathBuf>, audio: Option<&AudioOut>) -> Self {
+    pub fn start(
+        package: Option<PathBuf>,
+        known: &[PathBuf],
+        content: Option<PathBuf>,
+        audio: Option<&AudioOut>,
+        save: Option<PathBuf>,
+    ) -> Self {
         let system = SystemPackages::find(package.as_deref(), known);
-        let machine = system.clone().map(|s| Machine::start(s, content.clone(), audio.map(|a| a.sink())));
+        let machine = system.clone().map(|s| Machine::start(s, content.clone(), audio.map(|a| a.sink()), save.clone()));
         let kind = package.as_deref().and_then(|p| {
             let name = p.file_name()?.to_string_lossy().into_owned();
             package::kind(&name, &head(p)?)
@@ -519,6 +604,7 @@ impl TwistSession {
             system,
             machine,
             content,
+            save,
         }
     }
 
@@ -527,7 +613,8 @@ impl TwistSession {
     /// modes (the factory test, see docs/rockit-twist.md).
     pub fn restart(&mut self, audio: Option<&AudioOut>) {
         self.machine = None;
-        self.machine = self.system.clone().map(|s| Machine::start(s, self.content.clone(), audio.map(|a| a.sink())));
+        self.machine =
+            self.system.clone().map(|s| Machine::start(s, self.content.clone(), audio.map(|a| a.sink()), self.save.clone()));
         if let Some(m) = &self.machine {
             m.set_keys(self.keys());
         }
@@ -871,6 +958,23 @@ pub fn describe_package(path: &Path) -> Option<Game> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_console_storage_is_saved_and_only_restored_onto_the_same_layout() {
+        let path = std::env::temp_dir().join(format!("ribbit-twist-save-{}.emmc", std::process::id()));
+        let mut t = ribbit_twist::machine::Twist::new(&[]);
+        let mut card = ribbit_twist::sd::Card::emmc(vec![0; 4096], 64);
+        card.write_sector(5, &[7; 512]);
+        t.bus.emmc = Some(card);
+        let mut saved = Vec::new();
+        store_save(Some(&path), 42, &t, &mut saved);
+        assert_eq!(saved.len(), 1);
+        let back = load_save(&path, 42).unwrap();
+        assert_eq!((back[0].0, back[0].1[0]), (5, 7));
+        assert!(load_save(&path, 43).is_none(), "another layout: not applied");
+        std::fs::remove_file(&path).ok();
+        assert_ne!(volume_key(&[0; 4096]), volume_key(&[0; 8192]));
+    }
+
 
     #[test]
     fn installed_games_are_listed_from_the_content_folder() {
@@ -932,7 +1036,7 @@ Version=\"1.0.3.16\"
 
     #[test]
     fn keys_press_and_release_and_turn() {
-        let mut s = TwistSession::start(None, &[], None, None);
+        let mut s = TwistSession::start(None, &[], None, None, None);
         assert!(s.machine.is_none(), "no system packages: controls only");
         assert!(s.key(KeyCode::KeyE, true));
         assert!(s.controls.pressed(Button::SwitchRight));

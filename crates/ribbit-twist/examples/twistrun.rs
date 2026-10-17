@@ -88,6 +88,9 @@ fn main() {
             );
         }
         t.bus.emmc = Some(ribbit_twist::sd::Card::emmc(image, 7_634_944));
+        if let Some(c) = &mut t.bus.emmc {
+            c.logging = true;
+        }
     }
     t.bus.skip_drawing = std::env::var("RIBBIT_NO_DRAW").is_ok();
     // RIBBIT_RAM_WATCH=lo-hi (hex): writes into that RAM range, by pc.

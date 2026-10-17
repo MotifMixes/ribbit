@@ -523,7 +523,7 @@ impl Bus {
 
     fn io_write(&mut self, a: u32, v: u32, mask: u32) {
         let w = a & !3;
-        if w == 0xC006_0000 {
+        if w == 0xC006_0000 && self.uart.len() < 1 << 20 {
             self.uart.push(v as u8);
         }
         let shift = 8 * (a & 3);
