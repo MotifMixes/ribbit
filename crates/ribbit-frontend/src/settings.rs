@@ -111,6 +111,9 @@ pub struct Settings {
     pub twist_keys: BTreeMap<String, String>,
     /// Ask GitHub for a newer release when Ribbit starts.
     pub check_for_updates: bool,
+    /// The BIOS picked in the library for each console other than the
+    /// original Leapster (console name -> file; the Leapster's is `bios`).
+    pub bios_picked: BTreeMap<String, PathBuf>,
     /// The Ribbit version that ran last: a different one backs the saves up
     /// first (`backup::before_update`).
     pub last_version: String,
@@ -163,6 +166,7 @@ impl Default for Settings {
             twist_usb: false,
             twist_keys: BTreeMap::new(),
             check_for_updates: true,
+            bios_picked: BTreeMap::new(),
             last_version: String::new(),
             touch_controls: true,
             skipped_update: String::new(),

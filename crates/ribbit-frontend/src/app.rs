@@ -31,6 +31,9 @@ const APP_NAME: &str = concat!("Ribbit v", env!("CARGO_PKG_VERSION"));
 /// Frames spent sizing the window around the screen (the first frames can
 /// still be settling the menu bar's height).
 const FIT_TRIES: u8 = 6;
+/// The smallest window: wide enough for the whole menu bar (and an update
+/// button) at any display scaling, so logical, not physical, pixels.
+const MIN_WINDOW: winit::dpi::LogicalSize<f64> = winit::dpi::LogicalSize::new(460.0, 360.0);
 const REWIND_KEEP: usize = 60;
 
 /// How Ribbit was started (command line / config file overrides).
@@ -425,7 +428,11 @@ impl App {
     fn rescan_library(&mut self) {
         let art = self.settings.bios.clone().map(|bios| ArtSource { bios });
         self.library.set_chosen_bios(self.settings.bios.as_deref());
-        self.library.scan(&self.settings.rom_folders, &self.settings.recent_carts, self.settings.twist_content.clone(), art);
+        self.library.set_picked_bios(&self.settings.bios_picked);
+        // Recent games, and the BIOS chosen with File > Open BIOS (its
+        // built-in games are listed wherever it is).
+        let extra: Vec<PathBuf> = self.settings.recent_carts.iter().chain(&self.settings.bios).cloned().collect();
+        self.library.scan(&self.settings.rom_folders, &extra, self.settings.twist_content.clone(), art);
         // Outline fonts for HD device text, from the same folders.
         crate::device_fonts::load(self.settings.rom_folders.clone());
     }
@@ -471,9 +478,18 @@ impl App {
     /// Plays a game on the console chosen in the library's console menu
     /// (unless a BIOS was given on the command line).
     fn open_cart(&mut self, path: PathBuf) {
-        // A console's built-in games (the Zippity's NAND): that console.
-        let listed = self.library.games.iter().any(|g| g.path == path && g.tags.contains(&"Internal"));
-        if listed || crate::library::is_internal(&path) {
+        // A console's built-in games: the Zippity's NAND, or a Leapster
+        // BIOS's own games (that BIOS with no cartridge in).
+        let internal = self.library.games.iter().find(|g| g.path == path && g.tags.contains(&"Internal"));
+        if internal.is_some_and(|g| matches!(g.family, crate::library::Family::Leapster | crate::library::Family::Leapster2)) {
+            self.next_bios = Some(path);
+            if let Err(e) = self.boot(None) {
+                let (title, explain) = explain_load_error(&e);
+                self.ui.problem(title, explain, format!("{e:#}"));
+            }
+            return;
+        }
+        if internal.is_some() || crate::library::is_internal(&path) {
             return self.start_zippity(path.clone(), path);
         }
         // A Zippity cartridge runs only on a Zippity: its NAND dump, whatever
@@ -971,6 +987,7 @@ impl App {
                 self.rescan_library();
             }
             Action::AskDeleteSave(path, title) => self.ui.ask_delete_save(path, title),
+            Action::PickBios(hw, path) => self.pick_bios(hw, path),
             Action::DeleteSaveData(path) => self.delete_save_data(&path),
             Action::CleanZippityDump(path) => {
                 self.end_session();
@@ -1192,6 +1209,9 @@ impl App {
         let most = (room_w / unit.0).min(room_h / unit.1).max(1);
         let times = if scale == 0 { most } else { scale.min(most) };
         let want = PhysicalSize::new(unit.0 * times + chrome_w, unit.1 * times + chrome_h);
+        // Never smaller than the window's minimum (the menu bar must fit).
+        let min: PhysicalSize<u32> = MIN_WINDOW.to_physical(window.scale_factor());
+        let want = PhysicalSize::new(want.width.max(min.width), want.height.max(min.height));
         tracing::debug!(target: "ribbit::window", ?inner, ?area, chrome_w, chrome_h, times, "fitting the window");
         if want == inner {
             return true;
@@ -1209,6 +1229,19 @@ impl App {
     fn window_size(scale: u32) -> PhysicalSize<u32> {
         // Room for the menu and status bars.
         PhysicalSize::new(160 * scale, 160 * scale + 56)
+    }
+
+    /// The library's BIOS picker: `path` becomes the BIOS `hw` plays on. For
+    /// the original Leapster that is the File > Open BIOS choice itself.
+    fn pick_bios(&mut self, hw: ribbit_memory::known::Hardware, path: PathBuf) {
+        if hw == ribbit_memory::known::Hardware::Leapster {
+            return self.set_bios(path);
+        }
+        let name = self.library.bios_list(hw).into_iter().find(|b| b.path == path).map(|b| b.short_name().to_string());
+        self.settings.bios_picked.insert(hw.name().to_string(), path);
+        self.save_settings();
+        self.library.set_picked_bios(&self.settings.bios_picked);
+        self.ui.toast(format!("{} BIOS: {}", hw.name(), name.unwrap_or_default()));
     }
 
     /// Deletes a Leapster game's save data: its cartridge save and its save
@@ -1451,6 +1484,8 @@ impl App {
             if n > log.1 {
                 tracing::info!(target: "ribbit::audio", gaps = n - log.1, speed = speed_percent, "audio ran dry (last 5 s)");
             }
+            let (queued, playing) = a.queue_state();
+            tracing::debug!(target: "ribbit::audio", queued, playing, "audio queue");
             *log = (now, n);
         }
     }
@@ -2123,7 +2158,7 @@ impl ApplicationHandler for App {
                 self.settings.window_scale,
                 event_loop.primary_monitor().map(|m| m.size()),
             )))
-            .with_min_inner_size(PhysicalSize::new(320, 240))
+            .with_min_inner_size(MIN_WINDOW)
             .with_window_icon(crate::icon::window_icon());
         #[cfg(windows)]
         let attrs = {

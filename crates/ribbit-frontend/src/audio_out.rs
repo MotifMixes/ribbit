@@ -205,6 +205,12 @@ impl AudioOut {
         self.queue.lock().unwrap().underruns
     }
 
+    /// Samples waiting and whether the device is playing them (for the log).
+    pub fn queue_state(&self) -> (usize, bool) {
+        let q = self.queue.lock().unwrap();
+        (q.samples.len(), q.playing)
+    }
+
     /// Opens the default output device; None (with a log line) if there is
     /// no usable device, in which case the emulator simply runs silently.
     pub fn open() -> Option<Self> {

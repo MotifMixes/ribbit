@@ -41,6 +41,8 @@ pub enum Action {
     RescanLibrary,
     /// Forget a game's art and make it again.
     RemakeArt(PathBuf),
+    /// The library's BIOS picker: play this console on this BIOS.
+    PickBios(ribbit_memory::known::Hardware, PathBuf),
     /// Ask before deleting a game's save data (path, title).
     AskDeleteSave(PathBuf, String),
     /// Delete a Leapster game's save data (moved into the backups folder).
@@ -144,7 +146,7 @@ pub struct LibraryView {
     pub search: String,
 }
 
-const TOAST_TIME: Duration = Duration::from_millis(2500);
+const TOAST_TIME: Duration = Duration::from_millis(4000);
 
 impl UiState {
     pub fn new() -> Self {
@@ -197,7 +199,10 @@ pub fn draw(
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, st, settings, info, actions));
     }
     if settings.show_status_bar && !info.fullscreen {
-        egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, info));
+        // The newest message shows in the status bar (nothing to cover).
+        st.toasts.retain(|(_, t)| t.elapsed() < TOAST_TIME);
+        let message = st.toasts.last().map(|(m, _)| m.clone());
+        egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, info, message.as_deref()));
     }
     let was_running = std::mem::replace(&mut st.was_running, info.running);
     let mut area = egui::Rect::NOTHING;
@@ -238,7 +243,10 @@ pub fn draw(
             Pick::TwistZip => Action::ImportTwistZip(path),
         });
     }
-    toasts(&ctx, st);
+    // Over the screen only when there is no status bar to show them in.
+    if !settings.show_status_bar || info.fullscreen {
+        toasts(&ctx, st);
+    }
     area
 }
 
@@ -886,8 +894,15 @@ fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings
     st.show_updates = open && !close;
 }
 
-fn status_bar(ui: &mut egui::Ui, info: &Info) {
+fn status_bar(ui: &mut egui::Ui, info: &Info, message: Option<&str>) {
     ui.horizontal(|ui| {
+        if let Some(m) = message {
+            // A message (BIOS chosen, save deleted...) in place of the
+            // status text while it shows.
+            ui.label(egui::RichText::new(m).color(ACCENT).strong());
+            ui.ctx().request_repaint();
+            return;
+        }
         ui.label(if info.running { info.title.as_str() } else { "No game running" });
         if info.experimental_touch && info.running {
             ui.label(egui::RichText::new("· touch: experimental").weak());
@@ -1109,6 +1124,9 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
             // Zippity and RockIt Twist games play on their own console: no
             // choice to make on their pages.
             if !matches!(tab, Some(Family::Zippity | Family::RockItTwist)) {
+                // (Right to left: the BIOS button shows to the right of the
+                // console menu.)
+                bios_picker(ui, settings, library, actions);
                 console_picker(ui, settings, library, tab, actions);
             }
             // The Leapster 2 chosen: its own system (main menu, drawing,
@@ -1161,6 +1179,42 @@ fn console_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
             .response
             .on_hover_text("The console your games play on")
             .on_disabled_hover_text(hint);
+    });
+}
+
+/// Which BIOS the chosen console plays on, when there is more than one
+/// (US, UK and Universal Leapster BaseROMs, the Leapster 2's 0.6, m9, B5...):
+/// every one found in the games folders or opened with File > Open BIOS.
+fn bios_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, actions: &mut Vec<Action>) {
+    let console = library.selected_console(&settings.library_console);
+    let list = library.bios_list(console);
+    let Some(current) = library.bios_file(console) else {
+        return;
+    };
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 32.0;
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+        egui::ComboBox::from_id_salt("library bios")
+            .selected_text(format!("💾  {}", current.short_name()))
+            .show_ui(ui, |ui| {
+                for b in &list {
+                    let file = b.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let label = egui::RichText::new(&b.name);
+                    if ui
+                        .selectable_label(b.path == current.path, label)
+                        .on_hover_text(format!("{file}\n{}", b.path.display()))
+                        .clicked()
+                    {
+                        actions.push(Action::PickBios(console, b.path.clone()));
+                    }
+                }
+                ui.separator();
+                if ui.button("Open another BIOS…").clicked() {
+                    actions.push(Action::Pick(Pick::Bios));
+                }
+            })
+            .response
+            .on_hover_text(format!("The {} BIOS your games play on", console.name()));
     });
 }
 
@@ -1890,15 +1944,26 @@ fn toasts(ctx: &egui::Context, st: &mut UiState) {
     if st.toasts.is_empty() {
         return;
     }
-    egui::Area::new("toasts".into()).anchor(egui::Align2::RIGHT_TOP, [-12.0, 40.0]).interactable(false).show(
-        ctx,
-        |ui| {
+    // Bottom centre, above the status bar: clear of the menus, the library's
+    // header and the game's own text. Solid, so nothing shows through.
+    egui::Area::new("toasts".into())
+        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -44.0])
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
             for (text, _) in &st.toasts {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(text);
-                });
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgb(28, 32, 30))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(46, 170, 82, 120)))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(14, 9))
+                    .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: egui::Color32::from_black_alpha(120) })
+                    .show(ui, |ui| {
+                        ui.set_max_width(560.0);
+                        ui.add(egui::Label::new(egui::RichText::new(text).color(egui::Color32::from_gray(235))).wrap());
+                    });
             }
-        },
-    );
+        });
     ctx.request_repaint();
 }

@@ -230,19 +230,45 @@ pub struct ArtSource {
 
 enum Msg {
     Game(Game),
-    Bios(Hardware, PathBuf),
+    Bios(BiosFile),
     Art(String, Option<egui::ColorImage>),
     Scanned,
     Done,
 }
 
+/// A BIOS (system image) Ribbit can use.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BiosFile {
+    pub hardware: Hardware,
+    pub path: PathBuf,
+    /// Which dump it is ("US v2.1 (152-11265)"; the file name when unknown).
+    pub name: String,
+}
+
+impl BiosFile {
+    /// The name without its part numbers ("US v2.1"), for buttons.
+    pub fn short_name(&self) -> &str {
+        self.name.split(" (").next().unwrap_or(&self.name)
+    }
+}
+
+/// A known dump's name without the console and "BaseROM" in front:
+/// "Leapster BaseROM US v2.1 (152-11265)" -> "US v2.1 (152-11265)".
+fn bios_name(full: &str, hw: Hardware) -> String {
+    let rest = full.strip_prefix(hw.name()).unwrap_or(full).trim_start();
+    rest.strip_prefix("BaseROM").unwrap_or(rest).trim_start().to_string()
+}
+
 pub struct Library {
     pub games: Vec<Game>,
-    /// BIOS (system) images found in the games folders, per console.
-    pub bios: Vec<(Hardware, PathBuf)>,
-    /// The BIOS chosen with File > Open BIOS, and its console (an unknown
-    /// dump counts as an original Leapster's).
-    chosen: Option<(Hardware, PathBuf)>,
+    /// BIOS (system) images found in the games folders, every one of them.
+    pub bios: Vec<BiosFile>,
+    /// The BIOS chosen with File > Open BIOS (an unknown dump counts as an
+    /// original Leapster's).
+    chosen: Option<BiosFile>,
+    /// The BIOS picked for each console (console name -> file), from the
+    /// settings.
+    picked: std::collections::BTreeMap<String, PathBuf>,
     pub scanning: bool,
     pub making_art: bool,
     art_dir: PathBuf,
@@ -258,6 +284,7 @@ impl Library {
             games: Vec::new(),
             bios: Vec::new(),
             chosen: None,
+            picked: Default::default(),
             scanning: false,
             making_art: false,
             art_dir: data_dir.join("art"),
@@ -298,9 +325,9 @@ impl Library {
                     let at = list.partition_point(|o| o.title.to_lowercase() <= g.title.to_lowercase());
                     list.insert(at, g);
                 }
-                Msg::Bios(hw, path) => {
-                    if !self.bios.iter().any(|(h, _)| *h == hw) {
-                        self.bios.push((hw, path));
+                Msg::Bios(b) => {
+                    if !self.bios.iter().any(|o| o.path == b.path) {
+                        self.bios.push(b);
                     }
                 }
                 Msg::Art(key, image) => {
@@ -338,15 +365,45 @@ impl Library {
     /// console can be played on like one whose BIOS is in a games folder.
     pub fn set_chosen_bios(&mut self, bios: Option<&Path>) {
         self.chosen = bios.map(|p| {
-            let hw = ribbit_core::load_firmware(p).ok().and_then(|f| f.known().map(|k| k.hardware));
-            (hw.unwrap_or(Hardware::Leapster), p.to_path_buf())
+            let known = ribbit_core::load_firmware(p).ok().and_then(|f| f.known().copied());
+            let hardware = known.map_or(Hardware::Leapster, |k| k.hardware);
+            let name = known.map_or_else(
+                || p.file_stem().map_or_else(|| "Unknown dump".to_string(), |n| n.to_string_lossy().into_owned()),
+                |k| bios_name(k.name, k.hardware),
+            );
+            BiosFile { hardware, path: p.to_path_buf(), name }
         });
     }
 
-    /// A BIOS for `hw`: one found in the games folders, else the one chosen
-    /// with File > Open BIOS when it is that console's.
+    /// Notes the BIOS picked for each console (console name -> file).
+    pub fn set_picked_bios(&mut self, picked: &std::collections::BTreeMap<String, PathBuf>) {
+        self.picked = picked.clone();
+    }
+
+    /// Every BIOS available for `hw`: the one chosen with File > Open BIOS
+    /// first, then those in the games folders.
+    pub fn bios_list(&self, hw: Hardware) -> Vec<&BiosFile> {
+        let mut list: Vec<&BiosFile> = Vec::new();
+        for b in self.chosen.iter().chain(&self.bios).filter(|b| b.hardware == hw) {
+            if !list.iter().any(|o| o.path == b.path) {
+                list.push(b);
+            }
+        }
+        list
+    }
+
+    /// The BIOS `hw` plays on: the one picked for it (while it is still
+    /// there), else the one chosen with File > Open BIOS when it is that
+    /// console's, else the first found in the games folders.
+    pub fn bios_file(&self, hw: Hardware) -> Option<&BiosFile> {
+        let list = self.bios_list(hw);
+        let picked = self.picked.get(hw.name()).and_then(|p| list.iter().find(|b| &b.path == p));
+        picked.or(list.first()).copied()
+    }
+
+    /// The path of `bios_file(hw)`.
     pub fn bios_for(&self, hw: Hardware) -> Option<&Path> {
-        self.bios.iter().chain(&self.chosen).find(|(h, _)| *h == hw).map(|(_, p)| p.as_path())
+        self.bios_file(hw).map(|b| b.path.as_path())
     }
 
     /// The consoles Leapster games can play on: the Leapster models with a
@@ -412,6 +469,8 @@ fn worker(
     let mut seen_games = HashSet::new();
     let mut todo = Vec::new();
     let mut zippity_todo = Vec::new();
+    // BIOSes whose built-in games need a picture (key, file).
+    let mut builtin_todo: Vec<(String, PathBuf)> = Vec::new();
     // Original Leapster BIOSes found (art is made on one: see below).
     let mut leapster_bios: Vec<PathBuf> = vec![];
     for path in files {
@@ -421,17 +480,33 @@ fn worker(
         }
         let cart = match classify(&path) {
             Some(Found::Cart(c)) => c,
-            Some(Found::Bios(hw)) => {
+            Some(Found::Bios(hw, name)) => {
                 if hw == Hardware::Leapster {
                     leapster_bios.push(path.clone());
                 }
-                if tx.send(Msg::Bios(hw, path.clone())).is_err() {
+                let bios = BiosFile { hardware: hw, path: path.clone(), name: bios_name(name, hw) };
+                // Its built-in games get a card of their own.
+                if bios_has_games(hw, name) && seen_games.insert(format!("bios:{}", bios.name)) {
+                    let mut game = describe_builtin(&path, &bios);
+                    match load_png(&art_file(art_dir, &game.key)) {
+                        Some(img) => game.art = Art::Image(img),
+                        None => {
+                            game.art = Art::Pending;
+                            builtin_todo.push((game.key.clone(), path.clone()));
+                        }
+                    }
+                    if tx.send(Msg::Game(game)).is_err() {
+                        return;
+                    }
+                }
+                if tx.send(Msg::Bios(bios)).is_err() {
                     return;
                 }
                 continue;
             }
             Some(Found::ZippityNand(mut game)) => {
-                if tx.send(Msg::Bios(Hardware::Zippity, path.clone())).is_err() {
+                let bios = BiosFile { hardware: Hardware::Zippity, path: path.clone(), name: game.title.clone() };
+                if tx.send(Msg::Bios(bios)).is_err() {
                     return;
                 }
                 if !seen_games.insert(game.key.clone()) {
@@ -475,6 +550,19 @@ fn worker(
     // The Zippity's built-in games: a picture from the console itself.
     for (key, path) in zippity_todo {
         let image = make_zippity_art(&path);
+        if let Some(img) = &image {
+            let _ = std::fs::create_dir_all(art_dir);
+            if let Err(e) = save_png(&art_file(art_dir, &key), img) {
+                tracing::warn!(target: "ribbit::library", "saving art: {e:#}");
+            }
+        }
+        if tx.send(Msg::Art(key, image.as_ref().map(to_image))).is_err() {
+            return;
+        }
+    }
+    // BIOSes' built-in games: a picture from the BIOS itself, no cartridge.
+    for (key, path) in builtin_todo {
+        let image = make_bios_art(&path);
         if let Some(img) = &image {
             let _ = std::fs::create_dir_all(art_dir);
             if let Err(e) = save_png(&art_file(art_dir, &key), img) {
@@ -555,8 +643,8 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// What a file in the games folders is.
 enum Found {
     Cart(Cartridge),
-    /// A BIOS or system image of this console.
-    Bios(Hardware),
+    /// A BIOS or system image of this console, and its name.
+    Bios(Hardware, &'static str),
     Zippity(Game),
     /// The Zippity's system NAND: the console, and its built-in games.
     ZippityNand(Game),
@@ -596,7 +684,7 @@ fn classify(path: &Path) -> Option<Found> {
         return None;
     }
     if let Some(k) = known::lookup(known::FIRMWARE, &ribbit_memory::ImageId::of(&data)) {
-        return Some(Found::Bios(k.hardware));
+        return Some(Found::Bios(k.hardware, k.name));
     }
     read_cartridge(data).map(Found::Cart)
 }
@@ -608,7 +696,7 @@ pub fn family_of(path: &Path) -> Option<Family> {
         Found::Cart(_) => Some(Family::Leapster),
         Found::Zippity(_) | Found::ZippityNand(_) => Some(Family::Zippity),
         Found::Twist(_) => Some(Family::RockItTwist),
-        Found::Bios(_) => None,
+        Found::Bios(..) => None,
     }
 }
 
@@ -686,6 +774,53 @@ fn describe_zippity_nand(path: &Path, known: Option<&ribbit_memory::known::Known
         title,
         subtitle: "Mickey Mouse Clubhouse, Pooh, Little Einsteins and more".into(),
         details,
+        tags: vec!["Internal"],
+        key,
+        art: Art::Missing,
+    }
+}
+
+/// Whether a BIOS has games of its own, played with no cartridge in: the
+/// original Leapster's 2.x-generation BaseROMs (US, UK, German v2.1 and the
+/// Spanish one) have a couple of Learning with Leap games and the
+/// Educational Game Tours (a player's report); the Universal v1.5 has none,
+/// nor does the Leapster TV's. The Leapster 2's has its main menu
+/// (drawing and other activities). The L-MAX's: not known yet.
+pub fn bios_has_games(hw: Hardware, name: &str) -> bool {
+    match hw {
+        Hardware::Leapster => !name.contains("v1.5"),
+        Hardware::Leapster2 => true,
+        _ => false,
+    }
+}
+
+/// The library card for a BIOS's built-in games (played with no cartridge).
+fn describe_builtin(path: &Path, bios: &BiosFile) -> Game {
+    let crc = ribbit_core::read_image(path).ok().map(|d| ribbit_memory::ImageId::of(&d).crc32).unwrap_or_default();
+    let key = format!("bios-{crc:08x}");
+    let (family, title, subtitle) = match bios.hardware {
+        Hardware::Leapster2 => (
+            Family::Leapster2,
+            format!("Leapster 2 Main Menu ({})", bios.short_name()),
+            "Drawing and other activities",
+        ),
+        _ => (
+            Family::Leapster,
+            format!("Leapster Built-in Games ({})", bios.short_name()),
+            "Art, a rabbit word game, Game Tours",
+        ),
+    };
+    Game {
+        path: path.to_path_buf(),
+        family,
+        title,
+        subtitle: subtitle.into(),
+        details: vec![
+            ("System", bios.hardware.name().to_string()),
+            ("Games", "built into the BIOS (played with no cartridge in)".to_string()),
+            ("BIOS", bios.name.clone()),
+            ("File", path.display().to_string()),
+        ],
         tags: vec!["Internal"],
         key,
         art: Art::Missing,
@@ -857,6 +992,45 @@ fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Shot> {
     best.filter(|b| b.0 >= 16).map(|b| b.1)
 }
 
+/// How long a BIOS runs for its built-in games' picture: past its warning,
+/// logo and region screens (region pickers move on by themselves after
+/// about 30 s) to its menu.
+const BIOS_ART_MS: u64 = 45_000;
+
+/// Art for a BIOS's built-in games: the BIOS started with no cartridge (as
+/// a console with its slot empty); the last screen that holds still and is
+/// colourful enough (its menu, after the warning and logo screens), else
+/// its most colourful one.
+fn make_bios_art(bios: &Path) -> Option<Shot> {
+    let fw = ribbit_core::load_firmware(bios).ok()?;
+    // Straps bit 14 set: the BIOS takes the saved calibration (no targets).
+    let mut m = Machine::with_straps(fw, None, 0x63FF_FFFF);
+    m.record_trace_tail = false;
+    m.io.eeprom.load(ART_PROFILE);
+    let mut cap = Capture { m, canvas: None, frame: Box::new([0u32; WIDTH * HEIGHT]) };
+    // (The latest still, colourful screen; and the most colourful of all.)
+    let mut latest: Option<Shot> = None;
+    let mut richest: Option<(usize, Shot)> = None;
+    let mut last = cap.frame.clone();
+    for i in 1..=BIOS_ART_MS / ART_SAMPLE_MS {
+        if !cap.run_to(i * ART_SAMPLE_MS) {
+            break;
+        }
+        cap.drain();
+        let still = *cap.frame == *last;
+        last.copy_from_slice(&cap.frame[..]);
+        let colours = colourfulness(&cap.frame);
+        if still && colours >= 48 {
+            latest = Some(cap.shot());
+        }
+        if richest.as_ref().is_none_or(|b| colours > b.0) {
+            richest = Some((colours, cap.shot()));
+        }
+    }
+    // A blank or near-blank screen is no art.
+    latest.or(richest.filter(|b| b.0 >= 16).map(|b| b.1))
+}
+
 /// Art for the Zippity's built-in games: its start-up, run to the Zippity
 /// logo, the middle 480x480 of the 640x480 picture.
 fn make_zippity_art(nand: &Path) -> Option<Shot> {
@@ -920,16 +1094,27 @@ mod tests {
         let mut lib = Library::new(Path::new("."));
         assert_eq!(lib.consoles(), [Hardware::Leapster], "nothing yet: the original Leapster");
         // A Leapster 2 BIOS chosen with File > Open BIOS, none in the folders.
-        lib.chosen = Some((Hardware::Leapster2, PathBuf::from("l2.bin")));
+        let file = |hardware, path: &str, name: &str| BiosFile { hardware, path: PathBuf::from(path), name: name.into() };
+        lib.chosen = Some(file(Hardware::Leapster2, "l2.bin", "0.6"));
         assert_eq!(lib.consoles(), [Hardware::Leapster2]);
         assert_eq!(lib.selected_console("Leapster"), Hardware::Leapster2);
         assert_eq!(lib.bios_for(Hardware::Leapster2), Some(Path::new("l2.bin")));
         assert_eq!(lib.bios_for(Hardware::Leapster), None);
         // An original Leapster BIOS in a games folder as well: both, as chosen.
-        lib.bios.push((Hardware::Leapster, PathBuf::from("v21.bin")));
+        lib.bios.push(file(Hardware::Leapster, "v21.bin", "US v2.1 (152-11265)"));
         assert_eq!(lib.consoles(), [Hardware::Leapster, Hardware::Leapster2]);
         assert_eq!(lib.selected_console("Leapster"), Hardware::Leapster);
         assert_eq!(lib.selected_console("Leapster 2"), Hardware::Leapster2);
+        // Several Leapster 2 BIOSes: the picked one plays, while it is there.
+        lib.bios.push(file(Hardware::Leapster2, "m9.bin", "CIP3 m9"));
+        assert_eq!(lib.bios_list(Hardware::Leapster2).len(), 2);
+        assert_eq!(lib.bios_for(Hardware::Leapster2), Some(Path::new("l2.bin")), "Open BIOS's first");
+        lib.set_picked_bios(&[("Leapster 2".to_string(), PathBuf::from("m9.bin"))].into_iter().collect());
+        assert_eq!(lib.bios_for(Hardware::Leapster2), Some(Path::new("m9.bin")));
+        lib.set_picked_bios(&[("Leapster 2".to_string(), PathBuf::from("gone.bin"))].into_iter().collect());
+        assert_eq!(lib.bios_for(Hardware::Leapster2), Some(Path::new("l2.bin")), "a missing pick is ignored");
+        assert_eq!(bios_name("Leapster BaseROM US v2.1 (152-11265)", Hardware::Leapster), "US v2.1 (152-11265)");
+        assert_eq!(file(Hardware::Leapster, "x", "US v2.1 (152-11265)").short_name(), "US v2.1");
     }
 
     #[test]
