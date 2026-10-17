@@ -92,8 +92,9 @@ fn main() {
         .unwrap_or_default();
     let mut monkey = std::env::var("RIBBIT_HD_MONKEY").ok().map(|v| v.parse::<u64>().unwrap() | 1);
     for t in (0..total).step_by(16) {
-        for &(b, at, dur) in &presses {
-            m.buttons.set(b, (at..at + dur).contains(&t));
+        // A button is down while any of its presses is.
+        for &(b, _, _) in &presses {
+            m.buttons.set(b, presses.iter().any(|&(c, at, dur)| c == b && (at..at + dur).contains(&t)));
         }
         if !taps.is_empty() {
             let raw = |p: u32| ((p * 0x7F0 + 79) / 159).min(0x7F0);
