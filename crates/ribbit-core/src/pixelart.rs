@@ -436,6 +436,25 @@ fn smooth(border: &[(Q, Q, u32, u32)], qw: i32, qh: i32) -> Vec<((f32, f32), (f3
     };
     let mut used = vec![false; border.len()];
     let mut out = vec![];
+    // Junctions (where chains meet) inside the image move toward the middle
+    // of their neighbours along the borders (at most half a pixel): many
+    // regions meeting along a staircase (shading bands against an outline)
+    // break it into chains a step long, which smoothing alone leaves as
+    // steps. Every chain ending there takes the moved point.
+    let lattice = |p: Q| (p.0 as f32 / 4.0, p.1 as f32 / 4.0);
+    let moved: HashMap<Q, (f32, f32)> = at
+        .iter()
+        .filter(|(p, _)| !through(**p) && p.0 > 0 && p.1 > 0 && p.0 < qw && p.1 < qh)
+        .map(|(&p, v)| {
+            let n: Vec<(f32, f32)> = v.iter().map(|&i| lattice(if border[i].0 == p { border[i].1 } else { border[i].0 })).collect();
+            let c = (n.iter().map(|q| q.0).sum::<f32>() / n.len() as f32, n.iter().map(|q| q.1).sum::<f32>() / n.len() as f32);
+            let o = lattice(p);
+            let (dx, dy) = ((c.0 - o.0) * 0.5, (c.1 - o.1) * 0.5);
+            let l = (dx * dx + dy * dy).sqrt();
+            let k = if l > 0.5 { 0.5 / l } else { 1.0 };
+            (p, (o.0 + dx * k, o.1 + dy * k))
+        })
+        .collect();
     let walk = |start: usize, from: Q, used: &mut Vec<bool>, out: &mut Vec<((f32, f32), (f32, f32), u32, u32)>| {
         // Points along the chain, oriented as the first piece goes.
         let first = border[start];
@@ -456,7 +475,7 @@ fn smooth(border: &[(Q, Q, u32, u32)], qw: i32, qh: i32) -> Vec<((f32, f32), (f3
             cur = n;
         }
         let closed = pts.first() == pts.last() && pts.len() > 2;
-        let fp: Vec<(f32, f32)> = pts.iter().map(|&(x, y)| (x as f32 / 4.0, y as f32 / 4.0)).collect();
+        let fp: Vec<(f32, f32)> = pts.iter().map(|&p| moved.get(&p).copied().unwrap_or_else(|| lattice(p))).collect();
         let curve = smooth_chain(&fp, closed);
         for w in curve.windows(2) {
             out.push((w[0], w[1], neg, pos));
@@ -519,7 +538,8 @@ fn smooth_chain(pts: &[(f32, f32)], closed: bool) -> Vec<(f32, f32)> {
         let (a, b, c) = (v[(i + n - 1) % n], v[i], v[(i + 1) % n]);
         let (u, w) = ((b.0 - a.0, b.1 - a.1), (c.0 - b.0, c.1 - b.1));
         let cos = (u.0 * w.0 + u.1 * w.1) / (len(a, b) * len(b, c)).max(1e-6);
-        cos <= 0.01 && len(a, b) >= 1.99 && len(b, c) >= 1.99
+        let run = 2.0;
+        cos <= 0.01 && len(a, b) >= run - 0.01 && len(b, c) >= run - 0.01
     };
     let fixed: Vec<bool> = (0..n).map(corner).collect();
     // Control points: corners as they are, else the middles of the runs.
