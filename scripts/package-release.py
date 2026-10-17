@@ -95,6 +95,30 @@ Help > Emulation status. ribbit.exe is the command-line tool (ribbit --help).
 """
 
 
+def personal_info(stage):
+    """Files in `stage` holding the build machine's home folder, any user
+    folder path or the git email: (file, what) pairs. A release must have
+    none (the names are found on the machine running this, never stored)."""
+    home = str(Path.home().resolve())
+    needles = {home, home.replace('\\', '/'), 'C:\\Users\\', '/Users/', '/home/'}
+    email = subprocess.run(['git', 'config', 'user.email'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    if email and not email.endswith('@users.noreply.github.com'):
+        needles.add(email)
+    found = []
+    for f in sorted(p for p in Path(stage).rglob('*') if p.is_file()):
+        data = f.read_bytes()
+        found += [(f.relative_to(stage), n) for n in sorted(needles) if n.encode() in data]
+    return found
+
+
+def refuse_personal_info(stage):
+    found = personal_info(stage)
+    if found:
+        for f, n in found:
+            print(f'  {f}: contains {n!r}')
+        sys.exit('the package holds personal information (paths or email); not packaged')
+
+
 def version():
     text = (ROOT / 'Cargo.toml').read_text(encoding='utf-8')
     m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
@@ -133,6 +157,8 @@ def main():
     found = {p.name for p in stage.iterdir()}
     if found != allowed:
         sys.exit(f'unexpected files in the package: {sorted(found - allowed)}')
+
+    refuse_personal_info(stage)
 
     out = DIST / f'{name}.zip'
     with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:

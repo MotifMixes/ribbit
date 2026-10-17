@@ -101,6 +101,30 @@ Help > Check for updates tells you when a new version is out.
 """
 
 
+def personal_info(stage):
+    """Files in `stage` holding the build machine's home folder, any user
+    folder path or the git email: (file, what) pairs. A release must have
+    none (the names are found on the machine running this, never stored)."""
+    home = str(Path.home().resolve())
+    needles = {home, home.replace('\\', '/'), 'C:\\Users\\', '/Users/', '/home/'}
+    email = subprocess.run(['git', 'config', 'user.email'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    if email and not email.endswith('@users.noreply.github.com'):
+        needles.add(email)
+    found = []
+    for f in sorted(p for p in Path(stage).rglob('*') if p.is_file()):
+        data = f.read_bytes()
+        found += [(f.relative_to(stage), n) for n in sorted(needles) if n.encode() in data]
+    return found
+
+
+def refuse_personal_info(stage):
+    found = personal_info(stage)
+    if found:
+        for f, n in found:
+            print(f'  {f}: contains {n!r}')
+        sys.exit('the package holds personal information (paths or email); not packaged')
+
+
 def version():
     text = (ROOT / 'Cargo.toml').read_text(encoding='utf-8')
     m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
@@ -179,6 +203,8 @@ def main():
     inside = {str(p.relative_to(stage)) for p in (stage / 'Ribbit.app').rglob('*') if p.is_file()}
     if inside != {'Ribbit.app/Contents/Info.plist', 'Ribbit.app/Contents/MacOS/ribbit-gui'}:
         sys.exit(f'unexpected files in the app: {sorted(inside)}')
+
+    refuse_personal_info(stage)
 
     # Ad-hoc signatures: Apple silicon refuses to run unsigned code at all.
     run('codesign', '--force', '--sign', '-', stage / 'ribbit')
