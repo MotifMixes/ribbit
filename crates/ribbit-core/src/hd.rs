@@ -945,6 +945,12 @@ pub struct HdCanvas {
     /// device text in these is drawn from its curves, else from the BIOS's
     /// pixel glyphs.
     pub fonts: Option<Arc<HashMap<String, crate::swf_font::OutlineFont>>>,
+    /// RESEARCH: fallback blocks so far by reason: stale (the LCD changed
+    /// outside any render), far, off (colours disagree), unknown.
+    pub why: [u64; 4],
+    /// RESEARCH: each block's reason at the last `update_mask` (0 none, 1 + the
+    /// index in `why`).
+    pub why_block: Vec<u8>,
 }
 
 /// Largest per-channel difference between a canvas block's average and its
@@ -980,6 +986,8 @@ impl HdCanvas {
             stale: vec![false; 160 * 160],
             from_outline: vec![false; 160 * 160],
             fonts: None,
+            why: [0; 4],
+            why_block: vec![0; 160 * 160],
         }
     }
 
@@ -1345,6 +1353,11 @@ impl HdCanvas {
                 let off = (0..3).any(|k| avg[k] < lo[k] - AGREE || avg[k] > hi[k] + AGREE);
                 let unknown = known < n * 128;
                 let use_fallback = self.stale[i] || (!self.from_outline[i] && (far || off)) || unknown;
+                if use_fallback {
+                    let r = if self.stale[i] { 0 } else if unknown { 3 } else if far { 1 } else { 2 };
+                    self.why[r] += 1;
+                }
+                self.why_block[i] = if use_fallback { 1 + if self.stale[i] { 0 } else if unknown { 3 } else if far { 1 } else { 2 } } else { 0 };
                 self.mask[i] = if use_fallback { 255 } else { 0 };
                 fallback += use_fallback as usize;
             }
@@ -1774,10 +1787,22 @@ fn sample_gradient(g: &GradientFill, px: f32, py: f32) -> [f32; 4] {
 /// A bitmap fill's colour at LCD position (px, py), premultiplied, 0..1:
 /// bilinear when the fill asks for smoothing, else the texel itself, as
 /// the BIOS draws it (the bitmap's own pixels, never smoothed for HD).
+///
+/// The BIOS samples each LCD pixel at its corner (X, Y), in 16.16 (VERIFIED-
+/// FW, US v2.1 bitmap painter 0x4005_4D24: the span's (x, y) << 16 through
+/// the fill's matrix, then a step per pixel, texel = u >> 16). A bitmap at
+/// one texel per LCD pixel is sampled so too: with a scale a hair under 1
+/// (65532/65536, Scooby-Doo's and SpongeBob's full-screen pictures) every
+/// pixel takes the texel before, so the picture shows a pixel over, and HD
+/// shows it as the device does (the texels are the LCD's pixels anyway).
+/// Other scales are sampled continuously, for their detail.
 fn sample(b: &BitmapFill, px: f32, py: f32) -> [f32; 4] {
     let m = b.matrix;
     if !b.smooth {
-        let (u, v) = (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]);
+        let det = (m[0] * m[3] - m[1] * m[2]).abs();
+        let (px, py) = if (0.97..1.03).contains(&det) { (px.floor(), py.floor()) } else { (px, py) };
+        let (px, py, md) = (px as f64, py as f64, m.map(|v| v as f64));
+        let (u, v) = (md[0] * px + md[2] * py + md[4], md[1] * px + md[3] * py + md[5]);
         let (w, h) = (b.image.width as i64, b.image.height as i64);
         let (tx, ty) = (u.floor() as i64, v.floor() as i64);
         let (tx, ty) = if b.clamp { (tx.clamp(0, w - 1), ty.clamp(0, h - 1)) } else { (tx.rem_euclid(w), ty.rem_euclid(h)) };

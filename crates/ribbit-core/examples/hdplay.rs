@@ -6,6 +6,8 @@
 //! RIBBIT_HD_PRESS="a,3000,100;right,5000,100": button presses (name, ms from
 //! the start, ms held). RIBBIT_HD_TINT=1: the HD side shows the parts taken
 //! from the LCD (not drawn as vectors) tinted magenta.
+//! RIBBIT_HD_MONKEY=seed: a stylus tap (150 ms) at a random LCD pixel every
+//! 1.5 s, to wander into a game's screens.
 
 use ribbit_core::Machine;
 use ribbit_core::hd::HdCanvas;
@@ -71,9 +73,24 @@ fn main() {
     let mut not_premultiplied = 0usize;
     // Device-text glyphs by font: (glyphs, with an outline).
     let mut text_fonts: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    let mut monkey = std::env::var("RIBBIT_HD_MONKEY").ok().map(|v| v.parse::<u64>().unwrap() | 1);
     for t in (0..total).step_by(16) {
         for &(b, at, dur) in &presses {
             m.buttons.set(b, (at..at + dur).contains(&t));
+        }
+        if let Some(r) = monkey.as_mut() {
+            let phase = t % 1500;
+            if phase < 16 {
+                // xorshift
+                *r ^= *r << 13;
+                *r ^= *r >> 7;
+                *r ^= *r << 17;
+                let raw = |p: u32| ((p * 0x7F0 + 79) / 159).min(0x7F0);
+                let (x, y) = (8 + (*r % 144) as u32, 8 + ((*r >> 16) % 144) as u32);
+                m.io.touch.as_mut().unwrap().live = Some((raw(x), raw(y)));
+            } else if phase >= 150 && phase < 166 {
+                m.io.touch.as_mut().unwrap().live = None;
+            }
         }
         let start = Instant::now();
         let end = m.cpu.cycles + 16 * per_ms;
@@ -198,9 +215,16 @@ fn main() {
                         let keep = 1.0 - c.mask[(y / s) * 160 + x / s] as f32 / 255.0;
                         let lcd_share = 1.0 - (c.pixels[i] >> 24) as f32 / 255.0 * keep;
                         if lcd_share > 0.02 {
+                            // By reason: stale magenta, far red, off yellow, unknown cyan.
+                            let t = match c.why_block[(y / s) * 160 + x / s] {
+                                2 => [255.0, 0.0, 0.0],
+                                3 => [255.0, 255.0, 0.0],
+                                4 => [0.0, 255.0, 255.0],
+                                _ => [255.0, 0.0, 255.0],
+                            };
                             let k = 0.6 * lcd_share;
                             let mix = |v: u32, t: f32| ((v as f32) * (1.0 - k) + t * k) as u32;
-                            *p = 0xFF00_0000 | mix((*p >> 16) & 0xFF, 255.0) << 16 | mix((*p >> 8) & 0xFF, 0.0) << 8 | mix(*p & 0xFF, 255.0);
+                            *p = 0xFF00_0000 | mix((*p >> 16) & 0xFF, t[0]) << 16 | mix((*p >> 8) & 0xFF, t[1]) << 8 | mix(*p & 0xFF, t[2]);
                         }
                     }
                 }
@@ -216,6 +240,9 @@ fn main() {
         draw_t.as_secs_f64() * 1000.0 / secs
     );
     println!("blocks from the fallback: {fixed}");
+    if let Some(c) = &canvas {
+        println!("fallback by reason [stale, far, off, unknown]: {:?}", c.why);
+    }
     println!("translucent fills brighter than their alpha: {not_premultiplied}");
     println!("text fonts (glyphs, from outlines): {text_fonts:?}");
     println!("fills by painter: {painters:x?}");
