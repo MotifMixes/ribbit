@@ -190,6 +190,13 @@ pub struct Fill {
     /// A bitmap fill the renderer can follow exactly: its bitmap and mapping
     /// (None for other fills, and for bitmaps with a colour transform).
     pub bitmap: Option<BitmapFill>,
+    /// A mask (Flash clip layer; kind +0x17 = 3), not drawn: the fills it
+    /// clips show only where it is on.
+    pub mask: bool,
+    /// The mask clipping this fill or mask (+0x10; 0 or 1 for none). VERIFIED-FW
+    /// (US v2.1 0x4004_FF44): a fill is drawn only where every mask up its
+    /// chain is on.
+    pub clip: u32,
 }
 
 /// A decoded bitmap: 0xAARRGGBB, premultiplied as the BIOS keeps it.
@@ -202,14 +209,15 @@ pub struct Image {
 
 /// A gradient fill (VERIFIED-FW, US v2.1 painters 0x4005_5194 linear,
 /// 0x4005_5260 radial): the point (x, y) in LCD pixels, times 256, through
-/// the matrix at fill +0x28 (16.16 a b c d, then tx ty: u = a x + c y + tx,
+/// the matrix at fill +0x50 (16.16 a b c d, then tx ty: u = a x + c y + tx,
 /// v = b x + d y + ty) picks the colour from a 257-entry ramp at +0x94 (B G
-/// R A): linear at u / 32768 + 128, radial at the distance (u, v) / 16384.
+/// R A, premultiplied): linear at u / 32768 + 128, radial at the distance
+/// (u, v) / 16384.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GradientFill {
     pub matrix: [f32; 6],
     pub radial: bool,
-    /// The ramp as straight R G B A, 0..1.
+    /// The ramp as premultiplied R G B A, 0..1.
     pub ramp: Arc<Vec<[f32; 4]>>,
 }
 
@@ -523,16 +531,19 @@ impl HdCapture {
             if f != 0 && !self.pending.fills.contains_key(&f) {
                 let c = |o: u32| u16::from_le_bytes([peek(f + o), peek(f + o + 1)]).min(255) as u8;
                 let painter = w(f + 0x20);
+                let mask = peek(f + 0x17) == 3;
                 // Not a fill style (its "painter" is not BIOS code, e.g.
-                // 0x0031_6C65 in text left in a reused object): no fill.
-                if !(0x4000_0000..0x4100_0000).contains(&painter) {
+                // 0x0031_6C65 in text left in a reused object) nor a mask:
+                // no fill.
+                if !mask && !(0x4000_0000..0x4100_0000).contains(&painter) {
                     continue;
                 }
+                let clip = w(f + 0x10);
                 let is_bitmap = painter == self.hooks.bitmap_painter || Some(painter) == self.hooks.bitmap_blend;
                 let bitmap = if is_bitmap { self.bitmap_fill(f, &peek) } else { None };
                 let is_gradient = Some(painter) == self.hooks.gradient || Some(painter) == self.hooks.gradient_blend;
                 let gradient = if is_gradient { gradient_fill(f, &peek) } else { None };
-                let fill = Fill { order: w(f + 0x0C), rgba: [c(0x28), c(0x26), c(0x24), c(0x2A)], painter, bitmap, gradient };
+                let fill = Fill { order: w(f + 0x0C), rgba: [c(0x28), c(0x26), c(0x24), c(0x2A)], painter, bitmap, gradient, mask, clip };
                 self.pending.fills.insert(f, fill);
             }
         }
@@ -604,8 +615,14 @@ impl HdCapture {
         if !self.glyphs.is_empty() {
             self.frame.push(Pass { scale: 4, glyphs: std::mem::take(&mut self.glyphs), ..Default::default() });
         }
-        self.sources.clear();
-        self.source_ends.clear();
+        // Exact sources are kept from frame to frame: the BIOS draws
+        // shapes that did not change from its cache of rounded edges,
+        // without reading their records again. Matched by rounded points,
+        // a moved shape no longer matches its old ones; bounded.
+        if self.sources.len() > 1 << 17 {
+            self.sources.clear();
+            self.source_ends.clear();
+        }
         self.last_end = None;
         self.strokes.clear();
         if self.done.len() + self.frame.len() > MAX_PENDING {
@@ -675,7 +692,7 @@ fn gradient_fill(f: u32, peek: &impl Fn(u32) -> u8) -> Option<GradientFill> {
     if ramp_at == 0 {
         return None;
     }
-    let m = [0, 4, 8, 12, 16, 20].map(|o| w(f + 0x28 + o) as i32 as f32);
+    let m = [0, 4, 8, 12, 16, 20].map(|o| w(f + 0x50 + o) as i32 as f32);
     let matrix = [m[0] / 65536.0, m[1] / 65536.0, m[2] / 65536.0, m[3] / 65536.0, m[4], m[5]];
     let ramp = (0..257u32)
         .map(|i| {
@@ -743,6 +760,8 @@ enum Paint {
     Bitmap(BitmapFill),
     /// A gradient, evaluated per canvas pixel.
     Gradient(GradientFill),
+    /// A mask: never drawn (see `Fill::mask`).
+    Mask,
     /// Anything the canvas cannot draw (e.g. a gradient): left unknown, for
     /// the fallback picture to fill.
     Unknown,
@@ -884,6 +903,7 @@ impl HdCanvas {
         let paints: Vec<Paint> = order
             .iter()
             .map(|(_, f)| match (&f.bitmap, &f.gradient, f.painter == self.solid_painter) {
+                _ if f.mask => Paint::Mask,
                 (Some(b), _, _) => Paint::Bitmap(b.clone()),
                 (None, Some(g), _) => Paint::Gradient(g.clone()),
                 (None, None, true) => Paint::Solid(f.rgba.map(|c| c as f32 / 255.0)),
@@ -910,14 +930,34 @@ impl HdCanvas {
                 }
             }
         }
+        // Each fill's masks, up the chain (indices in `paints`); a mask
+        // missing from the pass is never on, as for the BIOS.
+        let chains: Vec<Vec<usize>> = order
+            .iter()
+            .map(|(_, f)| {
+                let mut v = vec![];
+                let mut at = f.clip;
+                while at > 1 && v.len() < 16 {
+                    v.push(index.get(&at).map_or(usize::MAX, |&i| i as usize));
+                    at = pass.fills.get(&at).map_or(0, |m| m.clip);
+                }
+                v
+            })
+            .collect();
+        // The same edges as the BIOS has them (rounded, joined): a row the
+        // exact outlines leave unbalanced is drawn from these (see `rows`).
+        let plain: Vec<Edge> = pass.edges.iter().map(|e| Edge { exact: None, ..e.clone() }).collect();
+        let welded_round = weld(&plain);
         let mut segs: Vec<Seg> = vec![];
+        let mut segs_round: Vec<Seg> = vec![];
         // Thick lines HD draws itself: their BIOS outlines are left out.
         let stroked: std::collections::HashSet<u32> = pass.strokes.iter().map(|s| s.fill).collect();
         for s in &pass.strokes {
             let Some(&f) = index.get(&s.fill) else { continue };
             stroke_segs(s, k, f, &mut segs);
+            stroke_segs(s, k, f, &mut segs_round);
         }
-        for (e, ends) in pass.edges.iter().zip(&welded) {
+        for (i, e) in pass.edges.iter().enumerate() {
             if e.rule == 2 && stroked.contains(&e.fills[0]) {
                 continue;
             }
@@ -925,36 +965,23 @@ impl HdCanvas {
             if fills == [-1, -1] {
                 continue;
             }
-            let control = e.exact.map_or((e.p[1].0 as f32, e.p[1].1 as f32), |x| x[1]);
-            let p = [ends[0], control, ends[1]].map(|(x, y)| (x * k, y * k));
-            let n = if e.line {
-                1
-            } else {
-                let d = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
-                ((d(p[0], p[1]) + d(p[1], p[2])) / 6.0).ceil().clamp(1.0, 96.0) as usize
-            };
-            let at = |t: f32| {
-                let u = 1.0 - t;
-                let (a, b, c) = (u * u, 2.0 * u * t, t * t);
-                (a * p[0].0 + b * p[1].0 + c * p[2].0, a * p[0].1 + b * p[1].1 + c * p[2].1)
-            };
-            let mut prev = p[0];
-            for i in 1..=n {
-                let q = if i == n { p[2] } else { at(i as f32 / n as f32) };
-                if prev.1 != q.1 {
-                    segs.push(Seg { x0: prev.0, y0: prev.1, x1: q.0, y1: q.1, fills, rule: e.rule, dir: e.dir });
+            let rounded = (e.p[1].0 as f32, e.p[1].1 as f32);
+            let control = e.exact.map_or(rounded, |x| x[1]);
+            flatten(e, [welded[i][0], control, welded[i][1]], k, fills, &mut segs);
+            flatten(e, [welded_round[i][0], rounded, welded_round[i][1]], k, fills, &mut segs_round);
+        }
+        let lists = |segs: &[Seg]| {
+            let mut by_row: Vec<Vec<u32>> = vec![vec![]; y1 - y0];
+            for (i, s) in segs.iter().enumerate() {
+                let (lo, hi) = (s.y0.min(s.y1), s.y0.max(s.y1));
+                let (a, b) = ((lo.floor() as i64).max(y0 as i64), (hi.ceil() as i64).min(y1 as i64));
+                for y in a..b {
+                    by_row[(y as usize) - y0].push(i as u32);
                 }
-                prev = q;
             }
-        }
-        let mut by_row: Vec<Vec<u32>> = vec![vec![]; y1 - y0];
-        for (i, s) in segs.iter().enumerate() {
-            let (lo, hi) = (s.y0.min(s.y1), s.y0.max(s.y1));
-            let (a, b) = ((lo.floor() as i64).max(y0 as i64), (hi.ceil() as i64).min(y1 as i64));
-            for y in a..b {
-                by_row[(y as usize) - y0].push(i as u32);
-            }
-        }
+            by_row
+        };
+        let (by_row, by_row_round) = (lists(&segs), lists(&segs_round));
         // Rows are independent: big renders are split across cores.
         let size = self.size;
         let rows = &mut self.pixels[y0 * size..y1 * size];
@@ -965,20 +992,47 @@ impl HdCanvas {
             std::thread::available_parallelism().map_or(4, |t| t.get()).clamp(1, 16)
         };
         let band = (y1 - y0).div_ceil(threads);
-        let ctx = Raster { segs: &segs, paints: &paints, x0, x1, scale: s as f32 };
+        let ctx = Raster { segs: &segs, segs_round: &segs_round, paints: &paints, chains: &chains, x0, x1, scale: s as f32 };
         std::thread::scope(|scope| {
-            for (b, (chunk, lists)) in rows.chunks_mut(band * size).zip(by_row.chunks(band)).enumerate() {
+            for (b, ((chunk, lists), lists_round)) in rows.chunks_mut(band * size).zip(by_row.chunks(band)).zip(by_row_round.chunks(band)).enumerate() {
                 let ctx = &ctx;
                 let first = y0 + b * band;
                 if threads == 1 {
-                    ctx.rows(chunk, lists, first, size);
+                    ctx.rows(chunk, lists, lists_round, first, size);
                 } else {
-                    scope.spawn(move || ctx.rows(chunk, lists, first, size));
+                    scope.spawn(move || ctx.rows(chunk, lists, lists_round, first, size));
                 }
             }
         });
     }
+}
 
+/// An edge (start, control, end in pass units) as straight pieces in canvas
+/// units (scale `k`).
+fn flatten(e: &Edge, p: [(f32, f32); 3], k: f32, fills: [i32; 2], segs: &mut Vec<Seg>) {
+    let p = p.map(|(x, y)| (x * k, y * k));
+    let n = if e.line {
+        1
+    } else {
+        let d = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
+        ((d(p[0], p[1]) + d(p[1], p[2])) / 6.0).ceil().clamp(1.0, 96.0) as usize
+    };
+    let at = |t: f32| {
+        let u = 1.0 - t;
+        let (a, b, c) = (u * u, 2.0 * u * t, t * t);
+        (a * p[0].0 + b * p[1].0 + c * p[2].0, a * p[0].1 + b * p[1].1 + c * p[2].1)
+    };
+    let mut prev = p[0];
+    for i in 1..=n {
+        let q = if i == n { p[2] } else { at(i as f32 / n as f32) };
+        if prev.1 != q.1 {
+            segs.push(Seg { x0: prev.0, y0: prev.1, x1: q.0, y1: q.1, fills, rule: e.rule, dir: e.dir });
+        }
+        prev = q;
+    }
+}
+
+impl HdCanvas {
     /// Draws a device-font glyph as the BIOS does on the LCD, one block of
     /// canvas pixels per glyph pixel: the colour over what is there, by the
     /// pixel's coverage. The glyph exists only at the LCD's resolution (the
@@ -1379,6 +1433,10 @@ fn stroke_segs(s: &StrokePiece, k: f32, fill: i32, segs: &mut Vec<Seg>) {
 /// What one render's rows need.
 struct Raster<'a> {
     segs: &'a [Seg],
+    /// The BIOS's rounded outlines, for rows the exact ones leave open.
+    segs_round: &'a [Seg],
+    /// Each fill's masks (see `composite`).
+    chains: &'a [Vec<usize>],
     paints: &'a [Paint],
     x0: usize,
     x1: usize,
@@ -1389,16 +1447,48 @@ struct Raster<'a> {
 impl Raster<'_> {
     /// Rasterizes canvas rows `first..` (`chunk`, `size` pixels each), with
     /// each row's segments in `lists`.
-    fn rows(&self, chunk: &mut [u32], lists: &[Vec<u32>], first: usize, size: usize) {
+    fn rows(&self, chunk: &mut [u32], lists: &[Vec<u32>], lists_round: &[Vec<u32>], first: usize, size: usize) {
         let (x0, x1) = (self.x0, self.x1);
         let w = x1 - x0;
         let mut acc = vec![[0f32; 3]; w];
         let mut unknown_w = vec![0f32; w];
         let mut keep_w = vec![0f32; w];
-        let mut xs: Vec<(f32, u32)> = vec![];
+        let mut xs: Vec<(f32, u32, bool)> = vec![];
         let mut active = vec![false; self.paints.len()];
         // Per fill: parity (rules 0 and 1) or winding count (rule 2).
         let mut count = vec![0i32; self.paints.len()];
+        // Crossings of sub-row `sy`: (x, segment, from the rounded set).
+        let cross = |round: bool, list: &[u32], sy: f32, keep: &dyn Fn(&Seg) -> bool, xs: &mut Vec<(f32, u32, bool)>| {
+            let segs = if round { self.segs_round } else { self.segs };
+            for &i in list {
+                let s = segs[i as usize];
+                if !keep(&s) {
+                    continue;
+                }
+                let (lo, hi) = if s.y0 < s.y1 { ((s.x0, s.y0), (s.x1, s.y1)) } else { ((s.x1, s.y1), (s.x0, s.y0)) };
+                if sy >= lo.1 && sy < hi.1 {
+                    xs.push((lo.0 + (sy - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0), i, round));
+                }
+            }
+        };
+        // What each fill is left at by a row's crossings (0: closed).
+        let open = |xs: &[(f32, u32, bool)]| {
+            let mut n = vec![0i32; self.paints.len() + 1];
+            let at = |f: i32| (f + 1) as usize;
+            for &(_, i, round) in xs {
+                let s = if round { self.segs_round[i as usize] } else { self.segs[i as usize] };
+                match s.rule {
+                    1 => n[at(s.fills[0])] ^= 1,
+                    2 => n[at(s.fills[0])] += s.dir as i32,
+                    _ => {
+                        n[at(s.fills[0])] ^= 1;
+                        n[at(s.fills[1])] ^= 1;
+                    }
+                }
+            }
+            n
+        };
+        let all = |_: &Seg| true;
         for (r, list) in lists.iter().enumerate() {
             let y = first + r;
             acc.iter_mut().for_each(|a| *a = [0.0; 3]);
@@ -1407,25 +1497,39 @@ impl Raster<'_> {
             for j in 0..SUB {
                 let sy = y as f32 + (j as f32 + 0.5) / SUB as f32;
                 xs.clear();
-                for &i in list {
-                    let s = self.segs[i as usize];
-                    let (lo, hi) = if s.y0 < s.y1 { ((s.x0, s.y0), (s.x1, s.y1)) } else { ((s.x1, s.y1), (s.x0, s.y0)) };
-                    if sy >= lo.1 && sy < hi.1 {
-                        xs.push((lo.0 + (sy - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0), i));
+                cross(false, list, sy, &all, &mut xs);
+                let n = open(&xs);
+                if n[1..].iter().any(|&c| c != 0) {
+                    // Fills the exact outlines leave open on this row take
+                    // the BIOS's own (rounded) outlines here; the rest stay
+                    // exact. If that does not close them, the whole row is
+                    // the BIOS's.
+                    let bad = |s: &Seg| s.fills.iter().any(|&f| f >= 0 && n[(f + 1) as usize] != 0);
+                    let mut alt = vec![];
+                    cross(false, list, sy, &|s| !bad(s), &mut alt);
+                    cross(true, &lists_round[r], sy, &bad, &mut alt);
+                    if open(&alt)[1..].iter().all(|&c| c == 0) {
+                        xs = alt;
+                    } else {
+                        alt.clear();
+                        cross(true, &lists_round[r], sy, &all, &mut alt);
+                        if open(&alt)[1..].iter().all(|&c| c == 0) {
+                            xs = alt;
+                        }
                     }
                 }
                 xs.sort_by(|a, b| a.0.total_cmp(&b.0));
                 active.iter_mut().for_each(|a| *a = false);
                 count.iter_mut().for_each(|c| *c = 0);
                 let mut from = x0 as f32;
-                let mut look = composite(&active, self.paints);
+                let mut look = composite(&active, self.paints, self.chains);
                 let mut sink = Sink { acc: &mut acc, unknown_w: &mut unknown_w, keep_w: &mut keep_w, x0, sy, scale: self.scale };
-                for &(x, i) in &xs {
+                for &(x, i, round) in &xs {
                     let to = x.min(x1 as f32);
                     if to > from {
                         sink.span((from, to), &look, self.paints);
                     }
-                    let s = &self.segs[i as usize];
+                    let s = if round { &self.segs_round[i as usize] } else { &self.segs[i as usize] };
                     let mut flip = |f: i32| {
                         if f >= 0 {
                             count[f as usize] ^= 1;
@@ -1446,7 +1550,7 @@ impl Raster<'_> {
                             flip(s.fills[1]);
                         }
                     }
-                    look = composite(&active, self.paints);
+                    look = composite(&active, self.paints, self.chains);
                     from = from.max(x);
                 }
                 if (x1 as f32) > from {
@@ -1482,17 +1586,19 @@ struct Sink<'a> {
 }
 
 /// The look where the fills in `active` cover.
-fn composite(active: &[bool], paints: &[Paint]) -> Look {
+fn composite(active: &[bool], paints: &[Paint], chains: &[Vec<usize>]) -> Look {
     let (mut c, mut rest) = ([0f32; 3], 1f32);
     let mut stack = vec![];
     let mut varying = false;
     for i in (0..paints.len()).rev() {
-        if !active[i] {
+        // Masks are not drawn; a fill shows only inside all its masks.
+        if !active[i] || matches!(paints[i], Paint::Mask) || !chains[i].iter().all(|&m| active.get(m).copied().unwrap_or(false)) {
             continue;
         }
         stack.push(i);
         match &paints[i] {
             Paint::Unknown => break,
+            Paint::Mask => {}
             Paint::Bitmap(_) | Paint::Gradient(_) => varying = true,
             Paint::Solid(p) => {
                 for k in 0..3 {
@@ -1511,7 +1617,7 @@ fn composite(active: &[bool], paints: &[Paint]) -> Look {
 }
 
 /// A gradient's colour at LCD position (px, py) (a pixel's own position as
-/// the BIOS counts it), straight R G B A, 0..1: the ramp between its
+/// the BIOS counts it), premultiplied R G B A, 0..1: the ramp between its
 /// entries, where the BIOS takes the entry below.
 fn sample_gradient(g: &GradientFill, px: f32, py: f32) -> [f32; 4] {
     let m = g.matrix;
@@ -1568,6 +1674,7 @@ impl Sink<'_> {
                                 on_unknown = true;
                                 break;
                             }
+                            Paint::Mask => {}
                             Paint::Solid(p) => {
                                 for k in 0..3 {
                                     c[k] += rest * p[3] * p[k];
@@ -1586,7 +1693,7 @@ impl Sink<'_> {
                                 let s = self.scale.max(1.0);
                                 let p = sample_gradient(g, (x as f32 + 0.5) / s - 0.5, self.sy / s - 0.5);
                                 for k in 0..3 {
-                                    c[k] += rest * p[3] * p[k];
+                                    c[k] += rest * p[k];
                                 }
                                 rest *= 1.0 - p[3];
                             }
@@ -1667,7 +1774,7 @@ mod tests {
         assert!(p.edges[0].line);
         assert_eq!(
             p.fills[&0x80],
-            Fill { order: 0x000A_0002, rgba: [0x30, 0x20, 0x10, 0xFF], painter: 0x4000_0300, bitmap: None, gradient: None }
+            Fill { order: 0x000A_0002, rgba: [0x30, 0x20, 0x10, 0xFF], painter: 0x4000_0300, bitmap: None, gradient: None, mask: false, clip: 0 }
         );
     }
 }

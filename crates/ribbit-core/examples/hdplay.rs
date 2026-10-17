@@ -86,6 +86,11 @@ fn main() {
                         let words: Vec<String> =
                             (0..0x40u32).map(|i| format!("{:08x}", u32::from_le_bytes([0, 1, 2, 3].map(|k| m.bus.peek8(a + 4 * i + k).unwrap_or(0))))).collect();
                         println!("{t:6} fill {a:08x} rgba {:?} rect {:?}: {}", f.rgba, p.rect, words.join(" "));
+                        let ramp = u32::from_le_bytes([0, 1, 2, 3].map(|k| m.bus.peek8(a + 0x94 + k).unwrap_or(0)));
+                        if ramp != 0 {
+                            let al: Vec<String> = (0..257u32).step_by(8).chain(250..257).map(|i| format!("{i}:{:02x}{:02x}{:02x}{:02x}", m.bus.peek8(ramp + 4 * i + 2).unwrap_or(0), m.bus.peek8(ramp + 4 * i + 1).unwrap_or(0), m.bus.peek8(ramp + 4 * i).unwrap_or(0), m.bus.peek8(ramp + 4 * i + 3).unwrap_or(0))).collect();
+                            println!("       ramp (R G B A): {}", al.join(" "));
+                        }
                     }
                 }
                 if !dumped {
@@ -108,6 +113,27 @@ fn main() {
                     if !near.is_empty() {
                         println!("exact {ex}/{} rules {:?}", near.len(), near.iter().filter(|e| e.exact.is_none()).map(|e| (e.rule, e.line)).collect::<Vec<_>>());
                     }
+                }
+                if std::env::var("RIBBIT_HD_ORDERS").is_ok_and(|v| t >= v.parse::<u64>().unwrap()) {
+                    let mut other: std::collections::HashMap<u32, usize> = Default::default();
+                    for e in &p.edges {
+                        for f in e.fills {
+                            if f != 0 && !p.fills.contains_key(&f) {
+                                *other.entry(f).or_default() += 1;
+                            }
+                        }
+                    }
+                    for (a, n) in &other {
+                        let words: Vec<String> = (0..0x30u32).map(|i| format!("{:08x}", u32::from_le_bytes([0, 1, 2, 3].map(|k| m.bus.peek8(a + 4 * i + k).unwrap_or(0))))).collect();
+                        println!("{t} non-fill {a:08x} edges {n}: {}", words.join(" "));
+                    }
+                }
+                // RIBBIT_HD_ORDERS=ms: list every fill of passes from then on.
+                if std::env::var("RIBBIT_HD_ORDERS").is_ok_and(|v| t >= v.parse::<u64>().unwrap()) {
+                    let mut fs: Vec<_> = p.fills.iter().collect();
+                    fs.sort_by_key(|(_, f)| f.order);
+                    let n = |a: u32| p.edges.iter().filter(|e| e.fills.contains(&a)).count();
+                    println!("{t} pass {:?}: {}", p.rect, fs.iter().map(|(a, f)| format!("{a:08x} order {:08x} painter {:x} rgba {:?} mask {} clip {:08x} edges {}", f.order, f.painter, f.rgba, f.mask, f.clip, n(**a))).collect::<Vec<_>>().join(" | "));
                 }
                 // RIBBIT_HD_EDGES=x0,y0,x1,y1 (pass units): print the edges
                 // with a point in that box.
