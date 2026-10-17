@@ -25,15 +25,16 @@ build Ribbit from its source code, which players never have to do.)
 2. In Ribbit, choose your BIOS dump with **File → Open BIOS…** (asked once).
 3. Add your games folder in the library, or open a game with **File → Open Cartridge…**.
 
-**Updating:** start in Ribbit itself.
+**Updating:** do it from inside Ribbit.
 
 1. When a new version is out, a green button appears at the top of Ribbit, right after the menus. It shows the new
-   version number, for example **⬆ Update to v1.2.3**. (No button? Use **Help → Check for updates**.) Click it to
-   see what's new, then click **Download**: it opens the release page.
-2. Download the file for your system, as above.
-3. Close Ribbit, then unzip the new version **over your old `Ribbit` folder** (replace the files when asked).
+   version number, for example **⬆ Update to v1.2.3**. (No button? Use **Help → Check for updates**.)
+2. Click it to see what's new, then click **Update now**. Ribbit downloads the new version, installs it and restarts
+   by itself. A game you're playing closes first, and your saves and settings are kept.
 
-Your saves and settings are kept, as they're stored separately from the app.
+If **Update now** isn't offered (Android, or versions before 1.2.3), the button says **Download** and opens the
+release page instead: download the file for your system as above, close Ribbit, and unzip the new version **over your
+old `Ribbit` folder** (replace the files when asked).
 
 **Something wrong?** If Ribbit closes or shows an error, send the file `ribbit.log` with your report. It's in
 `%APPDATA%\Ribbit` on Windows (paste that into the File Explorer address bar) and `~/.config/ribbit` on macOS and
