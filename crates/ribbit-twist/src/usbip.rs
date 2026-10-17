@@ -156,7 +156,8 @@ fn device_record(info: &DeviceInfo) -> Vec<u8> {
     v
 }
 
-/// One client connection: the operations, then URB traffic.
+/// One client connection: one operation (the device list, or an import
+/// followed by URB traffic).
 fn serve(
     mut s: TcpStream,
     info: &DeviceInfo,
@@ -165,44 +166,41 @@ fn serve(
     pending: &Arc<Mutex<HashSet<u32>>>,
 ) -> std::io::Result<()> {
     s.set_nodelay(true)?;
-    loop {
-        let mut op = [0u8; 8];
-        s.read_exact(&mut op)?;
-        match be16(&op[2..]) {
-            OP_REQ_DEVLIST => {
-                let mut r = Vec::new();
-                r.extend_from_slice(&VERSION.to_be_bytes());
-                r.extend_from_slice(&OP_REP_DEVLIST.to_be_bytes());
-                r.extend_from_slice(&0u32.to_be_bytes());
-                r.extend_from_slice(&1u32.to_be_bytes());
+    let mut op = [0u8; 8];
+    s.read_exact(&mut op)?;
+    match be16(&op[2..]) {
+        OP_REQ_DEVLIST => {
+            let mut r = Vec::new();
+            r.extend_from_slice(&VERSION.to_be_bytes());
+            r.extend_from_slice(&OP_REP_DEVLIST.to_be_bytes());
+            r.extend_from_slice(&0u32.to_be_bytes());
+            r.extend_from_slice(&1u32.to_be_bytes());
+            r.extend_from_slice(&device_record(info));
+            for i in &info.interfaces {
+                r.extend_from_slice(&[i.0, i.1, i.2, 0]);
+            }
+            s.write_all(&r)
+        }
+        OP_REQ_IMPORT => {
+            let mut busid = [0u8; 32];
+            s.read_exact(&mut busid)?;
+            let wanted = String::from_utf8_lossy(&busid).trim_end_matches('\0').to_string();
+            let ok = wanted == info.busid;
+            let mut r = Vec::new();
+            r.extend_from_slice(&VERSION.to_be_bytes());
+            r.extend_from_slice(&OP_REP_IMPORT.to_be_bytes());
+            r.extend_from_slice(&(if ok { 0u32 } else { 1 }).to_be_bytes());
+            if ok {
                 r.extend_from_slice(&device_record(info));
-                for i in &info.interfaces {
-                    r.extend_from_slice(&[i.0, i.1, i.2, 0]);
-                }
-                s.write_all(&r)?;
+            }
+            s.write_all(&r)?;
+            if !ok {
                 return Ok(());
             }
-            OP_REQ_IMPORT => {
-                let mut busid = [0u8; 32];
-                s.read_exact(&mut busid)?;
-                let wanted = String::from_utf8_lossy(&busid).trim_end_matches('\0').to_string();
-                let ok = wanted == info.busid;
-                let mut r = Vec::new();
-                r.extend_from_slice(&VERSION.to_be_bytes());
-                r.extend_from_slice(&OP_REP_IMPORT.to_be_bytes());
-                r.extend_from_slice(&(if ok { 0u32 } else { 1 }).to_be_bytes());
-                if ok {
-                    r.extend_from_slice(&device_record(info));
-                }
-                s.write_all(&r)?;
-                if !ok {
-                    return Ok(());
-                }
-                let _ = events.send(Event::Attached);
-                return urbs(s, events, replies, pending);
-            }
-            _ => return Ok(()),
+            let _ = events.send(Event::Attached);
+            urbs(s, events, replies, pending)
         }
+        _ => Ok(()),
     }
 }
 
