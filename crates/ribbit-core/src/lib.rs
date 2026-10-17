@@ -528,16 +528,28 @@ impl Machine {
     /// rendering (hd.rs). False if this BIOS's rasterizer is not recognised.
     /// Observes only: emulation results are unchanged.
     pub fn enable_hd_capture(&mut self) -> bool {
-        let Some(hooks) = hd::Hooks::find(self.firmware.data(), ribbit_memory::map::BIOS_MIRROR) else {
+        // The BIOS's Flash player, and a cartridge's own copy (run from the
+        // cartridge where it is mapped).
+        let players: Vec<hd::Hooks> = [
+            hd::Hooks::find(self.firmware.data(), ribbit_memory::map::BIOS_MIRROR),
+            self.cartridge.as_ref().and_then(|c| hd::Hooks::find(c.rom(), ribbit_memory::map::CART_BASE)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if players.is_empty() {
             return false;
-        };
-        let mut stops = vec![hooks.edge_ctor, hooks.scanline];
-        stops.extend(hooks.glyph);
-        stops.extend(hooks.transform);
-        stops.extend(hooks.shape_sites().map(|s| s.2));
-        stops.extend(hooks.stroke);
+        }
+        let mut stops = vec![];
+        for hooks in &players {
+            stops.extend([hooks.edge_ctor, hooks.scanline]);
+            stops.extend(hooks.glyph);
+            stops.extend(hooks.transform);
+            stops.extend(hooks.shape_sites().map(|s| s.2));
+            stops.extend(hooks.stroke);
+        }
         self.cpu.icache.set_stops(&stops);
-        self.hd = Some(hd::HdCapture::new(hooks));
+        self.hd = Some(hd::HdCapture::with_players(players));
         true
     }
 
@@ -844,18 +856,21 @@ impl Machine {
             {
                 let bus = &self.bus;
                 let peek = |a: u32| bus.peek8(a).unwrap_or(0);
-                if from == hd.hooks.edge_ctor {
-                    hd.edge(self.cpu.regs[1], peek);
-                } else if from == hd.hooks.scanline {
-                    hd.scanline(self.cpu.regs[14], self.cpu.regs[17] as i32, peek);
-                } else if Some(from) == hd.hooks.glyph {
-                    hd.glyph(&self.cpu.regs, peek);
-                } else if Some(from) == hd.hooks.transform {
-                    hd.transform(&self.cpu.regs, peek);
-                } else if hd.hooks.shape_sites().is_some_and(|s| s.2 == from) {
-                    hd.shape_edge(&self.cpu.regs, peek);
-                } else if Some(from) == hd.hooks.stroke {
-                    hd.stroke(&self.cpu.regs, peek);
+                if hd.select(from) {
+                    let h = *hd.active();
+                    if from == h.edge_ctor {
+                        hd.edge(self.cpu.regs[1], peek);
+                    } else if from == h.scanline {
+                        hd.scanline(self.cpu.regs[14], self.cpu.regs[17] as i32, peek);
+                    } else if Some(from) == h.glyph {
+                        hd.glyph(&self.cpu.regs, peek);
+                    } else if Some(from) == h.transform {
+                        hd.transform(&self.cpu.regs, peek);
+                    } else if h.shape_sites().is_some_and(|s| s.2 == from) {
+                        hd.shape_edge(&self.cpu.regs, peek);
+                    } else if Some(from) == h.stroke {
+                        hd.stroke(&self.cpu.regs, peek);
+                    }
                 }
             }
             // `idle_track` only acts while probing or after a backward jump;

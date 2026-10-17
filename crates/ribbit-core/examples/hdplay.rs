@@ -3,6 +3,9 @@
 //! writes LCD-vs-HD snapshots, with timing:
 //!   cargo run --release -p ribbit-core --example hdplay -- <bios> <cart> <state> <ms> <every_ms> <out_prefix> [system.eeprom] [cart.sav]
 //! RIBBIT_HD=0 runs the same span without capture (for the speed comparison).
+//! RIBBIT_HD_PRESS="a,3000,100;right,5000,100": button presses (name, ms from
+//! the start, ms held). RIBBIT_HD_TINT=1: the HD side shows the parts taken
+//! from the LCD (not drawn as vectors) tinted magenta.
 
 use ribbit_core::Machine;
 use ribbit_core::hd::HdCanvas;
@@ -58,7 +61,23 @@ fn main() {
     let mut shot = 0;
     let mut dumped = false;
     let mut painters: std::collections::BTreeMap<u32, usize> = Default::default();
+    let presses: Vec<(ribbit_input::Button, u64, u64)> = std::env::var("RIBBIT_HD_PRESS")
+        .map(|v| {
+            v.split(';')
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let q: Vec<&str> = p.split(',').collect();
+                    (ribbit_input::Button::from_name(q[0]).expect("button name"), q[1].parse().unwrap(), q[2].parse().unwrap())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let tint = std::env::var_os("RIBBIT_HD_TINT").is_some();
+    let mut not_premultiplied = 0usize;
     for t in (0..total).step_by(16) {
+        for &(b, at, dur) in &presses {
+            m.buttons.set(b, (at..at + dur).contains(&t));
+        }
         let start = Instant::now();
         let end = m.cpu.cycles + 16 * per_ms;
         while m.cpu.cycles < end {
@@ -76,6 +95,10 @@ fn main() {
                     println!("{t:6} pass renderer {:08x} rect {:?} rows {:?} scale {} edges {} fills {} painters {ps:?}", p.renderer, p.rect, p.rows, p.scale, p.edges.len(), p.fills.len());
                 }
                 for f in p.fills.values() {
+                    // A colour brighter than its alpha would not be premultiplied.
+                    if !f.mask && f.rgba[3] < 255 && f.rgba[..3].iter().any(|&c| c > f.rgba[3]) {
+                        not_premultiplied += 1;
+                    }
                     *painters.entry(f.painter).or_insert(0usize) += 1;
                 }
                 // RIBBIT_HD_PAINTER=hex: print the first few fills painted by
@@ -133,7 +156,7 @@ fn main() {
                     let mut fs: Vec<_> = p.fills.iter().collect();
                     fs.sort_by_key(|(_, f)| f.order);
                     let n = |a: u32| p.edges.iter().filter(|e| e.fills.contains(&a)).count();
-                    println!("{t} pass {:?}: {}", p.rect, fs.iter().map(|(a, f)| format!("{a:08x} order {:08x} painter {:x} rgba {:?} mask {} clip {:08x} edges {}", f.order, f.painter, f.rgba, f.mask, f.clip, n(**a))).collect::<Vec<_>>().join(" | "));
+                    println!("{t} pass {:?}: {}", p.rect, fs.iter().map(|(a, f)| format!("{a:08x} order {:08x} painter {:x} rgba {:?} mask {} clip {:08x} edges {} bmp {}", f.order, f.painter, f.rgba, f.mask, f.clip, n(**a), f.bitmap.as_ref().map_or("-".to_string(), |b| format!("{}x{} m {:?} clear {}", b.image.width, b.image.height, b.matrix, b.image.pixels.iter().filter(|&&p| p >> 24 < 255).count())))).collect::<Vec<_>>().join(" | "));
                 }
                 // RIBBIT_HD_EDGES=x0,y0,x1,y1 (pass units): print the edges
                 // with a point in that box.
@@ -155,7 +178,29 @@ fn main() {
         }
         if (t + 16) % every < 16 {
             if let Some(c) = &canvas {
-                write(&format!("{prefix}{shot:03}.png"), &lcd, &c.composed(&lcd[..]), c.size);
+                let mut hd = c.composed(&lcd[..]);
+                // RIBBIT_HD_RAW=1: HD's own drawing only, over grey.
+                if std::env::var_os("RIBBIT_HD_RAW").is_some() {
+                    hd = c.pixels.iter().map(|&p| {
+                        let a = (p >> 24) as f32 / 255.0;
+                        let m = |v: u32| ((v & 0xFF) as f32 + 128.0 * (1.0 - a)).min(255.0) as u32;
+                        0xFF00_0000 | m(p >> 16) << 16 | m(p >> 8) << 8 | m(p)
+                    }).collect();
+                } else if tint {
+                    // Share of each pixel from the LCD: magenta over it.
+                    let s = c.scale;
+                    for (i, p) in hd.iter_mut().enumerate() {
+                        let (x, y) = (i % c.size, i / c.size);
+                        let keep = 1.0 - c.mask[(y / s) * 160 + x / s] as f32 / 255.0;
+                        let lcd_share = 1.0 - (c.pixels[i] >> 24) as f32 / 255.0 * keep;
+                        if lcd_share > 0.02 {
+                            let k = 0.6 * lcd_share;
+                            let mix = |v: u32, t: f32| ((v as f32) * (1.0 - k) + t * k) as u32;
+                            *p = 0xFF00_0000 | mix((*p >> 16) & 0xFF, 255.0) << 16 | mix((*p >> 8) & 0xFF, 0.0) << 8 | mix(*p & 0xFF, 255.0);
+                        }
+                    }
+                }
+                write(&format!("{prefix}{shot:03}.png"), &lcd, &hd, c.size);
                 shot += 1;
             }
         }
@@ -167,6 +212,7 @@ fn main() {
         draw_t.as_secs_f64() * 1000.0 / secs
     );
     println!("blocks from the fallback: {fixed}");
+    println!("translucent fills brighter than their alpha: {not_premultiplied}");
     println!("fills by painter: {painters:x?}");
     if let Some(hd) = &m.hd {
         println!("dropped passes: {}", hd.dropped);

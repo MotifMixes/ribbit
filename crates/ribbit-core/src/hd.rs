@@ -108,6 +108,27 @@ pub struct Hooks {
 }
 
 impl Hooks {
+    /// Whether `pc` is one of these hooks (where the machine reports to
+    /// `HdCapture`).
+    pub fn has(&self, pc: u32) -> bool {
+        pc == self.edge_ctor
+            || pc == self.scanline
+            || [self.glyph, self.transform, self.stroke, self.shape_sites().map(|s| s.2)].contains(&Some(pc))
+    }
+
+    /// The same painter of `to` as `painter` is of these hooks (unchanged
+    /// if it is none of them).
+    fn painter_as(&self, painter: u32, to: &Hooks) -> u32 {
+        let pairs = [
+            (Some(self.solid_painter), Some(to.solid_painter)),
+            (Some(self.bitmap_painter), Some(to.bitmap_painter)),
+            (self.gradient, to.gradient),
+            (self.gradient_blend, to.gradient_blend),
+            (self.bitmap_blend, to.bitmap_blend),
+        ];
+        pairs.into_iter().find(|&(a, _)| a == Some(painter)).and_then(|(_, b)| b).unwrap_or(painter)
+    }
+
     /// Where the shape reader resumes after transforming a straight edge's
     /// end, a curve's control point and a curve's end (the last is also
     /// where a finished edge is complete in r15).
@@ -144,6 +165,25 @@ impl Hooks {
             shape_curve: find(&SHAPE_CURVE_SIG),
             stroke: find(&STROKE_SIG),
         })
+    }
+
+    /// RESEARCH: where each signature matches in `image` (for finding the
+    /// Flash player in images other than the BIOS).
+    pub fn find_each(image: &[u8], base: u32) -> Vec<(&'static str, Option<u32>)> {
+        let find = |sig: &[u8]| image.windows(sig.len()).enumerate().step_by(2).find(|(_, w)| *w == sig).map(|(i, _)| base + i as u32);
+        vec![
+            ("edge_ctor", find(&EDGE_CTOR_SIG)),
+            ("scanline", find(&SCANLINE_SIG)),
+            ("solid_painter", find(&SOLID_PAINTER_SIG)),
+            ("bitmap_painter", find(&BITMAP_PAINTER_SIG)),
+            ("glyph", find(&GLYPH_CALL_SIG)),
+            ("gradient", find(&GRADIENT_PAINTER_SIG)),
+            ("gradient_blend", find_masked(image, base, &GRADIENT_BLEND_SIG)),
+            ("bitmap_blend", find_masked(image, base, &BITMAP_BLEND_SIG)),
+            ("transform", find(&TRANSFORM_SIG)),
+            ("shape_curve", find(&SHAPE_CURVE_SIG)),
+            ("stroke", find(&STROKE_SIG)),
+        ]
     }
 }
 
@@ -284,8 +324,8 @@ pub struct Pass {
     pub renderer: u32,
     pub edges: Vec<Edge>,
     pub fills: HashMap<u32, Fill>,
-    /// Device-font glyphs drawn after the frame's shapes (in a pass of
-    /// their own, with no edges).
+    /// Device-font glyphs, drawn after this pass's shapes (a pass with no
+    /// edges is text drawn between renders).
     pub glyphs: Vec<Glyph>,
     /// Thick lines whose outline fill this pass draws.
     pub strokes: Vec<StrokePiece>,
@@ -294,7 +334,15 @@ pub struct Pass {
 /// Recorder state, owned by the machine while HD capture is on.
 #[derive(Debug, Clone)]
 pub struct HdCapture {
+    /// The first Flash player's hooks (the BIOS's, when it has one): fills
+    /// in passes name this player's painters.
     pub hooks: Hooks,
+    /// Every Flash player's hooks, `hooks` first: some cartridges carry
+    /// their own copy of the player (e.g. Scooby-Doo! Spooky Snacks, Dora
+    /// Pinata Party: VERIFIED-FW, run from the cartridge at 0x8001_xxxx).
+    pub players: Vec<Hooks>,
+    /// The player that reported last.
+    active: usize,
     current: Pass,
     /// Finished passes, oldest first, for the renderer to take.
     pub done: Vec<Pass>,
@@ -334,9 +382,32 @@ type ImageKey = (u32, u32, u32, u32, u32, u64);
 const MAX_PENDING: usize = 64;
 
 impl HdCapture {
+    /// The player whose hook is at `pc` reports next; false if none is.
+    pub fn select(&mut self, pc: u32) -> bool {
+        match self.players.iter().position(|h| h.has(pc)) {
+            Some(i) => {
+                self.active = i;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The hooks of the player that reported last.
+    pub fn active(&self) -> &Hooks {
+        &self.players[self.active]
+    }
+
     pub fn new(hooks: Hooks) -> Self {
+        Self::with_players(vec![hooks])
+    }
+
+    /// Capture from several Flash players (`players[0]` names painters).
+    pub fn with_players(players: Vec<Hooks>) -> Self {
         Self {
-            hooks,
+            hooks: players[0],
+            players,
+            active: 0,
             current: Pass::default(),
             done: vec![],
             frame: vec![],
@@ -381,7 +452,7 @@ impl HdCapture {
     /// blink the caller). From the shape reader, its result is kept
     /// unrounded.
     pub fn transform(&mut self, regs: &[u32], peek: impl Fn(u32) -> u8) {
-        let Some((line, control, end)) = self.hooks.shape_sites() else { return };
+        let Some((line, control, end)) = self.players[self.active].shape_sites() else { return };
         let blink = regs[31];
         if blink != line && blink != control && blink != end {
             return;
@@ -497,7 +568,7 @@ impl HdCapture {
         let res = w(regs[17] + 8);
         let name_at = w(res + 4);
         let font: String = (0..32).map(|i| peek(name_at + i)).take_while(|&b| b != 0).map(|b| b as char).collect();
-        self.glyphs.push(Glyph {
+        let g = Glyph {
             x: regs[5] as i16 as i32,
             y: regs[6] as i16 as i32,
             width,
@@ -509,7 +580,16 @@ impl HdCapture {
             font,
             em: peek(res + 0x10) as f32,
             pen: (regs[13] as i16 as i32, regs[19] as i16 as i32),
-        });
+        };
+        // Text drawn after a render's scanlines goes over that render;
+        // text drawn before the next render, under it (VERIFIED-FW:
+        // SpongeBob Through the Wormhole draws a "Nickelodeon Logo" text
+        // field, then a bitmap over it, in one frame).
+        if self.current.rows.is_some() {
+            self.current.glyphs.push(g);
+        } else {
+            self.glyphs.push(g);
+        }
     }
 
     /// The edge constructor was executed: `rec` is its edge record.
@@ -535,9 +615,11 @@ impl HdCapture {
                 // Not a fill style (its "painter" is not BIOS code, e.g.
                 // 0x0031_6C65 in text left in a reused object) nor a mask:
                 // no fill.
-                if !mask && !(0x4000_0000..0x4100_0000).contains(&painter) {
+                let code = |a: u32| (0x4000_0000..0x4100_0000).contains(&a) || (0x8000_0000..0x8100_0000).contains(&a);
+                if !mask && !code(painter) {
                     continue;
                 }
+                let painter = self.players[self.active].painter_as(painter, &self.hooks);
                 let clip = w(f + 0x10);
                 let is_bitmap = painter == self.hooks.bitmap_painter || Some(painter) == self.hooks.bitmap_blend;
                 let bitmap = if is_bitmap { self.bitmap_fill(f, &peek) } else { None };
@@ -635,6 +717,10 @@ impl HdCapture {
     fn finish(&mut self) {
         if self.current.edges.is_empty() && self.current.rect.is_none() {
             return;
+        }
+        // Text drawn before this render: under it.
+        if !self.glyphs.is_empty() {
+            self.frame.push(Pass { scale: 4, glyphs: std::mem::take(&mut self.glyphs), ..Default::default() });
         }
         self.restore_flat_edges();
         // The thick lines whose outlines this pass draws.
@@ -754,7 +840,9 @@ const SUB: usize = 4;
 /// How a fill is drawn in HD.
 #[derive(Clone)]
 enum Paint {
-    /// Plain colour, straight alpha.
+    /// Plain colour, premultiplied as the BIOS keeps it (VERIFIED against
+    /// the LCD: SpongeBob Through the Wormhole's bubbles, colour (115, 115,
+    /// 115) at alpha 115, show light over dark rock).
     Solid([f32; 4]),
     /// A bitmap, sampled per canvas pixel.
     Bitmap(BitmapFill),
@@ -864,15 +952,18 @@ impl HdCanvas {
         }
     }
 
-    /// Draws `pass` inside its redraw rectangle.
+    /// Draws `pass` inside its redraw rectangle, then its text.
     pub fn apply(&mut self, pass: &Pass) {
         self.passes += 1;
-        if pass.edges.is_empty() && !pass.glyphs.is_empty() {
-            for g in &pass.glyphs {
-                self.draw_glyph(g);
-            }
-            return;
+        if !(pass.edges.is_empty() && !pass.glyphs.is_empty()) {
+            self.apply_shapes(pass);
         }
+        for g in &pass.glyphs {
+            self.draw_glyph(g);
+        }
+    }
+
+    fn apply_shapes(&mut self, pass: &Pass) {
         // Pass units to canvas pixels (a pass with no rectangle seen is taken
         // as a full-quality full redraw).
         let units = match pass.scale {
@@ -892,7 +983,19 @@ impl HdCanvas {
             return;
         }
         let s = self.scale;
+        // Text drawn from outlines stays so where this pass paints nothing
+        // over it: the BIOS draws a frame's shapes in several passes over
+        // one rectangle, its text between them (VERIFIED-FW: Kindergarten's
+        // keyboard, one letter after each pass). Their pixels before.
+        let mut text_before: Vec<(usize, Vec<u32>)> = vec![];
         for py in y0 / s..y1.div_ceil(s) {
+            for bx in x0 / s..x1.div_ceil(s) {
+                let b = py * 160 + bx;
+                if self.from_outline[b] {
+                    let px: Vec<u32> = (py * s..(py + 1) * s).flat_map(|y| self.pixels[y * self.size + bx * s..y * self.size + (bx + 1) * s].to_vec()).collect();
+                    text_before.push((b, px));
+                }
+            }
             self.covered[py * 160 + x0 / s..py * 160 + x1.div_ceil(s)].fill(true);
             self.from_outline[py * 160 + x0 / s..py * 160 + x1.div_ceil(s)].fill(false);
         }
@@ -1004,6 +1107,13 @@ impl HdCanvas {
                 }
             }
         });
+        for (b, px) in text_before {
+            let (bx, by) = (b % 160, b / 160);
+            let same = (by * s..(by + 1) * s).zip(px.chunks(s)).all(|(y, was)| self.pixels[y * self.size + bx * s..y * self.size + (bx + 1) * s] == *was);
+            if same {
+                self.from_outline[b] = true;
+            }
+        }
     }
 }
 
@@ -1602,7 +1712,7 @@ fn composite(active: &[bool], paints: &[Paint], chains: &[Vec<usize>]) -> Look {
             Paint::Bitmap(_) | Paint::Gradient(_) => varying = true,
             Paint::Solid(p) => {
                 for k in 0..3 {
-                    c[k] += rest * p[3] * p[k];
+                    c[k] += rest * p[k];
                 }
                 rest *= 1.0 - p[3];
                 if p[3] >= 1.0 {
@@ -1677,7 +1787,7 @@ impl Sink<'_> {
                             Paint::Mask => {}
                             Paint::Solid(p) => {
                                 for k in 0..3 {
-                                    c[k] += rest * p[3] * p[k];
+                                    c[k] += rest * p[k];
                                 }
                                 rest *= 1.0 - p[3];
                             }
