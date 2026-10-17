@@ -1,0 +1,71 @@
+# Builds the macOS and Linux release packages on GitHub's machines (free for
+# this public repository) and, if asked, attaches them to the release.
+# Manual only: Actions > Release builds > Run workflow. Windows (trained on
+# BIOS and game dumps that never leave the owner's PC) and Android (signed
+# with the owner's key) are built locally.
+name: Release builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build, e.g. v1.2.1"
+        required: true
+      upload:
+        description: "Attach the packages to that release (off: keep them as run artifacts to check first)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Times in UTC (the scripts write zip times in UTC too).
+  TZ: UTC
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build and package (universal Ribbit.app)
+        run: python3 -I scripts/package-mac.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/dist/*.zip
+          if-no-files-found: error
+      - name: Attach to the release
+        if: ${{ inputs.upload }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" target/dist/*.zip --clobber
+
+  linux:
+    # Ubuntu 22.04: the programs then run on glibc 2.35 or later.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Libraries
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libudev-dev
+      - name: Build and package
+        run: python3 -I scripts/package-linux.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: target/dist/*.tar.gz
+          if-no-files-found: error
+      - name: Attach to the release
+        if: ${{ inputs.upload }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" target/dist/*.tar.gz --clobber
