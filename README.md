@@ -1,8 +1,8 @@
 # Ribbit
 
 An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leapster (the main target), the
-Leapster L-MAX, Leapster TV and Leapster 2, the Zippity and the RockIt Twist. Written in Rust, for Windows, Linux and
-macOS (Android builds exist but have not been tried on a device yet).
+Leapster L-MAX, Leapster TV and Leapster 2, the Zippity and the RockIt Twist. Written in Rust, for **Windows, macOS,
+Linux and Android** (the Android app is new and has not been tested on real devices yet).
 
 **→ [Compatibility list: every console and every game tested](docs/compatibility.md)**
 
@@ -153,12 +153,14 @@ cargo build --release
   writes `target/dist/Ribbit-<version>-macos-universal.zip` (`Ribbit.app` for Apple silicon and Intel).
 * Add `--upload` to the Linux or macOS script to attach the file to the GitHub release `v<version>` (needs the `gh`
   CLI, logged in; make the release first, e.g. from the Windows build).
-* **Android** (arm64, untested on a device): `python -I scripts/build-apk.py` builds
-  `target/android/ribbit-debug.apk` (needs the Android SDK/NDK and `cargo-ndk`).
+* **Android release** (arm64, untested on a device): `python -I scripts/build-apk.py` builds
+  `target/android/ribbit-debug.apk` and the release copy `target/dist/Ribbit-<version>-android-arm64.apk` (needs the
+  Android SDK/NDK and `cargo-ndk`). Android 8 or later.
 
 ## Playing
 
-Run `target/release/ribbit-gui` (`.exe` on Windows; or download a release). Add your games folder in the library, or use File →
+Run `target/release/ribbit-gui` (`.exe` on Windows), or download a release: a zip for Windows or macOS, a
+`.tar.gz` for Linux, an `.apk` for Android (install it on the device; on a phone, touch controls appear on screen). Add your games folder in the library, or use File →
 Open BIOS… once and then File → Open Cartridge… (dropping files onto the window works too). Settings, saves, save
 states and screenshots go to `%APPDATA%\Ribbit` on Windows and `~/.config/ribbit` on Linux and macOS.
 
