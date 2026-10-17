@@ -2739,6 +2739,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "epaint_default_fonts",
+ "flate2",
  "gilrs",
  "naga",
  "png",

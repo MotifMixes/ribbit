@@ -60,6 +60,8 @@ pub enum Action {
     ImportTwistZip(PathBuf),
     /// The console view was turned on or off.
     ConsoleViewChanged,
+    /// The update is installed: save, start the new version and quit.
+    RestartForUpdate,
     Quit,
 }
 
@@ -135,6 +137,8 @@ pub struct UiState {
     notes_open: Option<String>,
     /// A newer release was announced this session (it pops up once).
     update_announced: bool,
+    /// The installed update's restart has been asked for.
+    restarting: bool,
 }
 
 /// What the library shows.
@@ -821,23 +825,64 @@ fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings
                     }
                 }
                 (Status::Done(_), Some(r)) => {
+                    use crate::install::State as Install;
                     ui.heading(format!("Ribbit {} is available", r.version_text()));
                     ui.label(format!("You have version {CURRENT}. Released {}.", long_date(&r.date)));
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        let download = egui::RichText::new("Download").color(egui::Color32::WHITE);
-                        if ui.add(egui::Button::new(download).fill(ACCENT)).clicked() {
-                            ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                    let package = crate::install::installable(r);
+                    let install = st.updates.installer.state();
+                    match &install {
+                        Install::Downloading { done, total } => {
+                            let mb = |b: u64| b as f32 / 1_048_576.0;
+                            let part = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                            let text = format!("Downloading… {:.1} of {:.1} MB", mb(*done), mb(*total));
+                            ui.add(egui::ProgressBar::new(part).text(text));
                         }
-                        if ui.button("Skip this version").on_hover_text("Don't announce it at start-up again").clicked() {
-                            settings.skipped_update = r.tag.clone();
-                            actions.push(Action::SettingsChanged);
-                            close = true;
+                        Install::Installing | Install::Ready => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(if install == Install::Ready { "Restarting Ribbit…" } else { "Installing…" });
+                            });
                         }
-                        if ui.button("Later").clicked() {
-                            close = true;
+                        Install::Idle | Install::Failed(_) => {
+                            if let Install::Failed(why) = &install {
+                                ui.colored_label(egui::Color32::LIGHT_RED, format!("The update didn't install: {why}."));
+                            }
+                            ui.horizontal(|ui| {
+                                if let Some(asset) = &package {
+                                    let text = egui::RichText::new("Update now").color(egui::Color32::WHITE);
+                                    if ui
+                                        .add(egui::Button::new(text).fill(ACCENT))
+                                        .on_hover_text("Downloads and installs it, then restarts Ribbit")
+                                        .clicked()
+                                    {
+                                        st.updates.installer.start(asset.clone(), ctx);
+                                    }
+                                } else {
+                                    let download = egui::RichText::new("Download").color(egui::Color32::WHITE);
+                                    if ui.add(egui::Button::new(download).fill(ACCENT)).clicked() {
+                                        ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                                    }
+                                }
+                                if ui.button("Skip this version").on_hover_text("Don't announce it at start-up again").clicked() {
+                                    settings.skipped_update = r.tag.clone();
+                                    actions.push(Action::SettingsChanged);
+                                    close = true;
+                                }
+                                if ui.button("Later").clicked() {
+                                    close = true;
+                                }
+                            });
+                            if package.is_some() {
+                                let note = "Ribbit restarts by itself when the update is in. A game you're \
+                                            playing closes first; its saves are kept.";
+                                ui.label(egui::RichText::new(note).weak());
+                                if install != Install::Idle && ui.link("Download it from GitHub instead").clicked() {
+                                    ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                                }
+                            }
                         }
-                    });
+                    }
                 }
                 (Status::Done(_), None) => {
                     let text = format!("✔ You're on the latest version ({CURRENT}).");
@@ -1766,6 +1811,11 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
     });
 
     updates_window(ctx, st, settings, actions);
+    // Installed (even with the window closed since): restart into it, once.
+    if st.updates.installer.state() == crate::install::State::Ready && !st.restarting {
+        st.restarting = true;
+        actions.push(Action::RestartForUpdate);
+    }
 
     egui::Window::new("About Ribbit").open(&mut st.show_about).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.heading("🐸 Ribbit");

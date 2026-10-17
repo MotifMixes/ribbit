@@ -195,6 +195,8 @@ impl App {
                 tracing::warn!(target: "ribbit::settings", "saving settings: {e:#}");
             }
         }
+        // What an in-app update moved aside.
+        crate::install::remove_leftovers();
         crate::twist::set_bindings(&settings.twist_keys);
         if let Some(f) = &opts.firmware {
             settings.bios = Some(f.clone());
@@ -1077,6 +1079,21 @@ impl App {
             }
             Action::SaveState(slot) => self.save_state(slot),
             Action::LoadState(slot) => self.load_state(slot),
+            Action::RestartForUpdate => {
+                // Everything saved before the new version starts and reads it.
+                self.shutdown();
+                match crate::install::restart() {
+                    Ok(()) => {
+                        self.quit = true;
+                        event_loop.exit();
+                    }
+                    Err(e) => self.ui.problem(
+                        "The update is installed",
+                        "Ribbit couldn't restart by itself: close it and open it again to use the new version.",
+                        e.to_string(),
+                    ),
+                }
+            }
             Action::Quit => {
                 self.quit = true;
                 event_loop.exit();

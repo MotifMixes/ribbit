@@ -17,6 +17,7 @@ mod fonts;
 mod gpu;
 mod held;
 mod icon;
+mod install;
 mod library;
 mod perf;
 pub mod saves;

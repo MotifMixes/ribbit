@@ -1,7 +1,8 @@
 //! Update check: asks GitHub for Ribbit's releases (in the background, once
 //! at start-up when the setting is on, or from Help → Check for updates),
 //! says whether a newer one is out and shows every release's patch notes.
-//! Nothing is downloaded or installed: "Download" opens the release page.
+//! "Update now" downloads and installs it (`install`) where Ribbit can
+//! update itself; elsewhere "Download" opens the release page.
 
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +28,17 @@ pub struct Release {
     pub prerelease: bool,
     /// Parsed from the tag (None: not a version tag).
     pub version: Option<Version>,
+    /// Its downloads.
+    pub assets: Vec<Asset>,
+}
+
+/// A file attached to a release.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Asset {
+    /// "Ribbit-1.2.2-windows-x64.zip".
+    pub name: String,
+    pub url: String,
+    pub size: u64,
 }
 
 impl Release {
@@ -53,6 +65,8 @@ pub enum Status {
 #[derive(Default)]
 pub struct Updates {
     status: Arc<Mutex<Status>>,
+    /// The in-app update.
+    pub installer: crate::install::Installer,
 }
 
 impl Updates {
@@ -150,6 +164,15 @@ fn parse_releases(json: &str) -> Result<Vec<Release>, String> {
         .map(|r| {
             let tag = text(r, "tag_name");
             let name = text(r, "name");
+            let assets = r.get("assets").and_then(|a| a.as_array()).map_or_else(Vec::new, |list| {
+                list.iter()
+                    .map(|a| Asset {
+                        name: text(a, "name"),
+                        url: text(a, "browser_download_url"),
+                        size: a.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
+                    })
+                    .collect()
+            });
             Release {
                 version: parse_version(&tag),
                 name: if name.is_empty() { tag.clone() } else { name },
@@ -157,6 +180,7 @@ fn parse_releases(json: &str) -> Result<Vec<Release>, String> {
                 date: text(r, "published_at").chars().take(10).collect(),
                 url: text(r, "html_url"),
                 prerelease: r.get("prerelease").and_then(|p| p.as_bool()).unwrap_or(false),
+                assets,
                 tag,
             }
         })
@@ -239,7 +263,8 @@ mod tests {
     fn releases_parse_and_the_newest_later_one_is_found() {
         let json = r#"[
             {"tag_name":"v1.0.0","name":"Ribbit 1.0.0","body":"First\r\n- one","published_at":"2026-10-15T06:31:20Z","html_url":"u0","draft":false,"prerelease":false},
-            {"tag_name":"v1.2.0","name":"","body":"","published_at":"2026-10-20T00:00:00Z","html_url":"u2","draft":false,"prerelease":false},
+            {"tag_name":"v1.2.0","name":"","body":"","published_at":"2026-10-20T00:00:00Z","html_url":"u2","draft":false,"prerelease":false,
+             "assets":[{"name":"Ribbit-1.2.0-windows-x64.zip","browser_download_url":"https://d/w.zip","size":9261000}]},
             {"tag_name":"v1.3.0","name":"Beta","body":"","published_at":"2026-10-21T00:00:00Z","html_url":"u3","draft":false,"prerelease":true},
             {"tag_name":"v9.0.0","name":"Draft","body":"","published_at":"","html_url":"","draft":true,"prerelease":false}
         ]"#;
@@ -248,6 +273,11 @@ mod tests {
         assert_eq!(r[1].name, "v1.2.0");
         assert_eq!(r[2].notes, "First\n- one");
         assert_eq!(r[2].date, "2026-10-15");
+        assert_eq!(r[2].assets, []);
+        assert_eq!(
+            r[1].assets,
+            [Asset { name: "Ribbit-1.2.0-windows-x64.zip".into(), url: "https://d/w.zip".into(), size: 9261000 }]
+        );
         assert_eq!(newest_after(&r, (1, 1, 0)).map(|r| r.tag.as_str()), Some("v1.2.0"));
         assert_eq!(newest_after(&r, (1, 2, 0)), None);
     }

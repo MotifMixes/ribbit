@@ -40,6 +40,10 @@ gilrs = "0.11"
 # The update check (HTTPS to api.github.com).
 ureq = "3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Unpacking the Linux release (.tar.gz) for the in-app update.
+flate2 = "1"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation"] }
 
