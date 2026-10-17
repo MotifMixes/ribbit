@@ -140,6 +140,9 @@ pub struct App {
     discord: crate::discord::Discord,
     /// Frames left to size the window around the screen (0 = done).
     fit_window: u8,
+    /// macOS: the open panel showing as a sheet, until it is answered.
+    #[cfg(target_os = "macos")]
+    sheet: Option<crate::files::SheetPick>,
     fatal: Option<anyhow::Error>,
     quit: bool,
     /// The game closed for inactivity, its snapshot, and where its BIOS
@@ -233,6 +236,8 @@ impl App {
             lcd_px: (0.0, 0.0, 0.0, 0.0),
             idle_left: None,
             fit_window: 0,
+            #[cfg(target_os = "macos")]
+            sheet: None,
             library: Library::new(&opts_data_dir),
             discord: crate::discord::Discord::start(),
             fatal: None,
@@ -923,20 +928,41 @@ impl App {
             Pick::TwistContent => self.settings.twist_content.clone(),
             Pick::TwistZip => None,
         };
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "macos")]
+        if self.sheet.is_none()
+            && let Some(g) = &self.gpu
         {
-            if let Some(path) = crate::files::native_pick(what, start.as_deref()) {
-                match what {
-                    Pick::Bios => self.set_bios(path),
-                    Pick::Cartridge => self.open_cart(path),
-                    Pick::RomFolder => self.add_rom_folder(path),
-                    Pick::TwistContent => self.set_twist_content(Some(path)),
-                    Pick::TwistZip => self.import_twist_zip(path),
-                }
-            }
+            self.sheet = Some(crate::files::SheetPick::start(what, start.as_deref(), &g.window));
+        }
+        #[cfg(not(any(target_os = "android", target_os = "macos")))]
+        if let Some(path) = crate::files::native_pick(what, start.as_deref()) {
+            self.picked(what, path);
         }
         #[cfg(target_os = "android")]
         self.ui.browser.start(what, start.as_deref());
+    }
+
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    fn picked(&mut self, what: Pick, path: PathBuf) {
+        match what {
+            Pick::Bios => self.set_bios(path),
+            Pick::Cartridge => self.open_cart(path),
+            Pick::RomFolder => self.add_rom_folder(path),
+            Pick::TwistContent => self.set_twist_content(Some(path)),
+            Pick::TwistZip => self.import_twist_zip(path),
+        }
+    }
+
+    /// macOS: acts on the sheet's answer once it is in.
+    #[cfg(target_os = "macos")]
+    fn poll_sheet(&mut self) {
+        let Some(answer) = self.sheet.as_mut().and_then(|s| s.poll()) else {
+            return;
+        };
+        let what = self.sheet.take().map(|s| s.what);
+        if let (Some(what), Some(path)) = (what, answer) {
+            self.picked(what, path);
+        }
     }
 
     fn update_title(&self) {
@@ -2274,6 +2300,8 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.poll_sheet();
         if let Some(g) = &self.gpu {
             g.window.request_redraw();
         }

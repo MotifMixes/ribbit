@@ -33,8 +33,9 @@ impl Pick {
     }
 }
 
-/// Native file dialog (blocks until the user chooses). Desktop only.
-#[cfg(not(target_os = "android"))]
+/// Native file dialog (blocks until the user chooses). Windows and Linux;
+/// macOS uses `SheetPick`.
+#[cfg(not(any(target_os = "android", target_os = "macos")))]
 pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
     let mut d = rfd::FileDialog::new().set_title(what.title());
     if let Some(dir) = start.and_then(|p| if p.is_dir() { Some(p) } else { p.parent() }) {
@@ -47,6 +48,49 @@ pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
         return d.add_filter("Zip archives", &["zip"]).add_filter("All files", &["*"]).pick_file();
     }
     d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"]).add_filter("All files", &["*"]).pick_file()
+}
+
+/// macOS: the open panel as a sheet on the window, shown at once and
+/// answered later while the event loop and drawing carry on (`poll` it each
+/// frame). A modal panel run from inside winit's event handler holds up
+/// every event until it closes: the window stops drawing, and on some Macs
+/// the whole desktop stops responding.
+#[cfg(target_os = "macos")]
+pub struct SheetPick {
+    pub what: Pick,
+    answer: std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>,
+}
+
+#[cfg(target_os = "macos")]
+impl SheetPick {
+    pub fn start(what: Pick, start: Option<&Path>, window: &winit::window::Window) -> Self {
+        let mut d = rfd::AsyncFileDialog::new().set_title(what.title()).set_parent(window);
+        if let Some(dir) = start.and_then(|p| if p.is_dir() { Some(p) } else { p.parent() }) {
+            d = d.set_directory(dir);
+        }
+        let answer: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> = if what.is_folder() {
+            Box::pin(d.pick_folder())
+        } else if what == Pick::TwistZip {
+            Box::pin(d.add_filter("Zip archives", &["zip"]).add_filter("All files", &["*"]).pick_file())
+        } else {
+            Box::pin(
+                d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"])
+                    .add_filter("All files", &["*"])
+                    .pick_file(),
+            )
+        };
+        Self { what, answer }
+    }
+
+    /// `Some` once the panel has closed: the chosen path, or `None` if
+    /// cancelled.
+    pub fn poll(&mut self) -> Option<Option<PathBuf>> {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match self.answer.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(file) => Some(file.map(|f| f.path().to_path_buf())),
+            std::task::Poll::Pending => None,
+        }
+    }
 }
 
 /// In-app file browser (egui).
