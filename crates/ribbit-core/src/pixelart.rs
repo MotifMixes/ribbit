@@ -4,12 +4,15 @@
 //! manner of Kopf and Lischinski's "Depixelizing Pixel Art" (2011), much
 //! simplified.
 //!
-//! 1. Pixels of similar colour joined side by side are one region (similar:
-//!    within the paper's thresholds in YUV, so shading and dithering of one
-//!    surface are one region); two similar pixels that touch only at a
-//!    corner join across it unless the other diagonal of that 2 x 2 block
-//!    joins too (then the sparser colour, the one with fewer similar pixels
-//!    around, keeps its diagonal, as foreground lines do in pixel art).
+//! 1. Pixels of near colour joined side by side are one region (near: within
+//!    half the paper's thresholds in YUV, so dithering and gentle shading of
+//!    one surface are one region, while distinct shapes, such as buildings
+//!    against the sky or a sprite's tones, are not); two near pixels that
+//!    touch only at a corner join across it unless the other diagonal of that
+//!    2 x 2 block joins too (then the sparser colour, the one with fewer near
+//!    pixels around, keeps its diagonal, as foreground lines do in pixel art).
+//!    Specks (regions of at most 3 pixels: hand-placed anti-aliasing and
+//!    shading dots) join their most alike neighbour when alike enough.
 //! 2. Where a diagonal joins, the corners of the two other pixels are cut
 //!    (a quarter pixel each way), so the joined pixels meet along a slope.
 //! 3. The borders between regions become chains between junctions; each is
@@ -48,7 +51,11 @@ impl Traced {
     pub fn new(width: usize, height: usize, pixels: &[u32]) -> Traced {
         let (w, h) = (width, height);
         let at = |x: usize, y: usize| pixels[y * w + x];
-        let sim = |a: u32, b: u32| similar(a, b);
+        // Half the paper's thresholds: near shades of one surface (dithering,
+        // gentle shading) join; distinct shapes (buildings against the sky,
+        // a sprite's tones) keep sharp borders.
+        let k = 0.5;
+        let sim = |a: u32, b: u32| similar(a, b, k);
         // 1. Regions.
         let mut parent: Vec<u32> = (0..(w * h) as u32).collect();
         fn find(p: &mut [u32], mut i: u32) -> u32 {
@@ -107,13 +114,69 @@ impl Traced {
                 }
             }
         }
+        // Specks (regions of at most 3 pixels: hand-placed anti-aliasing and
+        // shading dots) join their most alike neighbour when it is alike
+        // enough, keeping that neighbour's colour: shapes, not stipples.
+        let mut size: HashMap<u32, (usize, u32)> = HashMap::new();
+        for i in 0..w * h {
+            let r = find(&mut parent, i as u32);
+            let e = size.entry(r).or_insert((0, pixels[i]));
+            e.0 += 1;
+        }
+        let (smax, dmax) = (3usize, 1.0f32);
+        // Each speck's pixels, under its current root.
+        let mut members: HashMap<u32, Vec<usize>> = HashMap::new();
+        for i in 0..w * h {
+            let r = find(&mut parent, i as u32);
+            if size[&r].0 <= smax {
+                members.entry(r).or_default().push(i);
+            }
+        }
+        let small: Vec<u32> = members.keys().copied().collect();
+        for r0 in small {
+            let r = find(&mut parent, r0);
+            let Some(&(n, c)) = size.get(&r) else { continue };
+            let Some(pix) = members.get(&r).cloned() else { continue };
+            if n > smax {
+                continue;
+            }
+            let mut best: Option<(f32, u32)> = None;
+            for &i in &pix {
+                let (x, y) = (i % w, i / w);
+                for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                    if nx < w && ny < h {
+                        let q = find(&mut parent, (ny * w + nx) as u32);
+                        if q != r {
+                            let d = distance(c, size[&q].1);
+                            if best.is_none_or(|b| d < b.0) {
+                                best = Some((d, q));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((_, q)) = best.filter(|b| b.0 <= dmax) {
+                let (qn, qc) = size[&q];
+                union(&mut parent, r as usize, q as usize);
+                let root = find(&mut parent, r);
+                size.remove(&r);
+                size.remove(&q);
+                size.insert(root, (n + qn, qc));
+                // The merged region keeps a pixel list only while a speck.
+                let mut all = members.remove(&r).unwrap_or_default();
+                all.extend(members.remove(&q).unwrap_or_default());
+                if n + qn <= smax {
+                    members.insert(root, all);
+                }
+            }
+        }
         let mut ids: HashMap<u32, u32> = HashMap::new();
         let mut colors = vec![];
         let mut region = vec![0u32; w * h];
         for i in 0..w * h {
             let r = find(&mut parent, i as u32);
             let id = *ids.entry(r).or_insert_with(|| {
-                colors.push(pixels[r as usize]);
+                colors.push(size.get(&r).map_or(pixels[r as usize], |v| v.1));
                 colors.len() as u32 - 1
             });
             region[i] = id;
@@ -131,6 +194,10 @@ impl Traced {
             // The cut pixels, by the direction of their square from p.
             let cut: [(i32, i32); 2] = if main { [(1, -1), (-1, 1)] } else { [(-1, -1), (1, 1)] };
             for (sx, sy) in cut {
+                let px = (cx as i32 + if sx > 0 { 0 } else { -1 }, cy as i32 + if sy > 0 { 0 } else { -1 });
+                if reg(px.0 as usize, px.1 as usize) == joined {
+                    continue;
+                }
                 let (v, hz) = ((p.0, p.1 + 4 * sy), (p.0 + 4 * sx, p.1));
                 let (ve, he) = ((p.0, p.1 + sy), (p.0 + sx, p.1));
                 trim.insert((norm((v, p)).0, norm((v, p)).1, p), ve);
@@ -221,7 +288,6 @@ impl Traced {
                 let py = ((sy / s) as usize).min(self.height - 1);
                 let mut cur = self.region[py * self.width];
                 let mut from = 0f32;
-                let v = sy / s - 0.5;
                 let put = |a: f32, b: f32, r: u32, acc: &mut [[f32; 4]]| {
                     let (lo, hi) = (a.max(x0 as f32), b.min(x1 as f32));
                     if hi <= lo {
@@ -229,7 +295,7 @@ impl Traced {
                     }
                     for x in lo.floor() as usize..(hi.ceil() as usize).min(x1) {
                         let cov = (hi.min(x as f32 + 1.0) - lo.max(x as f32)).max(0.0);
-                        let c = self.color_at((x as f32 + 0.5) / s - 0.5, v, r);
+                        let c = self.color_at((x as f32 + 0.5) / s - 0.5, sy / s - 0.5, r);
                         for k in 0..4 {
                             acc[x - x0][k] += c[k] * cov;
                         }
@@ -315,7 +381,7 @@ impl Traced {
 
 /// Whether two A R G B colours look alike (Kopf and Lischinski's test:
 /// differences in Y, U and V within 48, 7 and 6 of 255), with alpha.
-fn similar(a: u32, b: u32) -> bool {
+fn similar(a: u32, b: u32, k: f32) -> bool {
     if a == b {
         return true;
     }
@@ -329,7 +395,20 @@ fn similar(a: u32, b: u32) -> bool {
         (y, 0.492 * (b - y), 0.877 * (r - y))
     };
     let (p, q) = (yuv(a), yuv(b));
-    (p.0 - q.0).abs() <= 48.0 && (p.1 - q.1).abs() <= 7.0 && (p.2 - q.2).abs() <= 6.0
+    (p.0 - q.0).abs() <= 48.0 * k && (p.1 - q.1).abs() <= 7.0 * k && (p.2 - q.2).abs() <= 6.0 * k
+}
+
+/// How unalike two colours are, for speck merging: 1.0 at twice the
+/// paper's similarity thresholds (Y 96, U 14, V 12 of 255), or alpha 32.
+fn distance(a: u32, b: u32) -> f32 {
+    let ch = |c: u32, k: u32| ((c >> k) & 0xFF) as f32;
+    let yuv = |c: u32| {
+        let (r, g, b) = (ch(c, 16), ch(c, 8), ch(c, 0));
+        let y = 0.299 * r + 0.587 * g + 0.114 * b;
+        (y, 0.492 * (b - y), 0.877 * (r - y))
+    };
+    let (p, q) = (yuv(a), yuv(b));
+    ((p.0 - q.0).abs() / 96.0).max((p.1 - q.1).abs() / 14.0).max((p.2 - q.2).abs() / 12.0).max((ch(a, 24) - ch(b, 24)).abs() / 32.0)
 }
 
 fn norm(e: (Q, Q)) -> (Q, Q) {
