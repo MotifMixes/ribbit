@@ -61,6 +61,21 @@ const GLYPH_CALL_SIG_AT: u32 = 0x32;
 /// The gradient span painter (US v2.1 0x4005_5394): fill +0x34 = 0x12 is
 /// radial, else linear (Flash's fill types).
 const GRADIENT_PAINTER_SIG: [u8; 20] = [0xe1, 0xc5, 0xf1, 0xc0, 0xad, 0x80, 0x0b, 0x0d, 0x91, 0x14, 0xb1, 0xff, 0x02, 0xf0, 0x7d, 0xff, 0xd1, 0xc0, 0xc1, 0xc5];
+/// The point transform (US v2.1 0x4004_A368; r0 the matrix, 16.16 a b c d
+/// then tx ty; r1 the point; r2 where the rounded result goes).
+const TRANSFORM_SIG: [u8; 30] = [0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xf1, 0xc0, 0x08, 0x75, 0x28, 0x76, 0x1a, 0x72, 0x00, 0x85, 0x20, 0x86, 0x04, 0x28, 0x7e, 0x00];
+/// The shape-record reader's curve step (US v2.1 0x4005_CB02, 0x10 before
+/// its control point's transform returns): it reads an edge's deltas from
+/// the movie's shape data, in twips, and transforms the control point and
+/// the end into the curve at r15 (start, control, end; rounded).
+const SHAPE_CURVE_SIG: [u8; 64] = [0x02, 0x12, 0x38, 0x60, 0x2e, 0x1a, 0x18, 0xa0, 0x0a, 0x70, 0x5e, 0x08, 0xef, 0xf6, 0xa9, 0x71, 0xc9, 0x70, 0x2e, 0x09, 0xaf, 0xff, 0x2a, 0x71, 0x2d, 0x12, 0x01, 0xa6, 0x38, 0x60, 0x2d, 0x1a, 0x18, 0xa0, 0xc9, 0x70, 0x1e, 0x09, 0xaf, 0xff, 0x2a, 0x71, 0x2e, 0x12, 0x01, 0xa6, 0x40, 0x27, 0x02, 0x14, 0x38, 0x60, 0x2e, 0x1a, 0x18, 0xa0, 0x0a, 0x70, 0x2e, 0x08, 0xef, 0xf6, 0xa9, 0x71];
+
+/// The stroker's "add a piece" (US v2.1 0x4006_ADFC; r0 the stroker:
+/// +0x08 the fill style its outline uses, +0x24 thick (wider than 3 units;
+/// thinner lines are drawn another way), +0x28 the width in units; r1 the
+/// piece: start, control, end as i32).
+const STROKE_SIG: [u8; 58] = [0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xf1, 0xc0, 0x08, 0x76, 0x00, 0x80, 0xa7, 0xc1, 0xe8, 0x10, 0x00, 0x00, 0x28, 0x75, 0x05, 0xe8, 0xa2, 0x0c, 0x2f, 0xf7, 0xc9, 0x70, 0x72, 0xf0, 0x04, 0x85, 0x40, 0x85, 0x1b, 0x08, 0x81, 0x00, 0x05, 0x85, 0x21, 0x85, 0x13, 0x08, 0x41, 0x00, 0x02, 0x85, 0x0b, 0x08, 0x81, 0x00, 0x03, 0x85, 0xcd, 0x08, 0x40, 0x00];
+
 /// A wildcard byte in a signature (an absolute address or a line number).
 const W: u16 = 0x100;
 /// The painters that blend a gradient's or a bitmap's span over what is
@@ -84,6 +99,29 @@ pub struct Hooks {
     pub gradient: Option<u32>,
     pub gradient_blend: Option<u32>,
     pub bitmap_blend: Option<u32>,
+    /// The point transform and the shape reader's curve step (see
+    /// `SHAPE_CURVE_SIG`; None: shapes are drawn from the BIOS's rounded
+    /// points).
+    pub transform: Option<u32>,
+    pub shape_curve: Option<u32>,
+    pub stroke: Option<u32>,
+}
+
+impl Hooks {
+    /// Where the shape reader resumes after transforming a straight edge's
+    /// end, a curve's control point and a curve's end (the last is also
+    /// where a finished edge is complete in r15).
+    pub fn shape_sites(&self) -> Option<(u32, u32, u32)> {
+        self.shape_curve.map(|s| (s + 0x40 - 0x94, s + 0x10, s + 0x40))
+    }
+}
+
+/// One edge as the shape reader produced it: rounded (as the BIOS goes on
+/// with it) and exact (from the movie's twips through the same matrix).
+#[derive(Debug, Clone, Copy)]
+struct Source {
+    rounded: [(i32, i32); 3],
+    exact: [(f32, f32); 3],
 }
 
 impl Hooks {
@@ -102,6 +140,9 @@ impl Hooks {
             gradient: find(&GRADIENT_PAINTER_SIG),
             gradient_blend: find_masked(bios, base, &GRADIENT_BLEND_SIG),
             bitmap_blend: find_masked(bios, base, &BITMAP_BLEND_SIG),
+            transform: find(&TRANSFORM_SIG),
+            shape_curve: find(&SHAPE_CURVE_SIG),
+            stroke: find(&STROKE_SIG),
         })
     }
 }
@@ -122,6 +163,11 @@ pub struct Edge {
     pub p: [(i16, i16); 3],
     pub line: bool,
     pub fills: [u32; 2],
+    /// The same edge from the movie's own coordinates (start, control, end
+    /// in the pass's units, unrounded), when the shape reader was seen
+    /// making it: the BIOS rounds every point to a unit (a quarter pixel),
+    /// which shows as lumps on small curves drawn large.
+    pub exact: Option<[(f32, f32); 3]>,
     /// How a crossing changes the fills (record +0x1D; VERIFIED-FW, US v2.1
     /// handlers 0x4005_0178, 0x4005_02F0, 0x4005_03B8): 0 flips both
     /// fills, 1 flips the first, 2 adds `dir` to the first fill's winding
@@ -204,6 +250,17 @@ pub struct Glyph {
     pub pen: (i32, i32),
 }
 
+/// A piece of a thick line, from the movie's coordinates: the fill style
+/// the BIOS outlines it with, its width and its centre (start, control,
+/// end), in the pass's units. HD draws it itself, with round caps and joins
+/// as Flash does, instead of the BIOS's outline of the rounded centre.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrokePiece {
+    pub fill: u32,
+    pub width: f32,
+    pub centre: [(f32, f32); 3],
+}
+
 /// Everything one render pass drew.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pass {
@@ -222,6 +279,8 @@ pub struct Pass {
     /// Device-font glyphs drawn after the frame's shapes (in a pass of
     /// their own, with no edges).
     pub glyphs: Vec<Glyph>,
+    /// Thick lines whose outline fill this pass draws.
+    pub strokes: Vec<StrokePiece>,
 }
 
 /// Recorder state, owned by the machine while HD capture is on.
@@ -248,6 +307,15 @@ pub struct HdCapture {
     images: HashMap<ImageKey, Arc<Image>>,
     /// Device-font glyphs of the frame in progress.
     glyphs: Vec<Glyph>,
+    /// The shape reader's exact results by where their rounded values go,
+    /// the last edge's end (rounded, exact), and the edges it produced this
+    /// frame, indexed by their rounded ends.
+    exact_out: HashMap<u32, (f32, f32)>,
+    last_end: Option<((i32, i32), (f32, f32))>,
+    sources: Vec<Source>,
+    source_ends: HashMap<(i32, i32), Vec<usize>>,
+    /// Thick line pieces seen this frame.
+    strokes: Vec<StrokePiece>,
 }
 
 /// A bitmap's identity: data, palette, format, width | height << 16,
@@ -269,7 +337,128 @@ impl HdCapture {
             last_scan: 0,
             images: HashMap::new(),
             glyphs: vec![],
+            exact_out: HashMap::new(),
+            last_end: None,
+            sources: vec![],
+            source_ends: HashMap::new(),
+            strokes: vec![],
         }
+    }
+
+    /// The stroker was given a piece (see `STROKE_SIG`): a thick line's
+    /// piece is kept with its exact centre (the shape reader's edge it was
+    /// made from), to be drawn by HD.
+    pub fn stroke(&mut self, regs: &[u32], peek: impl Fn(u32) -> u8) {
+        let w = |a: u32| i32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
+        let (st, c) = (regs[0], regs[1]);
+        if w(st + 0x24) == 0 {
+            return;
+        }
+        let r = [(w(c), w(c + 4)), (w(c + 8), w(c + 12)), (w(c + 16), w(c + 20))];
+        let exact = self.source_ends.get(&r[0]).into_iter().flatten().map(|&i| self.sources[i]).find_map(|s| {
+            if s.rounded == r {
+                Some(s.exact)
+            } else if s.rounded == [r[2], r[1], r[0]] {
+                Some([s.exact[2], s.exact[1], s.exact[0]])
+            } else {
+                None
+            }
+        });
+        let f = |p: (i32, i32)| (p.0 as f32, p.1 as f32);
+        let centre = exact.unwrap_or(r.map(f));
+        self.strokes.push(StrokePiece { fill: w(st + 8) as u32, width: w(st + 0x28) as f32, centre });
+    }
+
+    /// The point transform was entered (r0 matrix, r1 point, r2 result;
+    /// blink the caller). From the shape reader, its result is kept
+    /// unrounded.
+    pub fn transform(&mut self, regs: &[u32], peek: impl Fn(u32) -> u8) {
+        let Some((line, control, end)) = self.hooks.shape_sites() else { return };
+        let blink = regs[31];
+        if blink != line && blink != control && blink != end {
+            return;
+        }
+        let w = |a: u32| i32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
+        let m = [0, 4, 8, 12, 16, 20].map(|o| w(regs[0] + o) as f64);
+        let (x, y) = (w(regs[1]) as f64, w(regs[1] + 4) as f64);
+        let k = 65536.0;
+        let out = ((m[0] * x / k + m[2] * y / k + m[4]) as f32, (m[1] * x / k + m[3] * y / k + m[5]) as f32);
+        self.exact_out.insert(regs[2], out);
+    }
+
+    /// The shape reader finished an edge (r15: start, control, end, i32).
+    pub fn shape_edge(&mut self, regs: &[u32], peek: impl Fn(u32) -> u8) {
+        let w = |a: u32| i32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
+        let c = regs[15];
+        let r = [(w(c), w(c + 4)), (w(c + 8), w(c + 12)), (w(c + 16), w(c + 20))];
+        let f = |p: (i32, i32)| (p.0 as f32, p.1 as f32);
+        let start = match self.last_end {
+            Some((rounded, exact)) if rounded == r[0] => exact,
+            _ => f(r[0]),
+        };
+        let end = self.exact_out.get(&(c + 16)).copied().unwrap_or(f(r[2]));
+        let control = self.exact_out.get(&(c + 8)).copied().unwrap_or(((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0));
+        self.exact_out.clear();
+        self.last_end = Some((r[2], end));
+        let i = self.sources.len();
+        self.sources.push(Source { rounded: r, exact: [start, control, end] });
+        self.source_ends.entry(r[0]).or_default().push(i);
+        if r[2] != r[0] {
+            self.source_ends.entry(r[2]).or_default().push(i);
+        }
+    }
+
+    /// The exact version of edge `e`: a whole edge of the shape reader's,
+    /// or the part of one the BIOS split off where it turns vertically.
+    fn exact_for(&self, e: &Edge) -> Option<[(f32, f32); 3]> {
+        let (a, b) = ((e.p[0].0 as i32, e.p[0].1 as i32), (e.p[2].0 as i32, e.p[2].1 as i32));
+        let mut cands: Vec<usize> = vec![];
+        for k in [a, b] {
+            if let Some(v) = self.source_ends.get(&k) {
+                cands.extend(v);
+            }
+        }
+        let rev = |p: [(f32, f32); 3]| [p[2], p[1], p[0]];
+        let lerp = |p: (f32, f32), q: (f32, f32), t: f32| (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t);
+        let near = |p: (i32, i32), q: (f32, f32)| (p.0 as f32 - q.0).abs() <= 1.0 && (p.1 as f32 - q.1).abs() <= 1.0;
+        for &i in cands.iter().rev() {
+            let s = self.sources[i];
+            let (r, x) = (s.rounded, s.exact);
+            if (a, b) == (r[0], r[2]) {
+                return Some(x);
+            }
+            if (a, b) == (r[2], r[0]) {
+                return Some(rev(x));
+            }
+            // Split where y turns: t from the rounded curve, as the BIOS.
+            let (y0, y1, y2) = (r[0].1 as f32, r[1].1 as f32, r[2].1 as f32);
+            let den = y0 - 2.0 * y1 + y2;
+            if den == 0.0 {
+                continue;
+            }
+            let t = (y0 - y1) / den;
+            if t <= 0.0 || t >= 1.0 {
+                continue;
+            }
+            let rf = r.map(|(x, y)| (x as f32, y as f32));
+            let at = |p: [(f32, f32); 3], t: f32| lerp(lerp(p[0], p[1], t), lerp(p[1], p[2], t), t);
+            let mid = at(rf, t);
+            let first = [x[0], lerp(x[0], x[1], t), at(x, t)];
+            let second = [at(x, t), lerp(x[1], x[2], t), x[2]];
+            if a == r[0] && near(b, mid) {
+                return Some(first);
+            }
+            if b == r[0] && near(a, mid) {
+                return Some(rev(first));
+            }
+            if b == r[2] && near(a, mid) {
+                return Some(second);
+            }
+            if a == r[2] && near(b, mid) {
+                return Some(rev(second));
+            }
+        }
+        None
     }
 
     /// The device-font text loop is calling its glyph blitter (registers
@@ -326,7 +515,10 @@ impl HdCapture {
             fills: [w(rec + 0x08), w(rec + 0x0C)],
             rule: b(0x1D),
             dir: b(0x1E) as i8,
+            exact: None,
         };
+        let mut e = e;
+        e.exact = self.exact_for(&e);
         for f in e.fills {
             if f != 0 && !self.pending.fills.contains_key(&f) {
                 let c = |o: u32| u16::from_le_bytes([peek(f + o), peek(f + o + 1)]).min(255) as u8;
@@ -412,6 +604,10 @@ impl HdCapture {
         if !self.glyphs.is_empty() {
             self.frame.push(Pass { scale: 4, glyphs: std::mem::take(&mut self.glyphs), ..Default::default() });
         }
+        self.sources.clear();
+        self.source_ends.clear();
+        self.last_end = None;
+        self.strokes.clear();
         if self.done.len() + self.frame.len() > MAX_PENDING {
             self.dropped += self.done.len() as u64;
             self.done.clear();
@@ -423,7 +619,47 @@ impl HdCapture {
         if self.current.edges.is_empty() && self.current.rect.is_none() {
             return;
         }
+        self.restore_flat_edges();
+        // The thick lines whose outlines this pass draws.
+        let fills: std::collections::HashSet<u32> = self.current.edges.iter().filter(|e| e.rule == 2).map(|e| e.fills[0]).collect();
+        self.current.strokes = self.strokes.iter().filter(|s| fills.contains(&s.fill)).copied().collect();
         self.frame.push(std::mem::take(&mut self.current));
+    }
+
+    /// Puts back the shape reader's edges that rounding made horizontal:
+    /// a scanline renderer leaves those out, but exactly they slope a little,
+    /// and without them the exact edges on either side end at different
+    /// heights (a row crossed on one side only: a streak). Each takes the
+    /// fills of an exact edge it joins (plain fills only; strokes are made
+    /// another way).
+    fn restore_flat_edges(&mut self) {
+        let mut by_end: HashMap<(i32, i32), usize> = HashMap::new();
+        for (i, e) in self.current.edges.iter().enumerate() {
+            if e.exact.is_some() && e.rule != 2 {
+                for p in [e.p[0], e.p[2]] {
+                    by_end.entry((p.0 as i32, p.1 as i32)).or_insert(i);
+                }
+            }
+        }
+        let mut extra = vec![];
+        for s in &self.sources {
+            let (r, x) = (s.rounded, s.exact);
+            if r[0].1 != r[2].1 || (x[0].1 - x[2].1).abs() < 1e-4 {
+                continue;
+            }
+            let Some(&i) = by_end.get(&r[0]).or_else(|| by_end.get(&r[2])) else { continue };
+            let e = &self.current.edges[i];
+            let to16 = |p: (i32, i32)| (p.0 as i16, p.1 as i16);
+            extra.push(Edge {
+                p: [to16(r[0]), to16(r[1]), to16(r[2])],
+                line: false,
+                fills: e.fills,
+                rule: e.rule,
+                dir: 1,
+                exact: Some(x),
+            });
+        }
+        self.current.edges.extend(extra);
     }
 
     /// Takes the finished passes, oldest first.
@@ -657,13 +893,40 @@ impl HdCanvas {
         // Edges flattened (finer as the canvas grows); each segment listed
         // under the rows it crosses.
         let welded = weld(&pass.edges);
+        if std::env::var_os("RIBBIT_HD_OPEN").is_some() {
+            // Research: ends that no other edge of the same fill shares.
+            let mut count: HashMap<(u32, i64, i64), Vec<usize>> = HashMap::new();
+            for (i, (e, w)) in pass.edges.iter().zip(&welded).enumerate() {
+                for f in e.fills.into_iter().filter(|&f| f != 0) {
+                    for p in w {
+                        count.entry((f, (p.0 * 64.0).round() as i64, (p.1 * 64.0).round() as i64)).or_default().push(i);
+                    }
+                }
+            }
+            for ((f, x, y), v) in &count {
+                if v.len() % 2 == 1 {
+                    let e = &pass.edges[v[0]];
+                    eprintln!("open end fill {f:08x} at ({:.2},{:.2}) edge {:?} exact {:?}", *x as f32 / 64.0, *y as f32 / 64.0, e.p, e.exact.map(|x| x.map(|(a, b)| ((a * 100.0).round() / 100.0, (b * 100.0).round() / 100.0))));
+                }
+            }
+        }
         let mut segs: Vec<Seg> = vec![];
+        // Thick lines HD draws itself: their BIOS outlines are left out.
+        let stroked: std::collections::HashSet<u32> = pass.strokes.iter().map(|s| s.fill).collect();
+        for s in &pass.strokes {
+            let Some(&f) = index.get(&s.fill) else { continue };
+            stroke_segs(s, k, f, &mut segs);
+        }
         for (e, ends) in pass.edges.iter().zip(&welded) {
+            if e.rule == 2 && stroked.contains(&e.fills[0]) {
+                continue;
+            }
             let fills = e.fills.map(|f| if f == 0 { -1 } else { index.get(&f).copied().unwrap_or(-1) });
             if fills == [-1, -1] {
                 continue;
             }
-            let p = [ends[0], (e.p[1].0 as f32, e.p[1].1 as f32), ends[1]].map(|(x, y)| (x * k, y * k));
+            let control = e.exact.map_or((e.p[1].0 as f32, e.p[1].1 as f32), |x| x[1]);
+            let p = [ends[0], control, ends[1]].map(|(x, y)| (x * k, y * k));
             let n = if e.line {
                 1
             } else {
@@ -932,6 +1195,16 @@ impl HdCanvas {
 /// on the same row, at most one unit apart, with the same fills and rule.
 fn weld(edges: &[Edge]) -> Vec<[(f32, f32); 2]> {
     let mut out: Vec<[(f32, f32); 2]> = edges.iter().map(|e| [e.p[0], e.p[2]].map(|(x, y)| (x as f32, y as f32))).collect();
+    // Exact ends (edges from the movie's coordinates) by rounded point:
+    // every edge ending at that point, or joined to it, ends there, so
+    // outlines stay closed where exact and rounded edges meet.
+    let mut exact_at: HashMap<(i16, i16), (f32, f32)> = HashMap::new();
+    for e in edges {
+        if let Some(x) = e.exact {
+            exact_at.entry(e.p[0]).or_insert(x[0]);
+            exact_at.entry(e.p[2]).or_insert(x[2]);
+        }
+    }
     // Ends grouped by (fills, rule, row): (x, edge, which end).
     let mut groups: HashMap<([u32; 2], u8, i16), Vec<(i16, usize, usize)>> = HashMap::new();
     for (i, e) in edges.iter().enumerate() {
@@ -951,8 +1224,13 @@ fn weld(edges: &[Edge]) -> Vec<[(f32, f32); 2]> {
                 b += 1;
             }
             let run = &ends[a..b];
-            // Only ends that differ (equal ones are already joined).
-            if run.first().map(|e| e.0) != run.last().map(|e| e.0) {
+            let exact = run.iter().find_map(|&(_, i, j)| exact_at.get(&[edges[i].p[0], edges[i].p[2]][j]).copied());
+            if let Some(p) = exact {
+                for &(_, i, j) in run {
+                    out[i][j] = p;
+                }
+            } else if run.first().map(|e| e.0) != run.last().map(|e| e.0) {
+                // Only ends that differ (equal ones are already joined).
                 let mid = run.iter().map(|e| e.0 as f32).sum::<f32>() / run.len() as f32;
                 for &(_, i, j) in run {
                     out[i][j].0 = mid;
@@ -961,7 +1239,42 @@ fn weld(edges: &[Edge]) -> Vec<[(f32, f32); 2]> {
             a = b;
         }
     }
+    // Whatever their fills, ends at a point with an exact version use it.
+    for (e, o) in edges.iter().zip(out.iter_mut()) {
+        for (j, p) in [e.p[0], e.p[2]].into_iter().enumerate() {
+            if let Some(&x) = exact_at.get(&p) {
+                o[j] = x;
+            }
+        }
+    }
     smooth_joins(edges, &mut out);
+    // Ends on one BIOS row whose heights differ by float noise get one
+    // height: a scanline renderer leaves horizontal edges out, so two sides
+    // of an outline ending a hair apart leave a row where only one is
+    // crossed, a streak across the picture.
+    let mut rows: HashMap<i16, Vec<(f32, usize, usize)>> = HashMap::new();
+    for (i, e) in edges.iter().enumerate() {
+        for (j, p) in [e.p[0], e.p[2]].into_iter().enumerate() {
+            rows.entry(p.1).or_default().push((out[i][j].1, i, j));
+        }
+    }
+    for list in rows.values_mut() {
+        list.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut a = 0;
+        while a < list.len() {
+            let mut b = a + 1;
+            while b < list.len() && list[b].0 - list[a].0 <= 1.0 {
+                b += 1;
+            }
+            if list[b - 1].0 != list[a].0 {
+                let y = list[a..b].iter().map(|v| v.0).sum::<f32>() / (b - a) as f32;
+                for &(_, i, j) in &list[a..b] {
+                    out[i][j].1 = y;
+                }
+            }
+            a = b;
+        }
+    }
     out
 }
 
@@ -1007,6 +1320,59 @@ fn smooth_joins(edges: &[Edge], ends: &mut [[(f32, f32); 2]]) {
             ends[a][ja] = q;
             ends[b][jb] = q;
         }
+    }
+}
+
+/// A thick line piece as closed outlines (canvas units, scale `k`), for the
+/// winding rule: a rectangle per flattened step and a disc at every point,
+/// all wound the same way, so they merge into a line with round caps and
+/// joins (Flash's lines).
+fn stroke_segs(s: &StrokePiece, k: f32, fill: i32, segs: &mut Vec<Seg>) {
+    let c = s.centre.map(|(x, y)| (x * k, y * k));
+    let r = s.width * k / 2.0;
+    if r <= 0.0 {
+        return;
+    }
+    let d = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
+    let n = ((d(c[0], c[1]) + d(c[1], c[2])) / 4.0).ceil().clamp(1.0, 64.0) as usize;
+    let at = |t: f32| {
+        let u = 1.0 - t;
+        (u * u * c[0].0 + 2.0 * u * t * c[1].0 + t * t * c[2].0, u * u * c[0].1 + 2.0 * u * t * c[1].1 + t * t * c[2].1)
+    };
+    let pts: Vec<(f32, f32)> = (0..=n).map(|i| at(i as f32 / n as f32)).collect();
+    let mut poly = |p: &[(f32, f32)]| {
+        // Wound one way (positive area) whatever order it came in.
+        let area: f32 = (0..p.len()).map(|i| p[i].0 * p[(i + 1) % p.len()].1 - p[(i + 1) % p.len()].0 * p[i].1).sum();
+        let mut v = p.to_vec();
+        if area < 0.0 {
+            v.reverse();
+        }
+        for i in 0..v.len() {
+            let (a, b) = (v[i], v[(i + 1) % v.len()]);
+            if a.1 != b.1 {
+                segs.push(Seg { x0: a.0, y0: a.1, x1: b.0, y1: b.1, fills: [fill, -1], rule: 2, dir: if b.1 > a.1 { 1 } else { -1 } });
+            }
+        }
+    };
+    let sides = ((r * 1.5).ceil() as usize).clamp(12, 64);
+    for &p in &pts {
+        let disc: Vec<(f32, f32)> = (0..sides)
+            .map(|i| {
+                let a = i as f32 / sides as f32 * std::f32::consts::TAU;
+                (p.0 + r * a.cos(), p.1 + r * a.sin())
+            })
+            .collect();
+        poly(&disc);
+    }
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = dx.hypot(dy);
+        if len == 0.0 {
+            continue;
+        }
+        let (nx, ny) = (-dy / len * r, dx / len * r);
+        poly(&[(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)]);
     }
 }
 
@@ -1262,7 +1628,10 @@ mod tests {
                 glyph: None,
                 gradient: None,
                 gradient_blend: None,
-                bitmap_blend: None
+                bitmap_blend: None,
+                transform: None,
+                shape_curve: None,
+                stroke: None
             })
         );
         assert_eq!(Hooks::find(&bios[..0x200], 0x4000_0000), None);
@@ -1284,7 +1653,7 @@ mod tests {
             put(&mut mem, 0x128 + 4 * i, &v.to_le_bytes());
         }
         let peek = |a: u32| mem[a as usize];
-        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None, gradient: None, gradient_blend: None, bitmap_blend: None });
+        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None, gradient: None, gradient_blend: None, bitmap_blend: None, transform: None, shape_curve: None, stroke: None });
         c.edge(0, peek); // built before its render's first scanline event
         c.scanline(0x100, 1, peek);
         c.scanline(0x100, 2, peek); // later scanlines of the same render

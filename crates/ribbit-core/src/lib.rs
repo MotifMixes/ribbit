@@ -533,6 +533,9 @@ impl Machine {
         };
         let mut stops = vec![hooks.edge_ctor, hooks.scanline];
         stops.extend(hooks.glyph);
+        stops.extend(hooks.transform);
+        stops.extend(hooks.shape_sites().map(|s| s.2));
+        stops.extend(hooks.stroke);
         self.cpu.icache.set_stops(&stops);
         self.hd = Some(hd::HdCapture::new(hooks));
         true
@@ -847,6 +850,12 @@ impl Machine {
                     hd.scanline(self.cpu.regs[14], self.cpu.regs[17] as i32, peek);
                 } else if Some(from) == hd.hooks.glyph {
                     hd.glyph(&self.cpu.regs, peek);
+                } else if Some(from) == hd.hooks.transform {
+                    hd.transform(&self.cpu.regs, peek);
+                } else if hd.hooks.shape_sites().is_some_and(|s| s.2 == from) {
+                    hd.shape_edge(&self.cpu.regs, peek);
+                } else if Some(from) == hd.hooks.stroke {
+                    hd.stroke(&self.cpu.regs, peek);
                 }
             }
             // `idle_track` only acts while probing or after a backward jump;
