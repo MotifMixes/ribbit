@@ -63,8 +63,12 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
   that light up.
 * Picture options (display only, emulation is unchanged): sharp pixels, LCD grid, pixel perfect, smooth, and
   optional AI upscaling (ArtCNN / Anime4K) up to 2560 × 2560.
-* **HD vectors** (experimental, original Leapster and L-MAX): the BIOS's own Flash shapes redrawn at 640 × 640
-  instead of 160 × 160. No AI is used for this; anything Ribbit can't redraw shows the original pixels.
+* **HD vectors** (experimental, original Leapster and L-MAX): Leapster games are Flash, so their artwork is stored
+  as vector shapes (outlines and fills), not pixels. Ribbit takes those original shapes from the console's own Flash
+  player and redraws them at 640 × 640 instead of 160 × 160, so edges come out sharp because they are drawn again
+  from the game's own data. **This is not AI upscaling**: no neural network, smoothing or guessing is involved, and
+  nothing is invented. Parts that aren't vector art (bitmaps, text drawn from pixel fonts) keep their original
+  pixels. The AI upscaling above is a separate option and is never used with HD vectors.
 * Exact idle-loop skipping: same output, much less CPU.
 * Discord status, window sizes up to 16× (never maximized or full screen unless you ask).
 * Command-line and headless runners for testing and research.
