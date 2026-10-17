@@ -6,8 +6,9 @@ Output: target/dist/Ribbit-<version>-windows-x64.zip
 The build is profile-guided when your BIOS and game dumps are in roms/
 (scripts/pgo_build.py: 10-16% faster emulation, identical results).
 
-The zip holds only the two programs, a short read-me written here and the
-third-party licence notices. It is
+The zip holds only the app (ribbit-gui.exe, as Ribbit.exe), a short read-me
+written here and the third-party licence notices; the command-line tool
+(ribbit.exe) is for development and stays out. It is
 assembled in a fresh staging folder from named files, so no BIOS, ROM, save
 or other local file can end up inside; the script also refuses any file that
 is not on its list.
@@ -24,7 +25,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / 'target' / 'dist'
-PROGRAMS = ['ribbit-gui.exe', 'ribbit.exe']
+# Packaged name: built name.
+PROGRAMS = {'Ribbit.exe': 'ribbit-gui.exe'}
 
 README = """Ribbit {version} - an emulator for the LeapFrog Leapster (and the Zippity
 and RockIt Twist)
@@ -36,7 +38,10 @@ consoles, their own system files).
 
 Starting
 --------
-1. Run ribbit-gui.exe.
+Nothing to install: Ribbit.exe is the whole app (no Rust or anything else
+needed). Unzip the folder anywhere.
+
+1. Run Ribbit.exe.
 2. File > Open BIOS... and choose your BIOS dump (asked once; remembered).
 3. Choose your games folder. The game library shows every Leapster game in
    it (plain or zipped dumps) with its title screen; click a game to play.
@@ -87,12 +92,19 @@ Where things go
 Settings, game saves, save states and screenshots: %APPDATA%\\Ribbit
 (Help > About shows the save folder.)
 
+If Ribbit closes or shows an error
+----------------------------------
+Send %APPDATA%\\Ribbit\\ribbit.log with your report (it is rewritten each
+time Ribbit starts). Ribbit draws in software when the graphics card can't;
+if the picture is wrong or Ribbit crashes in the graphics driver, set the
+environment variable RIBBIT_SOFTWARE_GPU=1 to draw in software anyway.
+
 Accuracy
 --------
 Ribbit aims to be accurate before it is complete. Parts that follow MAME's
 research rather than hardware measurements (sound voices, the touchscreen,
 the power-line workaround) are labelled experimental in the menus; see
-Help > Emulation status. ribbit.exe is the command-line tool (ribbit --help).
+Help > Emulation status.
 """
 
 
@@ -145,8 +157,8 @@ def main():
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    for exe in PROGRAMS:
-        src = ROOT / 'target' / 'release' / exe
+    for exe, built in PROGRAMS.items():
+        src = ROOT / 'target' / 'release' / built
         if not src.exists():
             sys.exit(f'missing {src} (build first)')
         shutil.copy2(src, stage / exe)
@@ -166,7 +178,9 @@ def main():
         for f in sorted(stage.iterdir()):
             # Times in UTC: zip stores the zipping PC's local time, which
             # would give away its time zone.
-            info = zipfile.ZipInfo(f'{name}/{f.name}', date_time=time.gmtime(f.stat().st_mtime)[:6])
+            # (In a folder named Ribbit, without the version: unpacked where the
+            # last one was, a new release replaces it.)
+            info = zipfile.ZipInfo(f'Ribbit/{f.name}', date_time=time.gmtime(f.stat().st_mtime)[:6])
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = (f.stat().st_mode & 0xFFFF) << 16
             z.writestr(info, f.read_bytes(), compresslevel=9)

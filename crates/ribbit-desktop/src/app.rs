@@ -22,6 +22,7 @@ fn main() {
             }
         }));
     }
+    remove_old_programs();
     // WSL's Wayland server drops the window's connection after a moment
     // (its X11 server works): use X11 there unless RIBBIT_WAYLAND is set.
     #[cfg(target_os = "linux")]
@@ -38,6 +39,28 @@ fn main() {
     if let Err(e) = ribbit_frontend::run(opts) {
         tracing::error!("Ribbit could not start: {e:#}");
         failed(&format!("Ribbit could not start:\n\n{e:#}"), &log);
+    }
+}
+
+/// Up to 1.2.1 a release held two programs, ribbit-gui (the app) and ribbit
+/// (the command-line tool); now it holds the app alone, as Ribbit.exe or
+/// ribbit. Unpacked over an older release, the app replaces the old ribbit
+/// (Windows names ignore case) and removes the old ribbit-gui. A build from
+/// source keeps the name ribbit-gui, so it never removes itself.
+fn remove_old_programs() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let old = format!("ribbit-gui{}", std::env::consts::EXE_SUFFIX);
+    if exe.file_name().is_none_or(|n| n.eq_ignore_ascii_case(&old)) {
+        return;
+    }
+    let Some(old) = exe.parent().map(|d| d.join(&old)).filter(|p| p.is_file()) else {
+        return;
+    };
+    match std::fs::remove_file(&old) {
+        Ok(()) => tracing::info!("removed the old {}", old.display()),
+        Err(e) => tracing::warn!("could not remove the old {}: {e}", old.display()),
     }
 }
 

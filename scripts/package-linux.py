@@ -5,8 +5,9 @@ Run on Windows: python -I scripts/package-linux.py [--skip-build] [--upload]
         (builds inside WSL, Ubuntu-22.04 by default or --distro; uploads
         with the Windows gh)
 Output: target/dist/Ribbit-<version>-linux-x64.tar.gz
-        (ribbit-gui, the `ribbit` command-line tool, a .desktop file, a
-        read-me and the third-party licence notices)
+        (the app, built as ribbit-gui and packaged as `ribbit`, a .desktop
+        file, a read-me and the third-party licence notices; the
+        command-line tool is for development and stays out)
 
 Needs on the Linux side: Rust, pkg-config, libasound2-dev and libudev-dev.
 Built on Ubuntu 22.04, the programs run on distributions with glibc 2.35 or
@@ -34,13 +35,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / 'target' / 'dist'
-PROGRAMS = ['ribbit-gui', 'ribbit']
+# Packaged name: built name.
+PROGRAMS = {'ribbit': 'ribbit-gui'}
 
 DESKTOP = """[Desktop Entry]
 Type=Application
 Name=Ribbit
 Comment=Emulator for LeapFrog handhelds and TV consoles
-Exec=ribbit-gui
+Exec=ribbit
 Terminal=false
 Categories=Game;Emulator;
 """
@@ -57,11 +59,13 @@ Linux support is new and less tested than Windows.
 
 Running
 -------
-  ./ribbit-gui
+  ./ribbit
+
+Nothing to install: `ribbit` is the whole app (no Rust needed).
 
 Needs ALSA (libasound2) and libudev, present on almost every desktop
 distribution, and a Vulkan or OpenGL driver. Works on X11 and Wayland.
-To add it to your application menu, copy ribbit-gui somewhere on your PATH
+To add it to your application menu, copy ribbit somewhere on your PATH
 (e.g. ~/.local/bin) and ribbit.desktop to ~/.local/share/applications.
 
 Controllers: if a controller is not found, your user may need read access
@@ -89,7 +93,8 @@ Where things go
 Settings, game saves, save states and screenshots: ~/.config/ribbit
 (or $XDG_CONFIG_HOME/ribbit; Help > About shows the save folder.)
 
-`ribbit` is the command-line tool (./ribbit --help).
+If Ribbit closes or shows an error, send ~/.config/ribbit/ribbit.log with
+your report (it is rewritten each time Ribbit starts).
 Help > Check for updates tells you when a new version is out.
 """
 
@@ -201,8 +206,8 @@ def main():
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    for prog in PROGRAMS:
-        src = tdir / 'release' / prog
+    for prog, built in PROGRAMS.items():
+        src = tdir / 'release' / built
         if not src.exists():
             sys.exit(f'missing {src} (build first)')
         shutil.copy2(src, stage / prog)
@@ -221,7 +226,9 @@ def main():
     out = DIST / f'{name}.tar.gz'
     with tarfile.open(out, 'w:gz', compresslevel=9) as tar:
         for f in sorted(stage.iterdir()):
-            tar.add(f, f'{name}/{f.name}', filter=anonymous)
+            # (In a folder named Ribbit, without the version: unpacked where the
+            # last one was, a new release replaces it.)
+            tar.add(f, f'Ribbit/{f.name}', filter=anonymous)
     print(f'{out} ({out.stat().st_size // 1024} KiB)')
     if a.upload:
         if shutil.which('gh') is None:

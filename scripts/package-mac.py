@@ -3,8 +3,8 @@
 Run (on the Mac, from the repository):
         python3 -I scripts/package-mac.py [--skip-build] [--arch universal|arm64|x86_64] [--upload]
 Output: target/dist/Ribbit-<version>-macos-<arch>.zip
-        (Ribbit.app, the `ribbit` command-line tool, a read-me and the
-        third-party licence notices)
+        (Ribbit.app, a read-me and the third-party licence notices; the
+        command-line tool is for development and stays out)
 
 Needs: Rust (rustup), the Xcode command-line tools (xcode-select --install).
 A universal build adds both targets itself (rustup target add ...).
@@ -31,7 +31,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / 'target' / 'dist'
 TARGETS = {'arm64': 'aarch64-apple-darwin', 'x86_64': 'x86_64-apple-darwin'}
-PROGRAMS = ['ribbit-gui', 'ribbit']
 BUNDLE_ID = 'io.github.motifmixes.ribbit'
 
 INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
@@ -74,6 +73,8 @@ run this once in Terminal:
 
 Starting
 --------
+Nothing else to install: Ribbit.app is the whole app (no Rust needed).
+
 1. Open Ribbit.
 2. File > Open BIOS... and choose your BIOS dump (asked once; remembered).
 3. Add your games folder. The game library shows every game in it; click a
@@ -96,7 +97,8 @@ Where things go
 Settings, game saves, save states and screenshots: ~/.config/ribbit
 (Help > About shows the save folder.)
 
-`ribbit` next to the app is the command-line tool (./ribbit --help).
+If Ribbit closes or shows an error, send ~/.config/ribbit/ribbit.log with
+your report (it is rewritten each time Ribbit starts).
 Help > Check for updates tells you when a new version is out.
 """
 
@@ -192,11 +194,10 @@ def main():
     (app / 'Resources').mkdir()
     program(arches, 'ribbit-gui', app / 'MacOS' / 'ribbit-gui')
     (app / 'Info.plist').write_text(INFO_PLIST.format(version=ver, bundle_id=BUNDLE_ID), encoding='utf-8')
-    program(arches, 'ribbit', stage / 'ribbit')
     (stage / 'README.txt').write_text(README.format(version=ver), encoding='utf-8')
     shutil.copy2(ROOT / 'THIRD-PARTY-NOTICES.txt', stage / 'THIRD-PARTY-NOTICES.txt')
 
-    allowed = {'Ribbit.app', 'ribbit', 'README.txt', 'THIRD-PARTY-NOTICES.txt'}
+    allowed = {'Ribbit.app', 'README.txt', 'THIRD-PARTY-NOTICES.txt'}
     found = {p.name for p in stage.iterdir()}
     if found != allowed:
         sys.exit(f'unexpected files in the package: {sorted(found - allowed)}')
@@ -207,7 +208,6 @@ def main():
     refuse_personal_info(stage)
 
     # Ad-hoc signatures: Apple silicon refuses to run unsigned code at all.
-    run('codesign', '--force', '--sign', '-', stage / 'ribbit')
     run('codesign', '--force', '--deep', '--sign', '-', stage / 'Ribbit.app')
 
     out = DIST / f'{name}.zip'

@@ -6,6 +6,11 @@ An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leap
 Leapster L-MAX, Leapster TV and Leapster 2, the Zippity and the RockIt Twist. Written in Rust, for **Windows, macOS,
 Linux and Android** (the Android app is new and has not been tested on real devices yet).
 
+**→ [Download Ribbit](https://github.com/MotifMixes/ribbit/releases/latest)**: a zip for Windows or macOS, a
+`.tar.gz` for Linux, an `.apk` for Android. Nothing else to install: you **don't need Rust** or any other tool to
+play (Rust is only for building Ribbit from its source code). Unzip it and run `Ribbit.exe` (Windows), `Ribbit.app`
+(macOS) or `ribbit` (Linux).
+
 **→ [Compatibility list: every console and every game tested](docs/compatibility.md)**
 
 > [!IMPORTANT]
@@ -146,9 +151,11 @@ Roughly in this order:
 Later, maybe: a BIOS-free mode (a separate Flash player for Leapster cartridges, clearly labelled, never replacing
 the accurate path).
 
-## Build
+## Build from source (developers)
 
-Requires Rust 1.88+.
+Players don't need this: [download a release](https://github.com/MotifMixes/ribbit/releases/latest) instead. Building
+requires Rust 1.88+. It makes the app (`ribbit-gui`) and a command-line tool for development (`ribbit`: headless
+runs, traces and memory dumps); the release packages hold only the app.
 
 ```sh
 cargo test --workspace
@@ -156,7 +163,7 @@ cargo build --release
 ```
 
 * **Windows release**: `python -I scripts/package-release.py` writes `target/dist/Ribbit-<version>-windows-x64.zip`
-  (the programs and a read-me; no firmware).
+  (`Ribbit.exe` and a read-me; no firmware).
 * **Linux release**: `python3 -I scripts/package-linux.py` on Linux, or `python -I scripts/package-linux.py` on
   Windows (builds inside WSL), writes `target/dist/Ribbit-<version>-linux-x64.tar.gz`. Needs `pkg-config`,
   `libasound2-dev` and `libudev-dev`.
@@ -170,10 +177,15 @@ cargo build --release
 
 ## Playing
 
-Run `target/release/ribbit-gui` (`.exe` on Windows), or download a release: a zip for Windows or macOS, a
-`.tar.gz` for Linux, an `.apk` for Android (install it on the device; on a phone, touch controls appear on screen). Add your games folder in the library, or use File →
+[Download a release](https://github.com/MotifMixes/ribbit/releases/latest) and run `Ribbit.exe` (Windows),
+`Ribbit.app` (macOS) or `ribbit` (Linux); on Android, install the `.apk` (on a phone, touch controls appear on
+screen). Built from source, the app is `target/release/ribbit-gui`. Add your games folder in the library, or use File →
 Open BIOS… once and then File → Open Cartridge… (dropping files onto the window works too). Settings, saves, save
 states and screenshots go to `%APPDATA%\Ribbit` on Windows and `~/.config/ribbit` on Linux and macOS.
+
+**If Ribbit closes or shows an error**, send `ribbit.log` from that folder with your report (it is rewritten each
+time Ribbit starts). When the graphics card can't draw the window, Ribbit on Windows draws in software instead; to
+force that (a graphics driver that crashes or draws wrongly), set the environment variable `RIBBIT_SOFTWARE_GPU=1`.
 
 **Updating**: replace the program files with the new release. Saves and settings live in the data folder above, not
 next to the program, so an update never touches them. The first time a new version starts, Ribbit also copies all
