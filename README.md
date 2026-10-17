@@ -6,10 +6,31 @@ An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leap
 Leapster L-MAX, Leapster TV and Leapster 2, the Zippity and the RockIt Twist. Written in Rust, for **Windows, macOS,
 Linux and Android** (the Android app is new and has not been tested on real devices yet).
 
-**→ [Download Ribbit](https://github.com/MotifMixes/ribbit/releases/latest)**: a zip for Windows or macOS, a
-`.tar.gz` for Linux, an `.apk` for Android. Nothing else to install: you **don't need Rust** or any other tool to
-play (Rust is only for building Ribbit from its source code). Unzip it and run `Ribbit.exe` (Windows), `Ribbit.app`
-(macOS) or `ribbit` (Linux).
+## Download and play
+
+**You don't need to install Rust or anything else.** The download is the finished app. (Rust is only needed to
+build Ribbit from its source code, which players never have to do.)
+
+1. Open the **[latest release](https://github.com/MotifMixes/ribbit/releases/latest)** and, under *Assets*,
+   download the file for your system:
+
+   | System | File | Then |
+   |---|---|---|
+   | **Windows** 10 or 11 | `Ribbit-…-windows-x64.zip` | Unzip it and double-click **`Ribbit.exe`** in the `Ribbit` folder. |
+   | **macOS** 11 or later | `Ribbit-…-macos-universal.zip` | Unzip it and drag **`Ribbit.app`** to Applications. The first time, right-click it and choose **Open** (it isn't notarised by Apple). |
+   | **Linux** x86-64 | `Ribbit-…-linux-x64.tar.gz` | Unpack it and run **`./ribbit`** in the `Ribbit` folder. |
+   | **Android** 8 or later | `Ribbit-…-android-arm64.apk` | Open it on the device and allow installing it. |
+
+   (The *Source code* files at the bottom of the list are for developers, not for playing.)
+2. In Ribbit, choose your BIOS dump with **File → Open BIOS…** (asked once).
+3. Add your games folder in the library, or open a game with **File → Open Cartridge…**.
+
+**Updating:** unzip the new version over your old `Ribbit` folder (replace the files when asked). Your saves and
+settings are kept, as they're stored separately. Ribbit tells you when a new version is out.
+
+**Something wrong?** If Ribbit closes or shows an error, send the file `ribbit.log` with your report. It's in
+`%APPDATA%\Ribbit` on Windows (paste that into the File Explorer address bar) and `~/.config/ribbit` on macOS and
+Linux.
 
 **→ [Compatibility list: every console and every game tested](docs/compatibility.md)**
 
