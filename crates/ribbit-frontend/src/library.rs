@@ -37,40 +37,45 @@ const HD_DRAIN_MS: u64 = 50;
 /// with `examples/retitle.rs`, which matches each frame against the
 /// previous art. Games not listed are searched for their most colourful
 /// early screen.
+/// (Moments re-timed 2026-10-16 from half-second timelines, the middle of
+/// each title card: several had drifted onto a logo, a copyright screen or
+/// the black frame before the title.)
 const TITLE_CARD_MS: &[(u32, u64)] = &[
     (0x0ef6_1cbb, 10_250), // Spider-Man - The Case of the Sinister Speller
     (0xd4a7_e5d4, 21_000), // Disney/Pixar Cars (its "Disney presents a Pixar film" title)
     (0x0f2a_d725, 8_750), // SpongeBob SquarePants - Saves the Day (USA, alt)
     (0x0f6d_55cf, 11_750), // Number Raiders
     (0x19da_3dd8, 10_750), // Scooby-Doo! - Spooky Snacks
-    (0x2465_f01d, 28_000), // Disney Princess - Worlds of Enchantment
+    (0x2465_f01d, 33_500), // Disney Princess - Worlds of Enchantment
     (0x2700_0674, 13_500), // Star Wars - The Clone Wars - Jedi Math
-    (0x29af_42ba, 23_250), // Cars 2
-    (0x2c1f_cf40, 9_000), // Learning with Leap
-    (0x3c42_8a13, 28_000), // Pet Pals
-    (0x5303_d366, 13_000), // Thomas & Friends - Calling All Engines!
+    (0x29af_42ba, 26_000), // Cars 2
+    (0x2c1f_cf40, 10_500), // Learning with Leap
+    (0x3c42_8a13, 33_500), // Pet Pals
+    (0x5303_d366, 15_000), // Thomas & Friends - Calling All Engines!
     (0x58d0_8f36, 15_750), // The Talking Words Factory
     (0x5ccb_2ad3, 15_750), // Disney Princess - Enchanted Learning
     (0x6239_a178, 24_000), // Star Wars - Jedi Reading
     // Through the Wormhole has no title screen of its own (as recorded on a
     // Leapster TV: LeapFrog, the Nickelodeon/SpongeBob legal screen, then
     // the player menu); its player menu, before the buttons start pulsing.
-    (0x6b24_a3ef, 10_500), // SpongeBob SquarePants - Through the Wormhole
+    (0x6b24_a3ef, 11_000), // SpongeBob SquarePants - Through the Wormhole
     (0x7177_8536, 12_250), // Dora the Explorer - Camping Adventure
-    (0x74af_5d57, 9_500), // Dora the Explorer - Wildlife Rescue
+    (0x74af_5d57, 12_500), // Dora the Explorer - Wildlife Rescue
     (0x9793_46d5, 12_250), // Cosmic Math
-    (0x9b86_a0fb, 9_500), // Letterpillar
-    (0x9e69_c26a, 27_750), // Outwit!
+    // NASCAR has no title card: its NASCAR logo screen, after the race intro.
+    (0x95c7_8f34, 23_000), // NASCAR
+    (0x9b86_a0fb, 12_000), // Letterpillar
+    (0x9e69_c26a, 33_000), // Outwit!
     (0x9f08_d02a, 9_000), // Creature Create
     (0xa0a3_62aa, 19_000), // The Batman - Multiply, Divide and Conquer (Germany)
-    (0xa9c7_5d90, 19_250), // Madagascar
+    (0xa9c7_5d90, 22_000), // Madagascar
     (0xa9d2_cdbd, 15_500), // Sonic X
     (0xb186_a3bf, 11_750), // Letters on the Loose
-    (0xd0c4_de47, 14_750), // Ratatouille
+    (0xd0c4_de47, 16_000), // Ratatouille
     (0xd2f5_60c7, 12_500), // Disney Fairies (Spain)
-    (0xda56_181c, 15_750), // I Spy Challenger!
+    (0xda56_181c, 18_500), // I Spy Challenger!
     (0xdb26_2164, 8_500), // Kindergarten
-    (0xdb36_283f, 9_250), // 1st Grade
+    (0xdb36_283f, 11_500), // 1st Grade
     (0xe62d_1684, 11_250), // Foster's Home for Imaginary Friends
     (0xea54_4030, 10_750), // Dora the Explorer - Pinata Party
 ];
@@ -90,7 +95,7 @@ const ART_PROFILE: &[u8; 256] = include_bytes!("art_profile.eeprom");
 
 /// Where a game's art is cached (the suffix changes whenever the way art
 /// is made changes, so old pictures are made again).
-const ART_SUFFIX: &str = "-7.png";
+const ART_SUFFIX: &str = "-8.png";
 
 fn art_file(art_dir: &Path, key: &str) -> PathBuf {
     art_dir.join(art_name(key))
@@ -741,7 +746,19 @@ fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Shot> {
     m.record_trace_tail = false;
     m.io.eeprom.load(ART_PROFILE);
     m.enable_experimental_mame_touch(Default::default());
-    let canvas = m.enable_hd_capture().then(|| ribbit_core::hd::HdCanvas::new(m.hd.as_ref().unwrap().hooks));
+    let canvas = m.enable_hd_capture().then(|| {
+        let mut c = ribbit_core::hd::HdCanvas::new(m.hd.as_ref().unwrap().hooks);
+        // Text from the fonts' outlines, as HD shows it: the fonts are
+        // searched in the background as the library is; waited for a while.
+        for _ in 0..300 {
+            if crate::device_fonts::get().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        c.fonts = crate::device_fonts::get();
+        c
+    });
     let mut cap = Capture { m, canvas, frame: Box::new([0u32; WIDTH * HEIGHT]) };
     if let Some(ms) = title_card {
         // A known game: straight to its title card.
