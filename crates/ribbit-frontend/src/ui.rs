@@ -264,13 +264,14 @@ pub fn draw(
     // pop-up, read once. Android's quick start shows it as its first page.
     let quick_start = phone && !info.running && info.bios_name.is_none();
     if !settings.ai_notice_seen && !quick_start {
-        egui::Modal::new(egui::Id::new("ai-notice")).show(&ctx, |ui| {
-            ui.set_max_width(540.0);
-            ai_notice(ui);
-            ui.add_space(10.0);
+        egui::Modal::new(egui::Id::new("ai-notice")).frame(ai_card_frame()).show(&ctx, |ui| {
+            ui.set_width(ctx.content_rect().width().min(560.0) - 80.0);
+            ai_notice_text(ui);
+            ui.add_space(16.0);
             ui.vertical_centered(|ui| {
                 let text = egui::RichText::new("Continue").size(17.0).color(egui::Color32::WHITE);
-                if ui.add(egui::Button::new(text).fill(ACCENT).min_size(egui::vec2(200.0, 40.0))).clicked() {
+                let button = egui::Button::new(text).fill(ACCENT).corner_radius(10).min_size(egui::vec2(220.0, 44.0));
+                if ui.add(button).clicked() {
                     settings.ai_notice_seen = true;
                     actions.push(Action::SettingsChanged);
                 }
@@ -976,7 +977,25 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
 /// whose menu opens beside it.
 fn top_menu(ui: &mut egui::Ui, rows: bool, icon: &str, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
     if !rows {
-        ui.menu_button(label, add_contents);
+        let response = ui.menu_button(label, add_contents).response;
+        // With another of these menus open, pointing at this one opens it
+        // instead, as menu bars have done since Windows 95 (egui's opens
+        // only on a click).
+        let ctx = ui.ctx().clone();
+        let id = egui::Popup::default_response_id(&response);
+        let all = egui::Id::new("top-level menus");
+        let mut ids: Vec<egui::Id> = ctx.data(|d| d.get_temp(all)).unwrap_or_default();
+        if !ids.contains(&id) {
+            ids.push(id);
+            ctx.data_mut(|d| d.insert_temp(all, ids.clone()));
+        }
+        if response.hovered()
+            && !egui::Popup::is_id_open(&ctx, id)
+            && ids.iter().any(|&other| other != id && egui::Popup::is_id_open(&ctx, other))
+        {
+            egui::Popup::open_id(&ctx, id);
+            ctx.request_repaint();
+        }
         return;
     }
     let text = egui::RichText::new(format!("{icon}    {label}")).size(17.0).color(egui::Color32::from_gray(230));
@@ -1207,7 +1226,8 @@ fn welcome(ui: &mut egui::Ui, settings: &mut Settings, info: &Info, actions: &mu
             ai_notice(ui);
             ui.add_space(16.0);
             let text = egui::RichText::new("Continue").size(18.0).color(egui::Color32::WHITE);
-            if ui.add(egui::Button::new(text).fill(ACCENT).min_size(egui::vec2(240.0, 48.0))).clicked() {
+            let button = egui::Button::new(text).fill(ACCENT).corner_radius(10).min_size(egui::vec2(240.0, 48.0));
+            if ui.add(button).clicked() {
                 settings.ai_notice_seen = true;
                 actions.push(Action::SettingsChanged);
             }
@@ -1237,15 +1257,13 @@ fn welcome(ui: &mut egui::Ui, settings: &mut Settings, info: &Info, actions: &mu
                 }
             }
         }
-        ui.add_space(14.0);
-        ui.label(egui::RichText::new("You can also drop a BIOS or cartridge file onto this window.").weak());
-        ui.label(egui::RichText::new("No firmware or games are included: use dumps of hardware you own.").weak());
+        if !phone {
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("You can also drop a BIOS or cartridge file onto this window.").weak());
+        }
         if phone {
             ui.add_space(10.0);
             ui.label(egui::RichText::new("Swipe in from the left edge for the menu.").weak());
-        } else {
-            ui.add_space(22.0);
-            ai_notice(ui);
         }
         ui.add_space(12.0);
     }));
@@ -1254,23 +1272,45 @@ fn welcome(ui: &mut egui::Ui, settings: &mut Settings, info: &Info, actions: &mu
 /// The README's "This project was made with AI", shortened, on the first
 /// screen: players should know before they start.
 fn ai_notice(ui: &mut egui::Ui) {
-    let width = ui.available_width().min(520.0);
-    egui::Frame::group(ui.style()).inner_margin(12.0).show(ui, |ui| {
-        ui.set_width(width - 26.0);
-        ui.label(egui::RichText::new("This project was made with AI").strong());
-        ui.add_space(4.0);
+    let width = ui.available_width().min(560.0);
+    ai_card_frame().show(ui, |ui| {
+        ui.set_width(width - 48.0);
+        ai_notice_text(ui);
+    });
+}
+
+/// The AI note's card: dark, rounded, with a soft green edge.
+fn ai_card_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(22, 26, 24))
+        .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.55)))
+        .corner_radius(16)
+        .inner_margin(egui::Margin::symmetric(24, 20))
+        .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(110) })
+}
+
+/// The README's "This project was made with AI", shortened: a title, the
+/// note in short paragraphs, and who it's not from.
+fn ai_notice_text(ui: &mut egui::Ui) {
+    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.label(egui::RichText::new("This project was made with AI").size(21.0).strong().color(egui::Color32::WHITE));
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new("Please read this before you start").size(13.5).color(ACCENT));
+        ui.add_space(12.0);
         for text in [
             "Ribbit is written almost entirely by an AI coding assistant (Anthropic's Claude), working under my \
              direction: I choose what to work on, test it, supply the hardware references and decide what goes in.",
             "Many people don't want to use AI-written software, for reasons I respect: licensing and where training \
              data comes from, code quality, and the work of people who reverse-engineer hardware by hand. If that's \
-             you, no hard feelings. Otherwise, please judge Ribbit by its results: every hardware claim in its notes \
-             says how sure it is and where it comes from.",
-            "Ribbit is not affiliated with or endorsed by LeapFrog.",
+             you, no hard feelings.",
+            "Otherwise, please judge Ribbit by its results: every hardware claim in its notes says how sure it is \
+             and where it comes from.",
         ] {
-            ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
-            ui.add_space(2.0);
+            ui.add(egui::Label::new(egui::RichText::new(text).size(15.0).color(egui::Color32::from_gray(205))).wrap());
+            ui.add_space(9.0);
         }
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new("Ribbit is not affiliated with or endorsed by LeapFrog.").size(12.5).color(egui::Color32::from_gray(130)));
     });
 }
 
@@ -1789,8 +1829,6 @@ fn empty_library(ui: &mut egui::Ui, settings: &Settings, actions: &mut Vec<Actio
         if ui.add(egui::Button::new("Open a single file…").corner_radius(8).min_size(egui::vec2(280.0, 36.0))).clicked() {
             actions.push(Action::Pick(Pick::Cartridge));
         }
-        ui.add_space(18.0);
-        ui.label(egui::RichText::new("No games are included: use dumps of cartridges you own.").size(12.5).weak());
     });
 }
 
