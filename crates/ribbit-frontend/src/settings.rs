@@ -103,6 +103,9 @@ pub struct Settings {
     /// A folder written onto the RockIt Twist's internal storage at power-on
     /// (laid out like its F: drive), if one is chosen.
     pub twist_content: Option<PathBuf>,
+    /// Offer the RockIt Twist on the PC's USB (a USB/IP server for
+    /// usbip-win2 and LeapFrog Connect).
+    pub twist_usb: bool,
 }
 
 impl Default for Settings {
@@ -143,6 +146,7 @@ impl Default for Settings {
             console_view_twist: true,
             console_view_keys: true,
             twist_content: None,
+            twist_usb: false,
         }
     }
 }

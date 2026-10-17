@@ -30,6 +30,8 @@ pub mod package;
 pub mod probe;
 pub mod sd;
 pub mod sound;
+pub mod udc;
+pub mod usbip;
 pub mod video;
 
 /// Where the emulation stands, for the UI and documentation.

@@ -309,6 +309,8 @@ struct Shared {
     error: Mutex<Option<String>>,
     /// Where the sound goes, and its volume (an f32's bits).
     sink: Mutex<Option<AudioSink>>,
+    /// USB news for the UI.
+    usb_news: Mutex<Option<UsbNews>>,
     gain: AtomicU32,
 }
 
@@ -326,7 +328,14 @@ impl Machine {
     /// `content`: a folder written onto the storage (the volume's root).
     /// `save`: the file holding what the console stored (profiles,
     /// progress), loaded at power-on and written as it changes.
-    pub fn start(packages: SystemPackages, content: Option<PathBuf>, sink: Option<AudioSink>, save: Option<PathBuf>) -> Self {
+    /// `usb`: offer the console on the PC's USB (`run_usb`).
+    pub fn start(
+        packages: SystemPackages,
+        content: Option<PathBuf>,
+        sink: Option<AudioSink>,
+        save: Option<PathBuf>,
+        usb: bool,
+    ) -> Self {
         let shared = Arc::new(Shared {
             screen: Mutex::new(vec![0; ribbit_twist::SCREEN_W * ribbit_twist::SCREEN_H]),
             running: AtomicBool::new(true),
@@ -337,13 +346,14 @@ impl Machine {
             slider_pads: AtomicU32::new(0),
             error: Mutex::new(None),
             sink: Mutex::new(sink),
+            usb_news: Mutex::new(None),
             gain: AtomicU32::new(1f32.to_bits()),
         });
         let s = shared.clone();
         let thread = std::thread::Builder::new()
             .name("rockit-twist".into())
             .spawn(move || {
-                if let Err(e) = Self::run(&packages, content.as_deref(), save.as_deref(), &s) {
+                if let Err(e) = Self::run(&packages, content.as_deref(), save.as_deref(), usb, &s) {
                     *s.error.lock().unwrap() = Some(format!("{e:#}"));
                 }
             })
@@ -351,7 +361,7 @@ impl Machine {
         Self { shared, thread, speed_from: Mutex::new((Instant::now(), 0)), speed_shown: AtomicU64::new(0) }
     }
 
-    fn run(p: &SystemPackages, content: Option<&Path>, save: Option<&Path>, s: &Shared) -> anyhow::Result<()> {
+    fn run(p: &SystemPackages, content: Option<&Path>, save: Option<&Path>, usb: bool, s: &Shared) -> anyhow::Result<()> {
         use ribbit_twist::{image, machine};
         let boot = package_file(&p.bootloader, None)?;
         let base = package_file(&p.base, None)?;
@@ -375,6 +385,14 @@ impl Machine {
             }
         }
         let mut save_check = Instant::now();
+        let server = usb.then(|| match ribbit_twist::usbip::Server::start(usb_device(), ribbit_twist::usbip::PORT) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                *s.usb_news.lock().unwrap() = Some(UsbNews::Failed(e.to_string()));
+                None
+            }
+        });
+        let server = server.flatten();
         let slice = machine::CLOCK / 120;
         let mut pixels = vec![0u32; ribbit_twist::SCREEN_W * ribbit_twist::SCREEN_H];
         // The console's time follows the clock from `origin` (moved on
@@ -408,7 +426,13 @@ impl Machine {
                 *sent = total;
             }
             t.bus.slider_pads = s.slider_pads.load(Ordering::Relaxed) as u8;
+            if let Some(srv) = &server {
+                Self::run_usb(srv, &mut t, s);
+            }
             t.run(slice);
+            if let Some(srv) = &server {
+                Self::run_usb(srv, &mut t, s);
+            }
             // The picture changes only when the panel is sent a frame.
             if t.bus.panel_frames != shown {
                 shown = t.bus.panel_frames;
@@ -463,6 +487,38 @@ impl Machine {
         self.shared.slider_pads.store(pads.into(), Ordering::Relaxed);
     }
 
+    /// Passes the PC's transfers to the console's USB controller and its
+    /// answers back.
+    fn run_usb(srv: &ribbit_twist::usbip::Server, t: &mut ribbit_twist::machine::Twist, s: &Shared) {
+        use ribbit_twist::usbip::Event;
+        while let Some(e) = srv.next_event() {
+            match e {
+                Event::Attached => {
+                    t.bus.udc_attach(true);
+                    *s.usb_news.lock().unwrap() = Some(UsbNews::Attached);
+                }
+                Event::Detached => {
+                    if t.bus.udc.attached {
+                        *s.usb_news.lock().unwrap() = Some(UsbNews::Detached);
+                    }
+                    t.bus.udc_attach(false);
+                }
+                Event::Submit(u) => t.bus.udc_submit(u),
+                Event::Unlink(seq) => {
+                    t.bus.udc_unlink(seq);
+                }
+            }
+        }
+        for (seq, status, data, length) in t.bus.udc_take_done() {
+            srv.complete(seq, status, data, length);
+        }
+    }
+
+    /// News of the USB link since last asked.
+    pub fn take_usb_news(&self) -> Option<UsbNews> {
+        self.shared.usb_news.lock().unwrap().take()
+    }
+
     /// The volume (0 mutes).
     pub fn set_gain(&self, gain: f32) {
         self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
@@ -487,6 +543,30 @@ impl Drop for Machine {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+/// What the UI hears about the USB link.
+pub enum UsbNews {
+    Attached,
+    Detached,
+    Failed(String),
+}
+
+/// The device as the console's firmware describes itself over USB
+/// (VERIFIED with examples/usbhost.rs: vendor 0x0F63, LeapFrog; product
+/// 0x0047; one mass-storage interface, SCSI, Bulk-Only; high speed).
+fn usb_device() -> ribbit_twist::usbip::DeviceInfo {
+    ribbit_twist::usbip::DeviceInfo {
+        busid: "1-1".into(),
+        vendor: 0x0F63,
+        product: 0x0047,
+        bcd_device: 0x0100,
+        class: (0, 0, 0),
+        configuration: 1,
+        num_configurations: 1,
+        interfaces: vec![(8, 6, 0x50)],
+        speed: 3,
     }
 }
 
@@ -571,6 +651,8 @@ pub struct TwistSession {
     pub content: Option<PathBuf>,
     /// Where the console's stored data is kept.
     save: Option<PathBuf>,
+    /// Offer the console on the PC's USB.
+    pub usb: bool,
 }
 
 impl TwistSession {
@@ -582,9 +664,10 @@ impl TwistSession {
         content: Option<PathBuf>,
         audio: Option<&AudioOut>,
         save: Option<PathBuf>,
+        usb: bool,
     ) -> Self {
         let system = SystemPackages::find(package.as_deref(), known);
-        let machine = system.clone().map(|s| Machine::start(s, content.clone(), audio.map(|a| a.sink()), save.clone()));
+        let machine = system.clone().map(|s| Machine::start(s, content.clone(), audio.map(|a| a.sink()), save.clone(), usb));
         let kind = package.as_deref().and_then(|p| {
             let name = p.file_name()?.to_string_lossy().into_owned();
             package::kind(&name, &head(p)?)
@@ -605,6 +688,7 @@ impl TwistSession {
             machine,
             content,
             save,
+            usb,
         }
     }
 
@@ -613,8 +697,10 @@ impl TwistSession {
     /// modes (the factory test, see docs/rockit-twist.md).
     pub fn restart(&mut self, audio: Option<&AudioOut>) {
         self.machine = None;
-        self.machine =
-            self.system.clone().map(|s| Machine::start(s, self.content.clone(), audio.map(|a| a.sink()), self.save.clone()));
+        self.machine = self
+            .system
+            .clone()
+            .map(|s| Machine::start(s, self.content.clone(), audio.map(|a| a.sink()), self.save.clone(), self.usb));
         if let Some(m) = &self.machine {
             m.set_keys(self.keys());
         }
@@ -1036,7 +1122,7 @@ Version=\"1.0.3.16\"
 
     #[test]
     fn keys_press_and_release_and_turn() {
-        let mut s = TwistSession::start(None, &[], None, None, None);
+        let mut s = TwistSession::start(None, &[], None, None, None, false);
         assert!(s.machine.is_none(), "no system packages: controls only");
         assert!(s.key(KeyCode::KeyE, true));
         assert!(s.controls.pressed(Button::SwitchRight));

@@ -155,7 +155,9 @@ the jump table at 0xFFF260), then the data that follows is fed 512 bytes at a ti
 console receives packs as plain tar archives: **LeapFrog Connect decrypts the `.lf3` on the computer.** An
 emulated console running its own firmware will therefore never unpack an `.lf3` itself.
 
-**The USB transport (VERIFIED).** The console appears as a USB CD-ROM ("GENPLUS USB-CDRM DISK", inquiry type 5).
+**The USB transport (VERIFIED by running it, docs/rockit-twist-usb.md).** The console is a USB mass-storage device
+(Bulk-Only Transport, SCSI) whose one LUN is a 512-byte-block disk: INQUIRY "Leapfrog" / "Pocket Play 6060" (the
+"GENPLUS USB-CDRM DISK" data in the firmware belongs to a LUN type it never sets). USB vendor 0x0F63, product 0x0047.
 Its mass-storage driver has hooks (installed at 0x25C6C) for two block numbers on LUN 0: a SCSI WRITE(10) of one
 block at LBA 0x20 sends a command line (0x25CF8), a READ(10) of one block at LBA 0x20 returns the reply
 (0x263C8), and transfers at LBA 0x40 (up to 32 blocks each) carry file data. Replies come from the table at
@@ -318,6 +320,22 @@ is UNVERIFIED (the menu's music comes out quiet).
 **Next steps.** The remaining text-plane modes (turned, zoomed, attribute maps); playing through the other built-in
 games and the packs; the DAC sample format; a small box drawn at the top of the screen in some games (from a sprite
 not identified yet); checking the loudness and the rotation direction against a real unit.
+
+## USB and LeapFrog Connect (2026-10-17)
+
+The console's USB device controller (0xC00E0000, `udc.rs`) is emulated from its driver's own use of it
+(docs/rockit-twist-usb.md): the firmware polls it from its USB task; the model answers the standard requests the
+silicon handles itself (SET_ADDRESS, GET_STATUS, CLEAR_FEATURE...), passes the rest to the firmware, and moves bulk
+data by FIFO and DMA as the driver expects. `usbip.rs` offers the device to the PC over USB/IP (TCP port 3240), the
+protocol of Linux's usbip, which usbip-win2 brings to Windows. `examples/usbhost.rs` plays the PC's part, directly
+or over USB/IP: VERIFIED that the console enumerates (descriptors, configuration, one LUN), answers INQUIRY, READ
+CAPACITY and TEST UNIT READY, and runs LeapFrog's file protocol (INFO "VERSION=4", LIST, GETS BASEVERSION /
+FREESPACE / MFG_SERIAL, RETR of a file through LBA 0x40).
+
+In the app: File → "Plug the RockIt Twist into this PC (USB)" starts the server with the console; then, with
+usbip-win2 installed, `usbip attach -r 127.0.0.1 -b 1-1` plugs it into Windows. Whether LeapFrog Connect accepts the
+emulated console (its serial number is Ribbit's own, "RIBBIT00000000000001") and whether its servers still work is
+UNVERIFIED: not tried yet.
 
 ## Using it in Ribbit
 

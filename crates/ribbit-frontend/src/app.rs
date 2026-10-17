@@ -633,6 +633,7 @@ impl App {
             self.settings.twist_content.clone(),
             self.audio.as_ref(),
             Some(self.save_dir().join("rockit-twist.emmc")),
+            self.settings.twist_usb,
         );
         let running = session.machine.is_some();
         self.twist = Some(session);
@@ -884,6 +885,19 @@ impl App {
             }
             Action::OpenTwist => self.start_twist(None),
             Action::SetTwistContent(path) => self.set_twist_content(path),
+            Action::SetTwistUsb(on) => {
+                self.settings.twist_usb = on;
+                self.save_settings();
+                if let Some(t) = &mut self.twist {
+                    t.usb = on;
+                    t.restart(self.audio.as_ref());
+                }
+                self.ui.toast(if on {
+                    "RockIt Twist on USB: run  usbip attach -r 127.0.0.1 -b 1-1  (usbip-win2) to plug it in"
+                } else {
+                    "RockIt Twist unplugged from USB"
+                });
+            }
             Action::ImportTwistZip(path) => self.import_twist_zip(path),
             Action::ConsoleViewChanged => self.console_view_changed(),
             Action::Reset => self.reset(),
@@ -1339,6 +1353,14 @@ impl App {
             if let Some(m) = &t.machine {
                 m.set_running(!halted);
                 m.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+                match m.take_usb_news() {
+                    Some(crate::twist::UsbNews::Attached) => self.ui.toast("RockIt Twist plugged into this PC"),
+                    Some(crate::twist::UsbNews::Detached) => self.ui.toast("RockIt Twist unplugged from this PC"),
+                    Some(crate::twist::UsbNews::Failed(e)) => {
+                        self.ui.toast(format!("RockIt Twist USB: can't listen on port 3240 ({e})"))
+                    }
+                    None => {}
+                }
             }
             self.speed_percent = t.machine.as_ref().map_or(0.0, |m| m.speed_percent());
             return;

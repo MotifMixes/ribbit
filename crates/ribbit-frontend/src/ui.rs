@@ -49,6 +49,7 @@ pub enum Action {
     OpenTwist,
     /// Use this folder as the RockIt Twist's storage content (None: none).
     SetTwistContent(Option<PathBuf>),
+    SetTwistUsb(bool),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
     ImportTwistZip(PathBuf),
     /// The console view was turned on or off.
@@ -370,6 +371,19 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             }
             if content.is_some() && ui.button("Remove RockIt Twist content").clicked() {
                 actions.push(Action::SetTwistContent(None));
+                ui.close();
+            }
+            let usb = settings.twist_usb;
+            if ui
+                .button(format!("{}Plug the RockIt Twist into this PC (USB)", if usb { "✓ " } else { "" }))
+                .on_hover_text(
+                    "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
+                     so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
+                     usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
+                )
+                .clicked()
+            {
+                actions.push(Action::SetTwistUsb(!usb));
                 ui.close();
             }
             ui.separator();

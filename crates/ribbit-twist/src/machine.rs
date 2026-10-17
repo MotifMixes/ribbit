@@ -94,6 +94,8 @@ pub struct Bus {
     pub(crate) beat_base: u32,
     pub(crate) beat_flag: bool,
     pub(crate) sound_made: u64,
+    /// The USB device controller (`udc`).
+    pub udc: crate::udc::Udc,
     pub sound: Vec<i16>,
     /// The buttons held, as `key` bits.
     pub keys: u32,
@@ -420,6 +422,7 @@ impl Bus {
             beat_base: 0,
             beat_flag: false,
             sound_made: 0,
+            udc: Default::default(),
             sound: Vec::new(),
             gfx_log: Vec::new(),
             mpeg: crate::mpeg4::Decoder::new(),
@@ -466,6 +469,12 @@ impl Bus {
 
     fn io_read(&mut self, a: u32) -> u32 {
         let a = a & !3;
+        if (crate::udc::BASE..crate::udc::BASE + 0x200).contains(&a)
+            && let Some(v) = self.udc_read(a)
+        {
+            self.trace(a, None, v);
+            return v;
+        }
         let v = match a {
             0xD000_003C => 1,
             // GPIO inputs (+0 of ports A, B, C, D and G): the buttons are
@@ -548,6 +557,10 @@ impl Bus {
 
     /// Timers, DMA, the interrupt controller and the sound unit.
     fn device_write(&mut self, w: u32, now: u32, written: u32, old: u32) {
+        if (crate::udc::BASE..crate::udc::BASE + 0x200).contains(&w) {
+            self.udc_write(w, now, written, old);
+            return;
+        }
         match w {
             0xD040_0E00 | 0xD040_0E80 => self.spu_enable(((w >> 7) & 1) as usize, now & 0xFFFF, old),
             0xD040_0E28 | 0xD040_0EA8 => self.spu_ramp_down(((w >> 7) & 1) as usize, now, old),
@@ -1023,6 +1036,9 @@ impl Bus {
     pub fn tick(&mut self) {
         self.tick_encoders();
         self.tick_sound();
+        if self.udc.attached {
+            self.udc_poll();
+        }
         // The panel's tearing-effect pulse, when its interrupt is enabled.
         let period = CLOCK / TE_HZ;
         if self.now >= self.te_due {
