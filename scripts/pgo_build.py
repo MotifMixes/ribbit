@@ -38,6 +38,17 @@ TRAINING = [
 ]
 
 
+def release_rustflags(*extra):
+    """Compiler flags for release builds, as CARGO_ENCODED_RUSTFLAGS (paths
+    with spaces stay whole): the build machine's home folder and the
+    repository's place on it are not kept in the programs (rustc keeps
+    source paths for panic messages; they would show the account name).
+    When several prefixes match, rustc uses the last one."""
+    home = Path.home().resolve()
+    flags = [f'--remap-path-prefix={home}=~', f'--remap-path-prefix={ROOT}=ribbit', *extra]
+    return {'CARGO_ENCODED_RUSTFLAGS': ''.join(flags)}
+
+
 def llvm_major(text):
     m = re.search(r'LLVM version:?\s*(\d+)', text)
     return m.group(1) if m else None
@@ -73,7 +84,7 @@ def build_pgo():
     if DATA.exists():
         shutil.rmtree(DATA)
     DATA.mkdir(parents=True)
-    env = dict(os.environ, CARGO_TARGET_DIR=str(GEN), RUSTFLAGS=f'-Cprofile-generate={DATA.as_posix()}')
+    env = dict(os.environ, CARGO_TARGET_DIR=str(GEN), **release_rustflags(f'-Cprofile-generate={DATA.as_posix()}'))
     subprocess.run(['cargo', 'build', '--release', '-p', 'ribbit-core', '--example', 'bench'], cwd=ROOT, env=env, check=True)
     bench = GEN / 'release' / 'examples' / 'bench.exe'
     for bios, cart, steps in pairs:
@@ -82,7 +93,7 @@ def build_pgo():
         subprocess.run([str(bench), str(ROOT / bios), str(steps)], cwd=ROOT, env=run_env, check=True, stdout=subprocess.DEVNULL)
     merged = DATA / 'merged.profdata'
     subprocess.run([str(profdata), 'merge', '-o', str(merged), *map(str, DATA.glob('*.profraw'))], check=True)
-    env = dict(os.environ, RUSTFLAGS=f'-Cprofile-use={merged.as_posix()}')
+    env = dict(os.environ, **release_rustflags(f'-Cprofile-use={merged.as_posix()}'))
     subprocess.run(['cargo', 'build', '--release', '-p', 'ribbit-desktop'], cwd=ROOT, env=env, check=True)
     print(f'pgo: optimised build in {TARGET / "release"}')
     return True

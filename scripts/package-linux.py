@@ -128,6 +128,17 @@ def from_windows(a, ver):
         upload(ver, out)
 
 
+def release_rustflags(*extra):
+    """Compiler flags for release builds, as CARGO_ENCODED_RUSTFLAGS (paths
+    with spaces stay whole): the build machine's home folder and the
+    repository's place on it are not kept in the programs (rustc keeps
+    source paths for panic messages; they would show the account name).
+    When several prefixes match, rustc uses the last one."""
+    home = Path.home().resolve()
+    flags = [f'--remap-path-prefix={home}=~', f'--remap-path-prefix={ROOT}=ribbit', *extra]
+    return {'CARGO_ENCODED_RUSTFLAGS': ''.join(flags)}
+
+
 def target_dir():
     if os.environ.get('RIBBIT_LINUX_TARGET'):
         return Path(os.environ['RIBBIT_LINUX_TARGET'])
@@ -150,7 +161,8 @@ def main():
 
     tdir = target_dir()
     if not a.skip_build:
-        run('cargo', 'build', '--release', '-p', 'ribbit-desktop', '--target-dir', tdir, cwd=ROOT)
+        env = dict(os.environ, **release_rustflags())
+        run('cargo', 'build', '--release', '-p', 'ribbit-desktop', '--target-dir', tdir, cwd=ROOT, env=env)
 
     name = f'Ribbit-{ver}-linux-x64'
     stage = DIST / name

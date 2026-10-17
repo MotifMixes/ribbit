@@ -13,6 +13,7 @@ or other local file can end up inside; the script also refuses any file that
 is not on its list.
 """
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -112,7 +113,8 @@ def main():
         sys.path.insert(0, str(ROOT / 'scripts'))
         import pgo_build
         if a.no_pgo or not pgo_build.build_pgo():
-            subprocess.run(['cargo', 'build', '--release', '-p', 'ribbit-desktop'], cwd=ROOT, check=True)
+            env = dict(os.environ, **pgo_build.release_rustflags())
+            subprocess.run(['cargo', 'build', '--release', '-p', 'ribbit-desktop'], cwd=ROOT, env=env, check=True)
     name = f'Ribbit-{ver}-windows-x64'
     stage = DIST / name
     if stage.exists():

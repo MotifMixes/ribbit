@@ -20,6 +20,7 @@ As with the Windows package, the zip is assembled in a fresh staging folder
 from named files, so no BIOS, ROM, save or other local file can end up in it.
 """
 import argparse
+import os
 import platform
 import re
 import shutil
@@ -108,16 +109,28 @@ def version():
     return m.group(1)
 
 
-def run(*cmd):
+def run(*cmd, env=None):
     print('+', ' '.join(str(c) for c in cmd), flush=True)
-    subprocess.run([str(c) for c in cmd], cwd=ROOT, check=True)
+    subprocess.run([str(c) for c in cmd], cwd=ROOT, check=True, env=env)
+
+
+def release_rustflags(*extra):
+    """Compiler flags for release builds, as CARGO_ENCODED_RUSTFLAGS (paths
+    with spaces stay whole): the build machine's home folder and the
+    repository's place on it are not kept in the programs (rustc keeps
+    source paths for panic messages; they would show the account name).
+    When several prefixes match, rustc uses the last one."""
+    home = Path.home().resolve()
+    flags = [f'--remap-path-prefix={home}=~', f'--remap-path-prefix={ROOT}=ribbit', *extra]
+    return {'CARGO_ENCODED_RUSTFLAGS': ''.join(flags)}
 
 
 def build(arches):
     for arch in arches:
         target = TARGETS[arch]
         run('rustup', 'target', 'add', target)
-        run('cargo', 'build', '--release', '-p', 'ribbit-desktop', '--target', target)
+        run('cargo', 'build', '--release', '-p', 'ribbit-desktop', '--target', target,
+            env=dict(os.environ, **release_rustflags()))
 
 
 def program(arches, name, out):
