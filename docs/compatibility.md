@@ -90,7 +90,8 @@ typed, OK accepted).
 
 | Game | Leapster 2 (0.6, m9, B5) | L-MAX (v2.1, v2.2) | Notes |
 |---|---|---|---|
-| 1st Grade, Cosmic Math, Creature Create, Disney Fairies, Dora Camping Adventure, Dora Wildlife Rescue, Madagascar, Foster's Home, I Spy Challenger, Kindergarten, Letterpillar, Letters on the Loose, Number Raiders, Scooby-Doo, Sonic X, Spider-Man, SpongeBob Saves the Day, SpongeBob Through the Wormhole, Star Wars Jedi Math, Thomas & Friends | Same | Same | |
+| 1st Grade, Cosmic Math, Creature Create, Disney Fairies, Dora Camping Adventure, Dora Wildlife Rescue, Madagascar, Foster's Home, I Spy Challenger, Kindergarten, Letterpillar, Letters on the Loose, Number Raiders, Scooby-Doo, Sonic X, Spider-Man, SpongeBob Through the Wormhole, Star Wars Jedi Math, Thomas & Friends | Same | Same | |
+| SpongeBob Saves the Day | Same | **Works** on L-MAX US v2.1 | Reported working by a player (Ribbit 1.2.1, 2026-10-17) |
 | Disney/Pixar Cars | Same, then name entry | Same | |
 | Disney/Pixar Cars 2, Dora Piñata Party, Pet Pals, Outwit, Star Wars Jedi Reading, The Batman (DE) | Same | Same | |
 | Disney Princess: Enchanted Learning, Ratatouille | Main menu / intro without name entry | Same | The Leapster 2 supplies a player name (HYPOTHESIS: a real unit does the same) |
