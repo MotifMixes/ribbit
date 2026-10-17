@@ -69,6 +69,10 @@ pub struct Settings {
     /// EXPERIMENTAL: redraw the BIOS's Flash vector art at 4x (640x640)
     /// instead of showing the 160x160 LCD (ribbit_core::hd).
     pub hd_vectors: bool,
+    /// With HD vectors: art that has no vector original (bitmaps in the
+    /// Flash movies, games drawn by their own code) traced into smooth
+    /// shapes (ribbit_core::pixelart). Off by default: the original pixels.
+    pub hd_trace_pixel_art: bool,
     /// Let the Leapster turn itself off when nothing is pressed for a while
     /// (as the real console does); Ribbit then closes the game. Off by
     /// default: Ribbit keeps it on.
@@ -126,6 +130,7 @@ impl Default for Settings {
             save_dir: None,
             show_status_bar: true,
             hd_vectors: false,
+            hd_trace_pixel_art: false,
             turn_off_when_idle: false,
             flash_before_idle_off: true,
             pause_in_background: true,

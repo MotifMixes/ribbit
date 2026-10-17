@@ -471,11 +471,24 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
         ui.menu_button("Video", |ui| {
             if ui
                 .checkbox(&mut settings.hd_vectors, "HD vectors (experimental)")
-                .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the BIOS, text from the fonts' own outlines. Bitmaps and anything not yet understood show the console's own pixels, never upscaled. Replaces the scaling options below while on. Original Leapster and L-MAX BIOSes.")
+                .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the movies' own coordinates, text from the fonts' own outlines, bitmaps from their own pixels. Art with no vector original shows its pixels (see HD pixel art); never AI-upscaled. Replaces the scaling options below while on. Original Leapster and L-MAX BIOSes, and cartridges with their own Flash player.")
                 .changed()
             {
                 actions.push(Action::HdChanged);
             }
+            // Art with no vector original: its pixels, or traced.
+            ui.add_enabled_ui(settings.hd_vectors, |ui| {
+                ui.menu_button("HD pixel art", |ui| {
+                    let before = settings.hd_trace_pixel_art;
+                    ui.radio_value(&mut settings.hd_trace_pixel_art, false, "Pixels (original)")
+                        .on_hover_text("Bitmaps in the games' Flash movies, and games drawn by their own code, show their own pixels, sharp");
+                    ui.radio_value(&mut settings.hd_trace_pixel_art, true, "Traced into vectors")
+                        .on_hover_text("The same pixels traced into smooth shapes by a fixed algorithm (depixelizing, no AI): curves where the pixels step, corners where the art has corners");
+                    if settings.hd_trace_pixel_art != before {
+                        actions.push(Action::SettingsChanged);
+                    }
+                });
+            });
             ui.separator();
             let before = settings.display;
             ui.radio_value(&mut settings.display, Display::Ai, "AI upscale (HD)");

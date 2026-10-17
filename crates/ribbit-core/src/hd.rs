@@ -998,6 +998,16 @@ pub struct HdCanvas {
     /// Where shapes' points land on the canvas, in LCD pixels right and
     /// down of their own coordinates (see `SHAPE_OFFSET`).
     pub shape_offset: f32,
+    /// Art with no vector original drawn traced into shapes (pixelart.rs)
+    /// instead of as its pixels: bitmaps in Flash movies, and what the
+    /// canvas takes from the LCD (games drawn by their own code). Off: the
+    /// original pixels.
+    pub trace_pixels: bool,
+    /// The LCD frame traced and drawn at the canvas's scale, by the frame's
+    /// hash.
+    traced_lcd: Option<(u64, Vec<u32>)>,
+    /// Bitmaps traced, by the image and the scale they were drawn at.
+    traced_bitmaps: HashMap<(usize, usize), Arc<Image>>,
     /// RESEARCH: each block's reason at the last `update_mask` (0 none, 1 + the
     /// index in `why`).
     pub why_block: Vec<u8>,
@@ -1042,8 +1052,40 @@ impl HdCanvas {
             fonts: None,
             why: [0; 4],
             shape_offset: SHAPE_OFFSET,
+            trace_pixels: false,
+            traced_lcd: None,
+            traced_bitmaps: HashMap::new(),
             why_block: vec![0; 160 * 160],
         }
+    }
+
+    /// `b` with its bitmap traced into shapes (pixelart.rs), drawn at about
+    /// the canvas's pixels per texel and sampled smoothly; cached.
+    fn traced_bitmap(&mut self, b: &BitmapFill) -> BitmapFill {
+        let m = b.matrix;
+        // LCD pixels per texel.
+        let det = (m[0] * m[3] - m[1] * m[2]).abs().max(1e-6);
+        let texel = 1.0 / det.sqrt();
+        let (w, h) = (b.image.width, b.image.height);
+        let k = ((self.scale as f32 * texel).ceil() as usize).clamp(1, 16).min(4096 / w.max(h).max(1)).max(1);
+        if k < 2 {
+            return b.clone();
+        }
+        let key = (Arc::as_ptr(&b.image) as usize, k);
+        let image = match self.traced_bitmaps.get(&key) {
+            Some(i) => i.clone(),
+            None => {
+                if self.traced_bitmaps.len() > 32 {
+                    self.traced_bitmaps.clear();
+                }
+                let t = crate::pixelart::Traced::new(w, h, &b.image.pixels);
+                let i = Arc::new(Image { width: w * k, height: h * k, pixels: t.render(k) });
+                self.traced_bitmaps.insert(key, i.clone());
+                i
+            }
+        };
+        let kf = k as f32;
+        BitmapFill { matrix: m.map(|v| v * kf), clamp: b.clamp, smooth: true, image }
     }
 
     /// Draws `pass` inside its redraw rectangle, then its text.
@@ -1097,10 +1139,13 @@ impl HdCanvas {
         let mut order: Vec<(&u32, &Fill)> = pass.fills.iter().collect();
         order.sort_by_key(|(a, f)| (f.order, **a));
         let index: HashMap<u32, i32> = order.iter().enumerate().map(|(i, (a, _))| (**a, i as i32)).collect();
+        let traced: Vec<Option<BitmapFill>> = order.iter().map(|(_, f)| f.bitmap.as_ref().filter(|_| self.trace_pixels).map(|b| self.traced_bitmap(b))).collect();
         let paints: Vec<Paint> = order
             .iter()
-            .map(|(_, f)| match (&f.bitmap, &f.gradient, f.painter == self.solid_painter) {
+            .zip(traced)
+            .map(|((_, f), t)| match (&f.bitmap, &f.gradient, f.painter == self.solid_painter) {
                 _ if f.mask => Paint::Mask,
+                (Some(_), _, _) if t.is_some() => Paint::Bitmap(t.unwrap()),
                 (Some(b), _, _) => Paint::Bitmap(b.clone()),
                 (None, Some(g), _) => Paint::Gradient(g.clone()),
                 (None, None, true) => Paint::Solid(f.rgba.map(|c| c as f32 / 255.0)),
@@ -1436,6 +1481,25 @@ impl HdCanvas {
                 self.why_block[i] = reason.map_or(0, |r| 1 + r as u8);
                 self.mask[i] = if use_fallback { 255 } else { 0 };
                 fallback += use_fallback as usize;
+            }
+        }
+        // Traced instead of the LCD's pixels, when asked: the blocks the
+        // canvas would take from the LCD get the LCD frame traced into shapes.
+        if self.trace_pixels && fallback > 0 {
+            let hash = lcd[..160 * 160].iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &p| (h ^ p as u64).wrapping_mul(0x0000_0100_0000_01b3));
+            if self.traced_lcd.as_ref().is_none_or(|t| t.0 != hash || t.1.len() != size * size) {
+                let px: Vec<u32> = lcd[..160 * 160].iter().map(|&p| 0xFF00_0000 | p).collect();
+                self.traced_lcd = Some((hash, crate::pixelart::Traced::new(160, 160, &px).render(s)));
+            }
+            let traced = &self.traced_lcd.as_ref().unwrap().1;
+            for i in 0..160 * 160 {
+                if self.mask[i] != 0 {
+                    let (bx, by) = (i % 160, i / 160);
+                    for y in by * s..(by + 1) * s {
+                        self.pixels[y * size + bx * s..y * size + (bx + 1) * s].copy_from_slice(&traced[y * size + bx * s..y * size + (bx + 1) * s]);
+                    }
+                    self.mask[i] = 0;
+                }
             }
         }
         self.prev_lcd.clear();

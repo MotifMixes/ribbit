@@ -1546,11 +1546,14 @@ impl App {
                 if canvas.fonts.is_none() {
                     canvas.fonts = crate::device_fonts::get();
                 }
+                canvas.trace_pixels = self.settings.hd_trace_pixel_art;
                 for p in &passes {
                     canvas.apply(p);
                 }
                 hd_dirty |= !passes.is_empty();
-                canvas.update_mask(&self.frame[..]);
+                // Traced pixel art goes into the canvas where the LCD would show.
+                let from_lcd = canvas.update_mask(&self.frame[..]);
+                hd_dirty |= canvas.trace_pixels && from_lcd > 0;
                 hd_frame = true;
             }
         }

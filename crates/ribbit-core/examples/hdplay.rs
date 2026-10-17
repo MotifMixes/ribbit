@@ -39,6 +39,8 @@ fn main() {
         // RIBBIT_HD_SCALE: canvas pixels per LCD pixel (4 = 640, 16 = 2560).
         let scale = std::env::var("RIBBIT_HD_SCALE").map_or(4, |s| s.parse().unwrap());
         let mut c = HdCanvas::with_scale(m.hd.as_ref().unwrap().hooks, scale);
+        // RIBBIT_HD_TRACE=1: art with no vector original traced into shapes.
+        c.trace_pixels = std::env::var_os("RIBBIT_HD_TRACE").is_some();
         if let Ok(o) = std::env::var("RIBBIT_HD_OFFSET") {
             c.shape_offset = o.parse().unwrap();
         }
