@@ -22,8 +22,9 @@ input (the check presses nothing). Most such games may well go further when play
 Early emulation. Game packs (.lf3) are encrypted and are not run. From the system packages (Bootloader, Base,
 Firmware-Bulk), the console's own firmware boots to its "Device Error" screen, which a unit shows when LeapFrog
 Connect has not installed the menu. With unpacked content imported (docs/rockit-twist.md), the menu runs and the
-built-in Arcade game **Nom-Nom** is **Playable** (title screen, level menu, the game, with sound; no videos). The
-other built-in games and the packs are untested (2026-10-17).
+built-in Arcade game **Nom-Nom** is **Playable** (title screen, level menu, the game, with sound), and the Sneak
+Peeks station plays its videos. Albert's Escape and a portrait-mode Arcade game start (not played through); the
+packs are untested (2026-10-17).
 
 ## Results
 

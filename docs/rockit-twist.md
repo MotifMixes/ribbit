@@ -4,8 +4,10 @@
 firmware. Without installed content they show the firmware's own "Device Error" screen (the menu LeapFrog Connect
 installs is missing, see "How far it gets"). With content installed (an unpacked pack zip, imported: "Using it in
 Ribbit"), the menu runs and the built-in Arcade game Nom-Nom plays from its title screen into the game, with sound
-(2026-10-17; the other games are untested). Missing: videos and the start-up logo's picture (the MPEG-4 decoder),
-parts of the text planes and the video chip. All controls reach the console as the firmware reads them. The factory
+and the Sneak Peeks station plays its videos (2026-10-17). Albert's Escape and a portrait-mode Arcade game start;
+the packs other than their trailers are untested. The console keeps its profiles and progress between sessions (the
+save folder's `rockit-twist.emmc`). Missing: parts of the text planes (turned or zoomed, attribute maps), and a check
+of the sound's loudness against a real unit. All controls reach the console as the firmware reads them. The factory
 test firmware runs too (hold the power-on combination below).
 Game packs (.lf3) are encrypted and are not run. The crate is `crates/ribbit-twist`; the frontend pieces are
 `crates/ribbit-frontend/src/twist.rs` and `console_view.rs`.
@@ -181,7 +183,7 @@ Devices found and modelled, each from the firmware's own use (addresses VERIFIED
 | DMA | 0xD0300000 + 0x40 n | +0 control (0 start, 7 fixed source, 13-12 unit, 10 continue with the queued buffer), +4/+8/+C source/destination/count, 0x1FC done flags (IRQ 24) | modelled; DAC transfers paced |
 | Audio DAC | 0xC00D0000 + 0x20 c | +0 control (bit 14 IRQ), +4 sample, +8 status (bit 15 full); IRQ 31/30; only the start-up logo's MP3 uses it | modelled; sample format NOT yet right |
 | Sound unit (SPU) | 0xD0400000 | 32 channels, the Zippity's unit with 16-bit registers and ADPCM36 (see "Sound") | modelled (`sound.rs`) |
-| MPEG-4 decoder | 0xD0C00000 | +0xC0C compressed frame (VOP start code), +0xC08/+0xC04 RGB565 output/reference, +0xA0 bit 4 start, +0xD0/+0xD4 IRQ enable/status (IRQ 26) | completes jobs, decodes nothing |
+| MPEG-4 decoder | 0xD0C00000 | +0xC0C compressed frame (VOP start code), +0xC08 RGB565 output, +0xC04 the reference frame's output, +0xA0 bit 4 start, +0xD0/+0xD4 IRQ enable/status (bit 2 done, bit 4 failed; IRQ 26) | decodes (`mpeg4.rs`, see "Video playback") |
 | Timebase | 0xC0040000 | +0x50 control, +0x54/+0x58 status/enable; bit 8 tick (IRQ 1) drives the firmware's time-outs (0x5014) | ticks at 1024 Hz (ASSUMED) |
 | ADC | 0xC00C0000 | +4 channel/start/done, +8 result; ch 1-2 board identity, ch 5 battery | modelled |
 | RTC (external) | 0xC0090000 | serial access to an external clock chip (registers 0-7) | not modelled |
@@ -272,6 +274,20 @@ The menu paces its frames by calling `System_getCount` until the next is due; ca
 and time then skips ahead 10 µs at each. Boot to the menu (20 emulated seconds) takes about 5 s on one core of a
 desktop i9; the menu runs about 1.7 times faster than real time.
 
+## Video playback (`ribbit_twist::mpeg4`, 2026-10-17)
+
+The start-up logo and the packs' videos are AVIs of MPEG-4 Part 2, Simple Profile (Xvid or libavcodec, 320 x 240,
+some 240 x 320: I and P frames, H.263 quantisation, some with resync markers), decoded by the hardware at 0xD0C00000
+one frame at a time. Ribbit decodes them with its own decoder (`mpeg4.rs`, from ISO/IEC 14496-2; its code tables are
+generated from FFmpeg's, which hold the standard's values). `examples/mp4dec.rs` compares it with FFmpeg: all 17 of
+the packs' videos decode at 56-69 dB PSNR against FFmpeg's pictures, the same to the eye.
+
+What the hardware does, VERIFIED from the System's driver (0x572E0, its interrupt handler 0x56B90) and by the
+pictures coming out right: a job decodes the frame at +0xC0C into +0xC08 as RGB 5:6:5, row by row; +0xC04 names the
+previous frame's output, the reference; on success it sets status bit 2 (the handler posts 4 and the player shows
+the frame); bit 4 is a failure (the driver resets the decoder). The start-up logo is sent to the panel straight from
+the output buffers; the menu's player copies each frame into a text plane in bitmap mode.
+
 ## Sound (`ribbit_twist::sound`, 2026-10-17)
 
 The menu and the games play through the sound unit at 0xD0400000, the Zippity's (after MAME's spg2xx_audio): the
@@ -299,9 +315,9 @@ the start-up logo's MP3). What differs, all VERIFIED from the System's own code:
 Mixed with the DAC, the output (stereo, 72 kHz) goes to the speaker in the app. Its loudness against a real unit
 is UNVERIFIED (the menu's music comes out quiet).
 
-**Next steps.** The MPEG-4 decoder (the logo, the trailers and videos); the remaining text-plane modes; the other
-built-in games and the packs; the DAC sample format; checking the loudness and the rotation direction against a
-real unit.
+**Next steps.** The remaining text-plane modes (turned, zoomed, attribute maps); playing through the other built-in
+games and the packs; the DAC sample format; a small box drawn at the top of the screen in some games (from a sprite
+not identified yet); checking the loudness and the rotation direction against a real unit.
 
 ## Using it in Ribbit
 

@@ -12,7 +12,7 @@ An emulator in development for the **original 2003 LeapFrog Leapster** (the blue
 
 Ribbit also runs the **LeapFrog Zippity** (TV console, see [docs/zippity.md](docs/zippity.md)) and lists the
 **LeapFrog RockIt Twist** in **early emulation**. From its system packages, the console's own firmware boots;
-with unpacked content imported, its menu runs and the built-in game Nom-Nom plays with sound (no videos yet). Its
+with unpacked content imported, its menu runs, the built-in game Nom-Nom plays with sound and its videos play. Its
 .lf3 game packs are encrypted and are not run. See [docs/rockit-twist.md](docs/rockit-twist.md).
 
 Leapster games are Flash content run by a player built into the console firmware. To run games you will need a

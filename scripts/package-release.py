@@ -24,11 +24,13 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / 'target' / 'dist'
 PROGRAMS = ['ribbit-gui.exe', 'ribbit.exe']
 
-README = """Ribbit {version} - an emulator for the original 2003 LeapFrog Leapster
+README = """Ribbit {version} - an emulator for the LeapFrog Leapster (and the Zippity
+and RockIt Twist)
 =====================================================================
 
 Ribbit includes no firmware and no games. You need a dump of the BIOS from
-your own Leapster and dumps of your own cartridges.
+your own Leapster and dumps of your own cartridges (and, for the other
+consoles, their own system files).
 
 Starting
 --------
@@ -58,6 +60,20 @@ Picture
 Pixel perfect is the default. Video > AI upscale (HD) runs the ArtCNN
 neural network on the 160x160 picture (Video > AI upscale settings).
 Window size: Fit screen (default), 2x, 3x, 4x or 16x.
+
+Other consoles
+--------------
+Choose the console in the library's console menu.
+  * LeapFrog Zippity (TV console): needs a dump of its system NAND; its
+    built-in games and cartridges play.
+  * LeapFrog RockIt Twist (early emulation): needs its system packages
+    (Bootloader, Base, Firmware-Bulk) and content unpacked from your own
+    packs (File > Import RockIt Twist games). The menu, the built-in games
+    (Nom-Nom tested), the Sneak Peeks videos and sound work; the console
+    keeps its profiles and progress in the save folder. Encrypted .lf3 packs
+    are not run. Keys: WASD/arrows = D-pad, Q/E = Switch, number pad = button
+    grid, U/J I/K O/L = dials, number pad * and - = spinner, Page Up/Down =
+    slider, Enter = check mark, Home = Home, Shift/Tab = Hint.
 
 Discord
 -------
