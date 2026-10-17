@@ -66,9 +66,15 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 * **HD vectors** (experimental, original Leapster and L-MAX): Leapster games are Flash, so their artwork is stored
   as vector shapes (outlines and fills), not pixels. Ribbit takes those original shapes from the console's own Flash
   player and redraws them at 640 × 640 instead of 160 × 160, so edges come out sharp because they are drawn again
-  from the game's own data. **This is not AI upscaling**: no neural network, smoothing or guessing is involved, and
-  nothing is invented. Parts that aren't vector art (bitmaps, text drawn from pixel fonts) keep their original
-  pixels. The AI upscaling above is a separate option and is never used with HD vectors.
+  from the game's own data.
+
+  **This is not AI upscaling.** Traditional AI upscalers (like the optional one above, or the "enhance" filters in
+  other emulators) are neural networks trained on lots of pictures. They only ever see the small, finished image, and
+  they guess what a sharper version would look like, so they can smear details or invent ones that were never there.
+  HD vectors don't guess at all: the game already has its artwork as exact shapes, and Ribbit simply draws those same
+  shapes again on a bigger canvas, the way the Flash player would on a higher-resolution screen. No neural network,
+  smoothing or guessing is involved, and nothing is added. Parts that aren't vector art (bitmaps, text drawn from
+  pixel fonts) keep their original pixels. The AI upscaler is a separate option and is never used with HD vectors.
 * Exact idle-loop skipping: same output, much less CPU.
 * Discord status, window sizes up to 16× (never maximized or full screen unless you ask).
 * Command-line and headless runners for testing and research.
