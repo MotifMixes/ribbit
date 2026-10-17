@@ -123,6 +123,8 @@ pub struct Settings {
     /// A release the player chose to skip ("v1.2.0"): not announced at
     /// start-up again (Help → Check for updates still shows it).
     pub skipped_update: String,
+    /// Android: the quick start's first page (the AI note) was read.
+    pub ai_notice_seen: bool,
 }
 
 impl Default for Settings {
@@ -170,6 +172,7 @@ impl Default for Settings {
             last_version: String::new(),
             touch_controls: true,
             skipped_update: String::new(),
+            ai_notice_seen: false,
         }
     }
 }

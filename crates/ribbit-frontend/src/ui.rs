@@ -139,6 +139,8 @@ pub struct UiState {
     update_announced: bool,
     /// The installed update's restart has been asked for.
     restarting: bool,
+    /// Android: the side menu is open.
+    drawer: bool,
 }
 
 /// What the library shows.
@@ -148,6 +150,12 @@ pub struct LibraryView {
     pub tab: Option<Family>,
     /// Search text.
     pub search: String,
+    /// Android: how far the list is pulled down at its top (points), to
+    /// refresh it.
+    pub pull: f32,
+    /// The finger touched down with the list at its top (only then does a
+    /// pull count).
+    pub pull_armed: bool,
 }
 
 const TOAST_TIME: Duration = Duration::from_millis(4000);
@@ -199,10 +207,12 @@ pub fn draw(
             st.notes_open = None;
         }
     }
-    if st.menu_visible && !info.fullscreen {
+    // A phone has no bars: the side menu (swiped in from the left) has it all.
+    let phone = cfg!(target_os = "android");
+    if st.menu_visible && !info.fullscreen && !phone {
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, st, settings, info, actions));
     }
-    if settings.show_status_bar && !info.fullscreen {
+    if settings.show_status_bar && !info.fullscreen && !phone {
         // The newest message shows in the status bar (nothing to cover).
         st.toasts.retain(|(_, t)| t.elapsed() < TOAST_TIME);
         let message = st.toasts.last().map(|(m, _)| m.clone());
@@ -247,11 +257,211 @@ pub fn draw(
             Pick::TwistZip => Action::ImportTwistZip(path),
         });
     }
+    if phone {
+        side_menu(&ctx, st, settings, info, actions);
+    }
+    // First start (an update from an older version too): the AI note as a
+    // pop-up, read once. Android's quick start shows it as its first page.
+    let quick_start = phone && !info.running && info.bios_name.is_none();
+    if !settings.ai_notice_seen && !quick_start {
+        egui::Modal::new(egui::Id::new("ai-notice")).show(&ctx, |ui| {
+            ui.set_max_width(540.0);
+            ai_notice(ui);
+            ui.add_space(10.0);
+            ui.vertical_centered(|ui| {
+                let text = egui::RichText::new("Continue").size(17.0).color(egui::Color32::WHITE);
+                if ui.add(egui::Button::new(text).fill(ACCENT).min_size(egui::vec2(200.0, 40.0))).clicked() {
+                    settings.ai_notice_seen = true;
+                    actions.push(Action::SettingsChanged);
+                }
+            });
+        });
+    }
     // Over the screen only when there is no status bar to show them in.
-    if !settings.show_status_bar || info.fullscreen {
+    if !settings.show_status_bar || info.fullscreen || phone {
         toasts(&ctx, st);
     }
     area
+}
+
+/// Android: a swipe starting this close to the left edge (points) opens the
+/// side menu; touches there are the menu's, not the game's.
+pub const SIDE_MENU_EDGE: f32 = 48.0;
+
+/// Android's side menu, swiped in from the left edge (or opened with Back),
+/// laid out like other emulators' on a phone: a header, the game's quick
+/// controls as big rows, then every setting.
+fn side_menu(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info: &Info, actions: &mut Vec<Action>) {
+    const SWIPE: f32 = 60.0;
+    let screen = ctx.content_rect();
+    let width = 280.0f32.min(screen.width() * 0.6);
+    let (swipe, back) = ctx.input(|i| {
+        let swipe = i.pointer.press_origin().zip(i.pointer.interact_pos()).map(|(o, p)| (o, p.x - o.x));
+        (swipe, i.key_pressed(egui::Key::BrowserBack))
+    });
+    match swipe {
+        Some((origin, dx)) if !st.drawer && origin.x <= SIDE_MENU_EDGE && dx > SWIPE => st.drawer = true,
+        Some((origin, dx)) if st.drawer && origin.x <= width && dx < -SWIPE => st.drawer = false,
+        _ => {}
+    }
+    if back {
+        st.drawer = !st.drawer;
+    }
+    // Slides in and out.
+    let shown = ctx.animate_bool_with_time(egui::Id::new("side-menu-open"), st.drawer, 0.16);
+    if shown <= 0.0 {
+        return;
+    }
+    // The rest dimmed; a tap there closes the menu.
+    egui::Area::new("side-menu-shade".into()).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+        let resp = ui.allocate_rect(screen, egui::Sense::click());
+        ui.painter().rect_filled(screen, 0.0, egui::Color32::from_black_alpha((160.0 * shown) as u8));
+        if resp.clicked() {
+            st.drawer = false;
+        }
+    });
+    let before = actions.len();
+    let at = screen.min + egui::vec2(-width * (1.0 - shown), 0.0);
+    egui::Area::new("side-menu".into()).order(egui::Order::Foreground).fixed_pos(at).interactable(st.drawer).show(ctx, |ui| {
+        let panel = egui::Rect::from_min_size(at, egui::vec2(width, screen.height()));
+        ui.painter().rect_filled(panel, 0.0, egui::Color32::from_gray(22));
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(panel.right_top(), panel.right_bottom() + egui::vec2(1.0, 0.0)),
+            0.0,
+            egui::Color32::from_white_alpha(20),
+        );
+        ui.set_width(width);
+        ui.set_height(screen.height());
+        drawer_header(ui, info, width);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                side_menu_items(ui, st, settings, info, actions);
+            });
+        });
+    });
+    // Something chosen: back to the game.
+    if actions.len() > before {
+        st.drawer = false;
+    }
+}
+
+/// The side menu's header: Ribbit and what is running, on the frog's green.
+fn drawer_header(ui: &mut egui::Ui, info: &Info, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 84.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 120, 58));
+    let left = rect.left() + 18.0;
+    p.text(egui::pos2(left, rect.top() + 30.0), egui::Align2::LEFT_CENTER, "🐸 Ribbit", egui::FontId::proportional(24.0), egui::Color32::WHITE);
+    let sub = if info.running { info.title.clone() } else { "No game running".to_string() };
+    let sub = p.layout(sub, egui::FontId::proportional(14.0), egui::Color32::from_gray(225), width - 36.0);
+    p.galley(egui::pos2(left, rect.top() + 52.0), sub, egui::Color32::from_gray(225));
+}
+
+/// A section's small heading.
+fn drawer_section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new(title.to_uppercase()).size(12.5).color(egui::Color32::from_gray(140)).strong());
+    ui.add_space(2.0);
+}
+
+/// One of the side menu's rows: an icon, a label and, on the right, a value
+/// or a switch (`Some(on)`).
+fn drawer_row(ui: &mut egui::Ui, icon: &str, label: &str, value: &str, switch: Option<bool>, enabled: bool) -> bool {
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 50.0), sense);
+    let p = ui.painter();
+    if enabled && (resp.is_pointer_button_down_on() || resp.hovered()) {
+        p.rect_filled(rect, 10.0, egui::Color32::from_white_alpha(16));
+    }
+    let fg = if enabled { egui::Color32::from_gray(232) } else { egui::Color32::from_gray(105) };
+    let y = rect.center().y;
+    p.text(egui::pos2(rect.left() + 26.0, y), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(20.0), fg);
+    p.text(egui::pos2(rect.left() + 52.0, y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(17.0), fg);
+    let right = rect.right() - 12.0;
+    if let Some(on) = switch {
+        let track = egui::Rect::from_center_size(egui::pos2(right - 22.0, y), egui::vec2(44.0, 24.0));
+        p.rect_filled(track, 12.0, if on { ACCENT } else { egui::Color32::from_gray(70) });
+        let knob = if on { track.right() - 12.0 } else { track.left() + 12.0 };
+        p.circle_filled(egui::pos2(knob, y), 9.0, egui::Color32::WHITE);
+    } else if !value.is_empty() {
+        p.text(egui::pos2(right, y), egui::Align2::RIGHT_CENTER, value, egui::FontId::proportional(15.0), egui::Color32::from_gray(150));
+    }
+    resp.clicked()
+}
+
+fn side_menu_items(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &Info, actions: &mut Vec<Action>) {
+    ui.spacing_mut().item_spacing = egui::vec2(6.0, 2.0);
+    if info.running {
+        drawer_section(ui, "Game");
+        let (icon, label) = if info.paused { ("▶", "Resume") } else { ("⏸", "Pause") };
+        if drawer_row(ui, icon, label, "", None, true) {
+            actions.push(Action::TogglePause);
+        }
+        let saved = info.slots.first().cloned().flatten();
+        if drawer_row(ui, "💾", "Save state", "", None, true) {
+            actions.push(Action::SaveState(1));
+        }
+        if drawer_row(ui, "📂", "Load state", saved.as_deref().unwrap_or("empty"), None, saved.is_some()) {
+            actions.push(Action::LoadState(1));
+        }
+        if drawer_row(ui, "⟲", "Reset", "", None, true) {
+            actions.push(Action::Reset);
+        }
+        if drawer_row(ui, "📷", "Screenshot", "", None, true) {
+            actions.push(Action::Screenshot);
+        }
+        if drawer_row(ui, "✕", "Close game", "", None, true) {
+            actions.push(Action::CloseCartridge);
+        }
+        drawer_section(ui, &format!("Speed · {:.0}% now", info.speed));
+        speed_picker(ui, settings, actions);
+    } else {
+        drawer_section(ui, "Games");
+        if drawer_row(ui, "🎮", "Open Cartridge…", "", None, info.bios_name.is_some()) {
+            actions.push(Action::Pick(Pick::Cartridge));
+        }
+        if drawer_row(ui, "📁", "Add Games Folder…", "", None, true) {
+            actions.push(Action::Pick(Pick::RomFolder));
+        }
+        if drawer_row(ui, "💾", "Open BIOS…", "", None, true) {
+            actions.push(Action::Pick(Pick::Bios));
+        }
+    }
+    drawer_section(ui, "Controls");
+    if drawer_row(ui, "☝", "Touch controls", "", Some(settings.touch_controls), true) {
+        settings.touch_controls = !settings.touch_controls;
+        actions.push(Action::SettingsChanged);
+    }
+    drawer_section(ui, "All settings");
+    ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+    ui.vertical(|ui| menus(ui, st, settings, info, actions, true));
+    ui.add_space(14.0);
+    ui.label(egui::RichText::new("Swipe left, tap outside or press Back to close.").size(13.0).weak());
+    ui.add_space(10.0);
+}
+
+/// Speed as a segmented control: normal, double, four times, unlimited.
+fn speed_picker(ui: &mut egui::Ui, settings: &mut Settings, actions: &mut Vec<Action>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 46.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 12.0, egui::Color32::from_gray(38));
+    let choices = [(100, "1×"), (200, "2×"), (400, "4×"), (0, "Max")];
+    let w = rect.width() / choices.len() as f32;
+    for (i, (pct, label)) in choices.into_iter().enumerate() {
+        let seg = egui::Rect::from_min_size(rect.min + egui::vec2(w * i as f32, 0.0), egui::vec2(w, rect.height())).shrink(4.0);
+        let resp = ui.interact(seg, ui.id().with(("speed", pct)), egui::Sense::click());
+        let on = settings.speed_percent == pct;
+        if on {
+            ui.painter().rect_filled(seg, 9.0, ACCENT);
+        } else if resp.is_pointer_button_down_on() {
+            ui.painter().rect_filled(seg, 9.0, egui::Color32::from_white_alpha(18));
+        }
+        let fg = if on { egui::Color32::WHITE } else { egui::Color32::from_gray(200) };
+        ui.painter().text(seg.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(17.0), fg);
+        if resp.clicked() && !on {
+            settings.speed_percent = pct;
+            actions.push(Action::SettingsChanged);
+        }
+    }
 }
 
 /// The last minute before an idle power-off: a small notice at the top.
@@ -341,422 +551,437 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
 }
 
 fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &Info, actions: &mut Vec<Action>) {
-    egui::MenuBar::new().ui(ui, |ui| {
-        ui.menu_button("File", |ui| {
-            if item(ui, "Open Cartridge…", "Ctrl+O") {
-                actions.push(Action::Pick(Pick::Cartridge));
+    egui::MenuBar::new().ui(ui, |ui| menus(ui, st, settings, info, actions, false));
+}
+
+/// The menus, in the menu bar or (Android) down the side menu.
+fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &Info, actions: &mut Vec<Action>, rows: bool) {
+    top_menu(ui, rows, "📂", "File", |ui| {
+        if item(ui, "Open Cartridge…", "Ctrl+O") {
+            actions.push(Action::Pick(Pick::Cartridge));
+        }
+        ui.menu_button("Open Recent", |ui| {
+            if settings.recent_carts.is_empty() {
+                ui.label(egui::RichText::new("(none yet)").weak());
             }
-            ui.menu_button("Open Recent", |ui| {
-                if settings.recent_carts.is_empty() {
-                    ui.label(egui::RichText::new("(none yet)").weak());
+            for path in settings.recent_carts.clone() {
+                let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                if ui.button(name).on_hover_text(path.display().to_string()).clicked() {
+                    actions.push(Action::OpenCartridge(path));
+                    ui.close();
                 }
-                for path in settings.recent_carts.clone() {
-                    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-                    if ui.button(name).on_hover_text(path.display().to_string()).clicked() {
-                        actions.push(Action::OpenCartridge(path));
-                        ui.close();
-                    }
-                }
-            });
-            ui.menu_button("Games Folders", |ui| {
-                for f in settings.rom_folders.clone() {
-                    let b = egui::Button::new(format!("✕  {}", f.display()));
-                    if ui.add(b).on_hover_text("Stop looking in this folder").clicked() {
-                        actions.push(Action::RemoveRomFolder(f));
-                        ui.close();
-                    }
-                }
-                if !settings.rom_folders.is_empty() {
-                    ui.separator();
-                }
-                if item(ui, "Add Games Folder…", "") {
-                    actions.push(Action::Pick(Pick::RomFolder));
-                }
-            });
-            if ui.add_enabled(info.running, egui::Button::new("Close Cartridge (back to games)")).clicked() {
-                actions.push(Action::CloseCartridge);
-                ui.close();
-            }
-            ui.separator();
-            if item(ui, "Open BIOS…", "") {
-                actions.push(Action::Pick(Pick::Bios));
-            }
-            if ui
-                .add(egui::Button::new("RockIt Twist (early emulation)"))
-                .on_hover_text(ribbit_twist::STATUS)
-                .clicked()
-            {
-                actions.push(Action::OpenTwist);
-                ui.close();
-            }
-            if ui
-                .button("Import RockIt Twist games (.zip)…")
-                .on_hover_text(
-                    "Unpacks a zip of RockIt Twist package folders (each with its meta.inf) for one region and \
-                     installs them on the emulated console, where its own firmware finds them.",
-                )
-                .clicked()
-            {
-                actions.push(Action::Pick(Pick::TwistZip));
-                ui.close();
-            }
-            let content = settings.twist_content.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-            if ui
-                .button(match &content {
-                    Some(n) => format!("RockIt Twist content: {n}…"),
-                    None => "RockIt Twist content folder…".to_string(),
-                })
-                .on_hover_text(
-                    "A folder written onto the RockIt Twist's internal storage when it starts, laid out like the \
-                     console's F: drive (Applications, Music, Trailers...). For your own programs, or content \
-                     copied from your own console.",
-                )
-                .clicked()
-            {
-                actions.push(Action::Pick(Pick::TwistContent));
-                ui.close();
-            }
-            if content.is_some() && ui.button("Remove RockIt Twist content").clicked() {
-                actions.push(Action::SetTwistContent(None));
-                ui.close();
-            }
-            let usb = settings.twist_usb;
-            if ui
-                .button(format!("{}Plug the RockIt Twist into this PC (USB)", if usb { "✓ " } else { "" }))
-                .on_hover_text(
-                    "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
-                     so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
-                     usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
-                )
-                .clicked()
-            {
-                actions.push(Action::SetTwistUsb(!usb));
-                ui.close();
-            }
-            ui.separator();
-            if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
-                actions.push(Action::Screenshot);
-                ui.close();
-            }
-            if ui.checkbox(&mut settings.discord_presence, "Show my game on Discord").changed() {
-                actions.push(Action::SettingsChanged);
-            }
-            ui.separator();
-            if item(ui, "Exit", "Alt+F4") {
-                actions.push(Action::Quit);
             }
         });
-        ui.menu_button("Emulation", |ui| {
-            let pause = if info.paused { "Resume" } else { "Pause" };
-            if ui.add_enabled(info.running, egui::Button::new(pause).shortcut_text("Esc")).clicked() {
-                actions.push(Action::TogglePause);
-                ui.close();
-            }
-            if ui.add_enabled(info.running, egui::Button::new("Reset").shortcut_text("Ctrl+R")).clicked() {
-                actions.push(Action::Reset);
-                ui.close();
-            }
-            ui.separator();
-            ui.add_enabled_ui(info.running, |ui| {
-                ui.menu_button("Save State", |ui| {
-                    for slot in 1..=STATE_SLOTS {
-                        let when = info.slots.get(slot as usize - 1).cloned().flatten().unwrap_or_else(|| "empty".into());
-                        let key = if slot == 1 { "F5" } else { "" };
-                        if ui.add(egui::Button::new(format!("Slot {slot}  ({when})")).shortcut_text(key)).clicked() {
-                            actions.push(Action::SaveState(slot));
-                            ui.close();
-                        }
-                    }
-                });
-                ui.menu_button("Load State", |ui| {
-                    for slot in 1..=STATE_SLOTS {
-                        let when = info.slots.get(slot as usize - 1).cloned().flatten();
-                        let key = if slot == 1 { "F9" } else { "" };
-                        let label = format!("Slot {slot}  ({})", when.as_deref().unwrap_or("empty"));
-                        if ui.add_enabled(when.is_some(), egui::Button::new(label).shortcut_text(key)).clicked() {
-                            actions.push(Action::LoadState(slot));
-                            ui.close();
-                        }
-                    }
-                });
-                ui.label(egui::RichText::new("Hold ` (left of 1) to rewind").weak());
-            });
-            ui.separator();
-            ui.menu_button("Speed", |ui| {
-                for (p, label) in [(50, "50%"), (100, "100% (normal)"), (200, "200%"), (400, "400%"), (0, "Unlimited")] {
-                    if ui.radio_value(&mut settings.speed_percent, p, label).clicked() {
-                        actions.push(Action::SettingsChanged);
-                        ui.close();
-                    }
+        ui.menu_button("Games Folders", |ui| {
+            for f in settings.rom_folders.clone() {
+                let b = egui::Button::new(format!("✕  {}", f.display()));
+                if ui.add(b).on_hover_text("Stop looking in this folder").clicked() {
+                    actions.push(Action::RemoveRomFolder(f));
+                    ui.close();
                 }
-                ui.label(egui::RichText::new("Hold Tab to fast-forward").weak());
-            });
-            ui.separator();
-            // Power.
-            if ui
-                .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
-                .on_hover_text("Like the real Leapster, turn off after a while with nothing pressed (about 15 minutes; 5 on the Leapster TV). Ribbit then closes the game. Off: Ribbit keeps it on.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
             }
-            ui.add_enabled_ui(settings.turn_off_when_idle, |ui| {
-                if ui
-                    .checkbox(&mut settings.flash_before_idle_off, "    Flash taskbar before turning off")
-                    .on_hover_text("Flash Ribbit's taskbar button in the last minute. On Windows this also shows an auto-hidden taskbar until you click Ribbit.")
-                    .changed()
-                {
-                    actions.push(Action::SettingsChanged);
-                }
-            });
-            if ui
-                .checkbox(&mut settings.pause_in_background, "Pause in background")
-                .on_hover_text("Pause the game while another window is active.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
-            ui.separator();
-            // Touch, then how its calibration is handled.
-            if ui
-                .checkbox(&mut settings.experimental_touch, "Touchscreen (experimental)")
-                .on_hover_text("MAME-derived, unverified touch model. Needed for calibration and touch games. Applies at the next start.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
-            if ui
-                .checkbox(&mut settings.skip_boot_calibration, "Skip calibration at boot")
-                .on_hover_text("Sets board straps bit 14 (MAME's default) so the BIOS uses the saved calibration. Applies at the next start.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
-            if ui
-                .checkbox(&mut settings.leapster2_skip_menu, "Leapster 2: start games directly")
-                .on_hover_text("Skip the Leapster 2's start-up screens and main menu and go straight into the cartridge. Off: games start from the cartridge icon in the menu, as on a real Leapster 2. Applies at the next start.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
-            if ui
-                .checkbox(&mut settings.auto_calibrate, "Calibrate automatically")
-                .on_hover_text("Ribbit presses the calibration targets for you when the calibration screen appears.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
-            ui.separator();
-            ui.menu_button("Advanced (experimental)", |ui| {
-                ui.label(egui::RichText::new("Unverified guesses. Apply at the next start.").weak());
-                if ui
-                    .checkbox(&mut settings.mame_gpio_lines, "MAME power-line workaround")
-                    .on_hover_text(
-                        "Reads every unidentified GPIO line as 1, as MAME does. The v1.5 (Universal) BIOS otherwise                          sees a shutdown request on line 11 and turns itself off. Not known to match hardware.",
-                    )
-                    .changed()
-                {
-                    actions.push(Action::SettingsChanged);
-                }
-                ui.label("CPU clock:");
-                for (mhz, label) in [(96, "96 MHz (nominal)"), (48, "48 MHz (MAME)")] {
-                    if ui.radio_value(&mut settings.cpu_mhz, mhz, label).clicked() {
-                        actions.push(Action::SettingsChanged);
-                    }
-                }
-            });
-        });
-        ui.menu_button("Video", |ui| {
-            if ui
-                .checkbox(&mut settings.hd_vectors, "HD vectors (experimental)")
-                .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the movies' own coordinates, text from the fonts' own outlines, bitmaps from their own pixels. Art with no vector original shows its pixels (see HD pixel art); never AI-upscaled. Replaces the scaling options below while on. Original Leapster and L-MAX BIOSes, and cartridges with their own Flash player.")
-                .changed()
-            {
-                actions.push(Action::HdChanged);
-            }
-            // Art with no vector original: its pixels, or traced.
-            ui.add_enabled_ui(settings.hd_vectors, |ui| {
-                ui.menu_button("HD pixel art", |ui| {
-                    let before = settings.hd_trace_pixel_art;
-                    ui.radio_value(&mut settings.hd_trace_pixel_art, false, "Pixels (original)")
-                        .on_hover_text("Bitmaps in the games' Flash movies, and games drawn by their own code, show their own pixels, sharp");
-                    ui.radio_value(&mut settings.hd_trace_pixel_art, true, "Traced into vectors")
-                        .on_hover_text("The same pixels traced into smooth shapes by a fixed algorithm (depixelizing, no AI): curves where the pixels step, corners where the art has corners");
-                    if settings.hd_trace_pixel_art != before {
-                        actions.push(Action::SettingsChanged);
-                    }
-                });
-            });
-            ui.separator();
-            let before = settings.display;
-            ui.radio_value(&mut settings.display, Display::Ai, "AI upscale (HD)");
-            ui.radio_value(&mut settings.display, Display::Sharp, "Sharp pixels");
-            ui.radio_value(&mut settings.display, Display::Lcd, "LCD grid");
-            ui.radio_value(&mut settings.display, Display::Pixel, "Pixel perfect (whole-number scale)");
-            ui.radio_value(&mut settings.display, Display::Smooth, "Smooth (bicubic)");
-            if settings.display != before {
-                actions.push(Action::SettingsChanged);
-            }
-            ui.menu_button("AI upscale settings", |ui| {
-                use crate::upscale::{Model, Resolution, Style};
-                let before = settings.ai;
-                ui.label(egui::RichText::new("Style").strong());
-                ui.radio_value(&mut settings.ai.style, Style::Clean, "Clean (ArtCNN)")
-                    .on_hover_text("Crisp lines and flat fills. Best for Leapster games, whose art is antialiased vector graphics.");
-                ui.radio_value(&mut settings.ai.style, Style::Soft, "Soft (Anime4K)")
-                    .on_hover_text("A softer neural upscaler.");
-                ui.radio_value(&mut settings.ai.style, Style::Cartoon, "Pixel-art edges (ScaleFX + ArtCNN)")
-                    .on_hover_text("For flat pixel art. Blotchy on antialiased art.");
+            if !settings.rom_folders.is_empty() {
                 ui.separator();
-                ui.label(egui::RichText::new("Quality").strong());
-                for m in Model::ALL {
-                    ui.radio_value(&mut settings.ai.model, m, m.label());
-                }
-                ui.label(egui::RichText::new("Bigger networks are sharper and use more GPU.").weak());
-                ui.separator();
-                ui.label(egui::RichText::new("Sharpness").strong());
-                for sh in crate::upscale::Sharpness::ALL {
-                    ui.radio_value(&mut settings.ai.sharpness, sh, sh.label());
-                }
-                ui.separator();
-                ui.label(egui::RichText::new("Resolution").strong());
-                for r in Resolution::ALL {
-                    ui.radio_value(&mut settings.ai.resolution, r, r.label());
-                }
-                if settings.ai != before {
-                    settings.display = Display::Ai;
-                    actions.push(Action::SettingsChanged);
-                }
-            });
-            ui.separator();
-            ui.menu_button("Window size", |ui| {
-                for s in [0, 2, 3, 4, 16] {
-                    let label = if s == 0 { "Fit screen".to_string() } else { format!("{s}x ({}x{})", 160 * s, 160 * s) };
-                    if ui.radio(settings.window_scale == s, label).clicked() {
-                        actions.push(Action::SetWindowScale(s));
-                        ui.close();
-                    }
-                }
-            });
-            if item(ui, if info.fullscreen { "Exit fullscreen" } else { "Fullscreen" }, "F11") {
-                actions.push(Action::ToggleFullscreen);
             }
-            if ui.checkbox(&mut settings.show_status_bar, "Status bar").changed() {
-                actions.push(Action::SettingsChanged);
-            }
-            ui.separator();
-            ui.label(egui::RichText::new("Console view (F7: the running console's)").strong());
-            let tip = "Shows the screen inside a drawing of the handheld, with its controls around it. Click, drag or scroll the controls to use them.";
-            if ui.checkbox(&mut settings.console_view_twist, "RockIt Twist").on_hover_text(tip).changed() {
-                actions.push(Action::ConsoleViewChanged);
-            }
-            let leapster_tip = match info.console_view_available {
-                Some(false) => "TV consoles (Leapster TV, Zippity) have no handheld to draw: they show the plain screen.",
-                _ => "Leapster, L-MAX and Leapster 2 (one drawing for all three, after the original Leapster).",
-            };
-            if ui.checkbox(&mut settings.console_view, "Leapster handhelds").on_hover_text(leapster_tip).changed() {
-                actions.push(Action::ConsoleViewChanged);
-            }
-            ui.add_enabled_ui(settings.console_view || settings.console_view_twist, |ui| {
-                if ui
-                    .checkbox(&mut settings.console_view_keys, "Show keys on the console")
-                    .on_hover_text("Each control shows its keyboard key; the key lights up while pressed.")
-                    .changed()
-                {
-                    actions.push(Action::SettingsChanged);
-                }
-            });
-        });
-        ui.menu_button("Audio", |ui| {
-            if ui.checkbox(&mut settings.muted, "Mute").changed() {
-                actions.push(Action::SettingsChanged);
-            }
-            if ui.add(egui::Slider::new(&mut settings.volume, 0.0..=1.0).text("Volume").show_value(false)).changed() {
-                actions.push(Action::SettingsChanged);
-            }
-            ui.separator();
-            ui.label(egui::RichText::new("Sound").strong());
-            for e in crate::audio_out::Enhance::ALL {
-                if ui.radio_value(&mut settings.audio_enhance, e, e.label()).clicked() {
-                    actions.push(Action::SettingsChanged);
-                }
-            }
-            ui.label(egui::RichText::new("The Leapster itself is mono with 8 kHz sound; these are effects.").weak());
-            ui.separator();
-            ui.label(egui::RichText::new("Leapster 2 PCM sound").strong());
-            for r in crate::audio_out::PcmRate::ALL {
-                if ui.radio_value(&mut settings.pcm_rate, r, r.label()).clicked() {
-                    actions.push(Action::SettingsChanged);
-                }
-            }
-            ui.label(egui::RichText::new("Games that stream sound through the Leapster 2's 32 kHz DAC.").weak());
-            ui.add_enabled_ui(settings.pcm_rate == crate::audio_out::PcmRate::Original32k, |ui| {
-                for c in crate::audio_out::PcmClean::ALL {
-                    if ui.radio_value(&mut settings.pcm_clean, c, c.label()).clicked() {
-                        actions.push(Action::SettingsChanged);
-                    }
-                }
-            });
-            ui.label(
-                egui::RichText::new("Clean audio filters the 32 kHz sound above 8.5 kHz; unfiltered plays it exactly as emulated.")
-                    .weak(),
-            );
-        });
-        ui.menu_button("Input", |ui| {
-            if item(ui, "Key bindings…", "") {
-                st.show_bindings = true;
-            }
-            if ui
-                .checkbox(&mut settings.touch_controls, "Touch controls")
-                .on_hover_text("On-screen buttons, shown when the screen is touched; a key or controller button hides them.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
-            ui.separator();
-            if ui
-                .checkbox(&mut settings.zippity_on_home, "Zippity: stand on the home spot (Shift)")
-                .on_hover_text("Both footprints of the mat's orange home spot stay pressed. Mickey Says and other games wait for the player to stand there.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
+            if item(ui, "Add Games Folder…", "") {
+                actions.push(Action::Pick(Pick::RomFolder));
             }
         });
-        ui.menu_button("Help", |ui| {
-            if item(ui, "Controls", "F1") {
-                st.show_controls = true;
-            }
-            if item(ui, "Emulation status", "") {
-                st.show_status = true;
-            }
-            ui.separator();
-            if item(ui, "Check for updates…", "") {
-                st.updates.check(ui.ctx());
-                st.show_updates = true;
-                st.notes_open = None;
-            }
-            ui.menu_button("Patch notes", |ui| patch_notes_menu(ui, st));
-            ui.separator();
-            if item(ui, "About Ribbit", "") {
-                st.show_about = true;
-            }
-        });
-        // Right after the menus (never over them, however narrow the window).
-        if let Some(r) = st.updates.newer() {
-            ui.add_space(8.0);
-            // The full label when it fits, else just the version.
-            let full = format!("⬆ Update to {}", r.version_text());
-            let font = egui::TextStyle::Button.resolve(ui.style());
-            let need = ui.painter().layout_no_wrap(full.clone(), font, egui::Color32::WHITE).size().x
-                + 2.0 * ui.spacing().button_padding.x;
-            let label = if ui.available_width() >= need { full } else { format!("⬆ {}", r.version_text()) };
-            let text = egui::RichText::new(label).color(egui::Color32::WHITE);
-            if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text("See what's new and download it").clicked() {
-                st.show_updates = true;
-                st.notes_open = Some(r.tag);
-            }
+        if ui.add_enabled(info.running, egui::Button::new("Close Cartridge (back to games)")).clicked() {
+            actions.push(Action::CloseCartridge);
+            ui.close();
+        }
+        ui.separator();
+        if item(ui, "Open BIOS…", "") {
+            actions.push(Action::Pick(Pick::Bios));
+        }
+        if ui
+            .add(egui::Button::new("RockIt Twist (early emulation)"))
+            .on_hover_text(ribbit_twist::STATUS)
+            .clicked()
+        {
+            actions.push(Action::OpenTwist);
+            ui.close();
+        }
+        if ui
+            .button("Import RockIt Twist games (.zip)…")
+            .on_hover_text(
+                "Unpacks a zip of RockIt Twist package folders (each with its meta.inf) for one region and \
+                 installs them on the emulated console, where its own firmware finds them.",
+            )
+            .clicked()
+        {
+            actions.push(Action::Pick(Pick::TwistZip));
+            ui.close();
+        }
+        let content = settings.twist_content.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        if ui
+            .button(match &content {
+                Some(n) => format!("RockIt Twist content: {n}…"),
+                None => "RockIt Twist content folder…".to_string(),
+            })
+            .on_hover_text(
+                "A folder written onto the RockIt Twist's internal storage when it starts, laid out like the \
+                 console's F: drive (Applications, Music, Trailers...). For your own programs, or content \
+                 copied from your own console.",
+            )
+            .clicked()
+        {
+            actions.push(Action::Pick(Pick::TwistContent));
+            ui.close();
+        }
+        if content.is_some() && ui.button("Remove RockIt Twist content").clicked() {
+            actions.push(Action::SetTwistContent(None));
+            ui.close();
+        }
+        let usb = settings.twist_usb;
+        if ui
+            .button(format!("{}Plug the RockIt Twist into this PC (USB)", if usb { "✓ " } else { "" }))
+            .on_hover_text(
+                "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
+                 so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
+                 usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
+            )
+            .clicked()
+        {
+            actions.push(Action::SetTwistUsb(!usb));
+            ui.close();
+        }
+        ui.separator();
+        if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
+            actions.push(Action::Screenshot);
+            ui.close();
+        }
+        if ui.checkbox(&mut settings.discord_presence, "Show my game on Discord").changed() {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.separator();
+        if item(ui, "Exit", "Alt+F4") {
+            actions.push(Action::Quit);
         }
     });
+    top_menu(ui, rows, "🎮", "Emulation", |ui| {
+        let pause = if info.paused { "Resume" } else { "Pause" };
+        if ui.add_enabled(info.running, egui::Button::new(pause).shortcut_text("Esc")).clicked() {
+            actions.push(Action::TogglePause);
+            ui.close();
+        }
+        if ui.add_enabled(info.running, egui::Button::new("Reset").shortcut_text("Ctrl+R")).clicked() {
+            actions.push(Action::Reset);
+            ui.close();
+        }
+        ui.separator();
+        ui.add_enabled_ui(info.running, |ui| {
+            ui.menu_button("Save State", |ui| {
+                for slot in 1..=STATE_SLOTS {
+                    let when = info.slots.get(slot as usize - 1).cloned().flatten().unwrap_or_else(|| "empty".into());
+                    let key = if slot == 1 { "F5" } else { "" };
+                    if ui.add(egui::Button::new(format!("Slot {slot}  ({when})")).shortcut_text(key)).clicked() {
+                        actions.push(Action::SaveState(slot));
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("Load State", |ui| {
+                for slot in 1..=STATE_SLOTS {
+                    let when = info.slots.get(slot as usize - 1).cloned().flatten();
+                    let key = if slot == 1 { "F9" } else { "" };
+                    let label = format!("Slot {slot}  ({})", when.as_deref().unwrap_or("empty"));
+                    if ui.add_enabled(when.is_some(), egui::Button::new(label).shortcut_text(key)).clicked() {
+                        actions.push(Action::LoadState(slot));
+                        ui.close();
+                    }
+                }
+            });
+            ui.label(egui::RichText::new("Hold ` (left of 1) to rewind").weak());
+        });
+        ui.separator();
+        ui.menu_button("Speed", |ui| {
+            for (p, label) in [(50, "50%"), (100, "100% (normal)"), (200, "200%"), (400, "400%"), (0, "Unlimited")] {
+                if ui.radio_value(&mut settings.speed_percent, p, label).clicked() {
+                    actions.push(Action::SettingsChanged);
+                    ui.close();
+                }
+            }
+            ui.label(egui::RichText::new("Hold Tab to fast-forward").weak());
+        });
+        ui.separator();
+        // Power.
+        if ui
+            .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
+            .on_hover_text("Like the real Leapster, turn off after a while with nothing pressed (about 15 minutes; 5 on the Leapster TV). Ribbit then closes the game. Off: Ribbit keeps it on.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.add_enabled_ui(settings.turn_off_when_idle, |ui| {
+            if ui
+                .checkbox(&mut settings.flash_before_idle_off, "    Flash taskbar before turning off")
+                .on_hover_text("Flash Ribbit's taskbar button in the last minute. On Windows this also shows an auto-hidden taskbar until you click Ribbit.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+        });
+        if ui
+            .checkbox(&mut settings.pause_in_background, "Pause in background")
+            .on_hover_text("Pause the game while another window is active.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.separator();
+        // Touch, then how its calibration is handled.
+        if ui
+            .checkbox(&mut settings.experimental_touch, "Touchscreen (experimental)")
+            .on_hover_text("MAME-derived, unverified touch model. Needed for calibration and touch games. Applies at the next start.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        if ui
+            .checkbox(&mut settings.skip_boot_calibration, "Skip calibration at boot")
+            .on_hover_text("Sets board straps bit 14 (MAME's default) so the BIOS uses the saved calibration. Applies at the next start.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        if ui
+            .checkbox(&mut settings.leapster2_skip_menu, "Leapster 2: start games directly")
+            .on_hover_text("Skip the Leapster 2's start-up screens and main menu and go straight into the cartridge. Off: games start from the cartridge icon in the menu, as on a real Leapster 2. Applies at the next start.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        if ui
+            .checkbox(&mut settings.auto_calibrate, "Calibrate automatically")
+            .on_hover_text("Ribbit presses the calibration targets for you when the calibration screen appears.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.separator();
+        ui.menu_button("Advanced (experimental)", |ui| {
+            ui.label(egui::RichText::new("Unverified guesses. Apply at the next start.").weak());
+            if ui
+                .checkbox(&mut settings.mame_gpio_lines, "MAME power-line workaround")
+                .on_hover_text(
+                    "Reads every unidentified GPIO line as 1, as MAME does. The v1.5 (Universal) BIOS otherwise                          sees a shutdown request on line 11 and turns itself off. Not known to match hardware.",
+                )
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+            ui.label("CPU clock:");
+            for (mhz, label) in [(96, "96 MHz (nominal)"), (48, "48 MHz (MAME)")] {
+                if ui.radio_value(&mut settings.cpu_mhz, mhz, label).clicked() {
+                    actions.push(Action::SettingsChanged);
+                }
+            }
+        });
+    });
+    top_menu(ui, rows, "🖥", "Video", |ui| {
+        if ui
+            .checkbox(&mut settings.hd_vectors, "HD vectors (experimental)")
+            .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the movies' own coordinates, text from the fonts' own outlines, bitmaps from their own pixels. Art with no vector original shows its pixels (see HD pixel art); never AI-upscaled. Replaces the scaling options below while on. Original Leapster and L-MAX BIOSes, and cartridges with their own Flash player.")
+            .changed()
+        {
+            actions.push(Action::HdChanged);
+        }
+        // Art with no vector original: its pixels, or traced.
+        ui.add_enabled_ui(settings.hd_vectors, |ui| {
+            ui.menu_button("HD pixel art", |ui| {
+                let before = settings.hd_trace_pixel_art;
+                ui.radio_value(&mut settings.hd_trace_pixel_art, false, "Pixels (original)")
+                    .on_hover_text("Bitmaps in the games' Flash movies, and games drawn by their own code, show their own pixels, sharp");
+                ui.radio_value(&mut settings.hd_trace_pixel_art, true, "Traced into vectors")
+                    .on_hover_text("The same pixels traced into smooth shapes by a fixed algorithm (depixelizing, no AI): curves where the pixels step, corners where the art has corners");
+                if settings.hd_trace_pixel_art != before {
+                    actions.push(Action::SettingsChanged);
+                }
+            });
+        });
+        ui.separator();
+        let before = settings.display;
+        ui.radio_value(&mut settings.display, Display::Ai, "AI upscale (HD)");
+        ui.radio_value(&mut settings.display, Display::Sharp, "Sharp pixels");
+        ui.radio_value(&mut settings.display, Display::Lcd, "LCD grid");
+        ui.radio_value(&mut settings.display, Display::Pixel, "Pixel perfect (whole-number scale)");
+        ui.radio_value(&mut settings.display, Display::Smooth, "Smooth (bicubic)");
+        if settings.display != before {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.menu_button("AI upscale settings", |ui| {
+            use crate::upscale::{Model, Resolution, Style};
+            let before = settings.ai;
+            ui.label(egui::RichText::new("Style").strong());
+            ui.radio_value(&mut settings.ai.style, Style::Clean, "Clean (ArtCNN)")
+                .on_hover_text("Crisp lines and flat fills. Best for Leapster games, whose art is antialiased vector graphics.");
+            ui.radio_value(&mut settings.ai.style, Style::Soft, "Soft (Anime4K)")
+                .on_hover_text("A softer neural upscaler.");
+            ui.radio_value(&mut settings.ai.style, Style::Cartoon, "Pixel-art edges (ScaleFX + ArtCNN)")
+                .on_hover_text("For flat pixel art. Blotchy on antialiased art.");
+            ui.separator();
+            ui.label(egui::RichText::new("Quality").strong());
+            for m in Model::ALL {
+                ui.radio_value(&mut settings.ai.model, m, m.label());
+            }
+            ui.label(egui::RichText::new("Bigger networks are sharper and use more GPU.").weak());
+            ui.separator();
+            ui.label(egui::RichText::new("Sharpness").strong());
+            for sh in crate::upscale::Sharpness::ALL {
+                ui.radio_value(&mut settings.ai.sharpness, sh, sh.label());
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Resolution").strong());
+            for r in Resolution::ALL {
+                ui.radio_value(&mut settings.ai.resolution, r, r.label());
+            }
+            if settings.ai != before {
+                settings.display = Display::Ai;
+                actions.push(Action::SettingsChanged);
+            }
+        });
+        ui.separator();
+        ui.menu_button("Window size", |ui| {
+            for s in [0, 2, 3, 4, 16] {
+                let label = if s == 0 { "Fit screen".to_string() } else { format!("{s}x ({}x{})", 160 * s, 160 * s) };
+                if ui.radio(settings.window_scale == s, label).clicked() {
+                    actions.push(Action::SetWindowScale(s));
+                    ui.close();
+                }
+            }
+        });
+        if item(ui, if info.fullscreen { "Exit fullscreen" } else { "Fullscreen" }, "F11") {
+            actions.push(Action::ToggleFullscreen);
+        }
+        if ui.checkbox(&mut settings.show_status_bar, "Status bar").changed() {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.separator();
+        ui.label(egui::RichText::new("Console view (F7: the running console's)").strong());
+        let tip = "Shows the screen inside a drawing of the handheld, with its controls around it. Click, drag or scroll the controls to use them.";
+        if ui.checkbox(&mut settings.console_view_twist, "RockIt Twist").on_hover_text(tip).changed() {
+            actions.push(Action::ConsoleViewChanged);
+        }
+        let leapster_tip = match info.console_view_available {
+            Some(false) => "TV consoles (Leapster TV, Zippity) have no handheld to draw: they show the plain screen.",
+            _ => "Leapster, L-MAX and Leapster 2 (one drawing for all three, after the original Leapster).",
+        };
+        if ui.checkbox(&mut settings.console_view, "Leapster handhelds").on_hover_text(leapster_tip).changed() {
+            actions.push(Action::ConsoleViewChanged);
+        }
+        ui.add_enabled_ui(settings.console_view || settings.console_view_twist, |ui| {
+            if ui
+                .checkbox(&mut settings.console_view_keys, "Show keys on the console")
+                .on_hover_text("Each control shows its keyboard key; the key lights up while pressed.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+        });
+    });
+    top_menu(ui, rows, "🔊", "Audio", |ui| {
+        if ui.checkbox(&mut settings.muted, "Mute").changed() {
+            actions.push(Action::SettingsChanged);
+        }
+        if ui.add(egui::Slider::new(&mut settings.volume, 0.0..=1.0).text("Volume").show_value(false)).changed() {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.separator();
+        ui.label(egui::RichText::new("Sound").strong());
+        for e in crate::audio_out::Enhance::ALL {
+            if ui.radio_value(&mut settings.audio_enhance, e, e.label()).clicked() {
+                actions.push(Action::SettingsChanged);
+            }
+        }
+        ui.label(egui::RichText::new("The Leapster itself is mono with 8 kHz sound; these are effects.").weak());
+        ui.separator();
+        ui.label(egui::RichText::new("Leapster 2 PCM sound").strong());
+        for r in crate::audio_out::PcmRate::ALL {
+            if ui.radio_value(&mut settings.pcm_rate, r, r.label()).clicked() {
+                actions.push(Action::SettingsChanged);
+            }
+        }
+        ui.label(egui::RichText::new("Games that stream sound through the Leapster 2's 32 kHz DAC.").weak());
+        ui.add_enabled_ui(settings.pcm_rate == crate::audio_out::PcmRate::Original32k, |ui| {
+            for c in crate::audio_out::PcmClean::ALL {
+                if ui.radio_value(&mut settings.pcm_clean, c, c.label()).clicked() {
+                    actions.push(Action::SettingsChanged);
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new("Clean audio filters the 32 kHz sound above 8.5 kHz; unfiltered plays it exactly as emulated.")
+                .weak(),
+        );
+    });
+    top_menu(ui, rows, "⌨", "Input", |ui| {
+        if item(ui, "Key bindings…", "") {
+            st.show_bindings = true;
+        }
+        if ui
+            .checkbox(&mut settings.touch_controls, "Touch controls")
+            .on_hover_text("On-screen buttons, shown when the screen is touched; a key or controller button hides them.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.separator();
+        if ui
+            .checkbox(&mut settings.zippity_on_home, "Zippity: stand on the home spot (Shift)")
+            .on_hover_text("Both footprints of the mat's orange home spot stay pressed. Mickey Says and other games wait for the player to stand there.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+    });
+    top_menu(ui, rows, "❓", "Help", |ui| {
+        if item(ui, "Controls", "F1") {
+            st.show_controls = true;
+        }
+        if item(ui, "Emulation status", "") {
+            st.show_status = true;
+        }
+        ui.separator();
+        if item(ui, "Check for updates…", "") {
+            st.updates.check(ui.ctx());
+            st.show_updates = true;
+            st.notes_open = None;
+        }
+        ui.menu_button("Patch notes", |ui| patch_notes_menu(ui, st));
+        ui.separator();
+        if item(ui, "About Ribbit", "") {
+            st.show_about = true;
+        }
+    });
+    // Right after the menus (never over them, however narrow the window).
+    if let Some(r) = st.updates.newer() {
+        ui.add_space(8.0);
+        // The full label when it fits, else just the version.
+        let full = format!("⬆ Update to {}", r.version_text());
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let need = ui.painter().layout_no_wrap(full.clone(), font, egui::Color32::WHITE).size().x
+            + 2.0 * ui.spacing().button_padding.x;
+        let label = if ui.available_width() >= need { full } else { format!("⬆ {}", r.version_text()) };
+        let text = egui::RichText::new(label).color(egui::Color32::WHITE);
+        if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text("See what's new and download it").clicked() {
+            st.show_updates = true;
+            st.notes_open = Some(r.tag);
+        }
+    }
+}
+
+/// A top-level menu: a menu-bar button, or (the side menu) a full-width row
+/// whose menu opens beside it.
+fn top_menu(ui: &mut egui::Ui, rows: bool, icon: &str, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    if !rows {
+        ui.menu_button(label, add_contents);
+        return;
+    }
+    let text = egui::RichText::new(format!("{icon}    {label}")).size(17.0).color(egui::Color32::from_gray(230));
+    let button = egui::Button::new(text).frame(false).min_size(egui::vec2(ui.available_width(), 48.0));
+    egui::containers::menu::MenuButton::from_button(button).ui(ui, add_contents);
 }
 
 /// Help → Patch notes: every release, newest first; one opens its notes.
@@ -967,19 +1192,27 @@ fn status_bar(ui: &mut egui::Ui, info: &Info, message: Option<&str>) {
     });
 }
 
-fn welcome(ui: &mut egui::Ui, settings: &Settings, info: &Info, actions: &mut Vec<Action>) {
+fn welcome(ui: &mut egui::Ui, settings: &mut Settings, info: &Info, actions: &mut Vec<Action>) {
+    let phone = cfg!(target_os = "android");
     // Scrolls when it doesn't fit (a phone held sideways, a small window).
     let gap = (ui.available_height() * 0.18).max(12.0);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| ui.vertical_centered(|ui| {
-        ui.add_space(if cfg!(target_os = "android") { 12.0 } else { gap });
+        ui.add_space(if phone { 12.0 } else { gap });
         ui.heading(egui::RichText::new("🐸 Ribbit").size(34.0));
         ui.label("An emulator for LeapFrog's handhelds and TV consoles");
         ui.add_space(18.0);
-        // On a phone the screen is short: the AI note comes first, before
-        // the BIOS and games, so it is read before anything is loaded.
-        if cfg!(target_os = "android") {
+        // On a phone, a quick start: the AI note on a page of its own first,
+        // then the BIOS and games.
+        if phone && !settings.ai_notice_seen {
             ai_notice(ui);
-            ui.add_space(18.0);
+            ui.add_space(16.0);
+            let text = egui::RichText::new("Continue").size(18.0).color(egui::Color32::WHITE);
+            if ui.add(egui::Button::new(text).fill(ACCENT).min_size(egui::vec2(240.0, 48.0))).clicked() {
+                settings.ai_notice_seen = true;
+                actions.push(Action::SettingsChanged);
+            }
+            ui.add_space(12.0);
+            return;
         }
         match &info.bios_name {
             Some(name) => ui.label(format!("BIOS: {name}")),
@@ -1007,7 +1240,10 @@ fn welcome(ui: &mut egui::Ui, settings: &Settings, info: &Info, actions: &mut Ve
         ui.add_space(14.0);
         ui.label(egui::RichText::new("You can also drop a BIOS or cartridge file onto this window.").weak());
         ui.label(egui::RichText::new("No firmware or games are included: use dumps of hardware you own.").weak());
-        if !cfg!(target_os = "android") {
+        if phone {
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("Swipe in from the left edge for the menu.").weak());
+        } else {
             ui.add_space(22.0);
             ai_notice(ui);
         }
@@ -1056,7 +1292,7 @@ fn library_screen(
     since: Instant,
     actions: &mut Vec<Action>,
 ) {
-    let LibraryView { tab, search } = view;
+    let LibraryView { tab, search, pull, pull_armed } = view;
     let ctx = ui.ctx().clone();
     for g in &mut library.games {
         if let Art::Image(img) = &g.art {
@@ -1065,13 +1301,25 @@ fn library_screen(
         }
     }
     backdrop(ui);
-    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(28, 20)).show(ui, |ui| {
-        library_header(ui, settings, library, *tab, actions);
+    // A phone: tighter margins, smaller cards, no "last played" banner.
+    let phone = cfg!(target_os = "android");
+    let margin = if phone { egui::Margin::symmetric(14, 10) } else { egui::Margin::symmetric(28, 20) };
+    let (card_width, card_gap) = if phone { (150.0, 12.0) } else { (CARD_WIDTH, CARD_GAP) };
+    egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
+        // On a phone the header scrolls away with the games (it would take
+        // half of a landscape screen).
+        if !phone || library.games.is_empty() {
+            library_header(ui, settings, library, *tab, actions);
+        }
         if library.games.is_empty() && !library.scanning {
             empty_library(ui, settings, actions);
             return;
         }
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if phone {
+                pull_to_refresh_hint(ui, *pull);
+                library_header(ui, settings, library, *tab, actions);
+            }
             if settings.rom_folders.is_empty() {
                 // Only recent games so far: ask for the folder with the rest.
                 notice(ui, "These are your recent games. Choose your games folder to see all of them.", || {
@@ -1084,7 +1332,7 @@ fn library_screen(
                 ui.add_space(14.0);
             }
             let last = settings.recent_carts.first().filter(|_| search.is_empty());
-            if let Some(game) = last.and_then(|p| library.games.iter().find(|g| &g.path == p)) {
+            if let Some(game) = last.and_then(|p| library.games.iter().find(|g| &g.path == p)).filter(|_| !phone) {
                 hero(ui, game, actions);
                 ui.add_space(28.0);
             }
@@ -1110,7 +1358,7 @@ fn library_screen(
                     }
                     let field = egui::TextEdit::singleline(search)
                         .hint_text("🔍  Search games")
-                        .desired_width(240.0)
+                        .desired_width(if phone { 180.0 } else { 240.0 })
                         .margin(egui::vec2(10.0, 6.0));
                     let resp = ui.add(field);
                     if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1126,12 +1374,12 @@ fn library_screen(
                 });
             }
             let avail = ui.available_width();
-            let cols = (((avail + CARD_GAP) / (CARD_WIDTH + CARD_GAP)).floor() as usize).max(1);
-            let card_w = ((avail - CARD_GAP * (cols - 1) as f32) / cols as f32).floor().min(CARD_WIDTH * 1.4);
+            let cols = (((avail + card_gap) / (card_width + card_gap)).floor() as usize).max(1);
+            let card_w = ((avail - card_gap * (cols - 1) as f32) / cols as f32).floor().min(card_width * 1.4);
             let shown = since.elapsed().as_secs_f32();
             for (r, row) in shown_games.chunks(cols).enumerate() {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = CARD_GAP;
+                    ui.spacing_mut().item_spacing.x = card_gap;
                     for (c, game) in row.iter().enumerate() {
                         // Each card grows in a moment after the one before.
                         let n = (r * cols + c).min(CARD_STAGGER_MAX);
@@ -1142,10 +1390,54 @@ fn library_screen(
                         game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), actions);
                     }
                 });
-                ui.add_space(CARD_GAP);
+                ui.add_space(card_gap);
             }
         });
+        if phone {
+            pull_to_refresh(ui, pull, pull_armed, out.state.offset.y, actions);
+        }
     });
+}
+
+/// How far to pull the list down at its top before letting go refreshes it.
+const PULL_TO_REFRESH: f32 = 90.0;
+
+/// Android: pulling the list down at its top, then letting go, looks for new
+/// games, as in other apps' lists.
+fn pull_to_refresh(ui: &egui::Ui, pull: &mut f32, armed: &mut bool, offset: f32, actions: &mut Vec<Action>) {
+    let (drag, pressed, released) = ui.input(|i| {
+        let drag = i.pointer.press_origin().zip(i.pointer.interact_pos()).map(|(o, p)| p.y - o.y);
+        (if i.pointer.primary_down() { drag } else { None }, i.pointer.any_pressed(), i.pointer.any_released())
+    });
+    if pressed {
+        *armed = offset <= 0.5;
+    }
+    match drag {
+        // Only a pull whose finger came down with the list at its top counts.
+        Some(dy) if *armed && offset <= 0.5 => *pull = dy.max(0.0),
+        _ => {
+            if released && *pull >= PULL_TO_REFRESH {
+                actions.push(Action::RescanLibrary);
+            }
+            *pull = 0.0;
+        }
+    }
+    if *pull > 0.0 {
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The note above the list while it is pulled down.
+fn pull_to_refresh_hint(ui: &mut egui::Ui, pull: f32) {
+    if pull <= 0.0 {
+        return;
+    }
+    let h = (pull * 0.5).min(56.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+    let ready = pull >= PULL_TO_REFRESH;
+    let text = if ready { "⟳  Release to refresh" } else { "↓  Pull to refresh" };
+    let color = if ready { ACCENT } else { egui::Color32::from_gray(170) };
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(16.0), color);
 }
 
 /// A soft green glow at the top fading into the window background.
@@ -1169,6 +1461,10 @@ fn backdrop(ui: &egui::Ui) {
 }
 
 fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
+    let phone = cfg!(target_os = "android");
+    if phone {
+        return phone_library_header(ui, settings, library, tab, actions);
+    }
     ui.horizontal(|ui| {
         let frog = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("frog icon"))).unwrap_or_else(|| {
             let img = egui::ColorImage::from_rgba_unmultiplied([256, 256], &crate::icon::frog_glyph_rgba(256));
@@ -1179,17 +1475,6 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         ui.add(egui::Image::new((frog.id(), egui::vec2(42.0, 42.0))));
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Games").size(34.0).family(crate::fonts::title()).color(egui::Color32::WHITE));
-        // Progress, next to the heading.
-        let pending = library.games.iter().filter(|g| matches!(g.art, Art::Pending)).count();
-        if library.scanning {
-            ui.add_space(10.0);
-            ui.spinner();
-            ui.label(egui::RichText::new("Looking for games…").weak());
-        } else if library.making_art && pending > 0 {
-            ui.add_space(10.0);
-            ui.spinner();
-            ui.label(egui::RichText::new(format!("Getting title screens… {pending} to go")).weak());
-        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if ui
@@ -1227,7 +1512,66 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
             }
         });
     });
+    // Progress on a line of its own under the heading (beside it, it ran
+    // under the buttons in a narrow window).
+    let pending = library.games.iter().filter(|g| matches!(g.art, Art::Pending)).count();
+    if library.scanning || (library.making_art && pending > 0) {
+        ui.horizontal(|ui| {
+            ui.add_space(50.0);
+            ui.spinner();
+            let text = if library.scanning { "Looking for games…".to_string() } else { format!("Getting title screens… {pending} to go") };
+            ui.label(egui::RichText::new(text).weak());
+        });
+    }
     ui.add_space(10.0);
+}
+
+/// The library's header on a phone: the title and progress, then the
+/// console and BIOS on a row of their own (adding games is in the side menu).
+fn phone_library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        let frog = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("frog icon"))).unwrap_or_else(|| {
+            let img = egui::ColorImage::from_rgba_unmultiplied([256, 256], &crate::icon::frog_glyph_rgba(256));
+            let tex = ui.ctx().load_texture("frog icon", img, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("frog icon"), tex.clone()));
+            tex
+        });
+        ui.add(egui::Image::new((frog.id(), egui::vec2(30.0, 30.0))));
+        ui.label(egui::RichText::new("Games").size(26.0).family(crate::fonts::title()).color(egui::Color32::WHITE));
+        let pending = library.games.iter().filter(|g| matches!(g.art, Art::Pending)).count();
+        if library.scanning {
+            ui.spinner();
+            ui.label(egui::RichText::new("Looking for games…").weak());
+        } else if library.making_art && pending > 0 {
+            ui.spinner();
+            ui.label(egui::RichText::new(format!("{pending} to go")).weak());
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(egui::RichText::new("⟳").size(18.0)).corner_radius(8).min_size(egui::vec2(44.0, 40.0)))
+                .clicked()
+            {
+                actions.push(Action::RescanLibrary);
+            }
+        });
+    });
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist)) {
+            console_picker(ui, settings, library, tab, actions);
+            bios_picker(ui, settings, library, actions);
+        }
+        let console = library.selected_console(&settings.library_console);
+        if console == Hardware::Leapster2
+            && library.bios_for(console).is_some()
+            && tab.is_none_or(|f| f.runs_on(console))
+            && system_button(ui, "Leapster 2 Main Menu").clicked()
+        {
+            actions.push(Action::StartSystem(console));
+        }
+    });
+    ui.add_space(8.0);
 }
 
 /// The console Leapster games play on (from the library and Open Cartridge): only

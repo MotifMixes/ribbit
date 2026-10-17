@@ -1699,6 +1699,9 @@ impl App {
         }
         let ppp = self.egui_ctx.pixels_per_point();
         let pos = egui::pos2(p.0 as f32 / ppp, p.1 as f32 / ppp);
+        if cfg!(target_os = "android") && pos.x <= crate::ui::SIDE_MENU_EDGE {
+            return true;
+        }
         self.egui_ctx.layer_id_at(pos).is_some_and(|l| l.order != egui::Order::Background)
     }
 

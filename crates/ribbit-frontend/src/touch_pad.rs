@@ -176,9 +176,17 @@ pub fn paint(painter: &egui::Painter, pads: &[Pad], pad: &TouchPad) {
                 for (a, t) in arms.iter().zip(ts) {
                     painter.rect(*a, arm * 0.25, fill(p.color, pad.holds(t)), edge, egui::StrokeKind::Inside);
                 }
-                for (a, s) in arms.iter().zip(["▲", "▼", "◀", "▶"]) {
+                // Arrows drawn as triangles: the fonts have ◀ and ▶ but no ▲ or
+                // ▼ (up and down showed as empty boxes).
+                for a in &arms {
                     let at = a.center() + (a.center() - c) * 0.25;
-                    painter.text(at, egui::Align2::CENTER_CENTER, s, egui::FontId::proportional(arm * 0.4), text);
+                    let dir = (a.center() - c).normalized();
+                    let side = egui::vec2(-dir.y, dir.x);
+                    let size = arm * 0.16;
+                    let tip = at + dir * size;
+                    let base = at - dir * size;
+                    let points = vec![tip, base + side * size, base - side * size];
+                    painter.add(egui::Shape::convex_polygon(points, text, Stroke::NONE));
                 }
             }
             Kind::Round(t) => {
