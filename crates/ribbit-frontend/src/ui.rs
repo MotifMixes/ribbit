@@ -996,6 +996,31 @@ fn welcome(ui: &mut egui::Ui, settings: &Settings, info: &Info, actions: &mut Ve
         ui.add_space(14.0);
         ui.label(egui::RichText::new("You can also drop a BIOS or cartridge file onto this window.").weak());
         ui.label(egui::RichText::new("No firmware or games are included: use dumps of hardware you own.").weak());
+        ui.add_space(22.0);
+        ai_notice(ui);
+    });
+}
+
+/// The README's "This project was made with AI", shortened, on the first
+/// screen: players should know before they start.
+fn ai_notice(ui: &mut egui::Ui) {
+    let width = ui.available_width().min(520.0);
+    egui::Frame::group(ui.style()).inner_margin(12.0).show(ui, |ui| {
+        ui.set_width(width - 26.0);
+        ui.label(egui::RichText::new("This project was made with AI").strong());
+        ui.add_space(4.0);
+        for text in [
+            "Ribbit is written almost entirely by an AI coding assistant (Anthropic's Claude), working under my \
+             direction: I choose what to work on, test it, supply the hardware references and decide what goes in.",
+            "Many people don't want to use AI-written software, for reasons I respect: licensing and where training \
+             data comes from, code quality, and the work of people who reverse-engineer hardware by hand. If that's \
+             you, no hard feelings. Otherwise, please judge Ribbit by its results: every hardware claim in its notes \
+             says how sure it is and where it comes from.",
+            "Ribbit is not affiliated with or endorsed by LeapFrog.",
+        ] {
+            ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
+            ui.add_space(2.0);
+        }
     });
 }
 
