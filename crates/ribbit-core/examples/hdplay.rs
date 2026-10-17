@@ -6,6 +6,7 @@
 //! RIBBIT_HD_PRESS="a,3000,100;right,5000,100": button presses (name, ms from
 //! the start, ms held). RIBBIT_HD_TINT=1: the HD side shows the parts taken
 //! from the LCD (not drawn as vectors) tinted magenta.
+//! RIBBIT_HD_TAP="x,y,ms;...": stylus taps (150 ms) at LCD pixels.
 //! RIBBIT_HD_MONKEY=seed: a stylus tap (150 ms) at a random LCD pixel every
 //! 1.5 s, to wander into a game's screens.
 
@@ -78,10 +79,25 @@ fn main() {
     let mut not_premultiplied = 0usize;
     // Device-text glyphs by font: (glyphs, with an outline).
     let mut text_fonts: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    let taps: Vec<(u32, u32, u64)> = std::env::var("RIBBIT_HD_TAP")
+        .map(|v| {
+            v.split(';')
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let q: Vec<&str> = p.split(',').collect();
+                    (q[0].parse().unwrap(), q[1].parse().unwrap(), q[2].parse().unwrap())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut monkey = std::env::var("RIBBIT_HD_MONKEY").ok().map(|v| v.parse::<u64>().unwrap() | 1);
     for t in (0..total).step_by(16) {
         for &(b, at, dur) in &presses {
             m.buttons.set(b, (at..at + dur).contains(&t));
+        }
+        if !taps.is_empty() {
+            let raw = |p: u32| ((p * 0x7F0 + 79) / 159).min(0x7F0);
+            m.io.touch.as_mut().unwrap().live = taps.iter().find(|&&(_, _, at)| (at..at + 150).contains(&t)).map(|&(x, y, _)| (raw(x), raw(y)));
         }
         if let Some(r) = monkey.as_mut() {
             let phase = t % 1500;
