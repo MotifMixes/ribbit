@@ -403,6 +403,8 @@ pub struct HdCapture {
     last_end: Option<((i32, i32), (f32, f32))>,
     sources: Vec<Source>,
     source_ends: HashMap<(i32, i32), Vec<usize>>,
+    /// Where this frame's sources start in `sources`.
+    frame_sources: usize,
     /// Thick line pieces seen this frame.
     strokes: Vec<StrokePiece>,
 }
@@ -454,6 +456,7 @@ impl HdCapture {
             last_end: None,
             sources: vec![],
             source_ends: HashMap::new(),
+            frame_sources: 0,
             strokes: vec![],
         }
     }
@@ -751,6 +754,7 @@ impl HdCapture {
             self.sources.clear();
             self.source_ends.clear();
         }
+        self.frame_sources = self.sources.len();
         self.last_end = None;
         self.strokes.clear();
         if self.done.len() + self.frame.len() > MAX_PENDING {
@@ -782,21 +786,28 @@ impl HdCapture {
     /// fills of an exact edge it joins (plain fills only; strokes are made
     /// another way).
     fn restore_flat_edges(&mut self) {
-        let mut by_end: HashMap<(i32, i32), usize> = HashMap::new();
+        let mut by_end: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
         for (i, e) in self.current.edges.iter().enumerate() {
             if e.exact.is_some() && e.rule != 2 {
                 for p in [e.p[0], e.p[2]] {
-                    by_end.entry((p.0 as i32, p.1 as i32)).or_insert(i);
+                    by_end.entry((p.0 as i32, p.1 as i32)).or_default().push(i);
                 }
             }
         }
         let mut extra = vec![];
-        for s in &self.sources {
+        // Only edges the shape reader made this frame, between two ends of
+        // this render's outlines with the same fills: sources kept from
+        // earlier frames (other shapes, or this one before it moved) that
+        // happen to share a rounded end put edges where there are none
+        // (streaks along moving art, e.g. between Sonic X's rivets).
+        for s in &self.sources[self.frame_sources..] {
             let (r, x) = (s.rounded, s.exact);
             if r[0].1 != r[2].1 || (x[0].1 - x[2].1).abs() < 1e-4 {
                 continue;
             }
-            let Some(&i) = by_end.get(&r[0]).or_else(|| by_end.get(&r[2])) else { continue };
+            let (Some(a), Some(b)) = (by_end.get(&r[0]), by_end.get(&r[2])) else { continue };
+            let edges = &self.current.edges;
+            let Some(&i) = a.iter().find(|&&i| b.iter().any(|&j| edges[j].fills == edges[i].fills && edges[j].rule == edges[i].rule)) else { continue };
             let e = &self.current.edges[i];
             let to16 = |p: (i32, i32)| (p.0 as i16, p.1 as i16);
             extra.push(Edge {
@@ -1193,14 +1204,14 @@ impl HdCanvas {
         let o = self.shape_offset * self.scale as f32;
         let mut segs: Vec<Seg> = vec![];
         let mut segs_round: Vec<Seg> = vec![];
-        // Thick lines HD draws itself: their BIOS outlines are left out.
-        // Lines a pixel wide or less keep the BIOS's outlines: the stroker
-        // moves them onto whole pixels (VERIFIED-FW from its outlines: a
-        // 1-pixel line at x = 36.1 pixels covers pixel 36, x 36..37), by a
-        // rule not yet known; its outlines are what the device shows.
-        let thin = |s: &StrokePiece| s.width <= units as f32 + 0.01;
-        let stroked: std::collections::HashSet<u32> = pass.strokes.iter().filter(|s| !thin(s)).map(|s| s.fill).collect();
-        for s in pass.strokes.iter().filter(|s| !thin(s)) {
+        // Lines HD draws itself, centred on their exact path as Flash draws
+        // them: their BIOS outlines are left out. (The BIOS's stroker moves
+        // lines a pixel wide or less onto whole pixels, VERIFIED-FW from its
+        // outlines: a 1-pixel line at x = 36.1 pixels covers pixel 36. Its
+        // outlines are kept to a quarter pixel, so a moving thin line steps
+        // a quarter pixel at a time: invisible on the LCD, a wobble in HD.)
+        let stroked: std::collections::HashSet<u32> = pass.strokes.iter().map(|s| s.fill).collect();
+        for s in &pass.strokes {
             let Some(&f) = index.get(&s.fill) else { continue };
             stroke_segs(s, k, o, f, &mut segs);
             stroke_segs(s, k, o, f, &mut segs_round);

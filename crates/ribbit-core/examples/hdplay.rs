@@ -227,7 +227,7 @@ fn main() {
                 if let Ok(b) = std::env::var("RIBBIT_HD_EDGES") {
                     let v: Vec<i16> = b.split(',').map(|s| s.parse().unwrap()).collect();
                     for e in p.edges.iter().filter(|e| e.p.iter().any(|&(x, y)| x >= v[0] && x <= v[2] && y >= v[1] && y <= v[3])) {
-                        println!("edge {:?} line {} rule {} dir {} fills {:08x?}", e.p, e.line, e.rule, e.dir, e.fills);
+                        println!("{t} edge {:?} line {} rule {} dir {} fills {:08x?} exact {:?}", e.p, e.line, e.rule, e.dir, e.fills, e.exact);
                     }
                 }
                 c.apply(&p);
