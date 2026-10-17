@@ -174,6 +174,16 @@ impl App {
         let settings_path = opts.data_dir.join("settings.toml");
         let opts_data_dir = opts.data_dir.clone();
         let mut settings = Settings::load(&settings_path);
+        // A different Ribbit version (an update, or an older one) copies the
+        // saves and settings aside before anything can change them.
+        if settings.last_version != crate::backup::VERSION {
+            let save_dir = settings.save_dir.clone().unwrap_or_else(|| opts.data_dir.join("saves"));
+            crate::backup::before_update(&opts.data_dir, &save_dir, &settings.last_version);
+            settings.last_version = crate::backup::VERSION.to_string();
+            if let Err(e) = settings.save(&settings_path) {
+                tracing::warn!(target: "ribbit::settings", "saving settings: {e:#}");
+            }
+        }
         crate::twist::set_bindings(&settings.twist_keys);
         if let Some(f) = &opts.firmware {
             settings.bios = Some(f.clone());

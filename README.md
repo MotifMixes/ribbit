@@ -172,6 +172,13 @@ Run `target/release/ribbit-gui` (`.exe` on Windows), or download a release: a zi
 Open BIOS… once and then File → Open Cartridge… (dropping files onto the window works too). Settings, saves, save
 states and screenshots go to `%APPDATA%\Ribbit` on Windows and `~/.config/ribbit` on Linux and macOS.
 
+**Updating**: replace the program files with the new release. Saves and settings live in the data folder above, not
+next to the program, so an update never touches them. The first time a new version starts, Ribbit also copies all
+saves and settings into `backups` in the data folder (the newest five are kept), and a save or settings file it can't
+use is kept aside as a `.bak` file instead of being written over. Save states only load in the Ribbit version that
+made them; in-game saves always carry over. On Android, install the new APK over the old one (don't uninstall first:
+that deletes the app's data).
+
 **Leapster keys**: arrows, Z = A, X = B, H = Hint, Enter = Pause, Backspace = Home. Mouse = stylus.
 **Controllers**: d-pad/stick, A, B, X/Y = Hint, Start = Pause, Back = Home, LB/RB = volume, Guide = menu.
 **Shortcuts**: Esc = pause, Tab (hold) = fast-forward, \` (hold) = rewind, F5/F9 = quick save/load state,

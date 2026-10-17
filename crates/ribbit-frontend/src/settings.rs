@@ -111,6 +111,9 @@ pub struct Settings {
     pub twist_keys: BTreeMap<String, String>,
     /// Ask GitHub for a newer release when Ribbit starts.
     pub check_for_updates: bool,
+    /// The Ribbit version that ran last: a different one backs the saves up
+    /// first (`backup::before_update`).
+    pub last_version: String,
     /// On-screen touch controls: shown when the screen is touched (from
     /// the start on Android), hidden again by any key or controller button.
     pub touch_controls: bool,
@@ -160,6 +163,7 @@ impl Default for Settings {
             twist_usb: false,
             twist_keys: BTreeMap::new(),
             check_for_updates: true,
+            last_version: String::new(),
             touch_controls: true,
             skipped_update: String::new(),
         }
@@ -326,7 +330,10 @@ impl Settings {
     pub fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
+                // Kept aside, not written over (e.g. settings from a newer
+                // Ribbit read by an older one).
                 tracing::warn!(target: "ribbit::settings", "ignoring unreadable {}: {e}", path.display());
+                crate::backup::set_aside(path, "unreadable");
                 Self::default()
             }),
             Err(_) => Self::default(),

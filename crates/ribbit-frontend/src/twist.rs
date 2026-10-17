@@ -478,7 +478,16 @@ impl Machine {
         let mut t = machine::Twist::boot(image::code(&boot), image::code(&base), &test, volume);
         // What the console stored last time, if the storage is built the
         // same way (the same packages and content).
-        let mut saved = save.and_then(|p| load_save(p, key)).unwrap_or_default();
+        // A save for storage built differently (other content, or a Ribbit
+        // that lays the storage out differently) can't be applied; it is
+        // kept aside rather than written over by the new one.
+        let mut saved = match save {
+            Some(p) if p.exists() => load_save(p, key).unwrap_or_else(|| {
+                crate::backup::set_aside(p, "other-storage");
+                Vec::new()
+            }),
+            _ => Vec::new(),
+        };
         if let Some(card) = &mut t.bus.emmc {
             for (n, d) in &saved {
                 card.write_sector(*n, d);
