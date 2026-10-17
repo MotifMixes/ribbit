@@ -240,6 +240,9 @@ pub struct Library {
     pub games: Vec<Game>,
     /// BIOS (system) images found in the games folders, per console.
     pub bios: Vec<(Hardware, PathBuf)>,
+    /// The BIOS chosen with File > Open BIOS, and its console (an unknown
+    /// dump counts as an original Leapster's).
+    chosen: Option<(Hardware, PathBuf)>,
     pub scanning: bool,
     pub making_art: bool,
     art_dir: PathBuf,
@@ -254,6 +257,7 @@ impl Library {
         Self {
             games: Vec::new(),
             bios: Vec::new(),
+            chosen: None,
             scanning: false,
             making_art: false,
             art_dir: data_dir.join("art"),
@@ -330,27 +334,39 @@ impl Library {
         }
     }
 
-    /// A BIOS found for `hw`, if any.
-    pub fn bios_for(&self, hw: Hardware) -> Option<&Path> {
-        self.bios.iter().find(|(h, _)| *h == hw).map(|(_, p)| p.as_path())
+    /// Notes the BIOS chosen with File > Open BIOS (None: none), so its
+    /// console can be played on like one whose BIOS is in a games folder.
+    pub fn set_chosen_bios(&mut self, bios: Option<&Path>) {
+        self.chosen = bios.map(|p| {
+            let hw = ribbit_core::load_firmware(p).ok().and_then(|f| f.known().map(|k| k.hardware));
+            (hw.unwrap_or(Hardware::Leapster), p.to_path_buf())
+        });
     }
 
-    /// The consoles Leapster games can play on: the original Leapster (on
-    /// the chosen BIOS) always, the other Leapster models when their BIOS is
-    /// in a games folder. Zippity and RockIt Twist games always play on their
-    /// own console, so those are not choices.
+    /// A BIOS for `hw`: one found in the games folders, else the one chosen
+    /// with File > Open BIOS when it is that console's.
+    pub fn bios_for(&self, hw: Hardware) -> Option<&Path> {
+        self.bios.iter().chain(&self.chosen).find(|(h, _)| *h == hw).map(|(_, p)| p.as_path())
+    }
+
+    /// The consoles Leapster games can play on: the Leapster models with a
+    /// BIOS (chosen with File > Open BIOS or in a games folder); the
+    /// original Leapster when there is none at all. Zippity and RockIt Twist
+    /// games always play on their own console, so those are not choices.
     pub fn consoles(&self) -> Vec<Hardware> {
-        CONSOLES
+        let have: Vec<Hardware> = CONSOLES
             .into_iter()
             .filter(|&hw| !matches!(hw, Hardware::Zippity | Hardware::RockItTwist))
-            .filter(|&hw| hw == Hardware::Leapster || self.bios_for(hw).is_some())
-            .collect()
+            .filter(|&hw| self.bios_for(hw).is_some())
+            .collect();
+        if have.is_empty() { vec![Hardware::Leapster] } else { have }
     }
 
     /// The console chosen in the library (`chosen`, a console name), or the
-    /// original Leapster when that one is not available.
+    /// first available one when that one is not.
     pub fn selected_console(&self, chosen: &str) -> Hardware {
-        self.consoles().into_iter().find(|hw| hw.name() == chosen).unwrap_or(Hardware::Leapster)
+        let consoles = self.consoles();
+        consoles.iter().copied().find(|hw| hw.name() == chosen).unwrap_or(consoles[0])
     }
 
     /// The tab that lists a console's games: the Leapster 2 page only when
@@ -898,6 +914,23 @@ fn load_png(path: &Path) -> Option<egui::ColorImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bios_chosen_with_open_bios_counts_for_its_console() {
+        let mut lib = Library::new(Path::new("."));
+        assert_eq!(lib.consoles(), [Hardware::Leapster], "nothing yet: the original Leapster");
+        // A Leapster 2 BIOS chosen with File > Open BIOS, none in the folders.
+        lib.chosen = Some((Hardware::Leapster2, PathBuf::from("l2.bin")));
+        assert_eq!(lib.consoles(), [Hardware::Leapster2]);
+        assert_eq!(lib.selected_console("Leapster"), Hardware::Leapster2);
+        assert_eq!(lib.bios_for(Hardware::Leapster2), Some(Path::new("l2.bin")));
+        assert_eq!(lib.bios_for(Hardware::Leapster), None);
+        // An original Leapster BIOS in a games folder as well: both, as chosen.
+        lib.bios.push((Hardware::Leapster, PathBuf::from("v21.bin")));
+        assert_eq!(lib.consoles(), [Hardware::Leapster, Hardware::Leapster2]);
+        assert_eq!(lib.selected_console("Leapster"), Hardware::Leapster);
+        assert_eq!(lib.selected_console("Leapster 2"), Hardware::Leapster2);
+    }
 
     #[test]
     fn title_cards_beat_flat_screens() {

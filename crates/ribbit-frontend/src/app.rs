@@ -414,6 +414,7 @@ impl App {
     /// BIOS, if there is one.
     fn rescan_library(&mut self) {
         let art = self.settings.bios.clone().map(|bios| ArtSource { bios });
+        self.library.set_chosen_bios(self.settings.bios.as_deref());
         self.library.scan(&self.settings.rom_folders, &self.settings.recent_carts, self.settings.twist_content.clone(), art);
         // Outline fonts for HD device text, from the same folders.
         crate::device_fonts::load(self.settings.rom_folders.clone());
