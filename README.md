@@ -27,8 +27,9 @@ build Ribbit from its source code, which players never have to do.)
 
 **Updating:** start in Ribbit itself.
 
-1. When a new version is out, a green **⬆ Update to v…** button appears next to Ribbit's menus (or use
-   **Help → Check for updates**). Click it to see what's new, then click **Download**: it opens the release page.
+1. When a new version is out, a green button appears at the top of Ribbit, right after the menus. It shows the new
+   version number, for example **⬆ Update to v1.2.3**. (No button? Use **Help → Check for updates**.) Click it to
+   see what's new, then click **Download**: it opens the release page.
 2. Download the file for your system, as above.
 3. Close Ribbit, then unzip the new version **over your old `Ribbit` folder** (replace the files when asked).
 
