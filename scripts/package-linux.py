@@ -61,7 +61,9 @@ Running
 -------
   ./ribbit
 
-Nothing to install: `ribbit` is the whole app (no Rust needed).
+Nothing to install: `ribbit` is the whole app (no Rust needed). To update
+later, unpack the new version over this folder; your saves and settings are
+kept (they live elsewhere).
 
 Needs ALSA (libasound2) and libudev, present on almost every desktop
 distribution, and a Vulkan or OpenGL driver. Works on X11 and Wayland.

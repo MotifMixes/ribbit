@@ -39,7 +39,8 @@ consoles, their own system files).
 Starting
 --------
 Nothing to install: Ribbit.exe is the whole app (no Rust or anything else
-needed). Unzip the folder anywhere.
+needed). Unzip the folder anywhere. To update later, unzip the new version
+over this folder; your saves and settings are kept (they live elsewhere).
 
 1. Run Ribbit.exe.
 2. File > Open BIOS... and choose your BIOS dump (asked once; remembered).
