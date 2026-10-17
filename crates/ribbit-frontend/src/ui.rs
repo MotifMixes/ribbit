@@ -839,7 +839,11 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
             if primary_button(ui, "➕  Add games folder", egui::vec2(0.0, 32.0)).clicked() {
                 actions.push(Action::Pick(Pick::RomFolder));
             }
-            console_picker(ui, settings, library, tab, actions);
+            // Zippity and RockIt Twist games play on their own console: no
+            // choice to make on their pages.
+            if !matches!(tab, Some(Family::Zippity | Family::RockItTwist)) {
+                console_picker(ui, settings, library, tab, actions);
+            }
             // The Leapster 2 chosen: its own system (main menu, drawing,
             // games from the cartridge icon), with or without a cartridge.
             let console = library.selected_console(&settings.library_console);
@@ -857,7 +861,7 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     ui.add_space(10.0);
 }
 
-/// The console games play on (from the library and Open Cartridge): only
+/// The console Leapster games play on (from the library and Open Cartridge): only
 /// consoles that run the open page's games (all of them on "All games").
 /// Choosing one opens the page with its games.
 fn console_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
@@ -873,8 +877,6 @@ fn console_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     };
     let hint = match tab {
         Some(Family::Leapster2) if options.is_empty() => "Add a Leapster 2 BIOS to your games folder to play these games",
-        Some(Family::Zippity) => "The only console these games play on",
-        Some(Family::RockItTwist) => "RockIt Twist packages: research preview, not emulated",
         _ => "Add a Leapster TV, L-MAX or Leapster 2 BIOS to your games folder to play on those",
     };
     ui.add_enabled_ui(options.len() > 1 || (!usable && !options.is_empty()), |ui| {

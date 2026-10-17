@@ -136,6 +136,9 @@ pub struct App {
     /// The game closed for inactivity, its snapshot, and where its BIOS
     /// keeps the idle timer (for Resume).
     idle_resume: Option<(PathBuf, Vec<u8>, Option<ribbit_core::idle_timer::IdleTimer>)>,
+    /// The library has opened on the chosen console's page (once, when its
+    /// first scan is in).
+    tab_shown: bool,
 }
 
 fn hw_zippity() -> ribbit_memory::known::Hardware {
@@ -212,6 +215,7 @@ impl App {
             fatal: None,
             quit: false,
             idle_resume: None,
+            tab_shown: false,
         };
         // A game given on the command line starts at once; otherwise the
         // game library shows.
@@ -475,6 +479,15 @@ impl App {
             }
         }
         if self.opts.firmware.is_none() {
+            // A game the chosen console can't play switches to its own
+            // console, when that one is available.
+            let family = family.unwrap_or(crate::library::Family::Leapster);
+            let console = self.library.selected_console(&self.settings.library_console);
+            if !family.runs_on(console) && self.library.consoles().contains(&family.console()) {
+                self.settings.library_console = family.console().name().to_string();
+                self.save_settings();
+                self.ui.library.tab = Some(self.library.tab_for(family.console()));
+            }
             match self.console_bios(&path) {
                 Ok(Some(nand)) if self.library.selected_console(&self.settings.library_console) == ribbit_memory::known::Hardware::Zippity => {
                     return self.start_zippity(nand, path);
@@ -1622,6 +1635,26 @@ impl App {
         let out = self.egui_ctx.run_ui(raw, |ui| {
             // The console is painted into this slot, under the menus and
             // messages drawn next.
+        // At start the library opens on the page open last time (once the
+        // first scan is in, so the page has its games); after that the open
+        // page is remembered.
+        if !self.tab_shown {
+            if !self.library.scanning && !self.library.games.is_empty() {
+                self.tab_shown = true;
+                let last = crate::library::Family::ALL.into_iter().find(|f| f.name() == self.settings.library_tab);
+                if self.ui.library.tab.is_none() {
+                    self.ui.library.tab = last;
+                }
+            }
+        } else {
+            let open = self.ui.library.tab.map_or("", crate::library::Family::name);
+            if open != self.settings.library_tab {
+                self.settings.library_tab = open.to_string();
+                if let Err(e) = self.settings.save(&self.settings_path) {
+                    tracing::warn!(target: "ribbit::settings", "saving settings: {e:#}");
+                }
+            }
+        }
             let under = ui.painter().add(egui::Shape::Noop);
             area = ui::draw(ui, ui_state, settings, library, &info, &mut actions);
             if let (true, Some(layout)) = (info.running, &view_layout) {

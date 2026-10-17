@@ -82,6 +82,9 @@ pub struct Settings {
     /// The console Leapster games play on from the library ("Leapster",
     /// "Leapster TV", ...; empty: the original Leapster).
     pub library_console: String,
+    /// The library page open last ("Leapster", "Zippity", ...; empty: all
+    /// games), where the library opens next time.
+    pub library_tab: String,
     /// Console view for the Leapster handhelds (Leapster, L-MAX, Leapster
     /// 2): the screen inside a drawing of the handheld, with clickable
     /// controls (see `console_view`). Off by default, Ribbit's usual plain
@@ -127,6 +130,7 @@ impl Default for Settings {
             flash_before_idle_off: true,
             pause_in_background: true,
             library_console: String::new(),
+            library_tab: String::new(),
             console_view: false,
             console_view_twist: true,
             console_view_keys: true,

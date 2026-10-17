@@ -328,16 +328,15 @@ impl Library {
         self.bios.iter().find(|(h, _)| *h == hw).map(|(_, p)| p.as_path())
     }
 
-    /// The consoles that can play games here: the original Leapster (on
-    /// the chosen BIOS), the Zippity and the RockIt Twist (research preview)
-    /// always, the other Leapster models when their BIOS is in a games folder.
+    /// The consoles Leapster games can play on: the original Leapster (on
+    /// the chosen BIOS) always, the other Leapster models when their BIOS is
+    /// in a games folder. Zippity and RockIt Twist games always play on their
+    /// own console, so those are not choices.
     pub fn consoles(&self) -> Vec<Hardware> {
         CONSOLES
             .into_iter()
-            .filter(|&hw| {
-                matches!(hw, Hardware::Leapster | Hardware::Zippity | Hardware::RockItTwist)
-                    || self.bios_for(hw).is_some()
-            })
+            .filter(|&hw| !matches!(hw, Hardware::Zippity | Hardware::RockItTwist))
+            .filter(|&hw| hw == Hardware::Leapster || self.bios_for(hw).is_some())
             .collect()
     }
 
