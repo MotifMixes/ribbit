@@ -948,6 +948,9 @@ pub struct HdCanvas {
     /// RESEARCH: fallback blocks so far by reason: stale (the LCD changed
     /// outside any render), far, off (colours disagree), unknown.
     pub why: [u64; 4],
+    /// Where shapes' points land on the canvas, in LCD pixels right and
+    /// down of their own coordinates (see `SHAPE_OFFSET`).
+    pub shape_offset: f32,
     /// RESEARCH: each block's reason at the last `update_mask` (0 none, 1 + the
     /// index in `why`).
     pub why_block: Vec<u8>,
@@ -959,6 +962,10 @@ pub struct HdCanvas {
 /// the range of the LCD pixel's 3x3 neighbourhood (an edge block blends its
 /// neighbours).
 const AGREE: i32 = 40;
+/// UNVERIFIED (being measured): the BIOS's pixel X shows what is at
+/// point X of the shapes (its samples centre on X), so a shape's point
+/// (x, y) lands at canvas (x + 1/2, y + 1/2) in LCD pixels.
+const SHAPE_OFFSET: f32 = 0.0;
 /// Largest difference from the block's own LCD pixel, whatever its
 /// neighbours: anti-aliasing never differs this much, but things drawn
 /// another way (the BIOS's pixel-font text) do.
@@ -987,6 +994,7 @@ impl HdCanvas {
             from_outline: vec![false; 160 * 160],
             fonts: None,
             why: [0; 4],
+            shape_offset: SHAPE_OFFSET,
             why_block: vec![0; 160 * 160],
         }
     }
@@ -1090,14 +1098,20 @@ impl HdCanvas {
         // exact outlines leave unbalanced is drawn from these (see `rows`).
         let plain: Vec<Edge> = pass.edges.iter().map(|e| Edge { exact: None, ..e.clone() }).collect();
         let welded_round = weld(&plain);
+        let o = self.shape_offset * self.scale as f32;
         let mut segs: Vec<Seg> = vec![];
         let mut segs_round: Vec<Seg> = vec![];
         // Thick lines HD draws itself: their BIOS outlines are left out.
-        let stroked: std::collections::HashSet<u32> = pass.strokes.iter().map(|s| s.fill).collect();
-        for s in &pass.strokes {
+        // Lines a pixel wide or less keep the BIOS's outlines: the stroker
+        // moves them onto whole pixels (VERIFIED-FW from its outlines: a
+        // 1-pixel line at x = 36.1 pixels covers pixel 36, x 36..37), by a
+        // rule not yet known; its outlines are what the device shows.
+        let thin = |s: &StrokePiece| s.width <= units as f32 + 0.01;
+        let stroked: std::collections::HashSet<u32> = pass.strokes.iter().filter(|s| !thin(s)).map(|s| s.fill).collect();
+        for s in pass.strokes.iter().filter(|s| !thin(s)) {
             let Some(&f) = index.get(&s.fill) else { continue };
-            stroke_segs(s, k, f, &mut segs);
-            stroke_segs(s, k, f, &mut segs_round);
+            stroke_segs(s, k, o, f, &mut segs);
+            stroke_segs(s, k, o, f, &mut segs_round);
         }
         for (i, e) in pass.edges.iter().enumerate() {
             if e.rule == 2 && stroked.contains(&e.fills[0]) {
@@ -1109,8 +1123,8 @@ impl HdCanvas {
             }
             let rounded = (e.p[1].0 as f32, e.p[1].1 as f32);
             let control = e.exact.map_or(rounded, |x| x[1]);
-            flatten(e, [welded[i][0], control, welded[i][1]], k, fills, &mut segs);
-            flatten(e, [welded_round[i][0], rounded, welded_round[i][1]], k, fills, &mut segs_round);
+            flatten(e, [welded[i][0], control, welded[i][1]], k, o, fills, &mut segs);
+            flatten(e, [welded_round[i][0], rounded, welded_round[i][1]], k, o, fills, &mut segs_round);
         }
         let lists = |segs: &[Seg]| {
             let mut by_row: Vec<Vec<u32>> = vec![vec![]; y1 - y0];
@@ -1158,8 +1172,8 @@ impl HdCanvas {
 
 /// An edge (start, control, end in pass units) as straight pieces in canvas
 /// units (scale `k`).
-fn flatten(e: &Edge, p: [(f32, f32); 3], k: f32, fills: [i32; 2], segs: &mut Vec<Seg>) {
-    let p = p.map(|(x, y)| (x * k, y * k));
+fn flatten(e: &Edge, p: [(f32, f32); 3], k: f32, o: f32, fills: [i32; 2], segs: &mut Vec<Seg>) {
+    let p = p.map(|(x, y)| (x * k + o, y * k + o));
     let n = if e.line {
         1
     } else {
@@ -1535,8 +1549,8 @@ fn smooth_joins(edges: &[Edge], ends: &mut [[(f32, f32); 2]]) {
 /// winding rule: a rectangle per flattened step and a disc at every point,
 /// all wound the same way, so they merge into a line with round caps and
 /// joins (Flash's lines).
-fn stroke_segs(s: &StrokePiece, k: f32, fill: i32, segs: &mut Vec<Seg>) {
-    let c = s.centre.map(|(x, y)| (x * k, y * k));
+fn stroke_segs(s: &StrokePiece, k: f32, o: f32, fill: i32, segs: &mut Vec<Seg>) {
+    let c = s.centre.map(|(x, y)| (x * k + o, y * k + o));
     let r = s.width * k / 2.0;
     if r <= 0.0 {
         return;

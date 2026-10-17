@@ -39,6 +39,9 @@ fn main() {
         // RIBBIT_HD_SCALE: canvas pixels per LCD pixel (4 = 640, 16 = 2560).
         let scale = std::env::var("RIBBIT_HD_SCALE").map_or(4, |s| s.parse().unwrap());
         let mut c = HdCanvas::with_scale(m.hd.as_ref().unwrap().hooks, scale);
+        if let Ok(o) = std::env::var("RIBBIT_HD_OFFSET") {
+            c.shape_offset = o.parse().unwrap();
+        }
         // RIBBIT_HD_FONTS: cartridge files (';'-separated) whose Flash
         // movies hold device fonts' outlines (swf_font.rs).
         if let Ok(list) = std::env::var("RIBBIT_HD_FONTS") {
@@ -107,6 +110,28 @@ fn main() {
                     ps.sort();
                     ps.dedup();
                     println!("{t:6} pass renderer {:08x} rect {:?} rows {:?} scale {} edges {} fills {} painters {ps:?}", p.renderer, p.rect, p.rows, p.scale, p.edges.len(), p.fills.len());
+                }
+                // RIBBIT_HD_STROKEDBG=1: vertical stroke pieces against the BIOS's
+                // outline edges of their fill (pass units).
+                if std::env::var_os("RIBBIT_HD_STROKEDBG").is_some() {
+                    for st in p.strokes.iter().filter(|s| (s.centre[0].0 - s.centre[2].0).abs() < 0.01 && (s.centre[0].1 - s.centre[2].1).abs() > 8.0).take(3) {
+                        let (y0, y1) = (st.centre[0].1.min(st.centre[2].1), st.centre[0].1.max(st.centre[2].1));
+                        let xs: Vec<i16> = p.edges.iter().filter(|e| e.fills[0] == st.fill && e.rule == 2 && e.p[0].0 == e.p[2].0 && (e.p[0].1.min(e.p[2].1) as f32) < y1 && (e.p[0].1.max(e.p[2].1) as f32) > y0 && (e.p[0].0 as f32 - st.centre[0].0).abs() < st.width + 8.0).map(|e| e.p[0].0).collect();
+                        println!("{t} stroke x {} width {} y {y0}..{y1}: BIOS outline x {xs:?}", st.centre[0].0, st.width);
+                    }
+                    for st in p.strokes.iter().filter(|s| (s.centre[0].1 - s.centre[2].1).abs() < 0.01 && (s.centre[0].0 - s.centre[2].0).abs() > 8.0).take(3) {
+                        let (x0, x1) = (st.centre[0].0.min(st.centre[2].0), st.centre[0].0.max(st.centre[2].0));
+                        // Horizontal outline edges are dropped by the scanline renderer: the
+                        // ends of the side edges give the rows instead.
+                        let ys: Vec<i16> = p.edges.iter().filter(|e| e.fills[0] == st.fill && e.rule == 2 && (e.p[0].0.min(e.p[2].0) as f32) < x1 && (e.p[0].0.max(e.p[2].0) as f32) > x0).flat_map(|e| [e.p[0].1, e.p[2].1]).filter(|&y| (y as f32 - st.centre[0].1).abs() < st.width + 8.0).collect();
+                        println!("{t} stroke y {} width {} x {x0}..{x1}: BIOS outline y {ys:?}", st.centre[0].1, st.width);
+                    }
+                }
+                if std::env::var_os("RIBBIT_HD_STROKES").is_some() && !p.strokes.is_empty() {
+                    let mut w: Vec<f32> = p.strokes.iter().map(|s| s.width / p.scale.max(1) as f32).collect();
+                    w.sort_by(f32::total_cmp);
+                    w.dedup();
+                    println!("{t} strokes {} widths (LCD px) {w:?}", p.strokes.len());
                 }
                 for g in &p.glyphs {
                     let e = text_fonts.entry(format!("{} {}px", g.font, g.em)).or_default();
@@ -200,6 +225,31 @@ fn main() {
         if (t + 16) % every < 16 {
             if let Some(c) = &canvas {
                 let mut hd = c.composed(&lcd[..]);
+                // RIBBIT_HD_FAR=1: the blocks that disagree with the LCD, by reason.
+                if std::env::var_os("RIBBIT_HD_FAR").is_some() {
+                    let mut by: std::collections::BTreeMap<u8, Vec<(usize, usize)>> = Default::default();
+                    for (i, &r) in c.why_block.iter().enumerate() {
+                        if r > 1 {
+                            by.entry(r).or_default().push((i % 160, i / 160));
+                        }
+                    }
+                    for (r, v) in &by {
+                        let raw = |x: usize, y: usize| {
+                            let mut a = [0u32; 4];
+                            for yy in y * c.scale..(y + 1) * c.scale {
+                                for xx in x * c.scale..(x + 1) * c.scale {
+                                    let p = c.pixels[yy * c.size + xx];
+                                    for (k, sh) in [16, 8, 0, 24].into_iter().enumerate() {
+                                        a[k] += (p >> sh) & 0xFF;
+                                    }
+                                }
+                            }
+                            a.map(|v| v / (c.scale * c.scale) as u32)
+                        };
+                        let ex: Vec<String> = v.iter().step_by((v.len() / 8).max(1)).take(8).map(|&(x, y)| { let l = lcd[y * 160 + x]; format!("({x},{y}) lcd {:06x} hd {:?}", l & 0xFFFFFF, raw(x, y)) }).collect();
+                        println!("{t} shot {shot} reason {r}: {} blocks, e.g. {}", v.len(), ex.join(" "));
+                    }
+                }
                 // RIBBIT_HD_RAW=1: HD's own drawing only, over grey.
                 if std::env::var_os("RIBBIT_HD_RAW").is_some() {
                     hd = c.pixels.iter().map(|&p| {
