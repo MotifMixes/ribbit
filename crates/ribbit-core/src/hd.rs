@@ -258,7 +258,7 @@ pub struct Fill {
     pub painter: u32,
     pub gradient: Option<GradientFill>,
     /// A bitmap fill the renderer can follow exactly: its bitmap and mapping
-    /// (None for other fills, and for bitmaps with a colour transform).
+    /// (None for other fills).
     pub bitmap: Option<BitmapFill>,
     /// A mask (Flash clip layer; kind +0x17 = 3), not drawn: the fills it
     /// clips show only where it is on.
@@ -391,6 +391,9 @@ pub struct HdCapture {
     last_scan: i32,
     /// Bitmaps decoded so far, by (data, palette, format, size, stride, sample).
     images: HashMap<ImageKey, Arc<Image>>,
+    /// Bitmaps through a colour transform, by image and the tables' hash
+    /// (a fade makes new ones each frame: bounded).
+    transformed: HashMap<(ImageKey, u64), Arc<Image>>,
     /// Device-font glyphs of the frame in progress.
     glyphs: Vec<Glyph>,
     /// The shape reader's exact results by where their rounded values go,
@@ -445,6 +448,7 @@ impl HdCapture {
             pending: Pass::default(),
             last_scan: 0,
             images: HashMap::new(),
+            transformed: HashMap::new(),
             glyphs: vec![],
             exact_out: HashMap::new(),
             last_end: None,
@@ -667,9 +671,9 @@ impl HdCapture {
     /// has a colour transform (+0x80) or an unknown format.
     fn bitmap_fill(&mut self, f: u32, peek: &impl Fn(u32) -> u8) -> Option<BitmapFill> {
         let w = |a: u32| u32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
-        if w(f + 0x80) != 0 {
-            return None;
-        }
+        // The colour transform's tables (see `color_transform`), if any.
+        let cx = w(f + 0x80);
+        let table: Option<Vec<u8>> = (cx != 0).then(|| (0..0x401).map(|i| peek(cx + i)).collect());
         let matrix = [0, 4, 8, 12, 16, 20].map(|o| w(f + 0x54 + o) as i32 as f32 / 65536.0);
         let b = w(f + 0x38);
         let (data, palette, format, width, height, stride) =
@@ -683,11 +687,22 @@ impl HdCapture {
             (h ^ peek(data.wrapping_add(i * (size / 64).max(1))) as u64).wrapping_mul(0x0000_0100_0000_01b3)
         });
         let key = (data, palette, format, width | height << 16, stride, sample);
-        let image = self
+        let mut image = self
             .images
             .entry(key)
             .or_insert_with(|| Arc::new(decode_image(peek, data, palette, format, width, height, stride)))
             .clone();
+        if let Some(t) = &table {
+            let tk = t.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3));
+            image = self
+                .transformed
+                .entry((key, tk))
+                .or_insert_with(|| Arc::new(color_transform(&image, t)))
+                .clone();
+            if self.transformed.len() > 64 {
+                self.transformed.clear();
+            }
+        }
         Some(BitmapFill { matrix, clamp: peek(f + 0x34) & 1 != 0, smooth: peek(f + 0x36) != 0, image })
     }
 
@@ -820,6 +835,37 @@ fn gradient_fill(f: u32, peek: &impl Fn(u32) -> u8) -> Option<GradientFill> {
     Some(GradientFill { matrix, radial: w(f + 0x34) == 0x12, ramp: Arc::new(ramp) })
 }
 
+/// A bitmap's texels through a fill's colour transform (VERIFIED-FW, US v2.1
+/// 0x4004_D4A0, called by the bitmap painter for each texel when fill +0x80
+/// is set): tables of 256 bytes for R, G, B and A at +0, +0x100, +0x200,
+/// +0x300. With +0x400 set the texels are premultiplied: R, G and B are
+/// divided by the alpha (0xFF00 / A, then >> 8) before their table and
+/// multiplied by the new alpha + 1 (>> 8) after; a new alpha of 0 clears the
+/// texel. Else each channel goes through its table as it is.
+fn color_transform(image: &Image, t: &[u8]) -> Image {
+    let premultiplied = t[0x400] != 0;
+    let pixels = image
+        .pixels
+        .iter()
+        .map(|&p| {
+            let (a, r, g, b) = ((p >> 24) as usize, ((p >> 16) & 0xFF) as usize, ((p >> 8) & 0xFF) as usize, (p & 0xFF) as usize);
+            let na = t[0x300 + a] as u32;
+            let (nr, ng, nb) = if premultiplied {
+                if na == 0 || a == 0 {
+                    return 0;
+                }
+                let f = 0xFF00 / a;
+                let ch = |c: usize, base: usize| (t[base + ((c * f) >> 8).min(255)] as u32 * (na + 1)) >> 8;
+                (ch(r, 0), ch(g, 0x100), ch(b, 0x200))
+            } else {
+                (t[r] as u32, t[0x100 + g] as u32, t[0x200 + b] as u32)
+            };
+            na << 24 | nr << 16 | ng << 8 | nb
+        })
+        .collect();
+    Image { width: image.width, height: image.height, pixels }
+}
+
 /// Decodes a BIOS bitmap (VERIFIED-FW, texel fetch at US v2.1 0x4005_66E0):
 /// formats 0-3 are 1/2/4/8-bit palette indices, most significant bits
 /// first, palette entries B G R A from `palette + 4`; 4 is RGB555 (5-bit
@@ -945,8 +991,9 @@ pub struct HdCanvas {
     /// device text in these is drawn from its curves, else from the BIOS's
     /// pixel glyphs.
     pub fonts: Option<Arc<HashMap<String, crate::swf_font::OutlineFont>>>,
-    /// RESEARCH: fallback blocks so far by reason: stale (the LCD changed
-    /// outside any render), far, off (colours disagree), unknown.
+    /// RESEARCH: blocks so far by reason: stale (the LCD changed outside any
+    /// render) and unknown, shown from the LCD; far and off (HD's colours
+    /// disagree with the LCD's), shown from HD.
     pub why: [u64; 4],
     /// Where shapes' points land on the canvas, in LCD pixels right and
     /// down of their own coordinates (see `SHAPE_OFFSET`).
@@ -962,9 +1009,9 @@ pub struct HdCanvas {
 /// the range of the LCD pixel's 3x3 neighbourhood (an edge block blends its
 /// neighbours).
 const AGREE: i32 = 40;
-/// UNVERIFIED (being measured): the BIOS's pixel X shows what is at
-/// point X of the shapes (its samples centre on X), so a shape's point
-/// (x, y) lands at canvas (x + 1/2, y + 1/2) in LCD pixels.
+/// Shapes' points land where they are: measured against the LCD in five
+/// games, an offset of 0 fits best (1/8 pixel already worse, 1/2 far
+/// worse); the BIOS's fills cover pixel X over x = X..X+1, as HD's do.
 const SHAPE_OFFSET: f32 = 0.0;
 /// Largest difference from the block's own LCD pixel, whatever its
 /// neighbours: anti-aliasing never differs this much, but things drawn
@@ -1366,12 +1413,27 @@ impl HdCanvas {
                 let far = (0..3).any(|k| (avg[k] - lc[k]).abs() > FAR);
                 let off = (0..3).any(|k| avg[k] < lo[k] - AGREE || avg[k] > hi[k] + AGREE);
                 let unknown = known < n * 128;
-                let use_fallback = self.stale[i] || (!self.from_outline[i] && (far || off)) || unknown;
-                if use_fallback {
-                    let r = if self.stale[i] { 0 } else if unknown { 3 } else if far { 1 } else { 2 };
+                // The LCD is shown only where HD does not know the picture: the
+                // LCD changed outside every render (drawn by other code), or
+                // the canvas has nothing there. Where HD drew, it is shown even
+                // if it differs from the LCD: what is left of those differences
+                // is the BIOS's own rounding (thin lines' jaggies, quarter-
+                // pixel edges), and the LCD's pixels in their place were specks.
+                let disagree = !self.from_outline[i] && (far || off);
+                let use_fallback = self.stale[i] || unknown;
+                let reason = if self.stale[i] {
+                    Some(0)
+                } else if unknown {
+                    Some(3)
+                } else if disagree {
+                    Some(if far { 1 } else { 2 })
+                } else {
+                    None
+                };
+                if let Some(r) = reason {
                     self.why[r] += 1;
                 }
-                self.why_block[i] = if use_fallback { 1 + if self.stale[i] { 0 } else if unknown { 3 } else if far { 1 } else { 2 } } else { 0 };
+                self.why_block[i] = reason.map_or(0, |r| 1 + r as u8);
                 self.mask[i] = if use_fallback { 255 } else { 0 };
                 fallback += use_fallback as usize;
             }

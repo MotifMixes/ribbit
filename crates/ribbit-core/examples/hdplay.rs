@@ -219,7 +219,15 @@ fn main() {
                     }
                 }
             }
+            let before = c.why;
             fixed += c.update_mask(&lcd[..]);
+            // RIBBIT_HD_WHEN=n: frames with more than n fallback blocks, by reason.
+            if let Ok(n) = std::env::var("RIBBIT_HD_WHEN") {
+                let d: Vec<u64> = (0..4).map(|k| c.why[k] - before[k]).collect();
+                if d.iter().sum::<u64>() > n.parse::<u64>().unwrap() {
+                    println!("{t} frame fallback {d:?}");
+                }
+            }
             draw_t += start.elapsed();
         }
         if (t + 16) % every < 16 {
