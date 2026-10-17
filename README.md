@@ -85,8 +85,11 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 
 **Leapster family**
 
-* Only SpongeBob: Saves the Day has been played through by hand. The other 33 tested games reach their own menus
-  in an automated check that presses nothing; most probably go further, but nobody has checked yet.
+* Only SpongeBob: Saves the Day has been played through by hand; players report Sonic X, Letterpillar and Counting on
+  Zero working. The other 30 tested games reach their own menus in an automated check that presses nothing; most
+  probably go further, but nobody has checked yet.
+* Can be very slightly laggy on some PCs at the default CPU clock (96 MHz); Emulation > Advanced > CPU clock 48 MHz
+  runs lighter.
 * Touch uses MAME's guessed model (labelled experimental); its rate and values are not verified on hardware.
 * Sound uses MAME's voice and speech model, also unverified against a real unit.
 * Universal v1.5 BIOS turns itself off after a few seconds unless the (unverified) power-line workaround is on

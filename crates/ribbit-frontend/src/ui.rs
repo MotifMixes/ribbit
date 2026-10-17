@@ -41,6 +41,10 @@ pub enum Action {
     RescanLibrary,
     /// Forget a game's art and make it again.
     RemakeArt(PathBuf),
+    /// Ask before deleting a game's save data (path, title).
+    AskDeleteSave(PathBuf, String),
+    /// Delete a Leapster game's save data (moved into the backups folder).
+    DeleteSaveData(PathBuf),
     /// Remove the saved players from this Zippity dump file.
     CleanZippityDump(PathBuf),
     /// Keep them (and don't ask again).
@@ -110,6 +114,9 @@ pub struct UiState {
     /// A Zippity dump holding a previous owner's players: asks whether to
     /// remove them from the file.
     pub zippity_clean: Option<PathBuf>,
+    /// A game whose save data the player asked to delete (path, title):
+    /// asks to confirm.
+    delete_save: Option<(PathBuf, String)>,
     /// The library's page and search.
     pub library: LibraryView,
     /// The game (title) that was closed because the console (name) turned
@@ -148,6 +155,11 @@ impl UiState {
     /// and the technical message folded away under "Details".
     pub fn problem(&mut self, title: impl Into<String>, explain: impl Into<String>, details: impl Into<String>) {
         self.error = Some(Problem { title: title.into(), explain: explain.into(), details: details.into() });
+    }
+
+    /// Asks whether to delete `title`'s save data (the game at `path`).
+    pub fn ask_delete_save(&mut self, path: PathBuf, title: String) {
+        self.delete_save = Some((path, title));
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
@@ -1487,7 +1499,80 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
             actions.push(Action::RemakeArt(game.path.clone()));
             ui.close();
         }
+        ui.separator();
+        // Leapster games keep their progress on their own cartridge chip; a
+        // Zippity's or RockIt Twist's belongs to the whole console.
+        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist);
+        let delete = ui
+            .add_enabled(
+                own_save,
+                egui::Button::new(egui::RichText::new("Delete save data…").color(egui::Color32::from_rgb(235, 87, 80))),
+            )
+            .on_hover_text("Removes this game's progress, profiles and save states")
+            .on_disabled_hover_text("This console's saves belong to the whole console, not one game");
+        if delete.clicked() {
+            actions.push(Action::AskDeleteSave(game.path.clone(), game.title.clone()));
+            ui.close();
+        }
     });
+}
+
+/// "Delete save data for <title>?" Delete / Cancel.
+fn delete_save_prompt(ctx: &egui::Context, path: &std::path::Path, title: &str) -> Option<Option<Action>> {
+    let screen = ctx.content_rect();
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("delete_save_dim")))
+        .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
+    let mut answer = None;
+    egui::Area::new(egui::Id::new("delete_save"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(24, 27, 30))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(214, 64, 58, 110)))
+                .corner_radius(14)
+                .inner_margin(egui::Margin::symmetric(26, 22))
+                .shadow(egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(140) })
+                .show(ui, |ui| {
+                    ui.set_width(320.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("Delete save data?").size(20.0).strong().color(egui::Color32::WHITE));
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new(title).size(15.0).color(egui::Color32::from_gray(220)));
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Its progress, profiles and save states are removed. A copy goes to the backups \
+                                 folder in Ribbit's data folder, in case you change your mind.",
+                            )
+                            .size(13.0)
+                            .color(egui::Color32::from_gray(170)),
+                        );
+                        ui.add_space(18.0);
+                        ui.horizontal(|ui| {
+                            let (del, cancel) = (egui::vec2(120.0, 38.0), egui::vec2(100.0, 38.0));
+                            ui.add_space((ui.available_width() - del.x - cancel.x - ui.spacing().item_spacing.x) / 2.0);
+                            let red = egui::Button::new(egui::RichText::new("Delete").strong().color(egui::Color32::WHITE))
+                                .fill(egui::Color32::from_rgb(190, 52, 46))
+                                .corner_radius(8)
+                                .min_size(del);
+                            if ui.add_sized(del, red).clicked() {
+                                answer = Some(Some(Action::DeleteSaveData(path.to_path_buf())));
+                            }
+                            let cancel_button =
+                                egui::Button::new(egui::RichText::new("Cancel").color(egui::Color32::from_gray(200)))
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(70)))
+                                    .corner_radius(8)
+                                    .min_size(cancel);
+                            if ui.add_sized(cancel, cancel_button).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                answer = Some(None);
+                            }
+                        });
+                    });
+                });
+        });
+    answer
 }
 
 fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info: &Info, actions: &mut Vec<Action>) {
@@ -1669,6 +1754,13 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
     {
         st.zippity_clean = None;
         actions.push(a);
+    }
+
+    if let Some((path, title)) = st.delete_save.clone()
+        && let Some(answer) = delete_save_prompt(ctx, &path, &title)
+    {
+        st.delete_save = None;
+        actions.extend(answer);
     }
 
     if let Some(problem) = st.error.clone()

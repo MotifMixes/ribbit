@@ -1,13 +1,13 @@
 # Compatibility
 
 How far each game gets in Ribbit, for every console it emulates. Update this file whenever a game is tested.
-Last updated 2026-10-17 (Ribbit 1.1.0 plus the work in progress on `main`).
+Last updated 2026-10-17 (Ribbit 1.2.1).
 
 ## Consoles at a glance
 
 | Console | Year | State in Ribbit | Best result so far | Section |
 |---|---|---|---|---|
-| Leapster (original handheld) | 2003 | Main target | SpongeBob: Saves the Day **Playable**; 33 more games reach their own menus | [Leapster](#leapster-original-handheld) |
+| Leapster (original handheld) | 2003 | Main target | SpongeBob: Saves the Day **Playable**; Sonic X, Letterpillar and Counting on Zero **Work**; 30 more games reach their own menus | [Leapster](#leapster-original-handheld) |
 | Leapster L-MAX | 2005 | Experimental | Every tested game shows the same screens as on the original | [Leapster 2 and L-MAX](#leapster-2-and-l-max-experimental) |
 | Leapster TV | 2005 | Experimental | SpongeBob reaches its intro | [Leapster TV](#leapster-tv-experimental) |
 | Leapster 2 | 2008 | Experimental | Every tested game shows the same screens as on the original; touch works | [Leapster 2 and L-MAX](#leapster-2-and-l-max-experimental) |
@@ -23,6 +23,7 @@ included.
 |---|---|
 | **Perfect** | Plays start to finish with no known problems (graphics, sound, controls, saves) |
 | **Playable** | Can be played through; minor problems listed in the notes |
+| **Works** | A player reports it working in gameplay; not yet checked to the end |
 | **In-game** | Reaches gameplay, but problems stop it being played through |
 | **Menus** | The game's own screens run (logo, region or profile menus); gameplay not yet reached |
 | **Boots** | The console starts the game, which stops on a loading or blank screen |
@@ -61,14 +62,14 @@ software list. Region pickers move on by themselves after about 30 s.
 | Disney Princess: Enchanted Learning | 5ccb2ad3 | Menus | automated | LeapFrog logo |
 | Disney Princess: Worlds of Enchantment | 2465f01d | Menus | automated | LeapFrog logo |
 | I Spy: Challenger! | da56181c | Menus | automated | LeapFrog logo (leapsterworld.com) |
-| Letterpillar | 9b86a0fb | Menus | automated | LeapFrog logo |
+| Letterpillar | 9b86a0fb | **Works** | tester, Ribbit 1.2.1 (Windows), 2026-10-17 | Reported working by a player |
 | Letters on the Loose | b186a3bf | Menus | automated | LeapFrog logo |
 | NASCAR | 95c78f34 | Menus | automated 2026-10-16 | Region choice, intro, NASCAR logo. (Was stuck on a black screen until the ADC delivered battery samples, 2026-10-16) |
 | Number Raiders | 0f6d55cf | Menus | automated | LeapFrog logo |
-| Numbers on the Run: Counting on Zero | 01f12ce7 | Menus | automated 2026-10-16 | Region choice, title, name entry. (Was stuck on a black screen until the ADC delivered battery samples, 2026-10-16) |
+| Numbers on the Run: Counting on Zero | 01f12ce7 | **Works** | tester, Ribbit 1.2.1 (Windows), 2026-10-17 | Reported working by a player. (Was stuck on a black screen until the ADC delivered battery samples, 2026-10-16) |
 | Pet Pals | 3c428a13 | Menus | automated | LeapFrog logo |
 | Scooby-Doo!: Spooky Snacks | 19da3dd8 | Menus | automated | LeapFrog logo |
-| Sonic X | a9d2cdbd | Menus | automated | LeapFrog logo |
+| Sonic X | a9d2cdbd | **Works** | tester, Ribbit 1.2.1 (Windows), 2026-10-17 | Reported working by a player |
 | Spider-Man: The Case of the Sinister Speller | 0ef61cbb | Menus | automated | LeapFrog logo |
 | Star Wars: Jedi Reading | 6239a178 | Menus | automated | LeapFrog logo (leapsterworld.com) |
 | Thomas & Friends: Calling All Engines! | 5303d366 | Menus | automated | Region choice, name entry (typing by touch works), then the main menu; no title card |

@@ -970,6 +970,8 @@ impl App {
                 self.library.forget_art(&p);
                 self.rescan_library();
             }
+            Action::AskDeleteSave(path, title) => self.ui.ask_delete_save(path, title),
+            Action::DeleteSaveData(path) => self.delete_save_data(&path),
             Action::CleanZippityDump(path) => {
                 self.end_session();
                 // Our saves were made on top of the old players: drop them.
@@ -1207,6 +1209,36 @@ impl App {
     fn window_size(scale: u32) -> PhysicalSize<u32> {
         // Room for the menu and status bars.
         PhysicalSize::new(160 * scale, 160 * scale + 56)
+    }
+
+    /// Deletes a Leapster game's save data: its cartridge save and its save
+    /// states, moved into the backups folder. A running copy of the game is
+    /// closed first (it would write its save back).
+    fn delete_save_data(&mut self, game: &Path) {
+        let Some(crc) = ribbit_core::read_image(game).ok().and_then(|d| ribbit_memory::Cartridge::from_bytes(d).ok()).map(|c| c.id().crc32)
+        else {
+            return self.ui.problem("Couldn't delete the save data", "The game file couldn't be read.", game.display().to_string());
+        };
+        let key = format!("cart-{crc:08x}");
+        if self.session.as_ref().is_some_and(|s| s.state_key == key) {
+            self.end_session();
+        }
+        let mut files = vec![self.save_dir().join(format!("{key}.sav"))];
+        if let Ok(dir) = std::fs::read_dir(self.opts.data_dir.join("states")) {
+            files.extend(
+                dir.filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{key}-slot")))),
+            );
+        }
+        let title = self.library.games.iter().find(|g| g.path == game).map_or_else(|| key.clone(), |g| g.title.clone());
+        match crate::backup::move_to_deleted(&self.opts.data_dir, &files) {
+            Ok((0, _)) => self.ui.toast(format!("{title} has no save data")),
+            Ok((n, dest)) => {
+                tracing::info!(target: "ribbit::saves", kept = %dest.display(), "deleted {n} save file(s) of {title}");
+                self.ui.toast(format!("Save data of {title} deleted (a copy is in the backups folder)"));
+            }
+            Err(e) => self.ui.problem("Couldn't delete the save data", "A save file couldn't be moved.", format!("{e}")),
+        }
     }
 
     fn state_path(&self, slot: u8) -> Option<PathBuf> {

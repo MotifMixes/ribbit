@@ -68,6 +68,25 @@ pub fn set_aside(path: &Path, what: &str) -> Option<PathBuf> {
     }
 }
 
+/// Moves `files` (those that exist) into `<data>/backups/deleted-<UTC
+/// time>`, so a deleted save can still be brought back by hand. Returns how
+/// many were moved, and where.
+pub fn move_to_deleted(data_dir: &Path, files: &[PathBuf]) -> std::io::Result<(usize, PathBuf)> {
+    let dest = data_dir.join("backups").join(format!("deleted-{}", utc_stamp(SystemTime::now())));
+    let mut moved = 0;
+    for f in files.iter().filter(|f| f.is_file()) {
+        std::fs::create_dir_all(&dest)?;
+        let to = dest.join(f.file_name().unwrap_or_default());
+        // A rename where possible; across drives, copy then remove.
+        if std::fs::rename(f, &to).is_err() {
+            std::fs::copy(f, &to)?;
+            std::fs::remove_file(f)?;
+        }
+        moved += 1;
+    }
+    Ok((moved, dest))
+}
+
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
@@ -179,6 +198,24 @@ mod tests {
         assert!(left.contains(&"before-1.7.0-20261017-000000".to_string()));
         assert!(!left.contains(&"before-1.0.0-20261010-000000".to_string()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deleted_saves_are_moved_into_backups() {
+        let data = temp("delete");
+        let save = data.join("saves").join("cart-0f2ad725.sav");
+        let state = data.join("states").join("cart-0f2ad725-slot1.state");
+        for f in [&save, &state] {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, b"x").unwrap();
+        }
+        let missing = data.join("saves").join("cart-0f2ad725-not-there.sav");
+        let (n, dest) = move_to_deleted(&data, &[save.clone(), state.clone(), missing]).unwrap();
+        assert_eq!(n, 2);
+        assert!(!save.exists() && !state.exists());
+        assert!(dest.join("cart-0f2ad725.sav").exists() && dest.join("cart-0f2ad725-slot1.state").exists());
+        assert!(dest.starts_with(data.join("backups")));
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
