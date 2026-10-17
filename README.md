@@ -11,8 +11,9 @@ An emulator in development for the **original 2003 LeapFrog Leapster** (the blue
 > been tested. See [docs/accuracy-matrix.md](docs/accuracy-matrix.md).
 
 Ribbit also runs the **LeapFrog Zippity** (TV console, see [docs/zippity.md](docs/zippity.md)) and lists the
-**LeapFrog RockIt Twist** as a **research preview: not emulated**. Its controls work and its packages are listed,
-but no Twist software runs yet and its game packs are encrypted. See [docs/rockit-twist.md](docs/rockit-twist.md).
+**LeapFrog RockIt Twist** in **early emulation**. From its system packages, the console's own firmware boots;
+with unpacked content imported, its menu runs and the built-in game Nom-Nom plays with sound (no videos yet). Its
+.lf3 game packs are encrypted and are not run. See [docs/rockit-twist.md](docs/rockit-twist.md).
 
 Leapster games are Flash content run by a player built into the console firmware. To run games you will need a
 dump of the **BIOS from your own console**, as well as your cartridge. No firmware or game data is included or will
@@ -49,7 +50,8 @@ cargo run -p ribbit-desktop -- --help
     pressed (Video → Show keys on the console). On by default for the RockIt Twist, off for the Leapster handhelds
     (Leapster, L-MAX and Leapster 2 share one drawing, after the original Leapster's Parent Guide); TV consoles
     have none. The game keeps running when it is switched; the screen keeps its shape and is never covered.
-  * **RockIt Twist** (choose it in the library's console menu, or File → RockIt Twist preview): not emulated.
+  * **RockIt Twist** (choose it in the library's console menu, or File → RockIt Twist (early emulation)): early emulation;
+    with content imported (File → Import RockIt Twist games), the menu and Nom-Nom run.
     Keys: WASD/arrows = D-pad, Q/E = Switch, number pad = button grid, number pad * and - = Spinner, U/J, I/K,
     O/L = the three Dials, Page Up/Down or the mouse wheel = Slider, Shift/Tab = Hint, Home, Enter = check mark.
   * Emulation → Advanced holds the experimental options: MAME's power-line workaround (needed by v1.5) and the

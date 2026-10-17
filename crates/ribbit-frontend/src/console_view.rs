@@ -56,6 +56,8 @@ pub enum Shape {
     Rounded(f32),
     /// A plus-shaped pad.
     Cross,
+    /// Two round lobes joined by a narrower waist (the Switch).
+    Peanut,
 }
 
 /// Where a button's keyboard key is drawn, relative to it.
@@ -170,8 +172,8 @@ pub fn rockit_twist() -> Layout {
         Control {
             name: "Switch",
             rect: px(600.0, 322.0, 900.0, 468.0, o),
-            shape: Shape::Rounded(0.5),
-            color: rgb(150, 100, 225),
+            shape: Shape::Peanut,
+            color: rgb(128, 78, 205),
             glyph: "",
             cap_at: CapAt::Center,
             action: Action::Rocker([t(TwistButton::SwitchLeft), t(TwistButton::SwitchRight)]),
@@ -214,7 +216,7 @@ pub fn rockit_twist() -> Layout {
             shape: Shape::Rounded(0.45),
             color: rgb(45, 45, 48),
             glyph: "?",
-            cap_at: CapAt::Right,
+            cap_at: CapAt::Center,
             action: press(TwistButton::Hint),
         },
         Control {
@@ -223,7 +225,7 @@ pub fn rockit_twist() -> Layout {
             shape: Shape::Rounded(0.3),
             color: rgb(45, 45, 48),
             glyph: "⌂",
-            cap_at: CapAt::Right,
+            cap_at: CapAt::Center,
             action: press(TwistButton::Home),
         },
         Control {
@@ -232,7 +234,7 @@ pub fn rockit_twist() -> Layout {
             shape: Shape::Circle,
             color: rgb(40, 150, 60),
             glyph: "✔",
-            cap_at: CapAt::Left,
+            cap_at: CapAt::Center,
             action: press(TwistButton::Check),
         },
         // Right edge (Parent's Guide: power, then volume, down the side).
@@ -316,9 +318,9 @@ pub fn rockit_twist() -> Layout {
                 well(px(584.0, 306.0, 916.0, 484.0, o), 0.5, None),
                 // The Slider's track, edged in orange light.
                 well(px(1362.0, 760.0, 1568.0, 1210.0, o), 0.5, Some(rgb(255, 150, 30))),
-                // Wells round the Spinner and the D-pad.
+                // A well round the Spinner (the D-pad sits on the face,
+                // as in photos of the console).
                 well(circle(pos2((1490.0 - o.0) / o.2, (560.0 - o.1) / o.3), 160.0 / o.3, aspect), 0.5, None),
-                well(circle(pos2((485.0 - o.0) / o.2, (865.0 - o.1) / o.3), 182.0 / o.3, aspect), 0.5, None),
             ];
             // The LEDs above the dials.
             for x in [785.0, 995.0, 1205.0] {
@@ -448,11 +450,11 @@ fn inside(shape: Shape, r: Rect, p: Pos2) -> bool {
             let d = p - r.center();
             (d.x / (r.width() / 2.0)).powi(2) + (d.y / (r.height() / 2.0)).powi(2) <= 1.0
         }
-        Shape::Rounded(_) => r.contains(p),
+        Shape::Rounded(_) | Shape::Peanut => r.contains(p),
         Shape::Cross => {
             let d = p - r.center();
             let (hw, hh) = (r.width() / 2.0, r.height() / 2.0);
-            let arm = 0.36;
+            let arm = 0.42;
             (d.x.abs() <= hw && d.y.abs() <= hh * arm) || (d.y.abs() <= hh && d.x.abs() <= hw * arm)
         }
     }
@@ -730,10 +732,37 @@ fn rr_sdf(r: Rect, radius: f32) -> impl Fn(Pos2) -> f32 {
     }
 }
 
+/// The Switch: a round lobe at each end (as tall as the control), joined
+/// by a waist about three quarters as tall, blended smoothly.
+fn peanut_sdf(r: Rect) -> impl Fn(Pos2) -> f32 {
+    let h = r.height();
+    let lobe = h / 2.0;
+    let (a, b) = (r.center() - vec2(r.width() / 2.0 - lobe, 0.0), r.center() + vec2(r.width() / 2.0 - lobe, 0.0));
+    let waist = rr_sdf(Rect::from_center_size(r.center(), vec2(r.width() - h, h * 0.74)), h * 0.3);
+    move |p| {
+        let lobes = ((p - a).length() - lobe).min((p - b).length() - lobe);
+        let w = waist(p);
+        let k = h * 0.22;
+        let t = (k - (lobes - w).abs()).max(0.0) / k;
+        lobes.min(w) - t * t * k / 4.0
+    }
+}
+
+/// The D-pad's arms: half their width, as a fraction of the pad's width
+/// (about 0.42 of it in photos of the console).
+const DPAD_ARM: f32 = 0.21;
+
 fn cross_sdf(r: Rect, arm: f32, radius: f32) -> impl Fn(Pos2) -> f32 {
     let v = rr_sdf(Rect::from_center_size(r.center(), vec2(r.width() * 2.0 * arm, r.height())), radius);
     let h = rr_sdf(Rect::from_center_size(r.center(), vec2(r.width(), r.height() * 2.0 * arm)), radius);
-    move |p| v(p).min(h(p))
+    // A smooth union: the inside corners where the arms meet are rounded
+    // as well as the tips.
+    move |p| {
+        let (a, b) = (v(p), h(p));
+        let k = radius;
+        let t = (k - (a - b).abs()).max(0.0) / k.max(1e-3);
+        a.min(b) - t * t * k / 4.0
+    }
 }
 
 /// Points along a shape's edge (`sdf` <= 0 inside), as seen from `from`
@@ -797,6 +826,11 @@ fn fan(edge: &[Pos2], hub: Pos2, middle: Color32, rim_color: impl Fn(Vec2) -> Co
     egui::Shape::mesh(mesh)
 }
 
+/// How much smaller a control looks pushed all the way in.
+fn press_scale(press: f32) -> f32 {
+    1.0 - 0.045 * press
+}
+
 fn shade(c: Color32, f: f32) -> Color32 {
     let m = |v: u8| ((v as f32 * f).round()).clamp(0.0, 255.0) as u8;
     Color32::from_rgba_unmultiplied(m(c.r()), m(c.g()), m(c.b()), c.a())
@@ -831,9 +865,11 @@ fn text(
 
 /// A raised control: a soft shadow, a glow while lit, then the dome itself
 /// (pushed in by `press`, 0..1), lit from the top left, with a highlight.
+/// Pushed in, it stays where it is and sinks into the face: a little
+/// smaller and darker, its shadow drawn in under it (moving it down would
+/// uncover a dark sliver of shadow above it).
 fn dome(out: &mut Vec<egui::Shape>, edge: &[Pos2], center: Pos2, base: Color32, press: f32, glow: f32, unit: f32) {
     let depth = unit * 3.0;
-    let size = edge.iter().map(|p| (*p - center).length()).fold(0.0, f32::max).max(1.0);
     // Shadow: softer and closer as it goes down.
     let lift = 1.0 - press * 0.75;
     let drop = vec2(unit * 1.5, depth) * lift;
@@ -853,24 +889,24 @@ fn dome(out: &mut Vec<egui::Shape>, edge: &[Pos2], center: Pos2, base: Color32, 
         let g = glow_of(base);
         out.push(band(&halo, edge, center, |_| alpha(g, 0.0), |_| alpha(g, 0.75 * glow)));
     }
-    let shift = vec2(0.0, depth * press);
-    let pts: Vec<Pos2> = edge.iter().map(|p| *p + shift).collect();
-    let c = center + shift;
+    let pts: Vec<Pos2> = edge.iter().map(|p| center + (*p - center) * press_scale(press)).collect();
+    let c = center;
     let face = mix(base, glow_of(base), glow * 0.7);
     // Pressed in, its top faces the light less.
     let top = shade(face, 1.38 - 0.18 * press);
-    out.push(fan(&pts, c + LIGHT * size * 0.35, top, |d| shade(face, 0.68 + 0.28 * lightness(d) - 0.1 * press)));
+    // Fanned from the centre the edge was traced from: any other hub
+    // spills outside shapes that are not convex (the D-pad's cross).
+    out.push(fan(&pts, c, top, |d| shade(face, 0.68 + 0.28 * lightness(d) - 0.1 * press)));
     out.push(egui::Shape::closed_line(pts.clone(), Stroke::new((unit * 1.1).max(1.0), shade(base, 0.42))));
-    // A highlight near the top left, inside the shape however long it is.
+    // A soft gloss towards the top left, the control's own shape made
+    // smaller (a round spot looks stuck on anything that is not round).
     let bounds = Rect::from_points(&pts);
-    let spot = c + vec2(LIGHT.x * bounds.width(), LIGHT.y * bounds.height()) * 0.27;
-    let spot_r = bounds.width().min(bounds.height()) * 0.16;
-    out.push(egui::Shape::circle_filled(spot, spot_r, Color32::from_white_alpha((55.0 * (1.0 - press * 0.6)) as u8)));
-    out.push(egui::Shape::circle_filled(
-        spot,
-        spot_r * 0.5,
-        Color32::from_white_alpha((80.0 * (1.0 - press * 0.6)) as u8),
-    ));
+    let toward = vec2(LIGHT.x * bounds.width(), LIGHT.y * bounds.height()) * 0.2;
+    let gloss: Vec<Pos2> = pts.iter().map(|p| c + (*p - c) * 0.62 + toward).collect();
+    let a = 1.0 - press * 0.6;
+    out.push(fan(&gloss, c + toward, Color32::from_white_alpha((70.0 * a) as u8), |d| {
+        Color32::from_white_alpha((14.0 * a * (0.5 + 0.5 * lightness(d)).max(0.0)) as u8)
+    }));
 }
 
 /// A keyboard key showing `label`, centred at `at`; lit (and pressed down)
@@ -1026,7 +1062,11 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                 let p = anim(0, (lit.pressed)(t));
                 let edge = edge_of(c.shape, r);
                 dome(&mut out, &edge, r.center(), c.color, p, p, unit);
-                glyph(&mut out, ctx, c, r.translate(vec2(0.0, unit * 3.0 * p)), unit);
+                // A keycap on the button covers its symbol: one or the other.
+                let capped = c.cap_at == CapAt::Center && lit.show_caps && (lit.cap)(CapFor::Press(t)).is_some();
+                if !capped {
+                    glyph(&mut out, ctx, c, r.scale_from_center(press_scale(p)), unit);
+                }
                 let at = match c.cap_at {
                     CapAt::Center => r.center(),
                     CapAt::Below => pos2(r.center().x, r.bottom() + unit * 6.0),
@@ -1043,73 +1083,137 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                 let tilt = (0..4).fold(Vec2::ZERO, |a, k| a + DIRS[k] * held[k]) * unit * 3.0;
                 let any = held.iter().cloned().fold(0.0, f32::max);
                 let rc = r.translate(tilt);
-                let edge = outline(cross_sdf(rc, 0.36, r.width() * 0.08), rc.center(), r.width(), N);
-                dome(&mut out, &edge, rc.center(), c.color, any * 0.5, 0.0, unit);
+                // As on the console: a cross of narrow arms (about 0.4 of
+                // its width) with bevelled sides, rings in the middle and
+                // an arrow near each tip, in clear red plastic.
+                let w = r.width();
+                let press = any * 0.5;
+                let cross = cross_sdf(rc, DPAD_ARM, w * 0.1);
+                let edge = outline(&cross, rc.center(), w, N);
+                dome(&mut out, &edge, rc.center(), c.color, press, 0.0, unit);
+                let mid = rc.center();
+                let sunk = |p: &Pos2| mid + (*p - mid) * press_scale(press);
+                // The bevel: a flat top inset from the edge, the sloping
+                // sides between shaded by which way they face.
+                let top_edge: Vec<Pos2> = outline(|p| cross(p) + w * 0.055, mid, w, N).iter().map(sunk).collect();
+                let outer: Vec<Pos2> = edge.iter().map(sunk).collect();
+                let face = c.color;
+                out.push(band(
+                    &outer,
+                    &top_edge,
+                    mid,
+                    |d| alpha(shade(face, 0.8 + 0.45 * lightness(d)), 0.9),
+                    |d| alpha(shade(face, 1.05 + 0.25 * lightness(d)), 0.9),
+                ));
+                out.push(fan(&top_edge, mid, shade(face, 1.2 - 0.15 * press), |d| {
+                    shade(face, 0.95 + 0.12 * lightness(d))
+                }));
+                out.push(egui::Shape::closed_line(
+                    top_edge.clone(),
+                    Stroke::new((unit * 0.8).max(1.0), shade(face, 1.45)),
+                ));
                 for k in 0..4 {
                     let dir = DIRS[k];
+                    let side = vec2(-dir.y, dir.x);
                     // The arm held lights up.
                     if held[k] > 0.01 {
-                        let arm = Rect::from_center_size(
-                            rc.center() + dir * r.width() * 0.3,
-                            if dir.x == 0.0 {
-                                vec2(r.width() * 0.66, r.height() * 0.36)
-                            } else {
-                                vec2(r.width() * 0.36, r.height() * 0.66)
-                            },
-                        );
+                        // Its flat top, from the rings out to the tip.
+                        let along = dir * w * 0.31;
+                        let size = (dir * w * 0.33).abs() + (side * w * 0.29).abs();
                         out.push(egui::Shape::rect_filled(
-                            arm.shrink(unit * 2.0),
-                            r.width() * 0.06,
-                            alpha(glow_of(c.color), 0.55 * held[k]),
+                            Rect::from_center_size(mid + along, size),
+                            w * 0.03,
+                            alpha(glow_of(face), 0.6 * held[k]),
                         ));
                     }
-                    let tip = rc.center() + dir * r.width() * 0.44;
-                    let back = rc.center() + dir * r.width() * 0.36;
-                    let side = vec2(-dir.y, dir.x) * r.width() * 0.05;
+                    // A raised arrow near the tip.
+                    let tip = mid + dir * w * 0.43;
+                    let back = mid + dir * w * 0.36;
+                    let s = side * w * 0.055;
                     out.push(egui::Shape::convex_polygon(
-                        vec![tip, back + side, back - side],
-                        shade(c.color, 1.5),
+                        vec![
+                            tip + vec2(unit, unit) * 0.8,
+                            back + s + vec2(unit, unit) * 0.8,
+                            back - s + vec2(unit, unit) * 0.8,
+                        ],
+                        shade(face, 0.55),
                         Stroke::NONE,
                     ));
-                    cap(CapFor::Press(ts[k]), rc.center() + dir * r.width() * 0.24, held[k]);
+                    out.push(egui::Shape::convex_polygon(
+                        vec![tip, back + s, back - s],
+                        mix(shade(face, 1.55), glow_of(face), held[k]),
+                        Stroke::NONE,
+                    ));
+                    cap(CapFor::Press(ts[k]), mid + dir * w * 0.255, held[k]);
                 }
-                out.push(egui::Shape::circle_filled(rc.center(), r.width() * 0.09, shade(c.color, 0.75)));
-                out.push(egui::Shape::circle_filled(
-                    rc.center() + LIGHT * r.width() * 0.03,
-                    r.width() * 0.05,
-                    shade(c.color, 1.1),
-                ));
+                // Rings moulded into the middle: each a dark groove with a
+                // lit edge below it.
+                for (k, rad) in [0.13f32, 0.09, 0.05].into_iter().enumerate() {
+                    let rad = w * rad;
+                    out.push(egui::Shape::circle_stroke(
+                        mid + vec2(0.0, unit * 0.7),
+                        rad,
+                        Stroke::new((unit * 0.9).max(1.0), alpha(shade(face, 1.6), 0.7)),
+                    ));
+                    out.push(egui::Shape::circle_stroke(
+                        mid,
+                        rad,
+                        Stroke::new((unit * (1.3 - 0.2 * k as f32)).max(1.0), shade(face, 0.6)),
+                    ));
+                }
+                out.push(egui::Shape::circle_filled(mid, w * 0.02, shade(face, 0.7)));
             }
             Action::Rocker(ts) => {
                 // It rocks towards the side held.
                 let (l, rr) = (anim(0, (lit.pressed)(ts[0])), anim(1, (lit.pressed)(ts[1])));
                 let rc = r.translate(vec2((rr - l) * unit * 4.0, 0.0));
                 let edge = edge_of(c.shape, rc);
-                dome(&mut out, &edge, rc.center(), c.color, l.max(rr) * 0.4, l.max(rr) * 0.6, unit);
-                // A groove down the middle, and each half lit when held.
-                let half = |left: bool| {
-                    if left {
-                        Rect::from_min_max(rc.min, pos2(rc.center().x, rc.max.y))
-                    } else {
-                        Rect::from_min_max(pos2(rc.center().x, rc.min.y), rc.max)
+                dome(&mut out, &edge, rc.center(), c.color, l.max(rr) * 0.4, 0.0, unit);
+                // As on the console: clear purple, each lobe a raised
+                // cushion with curved ridges facing out.
+                let h = rc.height();
+                let face = c.color;
+                for (k, t) in [(0usize, l), (1, rr)] {
+                    let out_dir = if k == 0 { -1.0 } else { 1.0 };
+                    let lobe = rc.center() + vec2(out_dir * (rc.width() / 2.0 - h / 2.0), 0.0);
+                    // The cushion: lighter towards the light, pushed in
+                    // (darker) and glowing while held.
+                    let rim: Vec<Pos2> = (0..48)
+                        .map(|i| {
+                            let a = std::f32::consts::TAU * i as f32 / 48.0;
+                            lobe + vec2(a.cos(), a.sin()) * h * 0.4 * press_scale(t)
+                        })
+                        .collect();
+                    let lit = mix(face, glow_of(face), t * 0.8);
+                    out.push(fan(&rim, lobe, shade(lit, 1.3 - 0.25 * t), |d| {
+                        alpha(shade(lit, 1.0 + 0.25 * lightness(d) - 0.2 * t), 0.85)
+                    }));
+                    let shine = lobe + LIGHT * h * 0.13;
+                    let gloss: Vec<Pos2> = rim.iter().map(|p| lobe + (*p - lobe) * 0.5 + LIGHT * h * 0.13).collect();
+                    let a = (60.0 * (1.0 - t * 0.6)) as u8;
+                    out.push(fan(&gloss, shine, Color32::from_white_alpha(a), |_| Color32::from_white_alpha(0)));
+                    // Two ridges: arcs round the Switch's middle.
+                    for (j, rad) in [0.2f32, 0.29].into_iter().enumerate() {
+                        let rad = rc.width() * rad;
+                        let arc = |off: Vec2| -> Vec<Pos2> {
+                            (0..=12)
+                                .map(|i| {
+                                    let a = (i as f32 / 12.0 - 0.5) * 1.1;
+                                    rc.center() + vec2(a.cos() * out_dir, a.sin()) * rad + off
+                                })
+                                .collect()
+                        };
+                        let wid = (unit * (1.6 - 0.3 * j as f32)).max(1.0);
+                        let light = alpha(shade(face, 1.7), 0.6);
+                        out.push(egui::Shape::line(arc(vec2(0.0, unit * 0.8)), Stroke::new(wid, light)));
+                        out.push(egui::Shape::line(arc(Vec2::ZERO), Stroke::new(wid, shade(face, 0.62))));
                     }
-                };
-                for (k, t) in [(0, l), (1, rr)] {
                     if t > 0.01 {
-                        out.push(egui::Shape::rect_filled(
-                            half(k == 0).shrink(unit * 4.0),
-                            rc.height() * 0.4,
-                            alpha(Color32::WHITE, 0.35 * t),
-                        ));
+                        let halo: Vec<Pos2> = rim.iter().map(|p| *p + (*p - lobe).normalized() * unit * 10.0).collect();
+                        let g = glow_of(face);
+                        out.push(band(&halo, &rim, lobe, |_| alpha(g, 0.0), |_| alpha(g, 0.5 * t)));
                     }
                 }
-                out.push(egui::Shape::line_segment(
-                    [
-                        pos2(rc.center().x, rc.top() + rc.height() * 0.2),
-                        pos2(rc.center().x, rc.bottom() - rc.height() * 0.2),
-                    ],
-                    Stroke::new(unit * 2.0, shade(c.color, 0.6)),
-                ));
                 cap(CapFor::Press(ts[0]), pos2(rc.left() + rc.width() * 0.25, rc.center().y), l);
                 cap(CapFor::Press(ts[1]), pos2(rc.left() + rc.width() * 0.75, rc.center().y), rr);
             }
@@ -1271,7 +1375,8 @@ fn edge_of(shape: Shape, r: Rect) -> Vec<Pos2> {
             })
             .collect(),
         Shape::Rounded(k) => rim(r, r.width().min(r.height()) * k, r.center(), N),
-        Shape::Cross => outline(cross_sdf(r, 0.36, r.width() * 0.08), r.center(), r.width(), N),
+        Shape::Cross => outline(cross_sdf(r, DPAD_ARM, r.width() * 0.1), r.center(), r.width(), N),
+        Shape::Peanut => outline(peanut_sdf(r), r.center(), r.width(), N),
     }
 }
 

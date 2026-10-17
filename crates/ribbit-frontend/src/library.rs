@@ -95,7 +95,7 @@ const ART_PROFILE: &[u8; 256] = include_bytes!("art_profile.eeprom");
 
 /// Where a game's art is cached (the suffix changes whenever the way art
 /// is made changes, so old pictures are made again).
-const ART_SUFFIX: &str = "-8.png";
+const ART_SUFFIX: &str = "-10.png";
 
 fn art_file(art_dir: &Path, key: &str) -> PathBuf {
     art_dir.join(art_name(key))
@@ -382,6 +382,8 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
     let mut seen_games = HashSet::new();
     let mut todo = Vec::new();
     let mut zippity_todo = Vec::new();
+    // Original Leapster BIOSes found (art is made on one: see below).
+    let mut leapster_bios: Vec<PathBuf> = vec![];
     for path in files {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
         if !seen_paths.insert(canonical) {
@@ -390,6 +392,9 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
         let cart = match classify(&path) {
             Some(Found::Cart(c)) => c,
             Some(Found::Bios(hw)) => {
+                if hw == Hardware::Leapster {
+                    leapster_bios.push(path.clone());
+                }
                 if tx.send(Msg::Bios(hw, path.clone())).is_err() {
                     return;
                 }
@@ -450,7 +455,25 @@ fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&A
             return;
         }
     }
-    if let Some(src) = art {
+    // Art is made on an original Leapster BIOS whose Flash player HD knows
+    // (title cards are timed on one, and the art profile is its EEPROM): the
+    // BIOS chosen in File > Open BIOS if it is one, else one found in the
+    // folders. A Leapster 2 BIOS chosen there stops every game at its region
+    // and name screens.
+    let fits = |p: &Path| {
+        ribbit_core::load_firmware(p).ok().is_some_and(|f| {
+            f.known().is_none_or(|k| k.hardware == Hardware::Leapster)
+                && ribbit_core::hd::Hooks::find(f.data(), ribbit_memory::map::BIOS_MIRROR).is_some_and(|h| h.glyph.is_some())
+        })
+    };
+    let art_src = art.and_then(|src| {
+        if fits(&src.bios) {
+            Some(src.clone())
+        } else {
+            leapster_bios.iter().find(|p| fits(p)).map(|bios| ArtSource { bios: bios.clone() })
+        }
+    });
+    if let Some(src) = art_src.as_ref() {
         let todo = std::sync::Mutex::new(todo);
         std::thread::scope(|scope| {
             for _ in 0..art_threads() {
@@ -722,6 +745,10 @@ impl Capture {
             for p in hd.take() {
                 c.apply(&p);
             }
+            // Every frame, as the app does: the canvas learns where the LCD
+            // changed outside its renders (games drawn by their own code),
+            // and shows the LCD there.
+            c.update_mask(&self.frame[..]);
         }
     }
 
@@ -729,10 +756,7 @@ impl Capture {
     fn shot(&mut self) -> Shot {
         self.drain();
         match self.canvas.as_mut() {
-            Some(c) => {
-                c.update_mask(&self.frame[..]);
-                Shot { size: c.size, pixels: c.composed(&self.frame[..]) }
-            }
+            Some(c) => Shot { size: c.size, pixels: c.composed(&self.frame[..]) },
             None => Shot { size: WIDTH, pixels: self.frame.to_vec() },
         }
     }
@@ -808,7 +832,9 @@ fn make_art(src: &ArtSource, cart: Cartridge) -> Option<Shot> {
 fn make_zippity_art(nand: &Path) -> Option<Shot> {
     use ribbit_zippity::{SCREEN_H, SCREEN_W};
     /// Frames from power-on to the Zippity logo.
-    const LOGO_FRAMES: usize = 330;
+    // (Re-timed 2026-10-16: the logo shows about frames 840-870 since the
+    // Zippity's frame timing; 330 is now its photosensitivity warning.)
+    const LOGO_FRAMES: usize = 855;
     let mut z = ribbit_zippity::Zippity::new(ribbit_core::read_image(nand).ok()?);
     for _ in 0..LOGO_FRAMES {
         z.run_frame();

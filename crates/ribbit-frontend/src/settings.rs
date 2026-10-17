@@ -100,6 +100,9 @@ pub struct Settings {
     /// Console view: show each control's keyboard key on it, as a keycap
     /// that lights up when pressed.
     pub console_view_keys: bool,
+    /// A folder written onto the RockIt Twist's internal storage at power-on
+    /// (laid out like its F: drive), if one is chosen.
+    pub twist_content: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -139,6 +142,7 @@ impl Default for Settings {
             console_view: false,
             console_view_twist: true,
             console_view_keys: true,
+            twist_content: None,
         }
     }
 }

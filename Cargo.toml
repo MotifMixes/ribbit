@@ -77,3 +77,11 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# The RockIt Twist's ARM core and machine run a 240 MHz processor: even in
+# debug builds they need full optimisation to keep up.
+[profile.dev.package.ribbit-arm]
+opt-level = 3
+
+[profile.dev.package.ribbit-twist]
+opt-level = 3

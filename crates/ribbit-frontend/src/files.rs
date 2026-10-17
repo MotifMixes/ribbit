@@ -9,6 +9,11 @@ pub enum Pick {
     Cartridge,
     /// A folder of games for the library.
     RomFolder,
+    /// Content for the RockIt Twist's internal storage: a folder laid out
+    /// like the console's F: drive.
+    TwistContent,
+    /// A zip of RockIt Twist packages to import.
+    TwistZip,
 }
 
 impl Pick {
@@ -17,7 +22,14 @@ impl Pick {
             Pick::Bios => "Open Leapster BIOS",
             Pick::Cartridge => "Open Leapster cartridge",
             Pick::RomFolder => "Choose your games folder",
+            Pick::TwistContent => "Choose RockIt Twist content (a folder laid out like the console's F: drive)",
+            Pick::TwistZip => "Import RockIt Twist games (.zip)",
         }
+    }
+
+    /// Whether a folder is chosen (not a file).
+    pub fn is_folder(self) -> bool {
+        matches!(self, Pick::RomFolder | Pick::TwistContent)
     }
 }
 
@@ -28,8 +40,11 @@ pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = start.and_then(|p| if p.is_dir() { Some(p) } else { p.parent() }) {
         d = d.set_directory(dir);
     }
-    if what == Pick::RomFolder {
+    if what.is_folder() {
         return d.pick_folder();
+    }
+    if what == Pick::TwistZip {
+        return d.add_filter("Zip archives", &["zip"]).add_filter("All files", &["*"]).pick_file();
     }
     d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"]).add_filter("All files", &["*"]).pick_file()
 }
@@ -96,7 +111,7 @@ impl Browser {
                     }
                 });
                 ui.label(egui::RichText::new(self.dir.display().to_string()).weak());
-                if what == Pick::RomFolder && ui.button("✔ Use this folder").clicked() {
+                if what.is_folder() && ui.button("✔ Use this folder").clicked() {
                     chosen = Some((what, self.dir.clone()));
                 }
                 if let Some(e) = &self.error {
@@ -107,7 +122,7 @@ impl Browser {
                 ui.separator();
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for (name, path, is_dir) in &self.entries {
-                        if what == Pick::RomFolder && !*is_dir {
+                        if what.is_folder() && !*is_dir {
                             continue;
                         }
                         let label = if *is_dir { format!("📁 {name}") } else { format!("🎮 {name}") };

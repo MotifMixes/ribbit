@@ -48,7 +48,7 @@ const FEET: u16 = Pad::LEFT_FOOT | Pad::RIGHT_FOOT;
 /// Frames a second (the model's stand-in timing: FRAME instructions each).
 const FPS: f64 = 60.0;
 /// The output queue's rate (mono).
-const OUT_HZ: f64 = ribbit_audio::DAC_RATE_HZ as f64;
+pub(crate) const OUT_HZ: f64 = ribbit_audio::DAC_RATE_HZ as f64;
 
 struct Shared {
     z: Mutex<Zippity>,
@@ -264,7 +264,7 @@ pub fn clean_dump(nand: &Path) -> anyhow::Result<PathBuf> {
 fn run(s: &Shared) {
     let mut img = vec![0u32; SCREEN_W * SCREEN_H];
     let mut next = Instant::now();
-    let mut resample = Resampler::default();
+    let mut resample = Resampler::new(ribbit_zippity::OUTPUT_RATE);
     let mut mono = Vec::new();
     let (mut counted_since, mut frames) = (Instant::now(), 0u32);
     let mut skipped = 0;
@@ -330,18 +330,24 @@ fn run(s: &Shared) {
     }
 }
 
-/// Stereo at the sound unit's rate to mono at the output queue's rate:
-/// linear interpolation between box-averaged input samples.
-#[derive(Default)]
-struct Resampler {
+/// Stereo at a sound unit's rate to mono at the output queue's rate
+/// (`OUT_HZ`): linear interpolation between box-averaged input samples.
+/// Also the RockIt Twist's.
+pub(crate) struct Resampler {
+    /// Input samples per output sample.
+    step: f64,
     /// Position of the next output sample, in input samples.
     pos: f64,
     prev: f32,
 }
 
 impl Resampler {
-    fn push(&mut self, stereo: &[i16], out: &mut Vec<i16>) {
-        let step = ribbit_zippity::OUTPUT_RATE / OUT_HZ;
+    pub(crate) fn new(from_hz: f64) -> Self {
+        Self { step: from_hz / OUT_HZ, pos: 0.0, prev: 0.0 }
+    }
+
+    pub(crate) fn push(&mut self, stereo: &[i16], out: &mut Vec<i16>) {
+        let step = self.step;
         let mono: Vec<f32> = stereo.as_chunks::<2>().0.iter().map(|p| (p[0] as f32 + p[1] as f32) / 2.0).collect();
         let n = mono.len() as f64;
         while self.pos < n {
@@ -415,7 +421,7 @@ mod tests {
 
     #[test]
     fn resampler_rate() {
-        let mut r = Resampler::default();
+        let mut r = Resampler::new(ribbit_zippity::OUTPUT_RATE);
         let mut out = Vec::new();
         // One second of input gives about one second of output.
         let input = vec![0i16; 2 * ribbit_zippity::OUTPUT_RATE as usize];

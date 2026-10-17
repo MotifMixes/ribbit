@@ -147,8 +147,9 @@ impl Source {
 pub const SWIPE_SECONDS: f32 = 0.15;
 pub const SWIPE_FROM: f32 = 0.75;
 pub const SWIPE_TO: f32 = 0.25;
-/// A wheel turned by a held key: the first step at once, then repeats.
-pub const REPEAT_DELAY: f32 = 0.35;
+/// A wheel turned by a held key: the first step at once, then one every
+/// `REPEAT_EVERY` with no pause first, so it keeps turning straight away
+/// (unlike typing's key repeat).
 pub const REPEAT_EVERY: f32 = 0.1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -220,7 +221,7 @@ impl Controls {
         let slot = &mut self.turning[r.index()][source.index()];
         match step {
             Some(s) if slot.is_none_or(|h| h.step != s) => {
-                *slot = Some(HeldTurn { step: s, next: REPEAT_DELAY });
+                *slot = Some(HeldTurn { step: s, next: REPEAT_EVERY });
                 self.turn(r, s as i32);
             }
             Some(_) => {}
@@ -345,10 +346,10 @@ mod tests {
         assert_eq!((c.turning(Rotary::RedDial), c.turning(Rotary::Spinner)), (Some(1), None));
         c.hold_turn(Source::Keyboard, Rotary::RedDial, Some(1));
         assert_eq!(c.turned(Rotary::RedDial), 1, "key repeat adds nothing");
-        c.tick(REPEAT_DELAY - 0.01);
+        c.tick(REPEAT_EVERY - 0.01);
         assert_eq!(c.turned(Rotary::RedDial), 1);
         c.tick(0.02 + REPEAT_EVERY);
-        assert_eq!(c.turned(Rotary::RedDial), 3);
+        assert_eq!(c.turned(Rotary::RedDial), 3, "no pause before it keeps turning");
         c.hold_turn(Source::Keyboard, Rotary::RedDial, None);
         c.tick(1.0);
         assert_eq!(c.turned(Rotary::RedDial), 3, "stops when let go");

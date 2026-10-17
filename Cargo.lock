@@ -2743,6 +2743,7 @@ dependencies = [
 name = "ribbit-twist"
 version = "1.0.0"
 dependencies = [
+ "png",
  "ribbit-arm",
  "ribbit-core",
 ]

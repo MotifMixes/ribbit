@@ -19,9 +19,11 @@ input (the check presses nothing). Most such games may well go further when play
 
 ## RockIt Twist
 
-Not emulated: every RockIt Twist package is **Nothing**. Game packs (.lf3) are encrypted and the console's
-hardware is not modelled yet (docs/rockit-twist.md). Ribbit lists them so the library is complete, and opens a
-controls-only preview.
+Early emulation. Game packs (.lf3) are encrypted and are not run. From the system packages (Bootloader, Base,
+Firmware-Bulk), the console's own firmware boots to its "Device Error" screen, which a unit shows when LeapFrog
+Connect has not installed the menu. With unpacked content imported (docs/rockit-twist.md), the menu runs and the
+built-in Arcade game **Nom-Nom** is **Playable** (title screen, level menu, the game, with sound; no videos). The
+other built-in games and the packs are untested (2026-10-17).
 
 ## Results
 

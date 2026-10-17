@@ -39,17 +39,21 @@ fn u32_at(d: &[u8], at: usize) -> Result<u32, ZipError> {
     d.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or(ZipError::Damaged("truncated"))
 }
 
-struct Entry {
-    name: String,
+/// A file or folder in an archive.
+pub struct Entry {
+    /// Its path in the archive, as stored ("/" or "\" between names;
+    /// folders end with one).
+    pub name: String,
     method: u16,
     crc: u32,
     packed: usize,
-    size: usize,
+    /// Its size unpacked.
+    pub size: usize,
     local: usize,
 }
 
 /// The archive's entries, from its central directory.
-fn entries(d: &[u8]) -> Result<Vec<Entry>, ZipError> {
+pub fn entries(d: &[u8]) -> Result<Vec<Entry>, ZipError> {
     // End of central directory: the last 22+ bytes (plus a comment).
     let from = d.len().saturating_sub(22 + 0xFFFF);
     let eocd = (from..=d.len().saturating_sub(22))
@@ -105,7 +109,8 @@ pub fn extract_named(d: &[u8], name: &str) -> Result<Vec<u8>, ZipError> {
     read_entry(d, entry)
 }
 
-fn read_entry(d: &[u8], entry: &Entry) -> Result<Vec<u8>, ZipError> {
+/// An entry's contents (checked against its CRC).
+pub fn read_entry(d: &[u8], entry: &Entry) -> Result<Vec<u8>, ZipError> {
     if entry.size > MAX_IMAGE {
         return Err(ZipError::Damaged("entry too large"));
     }

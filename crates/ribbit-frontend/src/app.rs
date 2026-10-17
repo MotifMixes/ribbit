@@ -90,7 +90,9 @@ pub struct App {
     tv_frame: Vec<u32>,
     /// Removing the saved players from a Zippity dump (the cleaned dump).
     zippity_cleaning: Option<std::thread::JoinHandle<anyhow::Result<PathBuf>>>,
-    /// A RockIt Twist research preview (not emulated), instead of the others.
+    /// A zip of RockIt Twist packages being unpacked.
+    twist_import: Option<std::thread::JoinHandle<anyhow::Result<crate::twist::Imported>>>,
+    /// A RockIt Twist session (early emulation), instead of the others.
     twist: Option<crate::twist::TwistSession>,
     /// The console view's pointer state (controls held by the mouse).
     console_view: ConsoleView,
@@ -179,6 +181,7 @@ impl App {
             zippity: None,
             tv_frame: Vec::new(),
             zippity_cleaning: None,
+            twist_import: None,
             twist: None,
             console_view: ConsoleView::default(),
             held: Held::default(),
@@ -458,8 +461,9 @@ impl App {
         // A Zippity cartridge runs only on a Zippity: its NAND dump, whatever
         // console the library has chosen.
         let family = self.library.games.iter().find(|g| g.path == path).map(|g| g.family).or_else(|| crate::library::family_of(&path));
-        // A RockIt Twist package: the research preview (it cannot run).
-        if family == Some(crate::library::Family::RockItTwist) {
+        // A RockIt Twist package (or one unpacked into a folder): the
+        // RockIt Twist, started from its system packages.
+        if family == Some(crate::library::Family::RockItTwist) || crate::twist::is_package_folder(&path) {
             return self.start_twist(Some(path));
         }
         if family == Some(crate::library::Family::Zippity) {
@@ -618,18 +622,72 @@ impl App {
         }
     }
 
-    /// Opens the RockIt Twist research preview: its controls, no emulation
-    /// (`package`: the package chosen in the library, if any).
+    /// Opens a RockIt Twist session (`package`: the package chosen in the
+    /// library, if any): the console starts from its system packages when
+    /// they are found, otherwise only its controls work.
     fn start_twist(&mut self, package: Option<PathBuf>) {
         self.end_session();
-        self.twist = Some(crate::twist::TwistSession::start(package));
+        let session = crate::twist::TwistSession::start(
+            package,
+            &self.twist_known(),
+            self.settings.twist_content.clone(),
+            self.audio.as_ref(),
+        );
+        let running = session.machine.is_some();
+        self.twist = Some(session);
         self.paused = false;
         self.fit_window = FIT_TRIES;
         if let Some(a) = &mut self.audio {
             a.clear();
         }
         self.update_title();
-        self.ui.toast("RockIt Twist: research preview, not emulated");
+        self.ui.toast(if running {
+            "RockIt Twist: early emulation"
+        } else {
+            "RockIt Twist: system packages not found, controls only"
+        });
+    }
+
+    /// The RockIt Twist files the system packages are looked for among: the
+    /// library's, and those in Ribbit's own system folder.
+    fn twist_known(&self) -> Vec<PathBuf> {
+        let mut known: Vec<PathBuf> = self
+            .library
+            .games
+            .iter()
+            .filter(|g| g.family == crate::library::Family::RockItTwist)
+            .map(|g| g.path.clone())
+            .collect();
+        known.extend(crate::twist::packages_in(&crate::twist::system_dir(&self.opts.data_dir)));
+        known
+    }
+
+    /// Unpacks a zip of RockIt Twist packages into Ribbit's data folder (in
+    /// the background), then uses it as the console's content.
+    fn import_twist_zip(&mut self, zip: PathBuf) {
+        if self.twist_import.is_some() {
+            self.ui.toast("Already importing RockIt Twist games");
+            return;
+        }
+        let prefer = crate::twist::SystemPackages::find(None, &self.twist_known()).and_then(|p| crate::twist::system_locale(&p));
+        let into = self.opts.data_dir.join("rockit-twist").join("content");
+        self.ui.toast("Importing RockIt Twist games…");
+        self.twist_import = Some(std::thread::spawn(move || crate::twist::import_zip(&zip, &into, prefer.as_deref())));
+    }
+
+    /// Chooses (or forgets) the RockIt Twist's storage content; a running
+    /// RockIt Twist restarts with it.
+    fn set_twist_content(&mut self, path: Option<PathBuf>) {
+        self.settings.twist_content = path;
+        self.save_settings();
+        if let Some(t) = &mut self.twist {
+            t.content = self.settings.twist_content.clone();
+            t.restart(self.audio.as_ref());
+            self.ui.toast(match &t.content {
+                Some(_) => "RockIt Twist restarted with the content folder",
+                None => "RockIt Twist restarted without content",
+            });
+        }
     }
 
     /// The console running (None: none).
@@ -744,6 +802,8 @@ impl App {
             Pick::Bios => self.settings.bios.clone(),
             Pick::Cartridge => self.settings.recent_carts.first().cloned(),
             Pick::RomFolder => self.settings.rom_folders.last().cloned(),
+            Pick::TwistContent => self.settings.twist_content.clone(),
+            Pick::TwistZip => None,
         };
         #[cfg(not(target_os = "android"))]
         {
@@ -752,6 +812,8 @@ impl App {
                     Pick::Bios => self.set_bios(path),
                     Pick::Cartridge => self.open_cart(path),
                     Pick::RomFolder => self.add_rom_folder(path),
+                    Pick::TwistContent => self.set_twist_content(Some(path)),
+                    Pick::TwistZip => self.import_twist_zip(path),
                 }
             }
         }
@@ -818,6 +880,8 @@ impl App {
                 self.save_settings();
             }
             Action::OpenTwist => self.start_twist(None),
+            Action::SetTwistContent(path) => self.set_twist_content(path),
+            Action::ImportTwistZip(path) => self.import_twist_zip(path),
             Action::ConsoleViewChanged => self.console_view_changed(),
             Action::Reset => self.reset(),
             Action::TogglePause => self.toggle_pause(),
@@ -1109,8 +1173,8 @@ impl App {
 
     fn reset(&mut self) {
         if let Some(t) = &mut self.twist {
-            t.controls.release_all();
-            self.ui.toast("Reset (nothing is emulated on the RockIt Twist yet)");
+            t.restart(self.audio.as_ref());
+            self.ui.toast("Reset");
         }
         if let Some(z) = &self.zippity {
             z.reset();
@@ -1159,7 +1223,7 @@ impl App {
             // or the keys: nothing on the console view stays held.
             self.release_view();
             if let Some(t) = &mut self.twist {
-                t.controls.release(ribbit_twist::input::Source::Keyboard);
+                t.release_keys();
             }
         }
         if focused && self.flashing {
@@ -1249,11 +1313,31 @@ impl App {
                 Err(_) => self.ui.problem("Couldn't clear the old players", CLEAN_FAILED, "The cleaning thread crashed."),
             }
         }
+        if self.twist_import.as_ref().is_some_and(|h| h.is_finished()) {
+            match self.twist_import.take().unwrap().join() {
+                Ok(Ok(done)) => {
+                    let n = done.packs.len();
+                    self.ui.toast(format!(
+                        "Imported {n} RockIt Twist package{} ({}, {} files)",
+                        if n == 1 { "" } else { "s" },
+                        done.locale,
+                        done.files
+                    ));
+                    self.set_twist_content(Some(done.dir));
+                }
+                Ok(Err(e)) => self.ui.problem("Couldn't import the RockIt Twist games", TWIST_IMPORT_FAILED, format!("{e:#}")),
+                Err(_) => self.ui.problem("Couldn't import the RockIt Twist games", TWIST_IMPORT_FAILED, "The import thread crashed."),
+            }
+        }
         if let Some(t) = &mut self.twist {
             if !halted {
                 t.tick();
             }
-            self.speed_percent = 0.0;
+            if let Some(m) = &t.machine {
+                m.set_running(!halted);
+                m.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+            }
+            self.speed_percent = t.machine.as_ref().map_or(0.0, |m| m.speed_percent());
             return;
         }
         if let Some(z) = &self.zippity {
@@ -1621,23 +1705,6 @@ impl App {
         let mut actions = Vec::new();
         let mut area = egui::Rect::NOTHING;
         self.library.poll();
-        self.discord.set(match &self.session {
-            _ if !self.settings.discord_presence => crate::discord::Presence::Off,
-            Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
-            None => match (&self.zippity, &self.twist) {
-                (Some(z), _) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
-                (None, Some(t)) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
-                (None, None) => crate::discord::Presence::Browsing,
-            },
-        });
-        let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
-        let (view, held, twist) = (&mut self.console_view, &self.held, self.twist.as_ref());
-        // Where the screen is inside the console view (None: the plain view).
-        let mut screen = None;
-        let mut view_events = Vec::new();
-        let out = self.egui_ctx.run_ui(raw, |ui| {
-            // The console is painted into this slot, under the menus and
-            // messages drawn next.
         // At start the library opens on the page open last time (once the
         // first scan is in, so the page has its games); after that the open
         // page is remembered.
@@ -1658,6 +1725,23 @@ impl App {
                 }
             }
         }
+        self.discord.set(match &self.session {
+            _ if !self.settings.discord_presence => crate::discord::Presence::Off,
+            Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
+            None => match (&self.zippity, &self.twist) {
+                (Some(z), _) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
+                (None, Some(t)) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
+                (None, None) => crate::discord::Presence::Browsing,
+            },
+        });
+        let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
+        let (view, held, twist) = (&mut self.console_view, &self.held, self.twist.as_ref());
+        // Where the screen is inside the console view (None: the plain view).
+        let mut screen = None;
+        let mut view_events = Vec::new();
+        let out = self.egui_ctx.run_ui(raw, |ui| {
+            // The console is painted into this slot, under the menus and
+            // messages drawn next.
             let under = ui.painter().add(egui::Shape::Noop);
             area = ui::draw(ui, ui_state, settings, library, &info, &mut actions);
             if let (true, Some(layout)) = (info.running, &view_layout) {
@@ -1945,6 +2029,8 @@ mod tests {
 }
 
 /// What the Zippity cleaning failure means for the user's file.
+const TWIST_IMPORT_FAILED: &str = "Nothing changed on the emulated RockIt Twist. The zip should hold RockIt Twist      package folders, each with its meta.inf, as they are installed on the console.";
+
 const CLEAN_FAILED: &str = "The players are still there. Nothing was lost: the dump is either unchanged or \
                             kept beside it as a .with-saves.bak file.";
 

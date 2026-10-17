@@ -47,6 +47,10 @@ pub enum Action {
     KeepZippitySaves(PathBuf),
     /// Open the RockIt Twist research preview (no package).
     OpenTwist,
+    /// Use this folder as the RockIt Twist's storage content (None: none).
+    SetTwistContent(Option<PathBuf>),
+    /// Unpack this zip of RockIt Twist packages and use it as the content.
+    ImportTwistZip(PathBuf),
     /// The console view was turned on or off.
     ConsoleViewChanged,
     Quit,
@@ -194,6 +198,8 @@ pub fn draw(
             Pick::Bios => Action::SetBios(path),
             Pick::Cartridge => Action::OpenCartridge(path),
             Pick::RomFolder => Action::AddRomFolder(path),
+            Pick::TwistContent => Action::SetTwistContent(Some(path)),
+            Pick::TwistZip => Action::ImportTwistZip(path),
         });
     }
     toasts(&ctx, st);
@@ -328,11 +334,42 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 actions.push(Action::Pick(Pick::Bios));
             }
             if ui
-                .add(egui::Button::new("RockIt Twist preview (not emulated)"))
+                .add(egui::Button::new("RockIt Twist (early emulation)"))
                 .on_hover_text(ribbit_twist::STATUS)
                 .clicked()
             {
                 actions.push(Action::OpenTwist);
+                ui.close();
+            }
+            if ui
+                .button("Import RockIt Twist games (.zip)…")
+                .on_hover_text(
+                    "Unpacks a zip of RockIt Twist package folders (each with its meta.inf) for one region and \
+                     installs them on the emulated console, where its own firmware finds them.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::TwistZip));
+                ui.close();
+            }
+            let content = settings.twist_content.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+            if ui
+                .button(match &content {
+                    Some(n) => format!("RockIt Twist content: {n}…"),
+                    None => "RockIt Twist content folder…".to_string(),
+                })
+                .on_hover_text(
+                    "A folder written onto the RockIt Twist's internal storage when it starts, laid out like the \
+                     console's F: drive (Applications, Music, Trailers...). For your own programs, or content \
+                     copied from your own console.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::TwistContent));
+                ui.close();
+            }
+            if content.is_some() && ui.button("Remove RockIt Twist content").clicked() {
+                actions.push(Action::SetTwistContent(None));
                 ui.close();
             }
             ui.separator();

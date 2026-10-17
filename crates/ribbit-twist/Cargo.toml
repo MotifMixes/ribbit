@@ -1,6 +1,6 @@
 [package]
 name = "ribbit-twist"
-description = "LeapFrog RockIt Twist research: its controls, its package and firmware formats, and a boot probe (not an emulator yet)"
+description = "LeapFrog RockIt Twist: its controls, package and firmware formats, and the machine (early emulation)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,5 @@ ribbit-arm.workspace = true
 [dev-dependencies]
 # The probe example reads system packages (.lfp, zip archives).
 ribbit-core.workspace = true
+# The run example writes screenshots of emulated memory.
+png = "0.18"
