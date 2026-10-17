@@ -12,7 +12,7 @@
 //!
 //! | Item | Model |
 //! |---|---|
-//! | Voices 0-4 | pitched A-law; address = (start & 0xFFFF_0000) \| u16(position); position starts at start's low half and advances by pitch / 0x8000 per sample; at end (end >> 16) it loops to the loop point (end & 0xFFFF) or stops if end - loop < 2; between samples, linear interpolation (EVIDENCE: a tester's comparison with real hardware; MAME takes the earlier sample) |
+//! | Voices 0-4 | pitched A-law; address = (start & 0xFFFF_0000) \| u16(position); position starts at start's low half and advances by pitch / 0x8000 per sample; at end (end >> 16) it loops to the loop point (end & 0xFFFF) or stops if end - loop < 2; between samples, linear interpolation (EVIDENCE: a hardware recording of SpongeBob's "Super Sudsy Scrubber Zone", 36 s aligned with renders, matches the linearly interpolated render's spectrum better than the stepped one: 0.244 vs 0.173 at 2-3.9 kHz; MAME takes the earlier sample) |
 //! | Voices 5-6 | raw A-law at 8 kHz from start to end (absolute addresses) |
 //! | Voice 7 | LFC speech: 16-bit mode word (0-2 = Level4/6/8), records of control + optional reflection-coefficient word + excitation of the previous record, 192 samples each; 256 start-up samples discarded; control 0x0FC0 ends the stream |
 //! | 0x0180_2078 | playing voices: voice 0 in bit 7, voices 1-7 in bits 0-6 ("not sure why it's out of place" - MAME) |
@@ -375,8 +375,8 @@ impl VoiceEngine {
                 // Pitched voices step through the sample by fractions:
                 // linearly interpolated between the two samples around the
                 // position (the next one wraps to the loop point at the
-                // end). EVIDENCE: a tester comparing with real hardware hears
-                // linear interpolation; MAME takes the earlier sample alone.
+                // end). EVIDENCE: a hardware recording matches
+                // this better than stepping (module docs); MAME takes the earlier sample alone.
                 let at = |i: u32| (start & 0xFFFF_0000) | (i as u16 as u32);
                 let (end, lp) = ((self.end[v] >> 16) as u16, self.end[v] as u16);
                 let i = pos as u32;
