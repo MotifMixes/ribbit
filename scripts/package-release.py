@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -163,7 +164,12 @@ def main():
     out = DIST / f'{name}.zip'
     with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for f in sorted(stage.iterdir()):
-            z.write(f, f'{name}/{f.name}')
+            # Times in UTC: zip stores the zipping PC's local time, which
+            # would give away its time zone.
+            info = zipfile.ZipInfo(f'{name}/{f.name}', date_time=time.gmtime(f.stat().st_mtime)[:6])
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (f.stat().st_mode & 0xFFFF) << 16
+            z.writestr(info, f.read_bytes(), compresslevel=9)
     print(f'{out} ({out.stat().st_size // 1024} KiB)')
 
 

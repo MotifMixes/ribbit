@@ -163,6 +163,14 @@ def release_rustflags(*extra):
     return {'CARGO_ENCODED_RUSTFLAGS': ''.join(flags)}
 
 
+def anonymous(info):
+    """A tar entry owned by nobody in particular (tar records the packing
+    user's name and ids otherwise)."""
+    info.uid = info.gid = 0
+    info.uname = info.gname = ''
+    return info
+
+
 def target_dir():
     if os.environ.get('RIBBIT_LINUX_TARGET'):
         return Path(os.environ['RIBBIT_LINUX_TARGET'])
@@ -213,7 +221,7 @@ def main():
     out = DIST / f'{name}.tar.gz'
     with tarfile.open(out, 'w:gz', compresslevel=9) as tar:
         for f in sorted(stage.iterdir()):
-            tar.add(f, f'{name}/{f.name}')
+            tar.add(f, f'{name}/{f.name}', filter=anonymous)
     print(f'{out} ({out.stat().st_size // 1024} KiB)')
     if a.upload:
         if shutil.which('gh') is None:

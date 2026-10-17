@@ -213,8 +213,11 @@ def main():
     out = DIST / f'{name}.zip'
     if out.exists():
         out.unlink()
-    # ditto keeps the bundle's permissions and signature intact (zipfile does not).
-    run('ditto', '-c', '-k', '--keepParent', stage, out)
+    # ditto keeps the bundle's permissions and signature intact (zipfile does
+    # not). In UTC, as zip stores local times (they would give away the time
+    # zone); no resource forks, extended attributes or quarantine flags.
+    run('ditto', '-c', '-k', '--keepParent', '--norsrc', '--noextattr', '--noqtn', stage, out,
+        env=dict(os.environ, TZ='UTC'))
     print(f'{out} ({out.stat().st_size // 1024} KiB)')
 
     if a.upload:
