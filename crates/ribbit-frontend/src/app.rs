@@ -150,6 +150,9 @@ pub struct App {
     sheet: Option<crate::files::SheetPick>,
     fatal: Option<anyhow::Error>,
     quit: bool,
+    /// Everything is saved for good: nothing more is written (after an
+    /// update's restart the new version owns the settings and saves).
+    shut_down: bool,
     /// The game closed for inactivity, its snapshot, and where its BIOS
     /// keeps the idle timer (for Resume).
     idle_resume: Option<(PathBuf, Vec<u8>, Option<ribbit_core::idle_timer::IdleTimer>)>,
@@ -249,6 +252,7 @@ impl App {
             discord: crate::discord::Discord::start(),
             fatal: None,
             quit: false,
+            shut_down: false,
             idle_resume: None,
             tab_shown: false,
         };
@@ -413,7 +417,12 @@ impl App {
         }
     }
 
+    /// Saves everything, once: after an update's restart the new version is
+    /// already running, and a second save here would overwrite its settings.
     fn shutdown(&mut self) {
+        if std::mem::replace(&mut self.shut_down, true) {
+            return;
+        }
         self.end_session();
         self.save_settings();
     }
@@ -1087,11 +1096,15 @@ impl App {
                         self.quit = true;
                         event_loop.exit();
                     }
-                    Err(e) => self.ui.problem(
-                        "The update is installed",
-                        "Ribbit couldn't restart by itself: close it and open it again to use the new version.",
-                        e.to_string(),
-                    ),
+                    Err(e) => {
+                        // Still running: closing it saves again.
+                        self.shut_down = false;
+                        self.ui.problem(
+                            "The update is installed",
+                            "Ribbit couldn't restart by itself: close it and open it again to use the new version.",
+                            e.to_string(),
+                        )
+                    }
                 }
             }
             Action::Quit => {
@@ -2333,6 +2346,12 @@ impl ApplicationHandler for App {
         if let Some(g) = &self.gpu {
             g.window.request_redraw();
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // macOS's Quit (⌘Q, the app menu) ends the process right after this,
+        // without returning from run_app: save here, not only after it.
+        self.shutdown();
     }
 }
 

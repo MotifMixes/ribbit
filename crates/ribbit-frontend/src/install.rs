@@ -246,6 +246,13 @@ fn replace_program(exe: &Path, program: &[u8]) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn replace_bundle(app: &Path, package: &[u8]) -> Result<(), String> {
     let parent = app.parent().ok_or("Ribbit.app has no folder")?;
+    // Opened straight from a download, macOS runs a read-only copy of the app
+    // from a temporary place (App Translocation).
+    if parent.components().any(|c| c.as_os_str() == "AppTranslocation") {
+        return Err("macOS is running Ribbit from a temporary read-only copy. Move Ribbit.app to your Applications \
+                    folder, open it from there, and update again"
+            .into());
+    }
     let cant = |e: std::io::Error| format!("Ribbit can't write to {}: {e}", parent.display());
     // Unpacked next to the app, so the new one moves into place within one disk.
     let work = parent.join(".ribbit-update");
@@ -316,6 +323,58 @@ pub fn remove_leftovers() {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "downloads Ribbit 1.2.2 from GitHub"]
+    fn a_release_downloads_and_replaces_the_bundle() {
+        let asset = Asset {
+            name: "Ribbit-1.2.2-macos-universal.zip".into(),
+            url: "https://github.com/MotifMixes/ribbit/releases/download/v1.2.2/Ribbit-1.2.2-macos-universal.zip".into(),
+            size: 15_978_979,
+        };
+        let mut last = 0;
+        let package = download(&asset, |done| last = done).unwrap();
+        assert_eq!(last, asset.size);
+        let dir = std::env::temp_dir().join(format!("ribbit-install-test-{}", std::process::id()));
+        let app = dir.join("Ribbit.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/ribbit-gui"), b"the old version").unwrap();
+        replace_bundle(&app, &package).unwrap();
+        let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
+        assert!(plist.contains("<string>1.2.2</string>"));
+        let signed = std::process::Command::new("/usr/bin/codesign").arg("-v").arg(&app).status().unwrap();
+        assert!(signed.success(), "the new app's signature is intact");
+        assert_eq!(std::fs::read(dir.join("Ribbit.app.old/Contents/MacOS/ribbit-gui")).unwrap(), b"the old version");
+        assert!(!dir.join(".ribbit-update").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_ribbit_cant_write_to_keeps_the_app() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ribbit-readonly-test-{}", std::process::id()));
+        let app = dir.join("Ribbit.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/ribbit-gui"), b"the old version").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let e = replace_bundle(&app, b"").unwrap_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(e.contains("can't write"), "{e}");
+        assert_eq!(std::fs::read(app.join("Contents/MacOS/ribbit-gui")).unwrap(), b"the old version");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_translocated_app_is_not_replaced() {
+        let app = Path::new("/private/var/folders/xx/T/AppTranslocation/1234/d/Ribbit.app");
+        let e = replace_bundle(app, b"").unwrap_err();
+        assert!(e.contains("Applications"), "{e}");
+    }
 }
 
 #[cfg(all(test, windows))]
