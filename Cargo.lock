@@ -2652,6 +2652,7 @@ version = "1.2.2"
 dependencies = [
  "android_logger",
  "jni 0.21.1",
+ "libc",
  "log",
  "ribbit-frontend",
  "tracing",

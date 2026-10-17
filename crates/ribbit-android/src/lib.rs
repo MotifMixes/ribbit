@@ -7,7 +7,9 @@
 
 #![cfg(target_os = "android")]
 
+use jni::objects::JObject;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use winit::event_loop::EventLoop;
 use winit::platform::android::EventLoopBuilderExtAndroid;
 use winit::platform::android::activity::AndroidApp;
@@ -21,6 +23,7 @@ fn android_main(app: AndroidApp) {
     if let Err(e) = request_all_files_access(&app) {
         log::warn!("could not check storage permission: {e}");
     }
+    let _ = ACTIVITY.set((app.vm_as_ptr() as usize, app.activity_as_ptr() as usize));
     let event_loop = match EventLoop::builder().with_android_app(app).build() {
         Ok(l) => l,
         Err(e) => {
@@ -28,10 +31,35 @@ fn android_main(app: AndroidApp) {
             return;
         }
     };
-    let opts = ribbit_frontend::StartOptions { data_dir, ..Default::default() };
+    let opts = ribbit_frontend::StartOptions { data_dir, destroyed: Some(activity_destroyed), ..Default::default() };
     if let Err(e) = ribbit_frontend::run_with(event_loop, opts) {
         log::error!("ribbit stopped: {e:#}");
     }
+    // Saved and stopped. The process goes too: Android may keep it for the
+    // next start, where winit 0.30 cannot make a second event loop. `_exit`,
+    // as the C exit handlers abort while other threads (sound, Discord) run.
+    // SAFETY: ends the process; nothing is left to write.
+    unsafe { libc::_exit(0) };
+}
+
+/// The Java VM and the activity, for `activity_destroyed`.
+static ACTIVITY: OnceLock<(usize, usize)> = OnceLock::new();
+
+/// Whether Android has destroyed the activity (`Activity.isDestroyed`, already
+/// true when its native `onDestroy` runs).
+fn activity_destroyed() -> bool {
+    let Some(&(vm, activity)) = ACTIVITY.get() else {
+        return false;
+    };
+    // SAFETY: the pointers come from the running NativeActivity; the activity
+    // reference stays valid until `android_main` returns.
+    let destroyed = || -> jni::errors::Result<bool> {
+        let vm = unsafe { jni::JavaVM::from_raw(vm as *mut _) }?;
+        let mut env = vm.get_env()?;
+        let activity = unsafe { JObject::from_raw(activity as jni::sys::jobject) };
+        env.call_method(&activity, "isDestroyed", "()Z", &[])?.z()
+    };
+    destroyed().unwrap_or(false)
 }
 
 /// Opens Android's "All files access" screen for Ribbit if not yet granted

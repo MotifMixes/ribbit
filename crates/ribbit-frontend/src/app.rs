@@ -48,6 +48,11 @@ pub struct StartOptions {
     pub straps: Option<u32>,
     pub experimental_touch: Option<bool>,
     pub cpu_mhz: Option<u64>,
+    /// Android: true once the activity is destroyed (swiped away from the
+    /// recent apps). Ribbit then saves and stops: winit 0.30 does not pass
+    /// that on, and Android waits for Ribbit to stop before it can start the
+    /// app again.
+    pub destroyed: Option<fn() -> bool>,
 }
 
 struct Session {
@@ -2299,7 +2304,13 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Android: only asked in the background, as the activity is only
+        // destroyed after its window has gone.
+        if self.egui_state.is_none() && self.opts.destroyed.is_some_and(|destroyed| destroyed()) {
+            event_loop.exit();
+            return;
+        }
         #[cfg(target_os = "macos")]
         self.poll_sheet();
         if let Some(g) = &self.gpu {
