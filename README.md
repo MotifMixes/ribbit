@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/ribbit-icon.png" alt="Ribbit's frog icon" width="160"></p>
+
 # Ribbit
 
 An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leapster (the main target), the
