@@ -153,6 +153,13 @@ pub struct Bus {
     /// 2D engine jobs (research log): (time, +0xC04, +0xC08, +0xC0C, and
     /// the registers 0xD0C00000-0xD0C00FFF written since the last job).
     pub gfx_log: Vec<(u64, u32, u32, u32, Vec<(u32, u32)>)>,
+    /// The video decoder (`mpeg4`) and the pictures it has made, by the
+    /// address their RGB copy went to (the next frame's reference names
+    /// it), newest last.
+    mpeg: crate::mpeg4::Decoder,
+    mpeg_pictures: Vec<(u32, crate::mpeg4::Picture)>,
+    /// Research: frames decoded, and ones that failed.
+    pub mpeg_frames: (u64, u64),
     gfx_regs: Vec<(u32, u32)>,
     /// DMA transfers (research log): (time, channel, control, source,
     /// destination, bytes).
@@ -410,6 +417,9 @@ impl Bus {
             sound_made: 0,
             sound: Vec::new(),
             gfx_log: Vec::new(),
+            mpeg: crate::mpeg4::Decoder::new(),
+            mpeg_pictures: Vec::new(),
+            mpeg_frames: (0, 0),
             gfx_regs: Vec::new(),
             timebase_due: 0,
             te_due: 0,
@@ -664,12 +674,13 @@ impl Bus {
                 self.lines_dirty = true;
             }
             0xC00D_0000 | 0xC00D_0020 => self.lines_dirty = true,
-            // The 2D engine (0xD0C00000): +0xA0 bit 4 starts a job with the
-            // parameters in +0xC04/+0xC08/+0xC0C (driver 0x572E0); +0xD0
-            // enables its interrupts (bit clear = on); +0xD4 is its status
-            // (bit 4: job done; write 1s to clear) — from its handler at
-            // 0x56B90. The job itself is not modelled yet: it finishes at
-            // once, doing nothing.
+            // The video decoder (0xD0C00000): +0xA0 bit 4 decodes the frame
+            // at +0xC0C into +0xC08, predicting from the frame at +0xC04
+            // (driver 0x572E0); +0xD0 enables its interrupts (bit clear =
+            // on); +0xD4 is its status, write 1s to clear: bit 2 a frame
+            // decoded, bit 4 a failure (the handler 0x56B90 posts 4 for the
+            // first, and the player then shows the frame; for the second
+            // the driver resets the decoder, 0x57074). Done at once.
             0xD0C0_00A0 if written & 0x10 != 0 => {
                 if self.gfx_log.len() < 10_000 {
                     let regs = std::mem::take(&mut self.gfx_regs);
@@ -682,7 +693,8 @@ impl Bus {
                     ));
                 }
                 self.io.insert(w, now & !0x10);
-                let s = self.latch(0xD0C0_00D4) | 0x10;
+                let done = if self.decode_video_frame() { 0x4 } else { 0x10 };
+                let s = self.latch(0xD0C0_00D4) | done;
                 self.io.insert(0xD0C0_00D4, s);
                 self.lines_dirty = true;
             }
@@ -887,6 +899,43 @@ impl Bus {
             self.io.insert(0xD010_0020, ext | raise);
             self.lines_dirty = true;
         }
+    }
+
+    /// One video decoder job (see `device_write`): the frame's data at
+    /// +0xC0C, the reference picture the one sent to +0xC04 last, the
+    /// result in RGB 5:6:5 at +0xC08, row by row, which the System sends to
+    /// the panel as it is (VERIFIED: the start-up logo comes out upright).
+    fn decode_video_frame(&mut self) -> bool {
+        let (data_at, out_at, ref_at) =
+            (self.latch(0xD0C0_0C0C) as usize, self.latch(0xD0C0_0C08), self.latch(0xD0C0_0C04));
+        let Some(data) = self.ram.get(data_at..(data_at + 0x8_0000).min(self.ram.len())) else {
+            self.mpeg_frames.1 += 1;
+            return false;
+        };
+        let reference = self.mpeg_pictures.iter().rev().find(|(a, _)| *a == ref_at).map(|(_, p)| p);
+        let pic = match self.mpeg.decode(data, reference) {
+            Ok(p) => p,
+            Err(_) => {
+                self.mpeg_frames.1 += 1;
+                return false;
+            }
+        };
+        self.mpeg_frames.0 += 1;
+        let (w, h) = (pic.width, pic.height);
+        for y in 0..h {
+            for x in 0..w {
+                let a = out_at as usize + 2 * (y * w + x);
+                if let Some(d) = self.ram.get_mut(a..a + 2) {
+                    d.copy_from_slice(&pic.rgb565(x, y).to_le_bytes());
+                }
+            }
+        }
+        self.mpeg_pictures.retain(|(a, _)| *a != out_at);
+        self.mpeg_pictures.push((out_at, pic));
+        if self.mpeg_pictures.len() > 8 {
+            self.mpeg_pictures.remove(0);
+        }
+        true
     }
 
     /// The screen as the player sees it, 320 x 240, as 0x00RRGGBB: the

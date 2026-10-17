@@ -359,6 +359,7 @@ fn main() {
         }
     }
     println!("\n== audio: {} samples written to the DAC", t.bus.audio.len());
+    println!("== video decoder: {} frames decoded, {} failed", t.bus.mpeg_frames.0, t.bus.mpeg_frames.1);
     println!(
         "== video: {} frames drawn by the video chip, {} sent to the panel",
         t.bus.frames_drawn, t.bus.panel_frames

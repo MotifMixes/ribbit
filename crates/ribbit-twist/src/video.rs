@@ -195,18 +195,25 @@ impl Bus {
     /// * Colour modes (PPU_setTextPlaneColorMode 0xDB34, numbered as the
     ///   sprites'): without bit 7 the palette at 2/4/6/8 bits; with it,
     ///   depth 0 16 bits (palette 9 or 0xB: ARGB 4:4:4:4), 1 RGB 5:6:5, 2
-    ///   32 bits ARGB 8:8:8:8, 3 YUV 4:2:2.
+    ///   32 bits ARGB 8:8:8:8, 3 RGB 5:6:5 too (EVIDENCE: the menu's
+    ///   videos, below; the Zippity's depth 3 is YUV).
+    /// * Bitmap mode (control bit 0): the map holds one 32-bit address per
+    ///   line of the plane, each line's pixels in a row from it. EVIDENCE:
+    ///   the Sneak Peeks station plays its videos so (control 0xAB,
+    ///   attributes 0x3003), the System copying each decoded frame into
+    ///   lines 640 bytes apart.
     ///
     /// EVIDENCE from Nom-Nom's level menu: plane 0 on (control 0xAA,
     /// attributes 0x30A2, y position 240), its map 32-bit entries, each the
     /// byte offset of a 32 x 32 tile from the base (0 for none), 16 a row,
     /// holding the game's title picture, 320 x 240, upright in ARGB 8:8:8:8
     /// with the plane's (x, y) where the player sees them on the screen
-    /// (the frame turned: `screen_to_frame`). Only register mode with the
-    /// plane neither turned nor zoomed is drawn yet.
+    /// (the frame turned: `screen_to_frame`). Register mode and bitmap
+    /// mode are drawn, the plane neither turned nor zoomed.
     fn draw_text_plane(&self, out: &mut [u16], pal: &[u32], reg: u32, base_reg: u32) {
         let control = self.latch(0xD050_000C + reg);
-        if control & 8 == 0 || control & 3 != 2 {
+        let bitmap = control & 1 != 0;
+        if control & 8 == 0 || (!bitmap && control & 2 == 0) {
             return;
         }
         let attr = self.latch(0xD050_0008 + reg);
@@ -225,14 +232,21 @@ impl Bus {
             // other positions: only 240 seen).
             let py = (y + 240).wrapping_sub(ypos) % ph;
             let row = map + (py / th) * (pw / tw) * 4;
+            let line = if bitmap { self.read_ram32(map + py * 4) } else { 0 };
+            if bitmap && line == 0 {
+                continue;
+            }
             for x in 0..crate::SCREEN_W as u32 {
                 let px = (x + xpos) % pw;
-                let entry = self.read_ram32(row + px / tw * 4);
-                if entry == 0 {
-                    continue;
-                }
-                let i = (py % th) * tw + px % tw;
-                let at = base.wrapping_add(entry);
+                let (at, i) = if bitmap {
+                    (line, px)
+                } else {
+                    let entry = self.read_ram32(row + px / tw * 4);
+                    if entry == 0 {
+                        continue;
+                    }
+                    (base.wrapping_add(entry), (py % th) * tw + px % tw)
+                };
                 let texel: Option<Texel> = if !direct {
                     let k = (pal_base + self.sprite_pixel(at, bpp, i)) as usize & 1023;
                     (pal[k] & 0x8000 == 0).then(|| (rgb555_to_565(pal[k]), 255))
@@ -243,18 +257,17 @@ impl Bus {
                             let (r, g, b) = (self.peek8(p + 1), self.peek8(p + 2), self.peek8(p + 3));
                             Some((((r >> 3) << 11 | (g >> 2) << 5 | b >> 3) as u16, self.peek8(p)))
                         }
-                        1 => Some(((self.peek8(at + i * 2) | self.peek8(at + i * 2 + 1) << 8) as u16, 255)),
+                        1 | 3 => Some(((self.peek8(at + i * 2) | self.peek8(at + i * 2 + 1) << 8) as u16, 255)),
                         0 if nibble == 9 || nibble == 0xB => {
                             let v = self.peek8(at + i * 2) | self.peek8(at + i * 2 + 1) << 8;
                             let n = |s: u32| ((v >> s) & 15) * 17;
                             Some((((n(8) >> 3) << 11 | (n(4) >> 2) << 5 | n(0) >> 3) as u16, (v >> 12) * 17))
                         }
-                        // ARGB 1:5:5:5 and YUV: not seen yet (UNVERIFIED).
-                        0 => {
+                        // ARGB 1:5:5:5: not seen yet (UNVERIFIED).
+                        _ => {
                             let v = self.peek8(at + i * 2) | self.peek8(at + i * 2 + 1) << 8;
                             Some((rgb555_to_565(v & 0x7FFF), if v & 0x8000 != 0 { 255 } else { 0 }))
                         }
-                        _ => None,
                     }
                 };
                 if let Some((c, alpha)) = texel {
