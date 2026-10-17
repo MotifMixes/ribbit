@@ -199,7 +199,11 @@ pub type LcdView = ((f32, f32, f32, f32), Display, AiSettings);
 
 pub struct Gpu {
     pub window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    /// Kept so a new surface can be made for a new window (Android takes
+    /// the window away while the app is in the background).
+    instance: wgpu::Instance,
+    /// None while detached (`detach`, `reattach`).
+    surface: Option<wgpu::Surface<'static>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -236,6 +240,10 @@ pub struct Gpu {
     pub egui: egui_wgpu::Renderer,
 }
 
+/// What `Gpu::connect` sets up: instance, surface, adapter, device, queue
+/// and the surface's configuration.
+type Connection = (wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration);
+
 impl Gpu {
     /// A GPU set up to show pictures in `window`: the platform's usual API
     /// first (or the one `WGPU_BACKEND` names: vulkan, gl, dx12, metal),
@@ -244,7 +252,7 @@ impl Gpu {
     /// then fails when the window is set up; that is tried and caught here.
     fn connect(
         window: &Arc<Window>,
-    ) -> Result<(wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration)> {
+    ) -> Result<Connection> {
         // WSL's Vulkan driver cannot keep a window going (it fails a few
         // frames in), so OpenGL comes first there.
         let wsl = cfg!(target_os = "linux")
@@ -272,7 +280,7 @@ impl Gpu {
     fn connect_with(
         window: &Arc<Window>,
         backends: wgpu::Backends,
-    ) -> Result<(wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration)> {
+    ) -> Result<Connection> {
         // (OpenGL through EGL needs the display the window is on.)
         let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()));
         desc.backends = backends;
@@ -326,11 +334,11 @@ impl Gpu {
         if let Some(e) = pollster::block_on(scope.pop()) {
             anyhow::bail!("{:?} window setup failed: {e}", adapter.get_info().backend);
         }
-        Ok((surface, adapter, device, queue, config))
+        Ok((instance, surface, adapter, device, queue, config))
     }
 
     pub fn new(window: Arc<Window>) -> Result<Self> {
-        let (surface, adapter, device, queue, config) = Self::connect(&window)?;
+        let (instance, surface, adapter, device, queue, config) = Self::connect(&window)?;
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lcd"),
@@ -491,7 +499,8 @@ impl Gpu {
         let egui = egui_wgpu::Renderer::new(&device, config.format, egui_wgpu::RendererOptions::default());
         Ok(Self {
             window,
-            surface,
+            instance,
+            surface: Some(surface),
             device,
             queue,
             config,
@@ -522,11 +531,33 @@ impl Gpu {
         })
     }
 
+    /// Lets go of the window's surface (Android: the app went to the
+    /// background and its window is going away). The device and every
+    /// texture stay, so nothing has to be uploaded again.
+    pub fn detach(&mut self) {
+        self.surface = None;
+    }
+
+    /// Shows pictures in `window` again (Android: the app came back with a
+    /// new window), on the same device.
+    pub fn reattach(&mut self, window: Arc<Window>) -> Result<()> {
+        let surface = self.instance.create_surface(window.clone()).context("creating surface")?;
+        let size = window.inner_size();
+        self.config.width = size.width.max(1);
+        self.config.height = size.height.max(1);
+        surface.configure(&self.device, &self.config);
+        self.surface = Some(surface);
+        self.window = window;
+        Ok(())
+    }
+
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         if size.width > 0 && size.height > 0 {
             self.config.width = size.width;
             self.config.height = size.height;
-            self.surface.configure(&self.device, &self.config);
+            if let Some(surface) = &self.surface {
+                surface.configure(&self.device, &self.config);
+            }
         }
     }
 
@@ -697,14 +728,18 @@ impl Gpu {
             }
         }
         use wgpu::CurrentSurfaceTexture as Cst;
-        let output = match self.surface.get_current_texture() {
+        // Detached (Android, in the background): nothing to show on.
+        let Some(surface) = &self.surface else {
+            return Ok(());
+        };
+        let output = match surface.get_current_texture() {
             Cst::Success(t) => t,
             Cst::Suboptimal(t) => {
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
                 t
             }
             Cst::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
                 return Ok(());
             }
             Cst::Timeout | Cst::Occluded => return Ok(()),

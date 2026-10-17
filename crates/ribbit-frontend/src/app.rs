@@ -2086,7 +2086,33 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.gpu.is_some() {
+        // Back from the background (Android): a new window for the GPU kept
+        // from before, with every texture still on it.
+        if let Some(gpu) = &mut self.gpu {
+            if self.egui_state.is_some() {
+                return;
+            }
+            let reattached = event_loop
+                .create_window(Window::default_attributes().with_title(APP_NAME))
+                .context("creating window")
+                .and_then(|w| gpu.reattach(Arc::new(w)));
+            match reattached {
+                Ok(()) => {
+                    self.egui_state = Some(egui_winit::State::new(
+                        self.egui_ctx.clone(),
+                        egui::ViewportId::ROOT,
+                        &gpu.window,
+                        Some(gpu.window.scale_factor() as f32),
+                        None,
+                        None,
+                    ));
+                    gpu.window.request_redraw();
+                }
+                Err(e) => {
+                    self.fatal = Some(e);
+                    event_loop.exit();
+                }
+            }
             return;
         }
         let attrs = Window::default_attributes()
@@ -2133,7 +2159,12 @@ impl ApplicationHandler for App {
             s.emu.resync();
         }
         self.save_settings();
-        self.gpu = None;
+        // Only the surface goes (the window is being taken away); the GPU
+        // and its textures (the UI's fonts, the game art) stay for when the
+        // app comes back, which used to find them gone and draw nothing.
+        if let Some(g) = &mut self.gpu {
+            g.detach();
+        }
         self.egui_state = None;
     }
 
