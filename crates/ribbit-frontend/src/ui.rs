@@ -102,6 +102,8 @@ pub struct UiState {
     pub show_status: bool,
     /// Waiting for a key to bind to this button.
     pub capturing: Option<Button>,
+    /// A RockIt Twist action waiting for its new key.
+    pub capturing_twist: Option<crate::twist::TwistKey>,
     pub browser: Browser,
     toasts: Vec<(String, Instant)>,
     pub error: Option<Problem>,
@@ -116,6 +118,14 @@ pub struct UiState {
     /// When the library last appeared (its cards grow in from then).
     library_since: Option<Instant>,
     was_running: bool,
+    /// The update check and the releases it found.
+    pub updates: crate::updates::Updates,
+    /// The updates and patch notes window.
+    pub show_updates: bool,
+    /// The release (tag) the patch notes window opens on.
+    notes_open: Option<String>,
+    /// A newer release was announced this session (it pops up once).
+    update_announced: bool,
 }
 
 /// What the library shows.
@@ -158,6 +168,19 @@ pub fn draw(
     actions: &mut Vec<Action>,
 ) -> egui::Rect {
     let ctx = ui.ctx().clone();
+    if settings.check_for_updates && !st.updates.checked() {
+        st.updates.check(&ctx);
+    }
+    // A newer release found at start-up pops up once (not for a skipped one).
+    if !st.update_announced
+        && let Some(r) = st.updates.newer()
+    {
+        st.update_announced = true;
+        if r.tag != settings.skipped_update {
+            st.show_updates = true;
+            st.notes_open = None;
+        }
+    }
     if st.menu_visible && !info.fullscreen {
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, st, settings, info, actions));
     }
@@ -659,6 +682,13 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
             if item(ui, "Key bindings…", "") {
                 st.show_bindings = true;
             }
+            if ui
+                .checkbox(&mut settings.touch_controls, "Touch controls")
+                .on_hover_text("On-screen buttons, shown when the screen is touched; a key or controller button hides them.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
             ui.separator();
             if ui
                 .checkbox(&mut settings.zippity_on_home, "Zippity: stand on the home spot (Shift)")
@@ -676,11 +706,165 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 st.show_status = true;
             }
             ui.separator();
+            if item(ui, "Check for updates…", "") {
+                st.updates.check(ui.ctx());
+                st.show_updates = true;
+                st.notes_open = None;
+            }
+            ui.menu_button("Patch notes", |ui| patch_notes_menu(ui, st));
+            ui.separator();
             if item(ui, "About Ribbit", "") {
                 st.show_about = true;
             }
         });
+        if let Some(r) = st.updates.newer() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let text = egui::RichText::new(format!("⬆ Update to {}", r.version_text())).color(egui::Color32::WHITE);
+                if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text("See what's new and download it").clicked() {
+                    st.show_updates = true;
+                    st.notes_open = Some(r.tag);
+                }
+            });
+        }
     });
+}
+
+/// Help → Patch notes: every release, newest first; one opens its notes.
+fn patch_notes_menu(ui: &mut egui::Ui, st: &mut UiState) {
+    use crate::updates::{CURRENT, Status, parse_version};
+    match st.updates.status() {
+        Status::Done(releases) if !releases.is_empty() => {
+            let current = parse_version(CURRENT);
+            for r in releases {
+                let this = r.version.is_some() && r.version == current;
+                let label = format!(
+                    "{}{}",
+                    r.name,
+                    if this { "  (this version)" } else if r.prerelease { "  (pre-release)" } else { "" }
+                );
+                if item(ui, &label, &r.date) {
+                    st.show_updates = true;
+                    st.notes_open = Some(r.tag);
+                }
+            }
+        }
+        Status::Done(_) => {
+            ui.label("No releases published yet.");
+        }
+        Status::Checking => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading…");
+            });
+        }
+        Status::NotChecked | Status::Failed(_) => {
+            if item(ui, "Load patch notes from GitHub", "") {
+                st.updates.check(ui.ctx());
+                st.show_updates = true;
+                st.notes_open = None;
+            }
+        }
+    }
+}
+
+/// The updates window: whether a newer release is out, and the patch notes
+/// of every release.
+fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, actions: &mut Vec<Action>) {
+    use crate::updates::{CURRENT, REPO, Status, long_date, notes_ui, parse_version};
+    let mut open = st.show_updates;
+    let mut close = false;
+    egui::Window::new("Updates and patch notes")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(520.0)
+        .show(ctx, |ui| {
+            let status = st.updates.status();
+            let newer = st.updates.newer();
+            match (&status, &newer) {
+                (Status::Checking, _) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking for updates…");
+                    });
+                }
+                (Status::Failed(why), _) => {
+                    ui.label(format!("Couldn't check for updates: {why}."));
+                    if ui.button("Try again").clicked() {
+                        st.updates.check(ctx);
+                    }
+                }
+                (Status::Done(_), Some(r)) => {
+                    ui.heading(format!("Ribbit {} is available", r.version_text()));
+                    ui.label(format!("You have version {CURRENT}. Released {}.", long_date(&r.date)));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let download = egui::RichText::new("Download").color(egui::Color32::WHITE);
+                        if ui.add(egui::Button::new(download).fill(ACCENT)).clicked() {
+                            ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                        }
+                        if ui.button("Skip this version").on_hover_text("Don't announce it at start-up again").clicked() {
+                            settings.skipped_update = r.tag.clone();
+                            actions.push(Action::SettingsChanged);
+                            close = true;
+                        }
+                        if ui.button("Later").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                (Status::Done(_), None) => {
+                    ui.label(format!("✔ You have the latest version ({CURRENT})."));
+                }
+                (Status::NotChecked, _) => {
+                    if ui.button("Check for updates").clicked() {
+                        st.updates.check(ctx);
+                    }
+                }
+            }
+            if ui.checkbox(&mut settings.check_for_updates, "Check for updates when Ribbit starts").changed() {
+                actions.push(Action::SettingsChanged);
+            }
+            let Status::Done(releases) = status else { return };
+            ui.separator();
+            ui.label(egui::RichText::new("Patch notes").strong().size(16.0));
+            let current = parse_version(CURRENT);
+            let focus = st.notes_open.take();
+            egui::ScrollArea::vertical().max_height(380.0).auto_shrink([false, true]).show(ui, |ui| {
+                for r in &releases {
+                    let this = r.version.is_some() && r.version == current;
+                    let is_new = r.version.zip(current).is_some_and(|(v, c)| v > c);
+                    let mut title = format!("{}  ·  {}", r.name, long_date(&r.date));
+                    if this {
+                        title.push_str("  (this version)");
+                    } else if is_new {
+                        title.push_str("  (new)");
+                    } else if r.prerelease {
+                        title.push_str("  (pre-release)");
+                    }
+                    let mut header = egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+                        .id_salt(("release", &r.tag))
+                        .default_open(is_new || (this && newer.is_none()));
+                    if let Some(f) = &focus {
+                        header = header.open(Some(*f == r.tag));
+                    }
+                    let resp = header.show(ui, |ui| {
+                        notes_ui(ui, &r.notes);
+                        if ui.link("Open on GitHub").clicked() {
+                            ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                        }
+                    });
+                    if focus.as_ref() == Some(&r.tag) {
+                        resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            if ui.link(format!("All releases: github.com/{REPO}/releases")).clicked() {
+                ctx.open_url(egui::OpenUrl::new_tab(format!("https://github.com/{REPO}/releases")));
+            }
+        });
+    st.show_updates = open && !close;
 }
 
 fn status_bar(ui: &mut egui::Ui, info: &Info) {
@@ -1323,10 +1507,36 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
             st.capturing = None;
             actions.push(Action::SettingsChanged);
         }
+        ui.separator();
+        egui::CollapsingHeader::new("RockIt Twist keys").show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                egui::Grid::new("twist-bindings").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                    for t in crate::twist::actions() {
+                        ui.label(crate::twist::action_label(t));
+                        let label = if st.capturing_twist == Some(t) {
+                            "press a key…".to_string()
+                        } else {
+                            crate::twist::keys_for(t)
+                        };
+                        if ui.add(egui::Button::new(label).min_size([110.0, 0.0].into())).clicked() {
+                            st.capturing_twist = Some(t);
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+            if ui.button("Restore RockIt Twist defaults").clicked() {
+                settings.twist_keys.clear();
+                crate::twist::set_bindings(&settings.twist_keys);
+                st.capturing_twist = None;
+                actions.push(Action::SettingsChanged);
+            }
+        });
     });
     st.show_bindings = open;
     if !open {
         st.capturing = None;
+        st.capturing_twist = None;
     }
 
     egui::Window::new("Controls").open(&mut st.show_controls).collapsible(false).resizable(false).show(ctx, |ui| {
@@ -1408,6 +1618,8 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
             }
         });
     });
+
+    updates_window(ctx, st, settings, actions);
 
     egui::Window::new("About Ribbit").open(&mut st.show_about).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.heading("🐸 Ribbit");

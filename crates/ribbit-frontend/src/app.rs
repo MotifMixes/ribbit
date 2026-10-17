@@ -126,6 +126,10 @@ pub struct App {
     cursor: Option<(f64, f64)>,
     mouse_down: bool,
     finger: Option<(u64, (f64, f64))>,
+    /// The on-screen touch controls, and the game area they were laid out
+    /// in last frame (points).
+    touch_pad: crate::touch_pad::TouchPad,
+    touch_area: egui::Rect,
     lcd_px: (f32, f32, f32, f32),
     /// Seconds until the idle power-off, in its last minute (shown).
     idle_left: Option<u32>,
@@ -170,6 +174,7 @@ impl App {
         let settings_path = opts.data_dir.join("settings.toml");
         let opts_data_dir = opts.data_dir.clone();
         let mut settings = Settings::load(&settings_path);
+        crate::twist::set_bindings(&settings.twist_keys);
         if let Some(f) = &opts.firmware {
             settings.bios = Some(f.clone());
         }
@@ -210,6 +215,8 @@ impl App {
             cursor: None,
             mouse_down: false,
             finger: None,
+            touch_pad: crate::touch_pad::TouchPad::new(),
+            touch_area: egui::Rect::NOTHING,
             lcd_px: (0.0, 0.0, 0.0, 0.0),
             idle_left: None,
             fit_window: 0,
@@ -732,6 +739,86 @@ impl App {
         }
     }
 
+    /// The touch controls for the running console, when they show (not with
+    /// the console view, whose own controls take touches).
+    fn touch_pads(&self) -> Option<Vec<crate::touch_pad::Pad>> {
+        if !self.settings.touch_controls || !self.touch_pad.visible || self.view_layout().is_some() {
+            return None;
+        }
+        if !self.touch_area.is_positive() {
+            return None;
+        }
+        Some(crate::touch_pad::layout(self.current_hardware()?, self.touch_area))
+    }
+
+    /// A touch control pressed or let go.
+    fn touch_target(&mut self, target: Target, down: bool) {
+        match target {
+            Target::Leapster(b) => self.press(Source::Touch, b, down),
+            Target::Twist(b) => {
+                if let Some(t) = &mut self.twist {
+                    t.controls.set(ribbit_twist::input::Source::Pointer, b, down);
+                }
+            }
+        }
+    }
+
+    /// A key or controller button was used: the touch controls go away
+    /// (until the screen is touched again), letting go of what they held.
+    fn hide_touch_pad(&mut self) {
+        if !self.touch_pad.visible {
+            return;
+        }
+        self.touch_pad.visible = false;
+        for t in self.touch_pad.release_all() {
+            self.touch_target(t, false);
+        }
+    }
+
+    /// A finger on the window: the touch controls' when it is on them
+    /// (true), otherwise the stylus's.
+    fn touch_controls_event(&mut self, t: &winit::event::Touch) -> bool {
+        if self.settings.touch_controls && t.phase == TouchPhase::Started {
+            self.touch_pad.visible = true;
+        }
+        let Some(pads) = self.touch_pads() else {
+            return false;
+        };
+        let ppp = self.egui_ctx.pixels_per_point();
+        let p = egui::pos2(t.location.x as f32 / ppp, t.location.y as f32 / ppp);
+        match t.phase {
+            TouchPhase::Started if !self.ui_at((t.location.x, t.location.y)) => {
+                let (taken, target) = self.touch_pad.down(&pads, t.id, p);
+                if let Some(target) = target {
+                    self.touch_target(target, true);
+                }
+                taken
+            }
+            TouchPhase::Moved => match self.touch_pad.moved(&pads, t.id, p) {
+                Some((off, on)) => {
+                    if let Some(off) = off {
+                        self.touch_target(off, false);
+                    }
+                    if let Some(on) = on {
+                        self.touch_target(on, true);
+                    }
+                    true
+                }
+                None => false,
+            },
+            TouchPhase::Ended | TouchPhase::Cancelled => match self.touch_pad.up(t.id) {
+                Some(held) => {
+                    if let Some(held) = held {
+                        self.touch_target(held, false);
+                    }
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
     /// What the console view's controls did.
     fn apply_view_events(&mut self, events: Vec<ViewEvent>) {
         use ribbit_twist::input::Source as TwistSource;
@@ -1112,10 +1199,11 @@ impl App {
     }
 
     fn state_path(&self, slot: u8) -> Option<PathBuf> {
-        let key = match (&self.session, &self.zippity) {
-            (Some(s), _) => s.state_key.clone(),
-            (None, Some(_)) => "zippity".to_string(),
-            (None, None) => return None,
+        let key = match (&self.session, &self.zippity, &self.twist) {
+            (Some(s), _, _) => s.state_key.clone(),
+            (None, Some(_), _) => "zippity".to_string(),
+            (None, None, Some(t)) if t.machine.is_some() => "rockit-twist".to_string(),
+            _ => return None,
         };
         Some(self.opts.data_dir.join("states").join(format!("{key}-slot{slot}.state")))
     }
@@ -1140,10 +1228,15 @@ impl App {
         let Some(path) = self.state_path(slot) else {
             return;
         };
-        let bytes = match (&self.session, &self.zippity) {
-            (Some(s), _) => s.emu.lock().save_state(),
-            (None, Some(z)) => z.save_state(),
-            (None, None) => return,
+        let bytes = match (&self.session, &self.zippity, &self.twist) {
+            (Some(s), _, _) => s.emu.lock().save_state(),
+            (None, Some(z), _) => z.save_state(),
+            (None, None, Some(t)) => match t.machine.as_ref().map(|m| m.save_state()) {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => return self.ui.problem("Couldn't save the state", "The RockIt Twist didn't answer.", e),
+                None => return,
+            },
+            (None, None, None) => return,
         };
         let result = (|| -> Result<()> {
             std::fs::create_dir_all(path.parent().unwrap())?;
@@ -1168,7 +1261,11 @@ impl App {
         };
         let result = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|bytes| match &self.session {
             Some(s) => s.emu.lock().load_state(&bytes).map_err(anyhow::Error::from),
-            None => self.zippity.as_ref().map_or(Ok(()), |z| z.load_state(&bytes).map_err(anyhow::Error::msg)),
+            None => match (&self.zippity, self.twist.as_ref().and_then(|t| t.machine.as_ref())) {
+                (Some(z), _) => z.load_state(&bytes).map_err(anyhow::Error::msg),
+                (None, Some(m)) => m.load_state(bytes).map_err(anyhow::Error::msg),
+                (None, None) => Ok(()),
+            },
         });
         match result {
             Ok(()) => {
@@ -1363,6 +1460,7 @@ impl App {
                 }
             }
             self.speed_percent = t.machine.as_ref().map_or(0.0, |m| m.speed_percent());
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
         if let Some(z) = &self.zippity {
@@ -1507,6 +1605,9 @@ impl App {
     }
 
     fn key(&mut self, code: KeyCode, pressed: bool, event_loop: &ActiveEventLoop) {
+        if pressed {
+            self.hide_touch_pad();
+        }
         if let Some(b) = self.ui.capturing {
             if pressed {
                 if code != KeyCode::Escape {
@@ -1514,6 +1615,20 @@ impl App {
                     self.save_settings();
                 }
                 self.ui.capturing = None;
+            }
+            return;
+        }
+        if let Some(t) = self.ui.capturing_twist {
+            if pressed {
+                if code != KeyCode::Escape {
+                    let name = crate::settings::key_name(code);
+                    // A key does one thing: taken from any other action.
+                    self.settings.twist_keys.retain(|_, k| *k != name);
+                    self.settings.twist_keys.insert(crate::twist::action_name(t), name);
+                    crate::twist::set_bindings(&self.settings.twist_keys);
+                    self.save_settings();
+                }
+                self.ui.capturing_twist = None;
             }
             return;
         }
@@ -1570,7 +1685,8 @@ impl App {
     }
 
     /// Android gamepad buttons (winit reports them as raw key codes; the
-    /// D-pad already arrives as arrow keys).
+    /// D-pad usually arrives as arrow keys, its own codes are taken too).
+    /// The layout matches the desktop's (`gamepad`, `twist::pad_button`).
     fn android_key(&mut self, code: u32, pressed: bool) {
         use ribbit_input::Button;
         const BACK: u32 = 4;
@@ -1583,8 +1699,42 @@ impl App {
             }
             return;
         }
+        if pressed {
+            self.hide_touch_pad();
+        }
+        if let Some(t) = &mut self.twist {
+            use crate::twist::TwistKey;
+            use ribbit_twist::input::{Button as T, Rotary, Source as TwistSource};
+            let key = match code {
+                19 => TwistKey::Press(T::DpadUp),
+                20 => TwistKey::Press(T::DpadDown),
+                21 => TwistKey::Press(T::DpadLeft),
+                22 => TwistKey::Press(T::DpadRight),
+                96 | 23 => TwistKey::Press(T::Check), // BUTTON_A, DPAD_CENTER
+                97 => TwistKey::Press(T::Hint),       // BUTTON_B
+                100 => TwistKey::Press(T::Home),      // BUTTON_Y
+                99 => TwistKey::Press(T::Grid(4)),    // BUTTON_X
+                102 => TwistKey::Press(T::SwitchLeft),
+                103 => TwistKey::Press(T::SwitchRight),
+                104 => TwistKey::Turn(Rotary::Spinner, -1), // BUTTON_L2
+                105 => TwistKey::Turn(Rotary::Spinner, 1),  // BUTTON_R2
+                109 => TwistKey::Turn(Rotary::RedDial, -1), // BUTTON_SELECT
+                108 => TwistKey::Turn(Rotary::RedDial, 1),  // BUTTON_START
+                _ => return,
+            };
+            match key {
+                TwistKey::Press(b) => t.controls.set(TwistSource::Gamepad, b, pressed),
+                TwistKey::Turn(r, s) => t.controls.hold_turn(TwistSource::Gamepad, r, pressed.then_some(s)),
+                TwistKey::Swipe(_) => {}
+            }
+            return;
+        }
         let button = match code {
-            96 => Button::A,           // BUTTON_A
+            19 => Button::Up,          // DPAD_UP
+            20 => Button::Down,        // DPAD_DOWN
+            21 => Button::Left,        // DPAD_LEFT
+            22 => Button::Right,       // DPAD_RIGHT
+            96 | 23 => Button::A,      // BUTTON_A, DPAD_CENTER
             97 => Button::B,           // BUTTON_B
             99 | 100 => Button::Hint,  // BUTTON_X / BUTTON_Y
             108 => Button::Pause,      // BUTTON_START
@@ -1605,8 +1755,44 @@ impl App {
         };
         let mut events = Vec::new();
         pads.poll(|e| events.push(e));
+        if events.iter().any(|e| match e {
+            PadEvent::Raw(_, down) | PadEvent::Button(_, down) => *down,
+            PadEvent::RightStick(x, y) => *x != 0 || *y != 0,
+            PadEvent::Menu => true,
+            PadEvent::Connected(_) | PadEvent::Disconnected(_) => false,
+        }) {
+            self.hide_touch_pad();
+        }
         for e in events {
+            if let Some(t) = &mut self.twist {
+                // The RockIt Twist maps the controller itself (twist::pad_button).
+                use ribbit_twist::input::{Rotary, Source as TwistSource};
+                match e {
+                    PadEvent::Raw(b, pressed) => match crate::twist::pad_button(b) {
+                        Some(crate::twist::TwistKey::Press(button)) => t.controls.set(TwistSource::Gamepad, button, pressed),
+                        Some(crate::twist::TwistKey::Turn(r, s)) => {
+                            t.controls.hold_turn(TwistSource::Gamepad, r, pressed.then_some(s))
+                        }
+                        _ => {}
+                    },
+                    PadEvent::RightStick(x, y) => {
+                        t.controls.hold_turn(TwistSource::Gamepad, Rotary::YellowDial, (y != 0).then_some(y));
+                        t.controls.hold_turn(TwistSource::Gamepad, Rotary::GreenDial, (x != 0).then_some(x));
+                    }
+                    PadEvent::Button(..) => {}
+                    PadEvent::Menu => {
+                        self.ui.menu_visible = true;
+                        if !self.paused {
+                            self.toggle_pause();
+                        }
+                    }
+                    PadEvent::Connected(name) => self.ui.toast(format!("Controller connected: {name}")),
+                    PadEvent::Disconnected(name) => self.ui.toast(format!("Controller disconnected: {name}")),
+                }
+                continue;
+            }
             match e {
+                PadEvent::Raw(..) | PadEvent::RightStick(..) => {}
                 PadEvent::Button(b, pressed) => self.press(Source::Gamepad, b, pressed),
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
@@ -1685,6 +1871,7 @@ impl App {
         } else {
             None
         };
+        let touch_pads = self.touch_pads();
         let (Some(gpu), Some(state)) = (&mut self.gpu, &mut self.egui_state) else {
             return;
         };
@@ -1760,6 +1947,7 @@ impl App {
             },
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
+        let touch_pad = &self.touch_pad;
         let (view, held, twist) = (&mut self.console_view, &self.held, self.twist.as_ref());
         // Where the screen is inside the console view (None: the plain view).
         let mut screen = None;
@@ -1800,7 +1988,11 @@ impl App {
                 });
                 crate::twist::overlay(ui.painter(), at, tw);
             }
+            if let (true, Some(pads)) = (info.running, &touch_pads) {
+                crate::touch_pad::paint(ui.painter(), pads, touch_pad);
+            }
         });
+        self.touch_area = area;
         state.handle_platform_output(&gpu.window, out.platform_output);
         let ppp = out.pixels_per_point;
         if self.fit_window > 0 {
@@ -1946,6 +2138,9 @@ impl ApplicationHandler for App {
                 self.set_stylus(if down { self.cursor } else { None });
             }
             WindowEvent::Touch(t) => {
+                if self.touch_controls_event(&t) {
+                    return;
+                }
                 let pos = (t.location.x, t.location.y);
                 match t.phase {
                     TouchPhase::Started if self.finger.is_none() && !self.ui_at(pos) => {

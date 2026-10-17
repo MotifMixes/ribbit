@@ -313,9 +313,15 @@ the start-up logo's MP3). What differs, all VERIFIED from the System's own code:
   one tiny coefficient) is wrong. The table was fitted from six background-music waves that the packs hold both as
   ADPCM36 and as 16-bit samples (offset binary, format flags 0x3C15): decoding with it matches the 16-bit copies to
   29.9 dB. Its first five pairs are Sony XA's (0, 0), (60, 0), (115, -52), (98, -55), (122, -60).
+* **End mark inside a frame.** A wave ends at a 0xFFFF word wherever it falls, among a frame's data words too:
+  the games' waves end "ff00 ffff ffff" part way through their last frame, the next wave straight after. Read
+  on, that wave's frames come out of step and the predictors overflow: seconds of loud noise in place of a
+  short sound (VERIFIED by decoding a wave held in memory: with the mark obeyed, no sample overflows).
+* **Stopping.** A channel that stops (its end, an envelope or ramp reaching 0, or the System clearing its
+  enable bit) drops its output over about 1.5 ms instead of at once, which would click (`TAIL_FADE`).
 
-Mixed with the DAC, the output (stereo, 72 kHz) goes to the speaker in the app. Its loudness against a real unit
-is UNVERIFIED (the menu's music comes out quiet).
+The output (stereo, 72 kHz) goes to the speaker in the app; the DAC is left out for now (see `tick_sound`).
+Its loudness against a real unit is UNVERIFIED (the menu's music comes out quiet).
 
 **Next steps.** The remaining text-plane modes (turned, zoomed, attribute maps); playing through the other built-in
 games and the packs; the DAC sample format; a small box drawn at the top of the screen in some games (from a sprite
@@ -388,3 +394,35 @@ UNVERIFIED: not tried yet.
 
 These keys apply only while a RockIt Twist session is open, so Tab is Hint there instead of fast-forward; the
 Leapster's keys and shortcuts are unchanged. Escape, F1, F5, F7, F9-F12, Ctrl+O and Ctrl+R keep their usual jobs.
+Every RockIt Twist key can be changed: Input → Key bindings…, "RockIt Twist keys" (a key given to an action stops
+doing what it did before; "Restore RockIt Twist defaults" undoes them all).
+
+**Game controller:** D-pad or left stick = D-pad, A = check mark, B = Hint, Y = Home, X = grid button 5 (the
+middle), LB / RB = Switch left / right, LT / RT = Spinner left / right, right stick up / down = yellow dial, left /
+right = green dial, Back / Start = red dial down / up, Guide = Ribbit's menu.
+
+**Save states:** F5 saves and F9 loads (slot 1; File menu for the other slots), as for the Leapster. A state holds
+the whole console except its storage's base image, so it loads only into a RockIt Twist started with the same
+system packages and content.
+
+**Sound level:** the sound unit's mix is raised 4 times, its peaks eased in rather than clipped (`LOUDNESS` in
+`crates/ribbit-frontend/src/twist.rs`), then the app's volume applies. How loud a real unit is is UNVERIFIED.
+
+## Open work (end of 2026-10-17)
+
+**Sound gaps when the console is busy.** The app's log (`ribbit::audio` "audio ran dry", `ribbit::twist` "fell
+0.25 s behind") shows short dropouts in heavy stretches: once at about 65% of real speed, 4 gaps in 5 s. The
+emulator averages about 2.4 times real speed, but some half-seconds run at 50-75% (seen at 16, 28, 32, 36, 40 and
+61 s of the scripted run). That is real firmware work (FAT code at 0x46300-0x47A00 while files are listed, deleted
+and written; 2424 sector writes at 15.5 s), not a wait we could skip; the interpreter runs 60-85 M instructions/s
+there. The sound queue holds 0.1 s, so it runs dry. Two ways on:
+1. A larger sound queue for the RockIt Twist (0.3-0.5 s): quick, but the sound would trail the picture by as much.
+2. A faster interpreter (aim: twice as fast; a decoded-instruction cache): no delay, a bigger job.
+
+Tools for it: `twistrun` with `RIBBIT_SPEED=1` (or `all`) prints the slow half-seconds; `RIBBIT_SAVE_STATE` /
+`RIBBIT_LOAD_STATE` time one stretch again and again; `examples/cpubench.rs` measures the bare interpreter.
+Windows timings are noisy (pin to a P-core); for a profile, build in WSL with debug info and use `perf`.
+
+**Fixed that day:** the "farts": ADPCM36 waves ending part way through a frame were read on into the next wave
+(see "Sound"); stopped channels now fade instead of clicking; the register map's hasher and per-instruction checks
+made cheaper (about 7% in heavy stretches).

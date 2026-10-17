@@ -9,6 +9,7 @@ use crate::audio_out::{AudioOut, AudioSink};
 use crate::library::{Art, Family, Game};
 use ribbit_twist::input::{Button, Controls, Rotary, Source, Step};
 use ribbit_twist::package::{self, Kind};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -73,35 +74,128 @@ pub const KEYS: &[(KeyCode, TwistKey)] = &[
     (KeyCode::Minus, TwistKey::Press(Button::VolumeDown)),
 ];
 
+/// The player's own keys (`Settings::twist_keys`): action name (`action_name`)
+/// to key name. An action given a key here uses only that key; the key no
+/// longer does what it did by default.
+static BINDINGS: std::sync::RwLock<BTreeMap<String, String>> = std::sync::RwLock::new(BTreeMap::new());
+
+/// Sets the player's keys (from the settings).
+pub fn set_bindings(b: &BTreeMap<String, String>) {
+    *BINDINGS.write().unwrap() = b.clone();
+}
+
+/// An action's name in the settings file ("Press(DpadUp)", "Turn(YellowDial, 1)").
+pub fn action_name(t: TwistKey) -> String {
+    format!("{t:?}")
+}
+
+/// The actions keys can be given, in the bindings dialog's order.
+pub fn actions() -> Vec<TwistKey> {
+    let mut v: Vec<TwistKey> = Vec::new();
+    for &(_, t) in KEYS {
+        if !v.contains(&t) {
+            v.push(t);
+        }
+    }
+    v
+}
+
+/// What an action is called in the bindings dialog.
+pub fn action_label(t: TwistKey) -> String {
+    match t {
+        TwistKey::Press(b) => match b {
+            Button::Grid(n) => format!("Grid button {}", n + 1),
+            Button::DpadUp => "D-pad up".into(),
+            Button::DpadDown => "D-pad down".into(),
+            Button::DpadLeft => "D-pad left".into(),
+            Button::DpadRight => "D-pad right".into(),
+            Button::SwitchLeft => "Switch left".into(),
+            Button::SwitchRight => "Switch right".into(),
+            Button::Check => "Check mark".into(),
+            Button::VolumeUp => "Volume up".into(),
+            Button::VolumeDown => "Volume down".into(),
+            b => format!("{b:?}"),
+        },
+        TwistKey::Turn(r, s) => match r {
+            Rotary::Spinner => format!("Spinner {}", if s > 0 { "right" } else { "left" }),
+            r => format!("{} {}", r.label(), if s > 0 { "up" } else { "down" }),
+        },
+        TwistKey::Swipe(up) => format!("Slider swipe {}", if up { "up" } else { "down" }),
+    }
+}
+
+/// Every (key name, action), the player's keys first.
+fn keymap() -> Vec<(String, TwistKey)> {
+    let b = BINDINGS.read().unwrap();
+    let mut out: Vec<(String, TwistKey)> = Vec::new();
+    for t in actions() {
+        if let Some(k) = b.get(&action_name(t)) {
+            out.push((k.clone(), t));
+        }
+    }
+    for &(k, t) in KEYS {
+        let name = crate::settings::key_name(k);
+        if !b.contains_key(&action_name(t)) && !out.iter().any(|(c, _)| *c == name) {
+            out.push((name, t));
+        }
+    }
+    out
+}
+
 pub fn key(code: KeyCode) -> Option<TwistKey> {
-    KEYS.iter().find(|(k, _)| *k == code).map(|(_, t)| *t)
+    let name = crate::settings::key_name(code);
+    keymap().into_iter().find(|(k, _)| *k == name).map(|(_, t)| t)
 }
 
 /// The first key for an action, as its keycap shows it.
 pub fn cap_for(what: TwistKey) -> Option<String> {
-    KEYS.iter().find(|(_, t)| *t == what).map(|(k, _)| crate::settings::cap_text(&format!("{k:?}")))
+    keymap().into_iter().find(|(_, t)| *t == what).map(|(k, _)| crate::settings::cap_text(&k))
 }
 
 /// The keys for a control, for tooltips ("W / Up").
 pub fn keys_for(what: TwistKey) -> String {
-    let names: Vec<String> = KEYS.iter().filter(|(_, t)| *t == what).map(|(k, _)| key_label(*k)).collect();
+    let names: Vec<String> = keymap().into_iter().filter(|(_, t)| *t == what).map(|(k, _)| key_label(&k)).collect();
     names.join(" / ")
 }
 
-fn key_label(k: KeyCode) -> String {
-    match k {
-        KeyCode::NumpadMultiply => "Num *".into(),
-        KeyCode::NumpadSubtract => "Num -".into(),
-        KeyCode::NumpadEnter => "Num Enter".into(),
-        KeyCode::Equal => "=".into(),
-        KeyCode::Minus => "-".into(),
-        k => {
-            let n = format!("{k:?}");
-            if let Some(d) = n.strip_prefix("Numpad") {
-                return format!("Num {d}");
-            }
-            crate::settings::key_label(&n)
-        }
+/// A game controller on the RockIt Twist (the app's `gamepad` events):
+/// D-pad or left stick = D-pad, A = check mark, B = Hint, Y = Home, X = grid
+/// button 5 (the middle), LB / RB = Switch left / right, LT / RT = Spinner
+/// left / right, right stick up / down = yellow dial, left / right = green
+/// dial, Back / Start = red dial down / up.
+#[cfg(not(target_os = "android"))]
+pub fn pad_button(b: gilrs::Button) -> Option<TwistKey> {
+    use gilrs::Button as P;
+    Some(match b {
+        P::DPadUp => TwistKey::Press(Button::DpadUp),
+        P::DPadDown => TwistKey::Press(Button::DpadDown),
+        P::DPadLeft => TwistKey::Press(Button::DpadLeft),
+        P::DPadRight => TwistKey::Press(Button::DpadRight),
+        P::South => TwistKey::Press(Button::Check),
+        P::East => TwistKey::Press(Button::Hint),
+        P::North => TwistKey::Press(Button::Home),
+        P::West => TwistKey::Press(Button::Grid(4)),
+        P::LeftTrigger => TwistKey::Press(Button::SwitchLeft),
+        P::RightTrigger => TwistKey::Press(Button::SwitchRight),
+        P::LeftTrigger2 => TwistKey::Turn(Rotary::Spinner, -1),
+        P::RightTrigger2 => TwistKey::Turn(Rotary::Spinner, 1),
+        P::Select => TwistKey::Turn(Rotary::RedDial, -1),
+        P::Start => TwistKey::Turn(Rotary::RedDial, 1),
+        _ => return None,
+    })
+}
+
+fn key_label(n: &str) -> String {
+    match n {
+        "NumpadMultiply" => "Num *".into(),
+        "NumpadSubtract" => "Num -".into(),
+        "NumpadEnter" => "Num Enter".into(),
+        "Equal" => "=".into(),
+        "Minus" => "-".into(),
+        n => match n.strip_prefix("Numpad") {
+            Some(d) => format!("Num {d}"),
+            None => crate::settings::key_label(n),
+        },
     }
 }
 
@@ -311,12 +405,16 @@ struct Shared {
     sink: Mutex<Option<AudioSink>>,
     /// USB news for the UI.
     usb_news: Mutex<Option<UsbNews>>,
+    /// Requests from the UI, taken by the console's thread.
+    ops: Mutex<std::sync::mpsc::Receiver<Op>>,
     gain: AtomicU32,
 }
 
 /// The console running on its own thread, in real time.
 pub struct Machine {
     shared: Arc<Shared>,
+    /// Requests for the console's thread (save states).
+    ops: std::sync::mpsc::Sender<Op>,
     thread: Option<std::thread::JoinHandle<()>>,
     /// For the speed shown: when it was last measured, the console's time
     /// then, and the figure (tenths of a percent).
@@ -336,6 +434,7 @@ impl Machine {
         save: Option<PathBuf>,
         usb: bool,
     ) -> Self {
+        let (ops, ops_rx) = std::sync::mpsc::channel();
         let shared = Arc::new(Shared {
             screen: Mutex::new(vec![0; ribbit_twist::SCREEN_W * ribbit_twist::SCREEN_H]),
             running: AtomicBool::new(true),
@@ -347,6 +446,7 @@ impl Machine {
             error: Mutex::new(None),
             sink: Mutex::new(sink),
             usb_news: Mutex::new(None),
+            ops: Mutex::new(ops_rx),
             gain: AtomicU32::new(1f32.to_bits()),
         });
         let s = shared.clone();
@@ -358,7 +458,7 @@ impl Machine {
                 }
             })
             .ok();
-        Self { shared, thread, speed_from: Mutex::new((Instant::now(), 0)), speed_shown: AtomicU64::new(0) }
+        Self { shared, ops, thread, speed_from: Mutex::new((Instant::now(), 0)), speed_shown: AtomicU64::new(0) }
     }
 
     fn run(p: &SystemPackages, content: Option<&Path>, save: Option<&Path>, usb: bool, s: &Shared) -> anyhow::Result<()> {
@@ -416,6 +516,7 @@ impl Machine {
                 continue;
             }
             if due - t.bus.now > machine::CLOCK / 4 {
+                tracing::info!(target: "ribbit::twist", "the console fell 0.25 s behind real time; it goes on from now");
                 origin = Instant::now();
                 origin_now = t.bus.now;
             }
@@ -428,6 +529,29 @@ impl Machine {
             t.bus.slider_pads = s.slider_pads.load(Ordering::Relaxed) as u8;
             if let Some(srv) = &server {
                 Self::run_usb(srv, &mut t, s);
+            }
+            while let Ok(op) = s.ops.lock().unwrap().try_recv() {
+                match op {
+                    Op::Save(reply) => {
+                        let mut state = key.to_le_bytes().to_vec();
+                        state.extend(t.save_state());
+                        let _ = reply.send(state);
+                    }
+                    Op::Load(state, reply) => {
+                        let result = if state.get(..8).is_some_and(|k| k == key.to_le_bytes()) {
+                            t.load_state(&state[8..])
+                        } else {
+                            Err("this state is from a RockIt Twist with other content".into())
+                        };
+                        if result.is_ok() {
+                            // Its clock starts from the state's time.
+                            origin = Instant::now();
+                            origin_now = t.bus.now;
+                            shown = u64::MAX;
+                        }
+                        let _ = reply.send(result);
+                    }
+                }
             }
             t.run(slice);
             if let Some(srv) = &server {
@@ -443,6 +567,12 @@ impl Machine {
             // The speaker: the sound unit with the DAC (`ribbit_twist::sound`).
             mono.clear();
             resample.push(&std::mem::take(&mut t.bus.sound), &mut mono);
+            // A comfortable level: the sound unit's mix comes out quiet (its
+            // loudness on a real unit is UNVERIFIED), so it is raised, peaks
+            // eased in rather than clipped.
+            for v in &mut mono {
+                *v = (32767.0 * (*v as f32 * LOUDNESS / 32767.0).tanh()) as i16;
+            }
             let gain = f32::from_bits(s.gain.load(Ordering::Relaxed));
             if let Some(sink) = s.sink.lock().unwrap().as_mut() {
                 sink.push_32k(&mono, gain);
@@ -519,6 +649,20 @@ impl Machine {
         self.shared.usb_news.lock().unwrap().take()
     }
 
+    /// The console's state now, for a save slot.
+    pub fn save_state(&self) -> Result<Vec<u8>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.ops.send(Op::Save(tx)).map_err(|_| "the console has stopped".to_string())?;
+        rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "the console didn't answer".to_string())
+    }
+
+    /// Restores a state from `save_state`.
+    pub fn load_state(&self, state: Vec<u8>) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.ops.send(Op::Load(state, tx)).map_err(|_| "the console has stopped".to_string())?;
+        rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "the console didn't answer".to_string())?
+    }
+
     /// The volume (0 mutes).
     pub fn set_gain(&self, gain: f32) {
         self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
@@ -545,6 +689,15 @@ impl Drop for Machine {
         }
     }
 }
+
+/// A request for the console's thread.
+enum Op {
+    Save(std::sync::mpsc::Sender<Vec<u8>>),
+    Load(Vec<u8>, std::sync::mpsc::Sender<Result<(), String>>),
+}
+
+/// How much the sound unit's mix is raised before the app's own volume.
+const LOUDNESS: f32 = 4.0;
 
 /// What the UI hears about the USB link.
 pub enum UsbNews {

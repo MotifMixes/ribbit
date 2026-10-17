@@ -1,32 +1,38 @@
-# Game compatibility
+# Compatibility
 
-How far each game gets in Ribbit. Update this file whenever a game is tested.
+How far each game gets in Ribbit, for every console it emulates. Update this file whenever a game is tested.
+Last updated 2026-10-17 (Ribbit 1.1.0 plus the work in progress on `main`).
+
+## Consoles at a glance
+
+| Console | Year | State in Ribbit | Best result so far | Section |
+|---|---|---|---|---|
+| Leapster (original handheld) | 2003 | Main target | SpongeBob: Saves the Day **Playable**; 33 more games reach their own menus | [Leapster](#leapster-original-handheld) |
+| Leapster L-MAX | 2005 | Experimental | Every tested game shows the same screens as on the original | [Leapster 2 and L-MAX](#leapster-2-and-l-max-experimental) |
+| Leapster TV | 2005 | Experimental | SpongeBob reaches its intro | [Leapster TV](#leapster-tv-experimental) |
+| Leapster 2 | 2008 | Experimental | Every tested game shows the same screens as on the original; touch works | [Leapster 2 and L-MAX](#leapster-2-and-l-max-experimental) |
+| Zippity | 2009 | Working | Built-in Mickey Says **Playable**; two cartridges reach their game menus | [Zippity](#zippity) |
+| RockIt Twist | 2019 | Early emulation | Built-in Nom-Nom **Playable**, videos play | [RockIt Twist](#rockit-twist-early-emulation) |
+
+You need your own console's firmware (BIOS or system dump) and your own game dumps for every console. None are
+included.
 
 ## Status levels
 
 | Status | Meaning |
 |---|---|
-| **Perfect** | Plays start to finish with no known problems (graphics, sound, touch, saves) |
+| **Perfect** | Plays start to finish with no known problems (graphics, sound, controls, saves) |
 | **Playable** | Can be played through; minor problems listed in the notes |
 | **In-game** | Reaches gameplay, but problems stop it being played through |
 | **Menus** | The game's own screens run (logo, region or profile menus); gameplay not yet reached |
-| **Boots** | The BIOS starts the game, which stops on a loading or blank screen |
-| **Nothing** | The BIOS does not accept the cartridge |
+| **Boots** | The console starts the game, which stops on a loading or blank screen |
+| **Nothing** | The console does not accept the game |
 | **Untested** | Not tried yet |
 
-"Menus" from the automated check means the game was running its own code but was waiting for
-input (the check presses nothing). Most such games may well go further when played.
+"Menus" from an automated check means the game was running its own code but was waiting for input (the check
+presses nothing). Most such games will probably go further when played by hand; they simply have not been yet.
 
-## RockIt Twist
-
-Early emulation. Game packs (.lf3) are encrypted and are not run. From the system packages (Bootloader, Base,
-Firmware-Bulk), the console's own firmware boots to its "Device Error" screen, which a unit shows when LeapFrog
-Connect has not installed the menu. With unpacked content imported (docs/rockit-twist.md), the menu runs and the
-built-in Arcade game **Nom-Nom** is **Playable** (title screen, level menu, the game, with sound), and the Sneak
-Peeks station plays its videos. Albert's Escape and a portrait-mode Arcade game start (not played through); the
-packs are untested (2026-10-17).
-
-## Results
+## Leapster (original handheld)
 
 BIOS: US v2.1 (152-11265). Automated check: 70 s from power-on, no input, with saved
 calibration (Ribbit 1.0.0, 2026-10-15). Played: tested by hand. Every dump below matches MAME's
@@ -72,16 +78,7 @@ software list. Region pickers move on by themselves after about 30 s.
 Images whose first bytes are not "LEAP" are later cartridges with a different header layout;
 the BIOS boots them all the same.
 
-## Leapster TV (EXPERIMENTAL)
-
-BIOS: Leapster TV Universal v2.1.11 (152-11594). The game picture comes from the emulated TV chip and the
-controller (buttons and pen) is Ribbit's model of the TV controller; see hardware-research.md, "Leapster TV".
-
-| Game | CRC32 | Status | Checked | Notes |
-|---|---|---|---|---|
-| SpongeBob SquarePants: Saves the Day (USA, alt) | 0f2ad725 | Menus | automated 2026-10-15 | LEAPSTER TV logo, title, name entry by stylus (letters and OK work), then the intro, full speed |
-
-## Leapster 2 and L-MAX (EXPERIMENTAL)
+## Leapster 2 and L-MAX (experimental)
 
 Automated check 2026-10-16: 60 s from power-on, no input, straps 0x63FF_FFFF (no calibration screen), each game on
 each BIOS, compared screen by screen with the original (US v2.1). "Same" = the same sequence of the game's own
@@ -102,3 +99,57 @@ typed, OK accepted).
 
 Not covered by the automated check: gameplay beyond the first screens, sound on the Leapster 2's PCM path (the
 host hears it averaged to 8 kHz), the L-MAX TV output, SD cards, LeapFrog Connect (USB).
+
+## Leapster TV (experimental)
+
+BIOS: Leapster TV Universal v2.1.11 (152-11594). The game picture comes from the emulated TV chip and the
+controller (buttons and pen) is Ribbit's model of the TV controller; see hardware-research.md, "Leapster TV".
+
+| Game | CRC32 | Status | Checked | Notes |
+|---|---|---|---|---|
+| SpongeBob SquarePants: Saves the Day (USA, alt) | 0f2ad725 | Menus | automated 2026-10-15 | LEAPSTER TV logo, title, name entry by stylus (letters and OK work), then the intro, full speed |
+
+## Zippity
+
+System dump: US system NAND (CRC32 16248b63). Controls are the dance mat, bopper (joystick) and feet keys; see
+[zippity.md](zippity.md), "In the Ribbit app".
+
+| Game | Kind | Status | Checked | Notes |
+|---|---|---|---|---|
+| System menu (Mickey's clubhouse, player sign-in) | Built-in | **Playable** | played 2026-10-16 | Start-up screens timed against a real unit. Sign In names appear about 1 s late and blink without fading |
+| Mickey Says | Built-in | **Playable** | played 2026-10-16 | Scores rise as on a real unit. Only some of its command types checked |
+| Goofy's Fancy Dancing | Built-in | Untested | | Listed on the menu |
+| Disney Princess | Cartridge | Menus | 2026-10-16 | Boots from the cartridge, mounts its file system, reaches the game menu (Ariel's Fireworks Display, Cinderella's Dress Dash, Snow White's Dancing Delight) |
+| The Princess and the Frog | Cartridge | Menus | 2026-10-16 | Reaches the game menu. Some backgrounds use a colour format whose U/V order is unverified |
+| Other cartridges | Cartridge | Untested | | No other dumps tried yet |
+
+## RockIt Twist (early emulation)
+
+System packages: Bootloader, Base and Firmware-Bulk (`.lfp`). Without installed content the firmware shows its own
+"Device Error" screen, which is correct: a real unit shows it too until LeapFrog Connect installs the menu. Games
+run only from **unpacked** content (File → Import RockIt Twist games). Encrypted `.lf3` game packs are not run, and
+Ribbit will not decrypt them. See [rockit-twist.md](rockit-twist.md).
+
+| Game | Kind | Status | Checked | Notes |
+|---|---|---|---|---|
+| Menu (profiles, stations) | Built-in | **Playable** | played 2026-10-17 | Profiles and progress are saved |
+| Nom-Nom (Arcade) | Built-in | **Playable** | played 2026-10-17 | Title screen, level menu, gameplay, sound |
+| Sneak Peeks (videos) | Built-in | **Playable** | played 2026-10-17 | MPEG-4 videos and the start-up logo play |
+| Music station | Built-in | Untested | | |
+| Albert's Escape | Built-in | Boots | 2026-10-17 | Starts; not played through |
+| Portrait-mode Arcade game | Built-in | Boots | 2026-10-17 | Starts in portrait; not played through |
+| Banzai Beans: Showdown | Game pack | Untested | | |
+| Banzai Beans Pet | Game pack | Untested | | |
+| Dinosaur Discoveries | Game pack | Untested | | |
+| Trolls Party Time with Poppy | Game pack | Untested | | |
+| Cookie's Sweet Treats | Game pack | Untested | | |
+| Penelope Penguin: Pet Detective | Game pack | Untested | | |
+| Animals, Animals, Animals | Game pack | Untested | | |
+| Chloe's Fashion Studio | Game pack | Untested | | |
+| Storybook Hotel | Game pack | Untested | | |
+| PJ Masks: Save the Day | Game pack | Untested | | |
+| Job Quests | Game pack | Untested | | |
+| RockIt Pets: Blast off to Space | Game pack | Untested | | |
+| Any `.lf3` pack | Encrypted pack | Nothing | | Encrypted; not supported by design |
+
+Some games draw a small box at the top of the screen that a real unit probably does not show (cause unknown).

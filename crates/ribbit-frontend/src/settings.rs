@@ -106,6 +106,17 @@ pub struct Settings {
     /// Offer the RockIt Twist on the PC's USB (a USB/IP server for
     /// usbip-win2 and LeapFrog Connect).
     pub twist_usb: bool,
+    /// The player's RockIt Twist keys: action (`twist::action_name`) to key
+    /// name; actions not here keep their default keys.
+    pub twist_keys: BTreeMap<String, String>,
+    /// Ask GitHub for a newer release when Ribbit starts.
+    pub check_for_updates: bool,
+    /// On-screen touch controls: shown when the screen is touched (from
+    /// the start on Android), hidden again by any key or controller button.
+    pub touch_controls: bool,
+    /// A release the player chose to skip ("v1.2.0"): not announced at
+    /// start-up again (Help → Check for updates still shows it).
+    pub skipped_update: String,
 }
 
 impl Default for Settings {
@@ -147,6 +158,10 @@ impl Default for Settings {
             console_view_keys: true,
             twist_content: None,
             twist_usb: false,
+            twist_keys: BTreeMap::new(),
+            check_for_updates: true,
+            touch_controls: true,
+            skipped_update: String::new(),
         }
     }
 }

@@ -101,6 +101,14 @@ fn main() {
     t.profile = true;
     // RIBBIT_BREAK=addr (hex): registers each time execution gets there.
     t.break_at = std::env::var("RIBBIT_BREAK").ok().and_then(|v| u32::from_str_radix(&v, 16).ok());
+    // RIBBIT_LOAD_STATE=file: start from a save state (RIBBIT_SAVE_STATE
+    // writes one at the end), for timing a stretch again and again.
+    if let Ok(p) = std::env::var("RIBBIT_LOAD_STATE") {
+        let state = std::fs::read(&p).unwrap_or_else(|e| panic!("reading {p}: {e}"));
+        t.load_state(&state).expect("loading the state");
+        t.profile = false;
+    }
+    let started = t.bus.now;
     let clock = std::time::Instant::now();
     // RIBBIT_FRAMES=dir: save the screen (as the panel shows it) whenever it
     // changes, checked every emulated 1/30 s.
@@ -134,6 +142,8 @@ fn main() {
             let mut pixels = vec![0u32; ribbit_twist::SCREEN_W * ribbit_twist::SCREEN_H];
             let mut last: Vec<u32> = Vec::new();
             let (mut done, mut saved) = (0u64, 0);
+            let speed_check = std::env::var("RIBBIT_SPEED").is_ok();
+            let (mut half_real, mut half_n, mut half_ins) = (0.0f64, 0, 0u64);
             let mut stop = machine::Stop::Budget;
             while done < budget {
                 // RIBBIT_PRESS=sec:mask:sec,... (mask in hex, `machine::key`
@@ -153,7 +163,27 @@ fn main() {
                         true
                     }
                 });
+                let ran = std::time::Instant::now();
                 stop = t.run(slice.min(budget - done));
+                // RIBBIT_SPEED=1: report emulated half-seconds that took
+                // longer than real ones (the app's sound would run dry).
+                if speed_check {
+                    half_real += ran.elapsed().as_secs_f64();
+                    half_n += 1;
+                    if half_n == 15 {
+                        let ins = t.cpu.instructions - half_ins;
+                        if half_real > 0.5 {
+                            println!(
+                                "slow at {secs:.1} s: {:.0}% speed, {:.0} M instructions/s",
+                                50.0 / half_real,
+                                ins as f64 / half_real / 1e6
+                            );
+                        } else if std::env::var("RIBBIT_SPEED").as_deref() == Ok("all") {
+                            println!("{secs:.1} s: {:.0}% speed, {:.0} M instructions/s", 50.0 / half_real, ins as f64 / half_real / 1e6);
+                        }
+                        (half_real, half_n, half_ins) = (0.0, 0, t.cpu.instructions);
+                    }
+                }
                 done += slice;
                 t.bus.screen(&mut pixels);
                 if pixels != last {
@@ -171,10 +201,28 @@ fn main() {
             stop
         }
     };
+    // RIBBIT_STATE_TEST=1: a save state now, loaded back, then 2 s more.
+    if let Ok(p) = std::env::var("RIBBIT_SAVE_STATE") {
+        std::fs::write(&p, t.save_state()).expect("writing the state");
+    }
+    if std::env::var("RIBBIT_STATE_TEST").is_ok() {
+        let t0 = std::time::Instant::now();
+        let state = t.save_state();
+        let saved = t0.elapsed();
+        let frames = t.bus.panel_frames;
+        t.load_state(&state).expect("loading the state");
+        t.run(2 * machine::CLOCK);
+        println!(
+            "state: {:.1} MB, saved in {:.0} ms, loaded; {} panel frames in the 2 s after",
+            state.len() as f64 / 1e6,
+            saved.as_secs_f64() * 1e3,
+            t.bus.panel_frames - frames
+        );
+    }
     println!(
-        "{stop:?} after {} instructions ({:.2} s emulated, {:.1} s real); pc {:08X} cpsr {:08X}",
+        "{stop:?} after {} instructions ({:.2} s emulated, {:.2} s real); pc {:08X} cpsr {:08X}",
         t.cpu.instructions,
-        t.bus.now as f64 / machine::CLOCK as f64,
+        (t.bus.now - started) as f64 / machine::CLOCK as f64,
         clock.elapsed().as_secs_f64(),
         t.cpu.r[15],
         t.cpu.cpsr

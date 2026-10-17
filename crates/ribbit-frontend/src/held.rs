@@ -1,5 +1,5 @@
 //! Buttons held by each input source (keyboard, the console view's
-//! controls, gamepads). A button is down while any source holds it, so
+//! controls, gamepads, the on-screen touch controls). A button is down while any source holds it, so
 //! letting go of a virtual button never releases a key still held, or the
 //! other way round.
 
@@ -10,11 +10,12 @@ pub enum Source {
     Keyboard,
     Pointer,
     Gamepad,
+    Touch,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Held {
-    masks: [u32; 3],
+    masks: [u32; 4],
 }
 
 fn bit(b: Button) -> u32 {
@@ -53,7 +54,7 @@ impl Held {
     }
 
     pub fn clear(&mut self) {
-        self.masks = [0; 3];
+        self.masks = [0; 4];
     }
 }
 

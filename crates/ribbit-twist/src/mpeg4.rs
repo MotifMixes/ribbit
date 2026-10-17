@@ -185,7 +185,7 @@ const ZIGZAG: [u8; 64] = [
 ];
 
 /// A picture in YUV 4:2:0, sized in whole macroblocks.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Picture {
     pub width: usize,
     pub height: usize,
@@ -217,7 +217,7 @@ impl Picture {
 }
 
 /// The stream's settings, from its video object layer header.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Vol {
     width: usize,
     height: usize,
@@ -226,7 +226,7 @@ struct Vol {
 }
 
 /// Decoding state kept between frames.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Decoder {
     vol: Option<Vol>,
 }

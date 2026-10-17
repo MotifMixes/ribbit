@@ -30,11 +30,15 @@ png = "0.18"
 # The frog icon: drawn from egui's own emoji font.
 ab_glyph = "0.2.32"
 epaint_default_fonts = "0.36.2"
+# Reading GitHub's release list (update check).
+serde_json = "1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 egui-winit = "0.36.2"
 rfd = "0.17"
 gilrs = "0.11"
+# The update check (HTTPS to api.github.com).
+ureq = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation"] }

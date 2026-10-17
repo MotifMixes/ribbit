@@ -22,3 +22,5 @@
 zippity/
 # Downloaded RockIt Twist packages (LeapFrog firmware and encrypted game packs).
 /leapfrog-rockit-twist-apps/
+# Flash files extracted from cartridges.
+*.swf

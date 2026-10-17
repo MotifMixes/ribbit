@@ -21,7 +21,9 @@ mod perf;
 pub mod saves;
 pub mod settings;
 mod ui;
+mod touch_pad;
 mod twist;
+mod updates;
 pub mod upscale;
 mod zippity;
 

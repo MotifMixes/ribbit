@@ -21,7 +21,7 @@ pub enum Response {
     Long([u32; 4]),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum State {
     Idle,
     Ready,
@@ -30,9 +30,13 @@ enum State {
     Tran,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Card {
-    /// Sectors as the chip holds them: the backing image, then writes.
-    image: Vec<u8>,
+    /// Sectors as the chip holds them: the backing image, then writes. (A
+    /// save state leaves the image out: it is the same at every start.)
+    #[serde(skip)]
+    pub(crate) image: Vec<u8>,
+    #[serde(with = "sectors")]
     written: HashMap<u64, Box<[u8; SECTOR]>>,
     /// Size in sectors.
     pub sectors: u64,
@@ -47,6 +51,7 @@ pub struct Card {
     writing: Option<(u64, Vec<u8>, bool)>,
     /// Sectors read and commands received (research log, kept only with
     /// `logging` on: it grows with every command).
+    #[serde(skip)]
     pub log: Vec<String>,
     pub logging: bool,
     /// The machine's time, set by the host before each command (for the log).
@@ -55,6 +60,24 @@ pub struct Card {
 
 /// A JEDEC-style CID: manufacturer 0x15, "RIBBIT" product name, serial 1.
 const CID: [u32; 4] = [0x1501_0052, 0x4942_4249, 0x5410_0000, 0x0001_0001];
+
+/// The written sectors in states: (number, bytes) pairs.
+mod sectors {
+    use super::SECTOR;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S: Serializer>(m: &HashMap<u64, Box<[u8; SECTOR]>>, s: S) -> Result<S::Ok, S::Error> {
+        let mut v: Vec<(u64, &[u8])> = m.iter().map(|(&n, d)| (n, &d[..])).collect();
+        v.sort_by_key(|e| e.0);
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<HashMap<u64, Box<[u8; SECTOR]>>, D::Error> {
+        let v: Vec<(u64, Vec<u8>)> = Deserialize::deserialize(d)?;
+        Ok(v.into_iter().filter_map(|(n, b)| Some((n, Box::new(<[u8; SECTOR]>::try_from(b.as_slice()).ok()?)))).collect())
+    }
+}
 
 impl Card {
     /// An eMMC chip of `sectors` sectors holding `image` from sector 0.

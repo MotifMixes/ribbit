@@ -237,8 +237,46 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    pub fn new(window: Arc<Window>) -> Result<Self> {
-        let instance = wgpu::Instance::default();
+    /// A GPU set up to show pictures in `window`: the platform's usual API
+    /// first (or the one `WGPU_BACKEND` names: vulkan, gl, dx12, metal),
+    /// then OpenGL. Some Linux setups (virtual machines, WSL, old drivers)
+    /// offer a Vulkan device that says it can present to the window and
+    /// then fails when the window is set up; that is tried and caught here.
+    fn connect(
+        window: &Arc<Window>,
+    ) -> Result<(wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration)> {
+        // WSL's Vulkan driver cannot keep a window going (it fails a few
+        // frames in), so OpenGL comes first there.
+        let wsl = cfg!(target_os = "linux")
+            && std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|r| r.to_lowercase().contains("microsoft"));
+        let usual = if wsl { wgpu::Backends::GL } else { wgpu::Backends::all() };
+        let first = wgpu::Backends::from_env().unwrap_or(usual);
+        let mut tried = Vec::new();
+        let mut last = anyhow::anyhow!("no GPU backend available");
+        for backends in [first, wgpu::Backends::GL] {
+            if tried.contains(&backends) {
+                continue;
+            }
+            tried.push(backends);
+            match Self::connect_with(window, backends) {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    tracing::warn!("GPU ({backends:?}) cannot show the window: {e:#}");
+                    last = e;
+                }
+            }
+        }
+        Err(last.context(format!("no GPU can draw to the window (tried {tried:?})")))
+    }
+
+    fn connect_with(
+        window: &Arc<Window>,
+        backends: wgpu::Backends,
+    ) -> Result<(wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration)> {
+        // (OpenGL through EGL needs the display the window is on.)
+        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()));
+        desc.backends = backends;
+        let instance = wgpu::Instance::new(desc);
         let surface = instance.create_surface(window.clone()).context("creating surface")?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
@@ -263,7 +301,36 @@ impl Gpu {
         if let Some(f) = caps.formats.iter().copied().find(|f| !f.is_srgb()) {
             config.format = f;
         }
+        // Set up the window and show one blank frame, catching what fails.
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(&device, &config);
+        if let wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) =
+            surface.get_current_texture()
+        {
+            let view = frame.texture.create_view(&Default::default());
+            let mut encoder = device.create_command_encoder(&Default::default());
+            drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("first frame"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            }));
+            queue.submit([encoder.finish()]);
+            queue.present(frame);
+        }
+        surface.configure(&device, &config);
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            anyhow::bail!("{:?} window setup failed: {e}", adapter.get_info().backend);
+        }
+        Ok((surface, adapter, device, queue, config))
+    }
+
+    pub fn new(window: Arc<Window>) -> Result<Self> {
+        let (surface, adapter, device, queue, config) = Self::connect(&window)?;
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lcd"),

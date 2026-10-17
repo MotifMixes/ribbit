@@ -12,6 +12,7 @@ const STICK: f32 = 0.5;
 
 pub struct Gamepads {
     gilrs: Gilrs,
+    right: (i8, i8),
     /// Pad-held state of each Leapster button, so releasing a pad button
     /// never releases a key still held on the keyboard and vice versa.
     held: [bool; Button::ALL.len()],
@@ -20,6 +21,10 @@ pub struct Gamepads {
 /// One change for the app to apply.
 pub enum PadEvent {
     Button(Button, bool),
+    /// The controller's own button (the RockIt Twist maps these itself).
+    Raw(gilrs::Button, bool),
+    /// The right stick, each axis -1, 0 or 1 (RockIt Twist dials).
+    RightStick(i8, i8),
     Menu,
     Connected(String),
     Disconnected(String),
@@ -28,7 +33,7 @@ pub enum PadEvent {
 impl Gamepads {
     pub fn open() -> Option<Self> {
         match Gilrs::new() {
-            Ok(gilrs) => Some(Self { gilrs, held: Default::default() }),
+            Ok(gilrs) => Some(Self { gilrs, right: (0, 0), held: Default::default() }),
             Err(e) => {
                 tracing::warn!(target: "ribbit::input", "no gamepad support: {e}");
                 None
@@ -45,9 +50,23 @@ impl Gamepads {
                 EventType::Disconnected => emit(PadEvent::Disconnected(name())),
                 EventType::ButtonPressed(Pad::Mode, _) => emit(PadEvent::Menu),
                 EventType::ButtonPressed(b, _) | EventType::ButtonReleased(b, _) => {
+                    let pressed = matches!(ev.event, EventType::ButtonPressed(..));
+                    emit(PadEvent::Raw(b, pressed));
                     if let Some(button) = map_button(b) {
-                        let pressed = matches!(ev.event, EventType::ButtonPressed(..));
                         self.set(button, pressed, &mut emit);
+                    }
+                }
+                EventType::AxisChanged(axis @ (Axis::RightStickX | Axis::RightStickY), v, _) => {
+                    let d = if v > STICK { 1 } else if v < -STICK { -1 } else { 0 };
+                    let mut r = self.right;
+                    if axis == Axis::RightStickX {
+                        r.0 = d;
+                    } else {
+                        r.1 = d;
+                    }
+                    if r != self.right {
+                        self.right = r;
+                        emit(PadEvent::RightStick(r.0, r.1));
                     }
                 }
                 EventType::AxisChanged(axis, v, _) => {

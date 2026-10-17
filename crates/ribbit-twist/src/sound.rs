@@ -18,7 +18,7 @@
 
 use crate::machine::{Bus, CLOCK};
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct Voice {
     pub(crate) playing: bool,
     /// The next word's address, in halfwords.
@@ -41,6 +41,10 @@ pub struct Voice {
     env_addr: u32,
     env_frame: u32,
     pub(crate) ramp_frame: u32,
+    /// What the channel put out last (left, right), faded out when it
+    /// stops (`spu_release`).
+    #[serde(skip)]
+    last_out: (i32, i32),
 }
 
 /// The sound unit's base clock: a channel plays phase * SPU_CLOCK / 2^19
@@ -78,6 +82,10 @@ const ENV_FRAMES: [u32; 16] = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096
 const RAMP_FRAMES: [u32; 8] = [13 * 4, 13 * 16, 13 * 64, 13 * 256, 13 * 1024, 13 * 4096, 13 * 8192, 13 * 8192];
 
 const CTL: u32 = 0xD040_0E00;
+
+/// A stopped channel's output fades by this much each output sample (to a
+/// third in about 1.5 ms).
+const TAIL_FADE: f32 = 0.991;
 
 impl Bus {
     fn spu_reg(&self, ch: usize, r: u32) -> u32 {
@@ -137,6 +145,9 @@ impl Bus {
                 let r5 = self.spu_reg(ch, 5);
                 self.spu_set(ch, 5, (self.spu_reg(ch, 6) & 0xFF) << 8 | (r5 & 0x7F));
             } else if !on {
+                if self.voices[ch].playing {
+                    self.spu_release(ch);
+                }
                 self.voices[ch].playing = false;
             }
         }
@@ -245,6 +256,13 @@ impl Bus {
             vo.shift = 0;
         }
         let word = self.spu_word(self.voices[ch].addr);
+        // The end mark ends a wave in the middle of a frame too (VERIFIED:
+        // the cartridge games' waves end "ff00 ffff ffff" part way through their last
+        // frame, the next wave straight after; read on, that wave's frames
+        // come out of step and overflow, seconds of loud noise).
+        if word == 0xFFFF {
+            return self.spu_wave_end(ch, tone);
+        }
         let vo = &mut self.voices[ch];
         let n = (((word >> vo.shift) & 15) as i32) << 28 >> 28;
         let (c0, c1) = ADPCM36_FILTERS[(vo.header >> 4 & 31) as usize];
@@ -268,11 +286,21 @@ impl Bus {
     /// a level (EVIDENCE: with the bit cleared it waits forever).
     fn spu_stop(&mut self, ch: usize) {
         let (bank, bit) = (ch / 16, 1u32 << (ch % 16));
+        self.spu_release(ch);
         self.voices[ch].playing = false;
         self.spu_stopped[bank] |= bit;
         let a = CTL + 0x80 * bank as u32 + 0x28;
         let v = self.latch(a);
         self.set_latch(a, v & !bit);
+    }
+
+    /// A channel stops: what it was last putting out fades away over a
+    /// couple of milliseconds instead of dropping to nothing at once (a
+    /// click; the console's speaker and filter soften it too).
+    fn spu_release(&mut self, ch: usize) {
+        let (l, r) = std::mem::take(&mut self.voices[ch].last_out);
+        self.spu_tail.0 += l as f32;
+        self.spu_tail.1 += r as f32;
     }
 
     /// One step of a channel's envelope (as on the Zippity, after MAME).
@@ -408,8 +436,10 @@ impl Bus {
             let pv = self.spu_reg(ch, 3);
             let (vol, pan) = ((pv & 0x7F) as i32, ((pv >> 8) & 0x7F) as i32);
             let (pl, pr) = if pan < 0x40 { (0x7F * vol, pan * 2 * vol) } else { ((0x7F - pan) * 2 * vol, 0x7F * vol) };
-            l += (s * pl) >> 14;
-            r += (s * pr) >> 14;
+            let out = ((s * pl) >> 14, (s * pr) >> 14);
+            self.voices[ch].last_out = out;
+            l += out.0;
+            r += out.1;
             if self.spu_ctl(bank, 0x28) & bit != 0 {
                 if self.voices[ch].ramp_frame > 0 {
                     self.voices[ch].ramp_frame -= 1;
@@ -429,6 +459,10 @@ impl Bus {
                 }
             }
         }
+        l += self.spu_tail.0 as i32;
+        r += self.spu_tail.1 as i32;
+        self.spu_tail.0 *= TAIL_FADE;
+        self.spu_tail.1 *= TAIL_FADE;
         let shift = if (self.spu_ctl(0, 0x34) >> 6) & 3 == 0 { 4 } else { 2 };
         let main = (self.spu_ctl(0, 0x04) & 0x7F) as i32;
         (((l >> shift) * main) >> 7, ((r >> shift) * main) >> 7)
@@ -448,17 +482,23 @@ impl Bus {
     }
 
     /// Runs the sound unit up to now: one output sample (into `sound`) each
-    /// CLOCK / OUTPUT_RATE cycles, with the DAC's latest sample added.
+    /// CLOCK / OUTPUT_RATE cycles.
     pub(crate) fn tick_sound(&mut self) {
+        // Called every few hundred cycles, a sample every few thousand.
+        if self.now < self.sound_next {
+            return;
+        }
         let due = (self.now as u128 * (SPU_CLOCK / 4) as u128 / CLOCK as u128) as u64;
+        self.sound_next = ((due as u128 + 1) * CLOCK as u128).div_ceil((SPU_CLOCK / 4) as u128) as u64;
         while self.sound_made < due {
             self.sound_made += 1;
             self.beat_tick();
             let (l, r) = self.spu_mix();
-            let (dl, dr) = if self.now < self.dac_hold_until { self.dac_hold } else { (0, 0) };
+            // The DAC is left out of the speaker: the start-up logo's audio
+            // path is not right yet (one buffer of undecoded data reaches it,
+            // a burst of loud noise), and nothing else uses it.
             if self.sound.len() < 1 << 24 {
-                self.sound
-                    .extend_from_slice(&[(l + dl as i32).clamp(-32768, 32767) as i16, (r + dr as i32).clamp(-32768, 32767) as i16]);
+                self.sound.extend_from_slice(&[l.clamp(-32768, 32767) as i16, r.clamp(-32768, 32767) as i16]);
             }
         }
     }
@@ -497,5 +537,33 @@ mod tests {
         assert_eq!(t.bus.read(0xD040_0E00, 4) & 8, 8, "still enabled: stopped, not paused");
         t.bus.write(0xD040_0E2C, 8, 4);
         assert_eq!(t.bus.read(0xD040_0E2C, 4) & 8, 0, "cleared by writing 1");
+    }
+
+    #[test]
+    fn an_adpcm36_wave_ends_at_a_mark_inside_a_frame() {
+        let mut t = Twist::new(&[]);
+        // A frame's header, two data words and the end mark; then another
+        // wave's loud words, which must not play.
+        let at = 0x1_0010 * 2;
+        let mut words = vec![0x0000u16, 0x1111, 0x1111, 0xFFFF];
+        words.extend([0x7777; 14]);
+        for (i, w) in words.iter().enumerate() {
+            t.bus.ram[at + 2 * i..at + 2 * i + 2].copy_from_slice(&w.to_le_bytes());
+        }
+        let ch = 0xD040_1000 + 0x40 * 3;
+        t.bus.write(ch, 0x0010, 4);
+        t.bus.write(ch + 4, 0x9041, 4); // ADPCM, one shot, address bits 1
+        t.bus.write(ch + 0xC, 0x407F, 4);
+        t.bus.write(ch + 0x14, 0x7F, 4);
+        t.bus.write(ch + 0x34, 0xBE00, 4); // ADPCM36
+        t.bus.write(0xD040_1800 + 0x40 * 3 + 0x10, 0x8000, 4);
+        t.bus.write(0xD040_0E54, 0x8, 4);
+        t.bus.write(0xD040_0E04, 0x7F, 4);
+        t.bus.write(0xD040_0E00, 0x8, 4);
+        t.bus.now = CLOCK / 200;
+        t.bus.tick_sound();
+        assert_eq!(t.bus.read(0xD040_0E3C, 4) & 8, 0, "ended at the mark");
+        let peak = t.bus.sound.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        assert!(peak > 0 && peak < 1000, "only the quiet first wave plays (peak {peak})");
     }
 }

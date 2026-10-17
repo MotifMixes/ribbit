@@ -40,25 +40,34 @@ pub const TIMER_HZ: u64 = 1_000_000;
 const IO_START: u32 = 0xC000_0000;
 const IO_END: u32 = 0xE000_0000;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
+    #[serde(with = "rle")]
     pub ram: Vec<u8>,
     pub iram: Vec<u8>,
     /// Last value written to each I/O word.
-    io: HashMap<u32, u32>,
+    io: HashMap<u32, u32, IoHash>,
     /// Reads of I/O words nothing models: (count, first pc).
+    #[serde(skip)]
     pub unmodelled: BTreeMap<u32, (u64, u32)>,
     /// Text written to the UART.
+    #[serde(skip)]
     pub uart: Vec<u8>,
     /// Instructions run so far (the machine's clock).
     pub now: u64,
     /// Research: accesses to I/O words in this range (inclusive) are kept
     /// in `watched` (at most `WATCH_MAX`).
+    #[serde(skip)]
     pub watch: Option<(u32, u32)>,
+    #[serde(skip)]
     pub watched: Vec<String>,
     /// Watch writes only, and never these registers.
+    #[serde(skip)]
     pub watch_writes_only: bool,
+    #[serde(skip)]
     pub watch_skip: Vec<u32>,
     /// Watch from this time on (cycles).
+    #[serde(skip)]
     pub watch_from: u64,
     /// The SD hosts' status registers (+0x14).
     sd_status: [u32; 2],
@@ -81,6 +90,7 @@ pub struct Bus {
     dac_level: [u32; 2],
     dac_last: [u64; 2],
     /// Samples written to the DAC (both channels interleaved as written).
+    #[serde(skip)]
     pub audio: Vec<i16>,
     /// The DAC's latest sample (left, right), heard until the time held
     /// (`sound::tick_sound` adds it to the sound unit's output).
@@ -94,8 +104,16 @@ pub struct Bus {
     pub(crate) beat_base: u32,
     pub(crate) beat_flag: bool,
     pub(crate) sound_made: u64,
+    /// When the next sample is due (cycles; 0: work it out).
+    #[serde(skip)]
+    pub(crate) sound_next: u64,
+    /// Stopped channels' output, fading (`sound::spu_release`).
+    #[serde(skip)]
+    pub(crate) spu_tail: (f32, f32),
     /// The USB device controller (`udc`).
+    #[serde(skip)]
     pub udc: crate::udc::Udc,
+    #[serde(skip)]
     pub sound: Vec<i16>,
     /// The buttons held, as `key` bits.
     pub keys: u32,
@@ -113,7 +131,9 @@ pub struct Bus {
     pub slider_pads: u8,
     /// Research: writes into this RAM range are kept in `ram_writes`
     /// (time, pc, address, value).
+    #[serde(skip)]
     pub ram_watch: Option<(u32, u32)>,
+    #[serde(skip)]
     pub ram_writes: Vec<(u64, u32, u32, u32)>,
     /// Reads of a timer's count close together (a program waiting on the
     /// clock), when the last was, and time to skip at the next step.
@@ -144,14 +164,17 @@ pub struct Bus {
     pub panel_frames: u64,
     /// The video chip's last frame (kept to reuse its memory), and how many
     /// it has drawn.
+    #[serde(skip)]
     frame: Vec<u16>,
     pub frames_drawn: u64,
     /// Research: leave the video chip's frames undrawn (to time the rest).
+    #[serde(skip)]
     pub skip_drawing: bool,
     /// Research: the drawing modes met (`video`), each with when first
     /// seen: text planes as (register base, control, attributes, the
     /// rotation/zoom words), sprites as (attributes, halfword 4's top
     /// bits, extended attributes) with bits that `video` does not decode.
+    #[serde(skip)]
     pub modes_seen: std::cell::RefCell<std::collections::BTreeMap<String, u64>>,
     /// The panel controller's registers, as set through its command port.
     pub panel: Panel,
@@ -159,6 +182,7 @@ pub struct Bus {
     panel_shown: Panel,
     /// 2D engine jobs (research log): (time, +0xC04, +0xC08, +0xC0C, and
     /// the registers 0xD0C00000-0xD0C00FFF written since the last job).
+    #[serde(skip)]
     pub gfx_log: Vec<(u64, u32, u32, u32, Vec<(u32, u32)>)>,
     /// The video decoder (`mpeg4`) and the pictures it has made, by the
     /// address their RGB copy went to (the next frame's reference names
@@ -166,10 +190,13 @@ pub struct Bus {
     mpeg: crate::mpeg4::Decoder,
     mpeg_pictures: Vec<(u32, crate::mpeg4::Picture)>,
     /// Research: frames decoded, and ones that failed.
+    #[serde(skip)]
     pub mpeg_frames: (u64, u64),
+    #[serde(skip)]
     gfx_regs: Vec<(u32, u32)>,
     /// DMA transfers (research log): (time, channel, control, source,
     /// destination, bytes).
+    #[serde(skip)]
     pub dma_log: Vec<(u64, u32, u32, u32, u32, u32)>,
     pc: u32,
 }
@@ -311,7 +338,7 @@ pub mod key {
 /// the player sees memory row r as screen column r and memory column c as
 /// screen row c (VERIFIED: with this, both firmwares' pictures come out
 /// upright and unmirrored).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Panel {
     pub madctl: u8,
     pub columns: (u16, u16),
@@ -319,11 +346,15 @@ pub struct Panel {
     /// The command whose data bytes are arriving, and how many have.
     command: u8,
     got: usize,
+    /// Display on (command 0x29; 0x28 display off and 0x10 sleep turn it
+    /// off): until then the panel shows nothing.
+    #[serde(default)]
+    pub on: bool,
 }
 
 impl Default for Panel {
     fn default() -> Self {
-        Self { madctl: 0, columns: (0, 239), pages: (0, 319), command: 0, got: 0 }
+        Self { madctl: 0, columns: (0, 239), pages: (0, 319), command: 0, got: 0, on: false }
     }
 }
 
@@ -331,6 +362,11 @@ impl Panel {
     pub fn command(&mut self, c: u8) {
         self.command = c;
         self.got = 0;
+        match c {
+            0x29 => self.on = true,
+            0x28 | 0x10 => self.on = false,
+            _ => {}
+        }
     }
 
     pub fn data(&mut self, d: u8) {
@@ -393,7 +429,7 @@ impl Bus {
         Self {
             ram: vec![0; RAM_SIZE],
             iram: vec![0; IRAM_SIZE],
-            io: HashMap::new(),
+            io: HashMap::default(),
             unmodelled: BTreeMap::new(),
             uart: Vec::new(),
             now: 0,
@@ -422,6 +458,8 @@ impl Bus {
             beat_base: 0,
             beat_flag: false,
             sound_made: 0,
+            sound_next: 0,
+            spu_tail: (0.0, 0.0),
             udc: Default::default(),
             sound: Vec::new(),
             gfx_log: Vec::new(),
@@ -960,14 +998,23 @@ impl Bus {
     /// The screen as the player sees it, 320 x 240, as 0x00RRGGBB: the
     /// last frame streamed to the panel, placed in the panel's memory by the
     /// window and orientation it was sent with (`Panel::stored_index`).
-    /// Black before the first frame and outside the window.
+    /// Black before the first frame, while the display is off (`Panel::on`)
+    /// and outside the window.
     pub fn screen(&mut self, out: &mut [u32]) {
         let w = crate::SCREEN_W;
-        let Some(base) = self.panel_source else {
+        let Some(base) = self.panel_source.filter(|_| self.panel.on) else {
             out.fill(0);
             return;
         };
         let geometry = self.panel_shown;
+        // The System fills the screen buffer with 0x8000 as its blank before
+        // the start-up logo (0x317A4); a whole frame of it is shown black
+        // (EVIDENCE: a firmware would not flash dark red on purpose; how the
+        // real panel shows it is UNVERIFIED).
+        if (0..240 * 320).step_by(97).all(|n| self.read(base.wrapping_add(2 * n), 2) == 0x8000) {
+            out.fill(0);
+            return;
+        }
         for (i, px) in out.iter_mut().enumerate() {
             *px = match geometry.stored_index(i % w, i / w) {
                 Some(n) => {
@@ -1305,6 +1352,7 @@ pub enum Stop {
     Idle,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Twist {
     pub cpu: Arm,
     pub bus: Bus,
@@ -1318,22 +1366,97 @@ pub struct Twist {
     pub vblank_wait: Option<std::ops::Range<u32>>,
     /// Research: count instructions by address in `hot` (costly: off
     /// unless asked for).
+    #[serde(skip)]
     pub profile: bool,
     /// Research: registers r0-r15 each time execution reaches this address
     /// (at most `BREAKS_MAX`), with the time.
+    #[serde(skip)]
     pub break_at: Option<u32>,
+    #[serde(skip)]
     pub breaks: Vec<(u64, [u32; 16])>,
     /// The text at r0 at each stop.
+    #[serde(skip)]
     pub break_texts: Vec<String>,
     /// Instructions run at each address in the last `HOT_WINDOW`.
+    #[serde(skip)]
     pub hot: HashMap<u32, u64>,
     /// Research: times execution reached each of these addresses (only
     /// the keys put in beforehand are counted), from `count_from` on.
+    #[serde(skip)]
     pub counts: HashMap<u32, u64>,
+    #[serde(skip)]
     pub count_from: u64,
 }
 
 pub const HOT_WINDOW: u64 = 500_000;
+
+/// The registers' map hashes their addresses with one multiply (they
+/// are looked up many times per device tick; the standard hasher is
+/// several times slower and its protection against crafted keys is not
+/// needed here).
+#[derive(Clone, Copy, Default)]
+pub struct IoHash;
+
+impl std::hash::BuildHasher for IoHash {
+    type Hasher = IoHasher;
+    fn build_hasher(&self) -> IoHasher {
+        IoHasher(0)
+    }
+}
+
+pub struct IoHasher(u64);
+
+impl std::hash::Hasher for IoHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 << 8 | b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u32(&mut self, v: u32) {
+        // Fibonacci hashing; the map uses the top bits as well as the low.
+        self.0 = (v as u64 ^ self.0).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+/// Save states: this number first, then the machine (bincode). Bumped
+/// whenever the machine's layout changes.
+const STATE_VERSION: u32 = 1;
+
+/// RAM in states: runs of zero bytes counted, the rest as they are (RAM is
+/// 64 MB, much of it unused). Pairs of (zeros, literal bytes).
+mod rle {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        let mut runs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut i = 0;
+        while i < v.len() {
+            let z = v[i..].iter().take_while(|&&b| b == 0).count();
+            i += z;
+            let start = i;
+            // A literal stretch ends at the next 64 zero bytes in a row.
+            while i < v.len() && !(v[i] == 0 && v[i..].iter().take(64).all(|&b| b == 0) && v.len() - i >= 64) {
+                i += 1;
+            }
+            runs.push((z as u32, v[start..i].to_vec()));
+        }
+        (v.len() as u64, runs).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let (len, runs): (u64, Vec<(u32, Vec<u8>)>) = Deserialize::deserialize(d)?;
+        let mut v = Vec::with_capacity(len as usize);
+        for (z, lit) in runs {
+            v.resize(v.len() + z as usize, 0);
+            v.extend_from_slice(&lit);
+        }
+        v.resize(len as usize, 0);
+        Ok(v)
+    }
+}
 pub const BREAKS_MAX: usize = 10_000;
 
 /// The address of the System function exported as `name`: its export table
@@ -1371,6 +1494,33 @@ const POLL_SKIP: u64 = CLOCK / 100_000;
 pub const EMMC_SECTORS: u64 = 7_634_944;
 
 impl Twist {
+    /// The machine as it is now (a save state). The storage's base image is
+    /// left out (`load_state` keeps the running one).
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut out = STATE_VERSION.to_le_bytes().to_vec();
+        out.extend(bincode::serialize(self).expect("serialise the machine"));
+        out
+    }
+
+    /// Restores a state from `save_state`, keeping the storage's image and
+    /// the USB connection.
+    pub fn load_state(&mut self, state: &[u8]) -> Result<(), String> {
+        let version = state.get(..4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        if version != Some(STATE_VERSION) {
+            return Err("this state is from another version of the RockIt Twist model".into());
+        }
+        let mut t: Twist = bincode::deserialize(&state[4..]).map_err(|e| e.to_string())?;
+        if let (Some(new), Some(old)) = (&mut t.bus.emmc, &mut self.bus.emmc) {
+            std::mem::swap(&mut new.image, &mut old.image);
+            new.logging = old.logging;
+        }
+        t.bus.udc = std::mem::take(&mut self.bus.udc);
+        t.bus.frame = std::mem::take(&mut self.bus.frame);
+        t.bus.lines_dirty = true;
+        *self = t;
+        Ok(())
+    }
+
     /// The whole console, started from its bootloader: the code of the
     /// Bootloader, Base (System) and MfgTest packages (`image::code`) and
     /// the Firmware-Bulk package's `FileSys` volume. The eMMC is built as
@@ -1407,6 +1557,13 @@ impl Twist {
         let end = self.bus.now + budget;
         let hot_from = end.saturating_sub(HOT_WINDOW);
         let mut idle = 0u64;
+        // The clock functions as four slots (1, never an instruction's
+        // address, fills the rest): checked on every instruction.
+        let mut clock_fns = [1u32; 4];
+        for (slot, f) in clock_fns.iter_mut().zip(&self.clock_fns) {
+            *slot = *f;
+        }
+        let clock_fns_more = self.clock_fns.len() > 4;
         while self.bus.now < end {
             if self.bus.now & 0xFF == 0 {
                 self.bus.tick();
@@ -1437,7 +1594,10 @@ impl Twist {
             {
                 *n += 1;
             }
-            if self.clock_fns.contains(&self.bus.pc) {
+            let pc = self.bus.pc;
+            if (pc == clock_fns[0] || pc == clock_fns[1] || pc == clock_fns[2] || pc == clock_fns[3])
+                || (clock_fns_more && self.clock_fns.contains(&pc))
+            {
                 self.bus.note_clock_poll();
             }
             if !self.cpu.step(&mut self.bus) {
@@ -1579,5 +1739,25 @@ mod tests {
         assert_eq!(t.bus.read(0xD012_3450, 4), 7);
         assert!(t.bus.unmodelled.contains_key(&0xD012_3450));
         assert_eq!(t.bus.read(0xD000_003C, 4), 1);
+    }
+
+    #[test]
+    fn a_save_state_round_trips_and_keeps_the_storage_image() {
+        let mut t = Twist::new(&[1, 2, 3, 4]);
+        t.bus.ram[0x10_0000..0x10_0004].copy_from_slice(&[9, 8, 7, 6]);
+        t.bus.emmc = Some(crate::sd::Card::emmc(vec![0x55; 4096], 64));
+        t.bus.emmc.as_mut().unwrap().write_sector(3, &[0xAA; 512]);
+        t.cpu.r[5] = 0x1234;
+        let state = t.save_state();
+        assert!(state.len() < 1 << 20, "RAM's zeros packed: {} bytes", state.len());
+        // Changed after saving, then loaded back.
+        t.bus.ram[0x10_0000] = 0;
+        t.cpu.r[5] = 0;
+        t.bus.emmc.as_mut().unwrap().write_sector(4, &[0xBB; 512]);
+        t.load_state(&state).unwrap();
+        assert_eq!((&t.bus.ram[0x10_0000..0x10_0004], t.cpu.r[5]), (&[9u8, 8, 7, 6][..], 0x1234));
+        let card = t.bus.emmc.as_ref().unwrap();
+        assert_eq!((card.sector(3)[0], card.sector(4)[0], card.sector(1)[0]), (0xAA, 0x55, 0x55), "image kept, writes as saved");
+        assert!(t.load_state(&[0, 0, 0, 0]).is_err());
     }
 }

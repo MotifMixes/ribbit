@@ -768,9 +768,31 @@ fn cross_sdf(r: Rect, arm: f32, radius: f32) -> impl Fn(Pos2) -> f32 {
 /// Points along a shape's edge (`sdf` <= 0 inside), as seen from `from`
 /// (inside it) in `n` evenly spaced directions, up to `reach` away.
 fn outline(sdf: impl Fn(Pos2) -> f32, from: Pos2, reach: f32, n: usize) -> Vec<Pos2> {
-    (0..n)
-        .map(|i| {
-            let a = std::f32::consts::TAU * i as f32 / n as f32;
+    outline_at(sdf, from, reach, &even_angles(n))
+}
+
+/// `n` evenly spaced directions (radians).
+fn even_angles(n: usize) -> Vec<f32> {
+    (0..n).map(|i| std::f32::consts::TAU * i as f32 / n as f32).collect()
+}
+
+/// Even directions plus those through each corner of `r` (as seen from
+/// `from`), in order: a band whose inner edge is `r` then meets its corners
+/// exactly instead of cutting across them.
+fn angles_through(r: Rect, from: Pos2, n: usize) -> Vec<f32> {
+    let mut a = even_angles(n);
+    for c in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
+        a.push((c.y - from.y).atan2(c.x - from.x).rem_euclid(std::f32::consts::TAU));
+    }
+    a.sort_by(f32::total_cmp);
+    a
+}
+
+/// The outline in the given directions (radians).
+fn outline_at(sdf: impl Fn(Pos2) -> f32, from: Pos2, reach: f32, angles: &[f32]) -> Vec<Pos2> {
+    angles
+        .iter()
+        .map(|&a| {
             let d = vec2(a.cos(), a.sin());
             let (mut lo, mut hi) = (0.0, reach);
             for _ in 0..22 {
@@ -785,7 +807,11 @@ fn outline(sdf: impl Fn(Pos2) -> f32, from: Pos2, reach: f32, n: usize) -> Vec<P
 /// Points along a rounded rectangle's edge, as seen from `from` (which must
 /// be inside it) in `n` evenly spaced directions.
 fn rim(r: Rect, radius: f32, from: Pos2, n: usize) -> Vec<Pos2> {
-    outline(rr_sdf(r, radius), from, r.size().length() + (from - r.center()).length(), n)
+    rim_at(r, radius, from, &even_angles(n))
+}
+
+fn rim_at(r: Rect, radius: f32, from: Pos2, angles: &[f32]) -> Vec<Pos2> {
+    outline_at(rr_sdf(r, radius), from, r.size().length() + (from - r.center()).length(), angles)
 }
 
 /// The band between two outlines sampled in the same directions, each
@@ -985,6 +1011,10 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     let face = place(shell, layout.face_rect);
     let from = bezel.center();
     let body_r = h * layout.corner * 1.25;
+    // The rings around the screen share these directions, which pass
+    // through the screen's corners: the screen is never drawn over.
+    let angles = angles_through(screen, from, N);
+    let rim = |r: Rect, radius: f32, _from: Pos2, _n: usize| rim_at(r, radius, from, &angles);
     // A soft shadow around the case (a band: nothing is drawn under it,
     // so the screen stays clear).
     let case = rim(shell, body_r, from, N);
@@ -1011,7 +1041,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     out.push(egui::Shape::closed_line(face_edge, Stroke::new(1.0, shade(layout.body, 0.75))));
     // The screen's frame: raised, the screen set into it.
     let frame_out = rim(bezel, bezel_pad * 1.4, from, N);
-    let glass = rim(screen, 2.0, from, N);
+    let glass = rim(screen, 0.0, from, N);
     let frame_mid = rim(screen.expand(bezel_pad * 0.45), bezel_pad * 0.6, from, N);
     out.push(band(&frame_out, &frame_mid, from, |d| shade(layout.bezel, 0.95 + 0.3 * lightness(d)), |_| layout.bezel));
     out.push(band(
@@ -1452,6 +1482,58 @@ mod tests {
 
     fn layouts() -> [Layout; 2] {
         [rockit_twist(), leapster()]
+    }
+
+    #[test]
+    fn nothing_is_painted_over_the_screen_or_its_corners() {
+        let ctx = egui::Context::default();
+        let lit = Lit {
+            pressed: &|_| false,
+            turned: &|_| 0,
+            turning: &|_| None,
+            strip: None,
+            swiping: None,
+            cap: &|_| None,
+            show_caps: false,
+            keys: &|_| String::new(),
+        };
+        let inside = |p: Pos2, [a, b, c]: [Pos2; 3]| {
+            let s = |u: Pos2, v: Pos2| (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);
+            let (d1, d2, d3) = (s(a, b), s(b, c), s(c, a));
+            let neg = d1 < -1e-3 || d2 < -1e-3 || d3 < -1e-3;
+            let pos = d1 > 1e-3 || d2 > 1e-3 || d3 > 1e-3;
+            !(neg && pos) && (d1.abs() > 1e-3 || d2.abs() > 1e-3 || d3.abs() > 1e-3)
+        };
+        for l in layouts() {
+            for size in [300.0, 700.0, 1300.0] {
+                let shell = Rect::from_min_size(pos2(10.0, 20.0), vec2(size * l.aspect, size));
+                let screen = place(shell, l.screen);
+                ctx.begin_pass(Default::default());
+                {
+                    for shape in paint(&l, shell, screen, &lit, &ctx) {
+                        let egui::Shape::Mesh(m) = shape else { continue };
+                        for t in m.indices.chunks(3) {
+                            let tri = [0, 1, 2].map(|k| m.vertices[t[k] as usize].pos);
+                            let area = ((tri[1] - tri[0]).x * (tri[2] - tri[0]).y - (tri[1] - tri[0]).y * (tri[2] - tri[0]).x).abs();
+                            if area < 0.01 {
+                                continue; // covers nothing
+                            }
+                            // Half a pixel in from each corner, and the middle.
+                            for p in [
+                                screen.left_top() + vec2(0.5, 0.5),
+                                screen.right_top() + vec2(-0.5, 0.5),
+                                screen.right_bottom() + vec2(-0.5, -0.5),
+                                screen.left_bottom() + vec2(0.5, -0.5),
+                                screen.center(),
+                            ] {
+                                assert!(!inside(p, tri), "{} at {size}: the screen is painted over at {p:?} by {tri:?}, screen {screen:?}", l.name);
+                            }
+                        }
+                    }
+                }
+                ctx.end_pass().textures_delta.clear();
+            }
+        }
     }
 
     #[test]
