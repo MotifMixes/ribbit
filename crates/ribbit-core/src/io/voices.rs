@@ -12,7 +12,7 @@
 //!
 //! | Item | Model |
 //! |---|---|
-//! | Voices 0-4 | pitched A-law; address = (start & 0xFFFF_0000) \| u16(position); position starts at start's low half and advances by pitch / 0x8000 per sample; at end (end >> 16) it loops to the loop point (end & 0xFFFF) or stops if end - loop < 2 |
+//! | Voices 0-4 | pitched A-law; address = (start & 0xFFFF_0000) \| u16(position); position starts at start's low half and advances by pitch / 0x8000 per sample; at end (end >> 16) it loops to the loop point (end & 0xFFFF) or stops if end - loop < 2; between samples, linear interpolation (EVIDENCE: a tester's comparison with real hardware; MAME takes the earlier sample) |
 //! | Voices 5-6 | raw A-law at 8 kHz from start to end (absolute addresses) |
 //! | Voice 7 | LFC speech: 16-bit mode word (0-2 = Level4/6/8), records of control + optional reflection-coefficient word + excitation of the previous record, 192 samples each; 256 start-up samples discarded; control 0x0FC0 ends the stream |
 //! | 0x0180_2078 | playing voices: voice 0 in bit 7, voices 1-7 in bits 0-6 ("not sure why it's out of place" - MAME) |
@@ -371,9 +371,29 @@ impl VoiceEngine {
             }
             let start = self.start[v];
             let pos = self.index[v];
-            let addr =
-                if v < 5 { (start & 0xFFFF_0000) | pos as u32 as u16 as u32 } else { start.wrapping_add(pos as u32) };
-            let s = ribbit_audio::alaw_to_linear(bus.read8(addr)) as f64;
+            let s = if v < 5 {
+                // Pitched voices step through the sample by fractions:
+                // linearly interpolated between the two samples around the
+                // position (the next one wraps to the loop point at the
+                // end). EVIDENCE: a tester comparing with real hardware hears
+                // linear interpolation; MAME takes the earlier sample alone.
+                let at = |i: u32| (start & 0xFFFF_0000) | (i as u16 as u32);
+                let (end, lp) = ((self.end[v] >> 16) as u16, self.end[v] as u16);
+                let i = pos as u32;
+                let looping = (end as i32) - (lp as i32) >= 2;
+                let next = if i + 1 < end as u32 { Some(i + 1) } else if looping { Some(lp as u32) } else { None };
+                let s0 = ribbit_audio::alaw_to_linear(bus.read8(at(i))) as f64;
+                match next {
+                    Some(n) => {
+                        let s1 = ribbit_audio::alaw_to_linear(bus.read8(at(n))) as f64;
+                        let frac = (pos - i as f32) as f64;
+                        s0 + (s1 - s0) * frac
+                    }
+                    None => s0,
+                }
+            } else {
+                ribbit_audio::alaw_to_linear(bus.read8(start.wrapping_add(pos as u32))) as f64
+            };
             mix += s * 0.125 * self.volume[v] as f64 / 16384.0;
             self.index[v] += self.dx[v];
             if v < 5 {
@@ -586,6 +606,36 @@ mod tests {
     const HZ: u64 = 16_000_000;
     /// Peripheral ticks per 32 kHz DAC sample.
     const DAC_TICKS: u64 = HZ / PCM_HZ;
+
+    #[test]
+    fn pitched_voices_interpolate_between_samples_and_across_the_loop() {
+        // Voice 0 at half speed over a 3-sample loop at 0x100..0x103.
+        let codes = [0xD5u8, 0x2A, 0x80];
+        let lin = codes.map(|c| ribbit_audio::alaw_to_linear(c) as f64);
+        let mut mem = Mem(vec![0; 0x200]);
+        mem.0[0x100..0x103].copy_from_slice(&codes);
+        let mut e = VoiceEngine::default();
+        e.start[0] = 0x100;
+        e.end[0] = (0x103 << 16) | 0x100;
+        e.pitch[0] = 0x4000;
+        e.volume[0] = 0x4000;
+        e.command(START_COMMAND, 0);
+        let got: Vec<i16> = (0..7).map(|_| e.sample(&mut mem)).collect();
+        let want = |x: f64| (x * 0.125).clamp(-32768.0, 32767.0) as i16;
+        let mid = |a: f64, b: f64| want((a + b) / 2.0);
+        assert_eq!(
+            got,
+            [
+                want(lin[0]),
+                mid(lin[0], lin[1]),
+                want(lin[1]),
+                mid(lin[1], lin[2]),
+                want(lin[2]),
+                mid(lin[2], lin[0]), // the last sample blends into the loop point
+                want(lin[0]),
+            ]
+        );
+    }
 
     #[test]
     fn pcm_registers_read_back_and_base_reads_include_the_position() {
