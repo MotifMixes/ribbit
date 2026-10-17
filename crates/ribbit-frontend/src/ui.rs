@@ -717,14 +717,20 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: 
                 st.show_about = true;
             }
         });
+        // Right after the menus (never over them, however narrow the window).
         if let Some(r) = st.updates.newer() {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let text = egui::RichText::new(format!("⬆ Update to {}", r.version_text())).color(egui::Color32::WHITE);
-                if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text("See what's new and download it").clicked() {
-                    st.show_updates = true;
-                    st.notes_open = Some(r.tag);
-                }
-            });
+            ui.add_space(8.0);
+            // The full label when it fits, else just the version.
+            let full = format!("⬆ Update to {}", r.version_text());
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let need = ui.painter().layout_no_wrap(full.clone(), font, egui::Color32::WHITE).size().x
+                + 2.0 * ui.spacing().button_padding.x;
+            let label = if ui.available_width() >= need { full } else { format!("⬆ {}", r.version_text()) };
+            let text = egui::RichText::new(label).color(egui::Color32::WHITE);
+            if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text("See what's new and download it").clicked() {
+                st.show_updates = true;
+                st.notes_open = Some(r.tag);
+            }
         }
     });
 }
@@ -890,7 +896,7 @@ fn welcome(ui: &mut egui::Ui, settings: &Settings, info: &Info, actions: &mut Ve
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.18).max(12.0));
         ui.heading(egui::RichText::new("🐸 Ribbit").size(34.0));
-        ui.label("An emulator for the original LeapFrog Leapster (2003)");
+        ui.label("An emulator for LeapFrog's handhelds and TV consoles");
         ui.add_space(18.0);
         match &info.bios_name {
             Some(name) => ui.label(format!("BIOS: {name}")),
