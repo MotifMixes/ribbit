@@ -42,12 +42,7 @@ fn main() {
         if let Ok(list) = std::env::var("RIBBIT_HD_FONTS") {
             let mut fonts = std::collections::HashMap::new();
             for path in list.split(';').filter(|p| !p.is_empty()) {
-                for (name, f) in ribbit_core::swf_font::find_fonts(&ribbit_core::read_image(path).unwrap()) {
-                    let better = fonts.get(&name).is_none_or(|g: &ribbit_core::swf_font::OutlineFont| g.glyphs.len() < f.glyphs.len());
-                    if better {
-                        fonts.insert(name, f);
-                    }
-                }
+                ribbit_core::swf_font::merge_fonts(&mut fonts, ribbit_core::swf_font::find_fonts(&ribbit_core::read_image(path).unwrap()));
             }
             println!("fonts: {:?}", fonts.iter().map(|(n, f)| (n.clone(), f.glyphs.len())).collect::<Vec<_>>());
             c.fonts = Some(std::sync::Arc::new(fonts));
@@ -74,6 +69,8 @@ fn main() {
         .unwrap_or_default();
     let tint = std::env::var_os("RIBBIT_HD_TINT").is_some();
     let mut not_premultiplied = 0usize;
+    // Device-text glyphs by font: (glyphs, with an outline).
+    let mut text_fonts: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
     for t in (0..total).step_by(16) {
         for &(b, at, dur) in &presses {
             m.buttons.set(b, (at..at + dur).contains(&t));
@@ -93,6 +90,13 @@ fn main() {
                     ps.sort();
                     ps.dedup();
                     println!("{t:6} pass renderer {:08x} rect {:?} rows {:?} scale {} edges {} fills {} painters {ps:?}", p.renderer, p.rect, p.rows, p.scale, p.edges.len(), p.fills.len());
+                }
+                for g in &p.glyphs {
+                    let e = text_fonts.entry(format!("{} {}px", g.font, g.em)).or_default();
+                    e.0 += 1;
+                    if c.fonts.as_ref().and_then(|f| f.get(&g.font)).and_then(|f| f.glyphs.get(&g.ch)).is_some_and(|o| !o.pieces.is_empty()) {
+                        e.1 += 1;
+                    }
                 }
                 for f in p.fills.values() {
                     // A colour brighter than its alpha would not be premultiplied.
@@ -213,6 +217,7 @@ fn main() {
     );
     println!("blocks from the fallback: {fixed}");
     println!("translucent fills brighter than their alpha: {not_premultiplied}");
+    println!("text fonts (glyphs, from outlines): {text_fonts:?}");
     println!("fills by painter: {painters:x?}");
     if let Some(hd) = &m.hd {
         println!("dropped passes: {}", hd.dropped);

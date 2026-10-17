@@ -25,8 +25,8 @@ pub struct OutlineFont {
 }
 
 /// Every font with outlines in the uncompressed Flash movies ("FWS")
-/// inside `data` (a cartridge image), by name; for a name seen twice, the
-/// one with more glyphs.
+/// inside `data` (a cartridge image), by name; a name seen twice has the
+/// glyphs of both (see `merge_fonts`).
 pub fn find_fonts(data: &[u8]) -> HashMap<String, OutlineFont> {
     let mut fonts: HashMap<String, OutlineFont> = HashMap::new();
     let mut i = 0;
@@ -38,14 +38,26 @@ pub fn find_fonts(data: &[u8]) -> HashMap<String, OutlineFont> {
             continue;
         }
         let movie = &data[at..at + len];
-        for (name, font) in movie_fonts(movie) {
-            if fonts.get(&name).is_none_or(|f| f.glyphs.len() < font.glyphs.len()) {
-                fonts.insert(name, font);
-            }
-        }
+        merge_fonts(&mut fonts, movie_fonts(movie));
         i = at + len;
     }
     fonts
+}
+
+/// Adds `from`'s fonts to `into`: a font in both gets the glyphs it lacks
+/// (a movie embeds only the characters it uses, so one cartridge seldom
+/// has a whole font: e.g. Leapster Prop, 23 glyphs in Creature Create, 188
+/// in Pet Pals).
+pub fn merge_fonts(into: &mut HashMap<String, OutlineFont>, from: impl IntoIterator<Item = (String, OutlineFont)>) {
+    for (name, font) in from {
+        let have = into.entry(name).or_default();
+        for (ch, outline) in font.glyphs {
+            let slot = have.glyphs.entry(ch).or_default();
+            if slot.pieces.is_empty() {
+                *slot = outline;
+            }
+        }
+    }
 }
 
 fn find(data: &[u8], needle: &[u8], from: usize) -> Option<usize> {

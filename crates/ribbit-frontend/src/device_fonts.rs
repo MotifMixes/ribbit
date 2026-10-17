@@ -34,11 +34,7 @@ pub fn load(folders: Vec<PathBuf>) {
         }
         for path in files {
             let Ok(data) = ribbit_core::read_image(&path) else { continue };
-            for (name, font) in ribbit_core::swf_font::find_fonts(&data) {
-                if fonts.get(&name).is_none_or(|f| f.glyphs.len() < font.glyphs.len()) {
-                    fonts.insert(name, font);
-                }
-            }
+            ribbit_core::swf_font::merge_fonts(&mut fonts, ribbit_core::swf_font::find_fonts(&data));
         }
         tracing::info!(target: "ribbit::hd", fonts = ?fonts.iter().map(|(n, f)| (n.as_str(), f.glyphs.len())).collect::<Vec<_>>(), "outline fonts for HD text");
         *FONTS.lock().unwrap() = Some(Arc::new(fonts));
