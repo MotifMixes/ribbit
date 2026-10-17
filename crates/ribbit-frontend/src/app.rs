@@ -407,7 +407,7 @@ impl App {
     /// BIOS, if there is one.
     fn rescan_library(&mut self) {
         let art = self.settings.bios.clone().map(|bios| ArtSource { bios });
-        self.library.scan(&self.settings.rom_folders, &self.settings.recent_carts, art);
+        self.library.scan(&self.settings.rom_folders, &self.settings.recent_carts, self.settings.twist_content.clone(), art);
         // Outline fonts for HD device text, from the same folders.
         crate::device_fonts::load(self.settings.rom_folders.clone());
     }
@@ -680,6 +680,8 @@ impl App {
     fn set_twist_content(&mut self, path: Option<PathBuf>) {
         self.settings.twist_content = path;
         self.save_settings();
+        // Its installed games are listed in the library's RockIt Twist tab.
+        self.rescan_library();
         if let Some(t) = &mut self.twist {
             t.content = self.settings.twist_content.clone();
             t.restart(self.audio.as_ref());

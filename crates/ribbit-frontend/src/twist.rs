@@ -505,7 +505,7 @@ impl TwistSession {
             package::kind(&name, &head(p)?)
         });
         let title = match &package {
-            Some(p) => describe_package(p).map_or_else(|| "RockIt Twist".to_string(), |g| g.title),
+            Some(p) => describe_package(p).or_else(|| describe_installed(p)).map_or_else(|| "RockIt Twist".to_string(), |g| g.title),
             None => "RockIt Twist".to_string(),
         };
         Self {
@@ -719,6 +719,80 @@ fn catalog_name(path: &Path, id: &str) -> Option<String> {
 }
 
 /// A library entry for a RockIt Twist package, or None if `path` is not one.
+/// The games installed in a content folder (`Applications\<package>`, each
+/// with its `meta.inf`), as library entries: the built-in bundle tagged
+/// "Internal", the packs "Installed". Playing one starts the console, whose
+/// own menu then offers it.
+pub fn installed_games(content: &Path) -> Vec<Game> {
+    let Ok(dirs) = std::fs::read_dir(content.join("Applications")) else {
+        return Vec::new();
+    };
+    let mut games: Vec<Game> = dirs.flatten().filter_map(|d| describe_installed(&d.path())).collect();
+    games.sort_by(|a, b| a.title.cmp(&b.title));
+    games
+}
+
+/// An installed package folder (`meta.inf` of type Application).
+pub fn describe_installed(dir: &Path) -> Option<Game> {
+    let meta = package::Meta::parse(&std::fs::read_to_string(dir.join("meta.inf")).ok()?);
+    if meta.get("Type") != Some("Application") {
+        return None;
+    }
+    let id = meta.get("PackageID").map_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().into_owned(), str::to_string);
+    let bundle = dir.file_name().is_some_and(|n| n == "Bundle");
+    // The bundle's games are its fapp\*.bin (Nomnom, Balloondart...).
+    let mut built_in: Vec<String> = std::fs::read_dir(dir.join("fapp"))
+        .map(|r| {
+            r.flatten()
+                .filter_map(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.strip_suffix(".bin").map(|s| s.replace('_', " "))
+                })
+                .filter(|n| !matches!(n.as_str(), "PetMenu" | "Usb"))
+                .collect()
+        })
+        .unwrap_or_default();
+    built_in.sort();
+    let title = if bundle {
+        "RockIt Twist Built-in Games".to_string()
+    } else {
+        meta.get("Name").unwrap_or(&id).trim_end_matches(" Game Pack").to_string()
+    };
+    let mut details = vec![("System", "RockIt Twist".to_string())];
+    if let Some(n) = meta.get("Name") {
+        details.push(("Name", n.to_string()));
+    }
+    if !built_in.is_empty() {
+        details.push(("Games", built_in.join(", ")));
+    }
+    for (label, key) in [("Version", "Version"), ("Locale", "Locale"), ("Developer", "Developer")] {
+        if let Some(v) = meta.get(key) {
+            details.push((label, v.to_string()));
+        }
+    }
+    details.push(("Package", id.clone()));
+    details.push((
+        "Status",
+        "installed in the content folder: the console starts at its menu, which offers this game".to_string(),
+    ));
+    details.push(("Folder", dir.display().to_string()));
+    let subtitle = if bundle {
+        format!("{} games built into the console", built_in.len())
+    } else {
+        format!("Game pack  ·  {}", meta.get("Version").unwrap_or("installed"))
+    };
+    Some(Game {
+        path: dir.to_path_buf(),
+        family: Family::RockItTwist,
+        title,
+        subtitle,
+        details,
+        tags: vec![if bundle { "Internal" } else { "Installed" }],
+        key: format!("twist-installed-{id}"),
+        art: Art::Missing,
+    })
+}
+
 pub fn describe_package(path: &Path) -> Option<Game> {
     let name = path.file_name()?.to_string_lossy().into_owned();
     let lower = name.to_ascii_lowercase();
@@ -772,7 +846,7 @@ pub fn describe_package(path: &Path) -> Option<Game> {
     details.push(("Size", format!("{mb} MB")));
     details.push((
         "Status",
-        "early emulation: the console starts and shows its own screens; games cannot run yet".to_string(),
+        "early emulation: the console starts; game packs run once unpacked and imported (content folder)".to_string(),
     ));
     details.push(("File", path.display().to_string()));
     let subtitle = [Some(what.to_string()), locale.clone(), Some(format!("{mb} MB"))]
@@ -797,6 +871,43 @@ pub fn describe_package(path: &Path) -> Option<Game> {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn installed_games_are_listed_from_the_content_folder() {
+        let dir = std::env::temp_dir().join(format!("ribbit-twist-installed-{}", std::process::id()));
+        let apps = dir.join("Applications");
+        std::fs::create_dir_all(apps.join("Bundle").join("fapp")).unwrap();
+        std::fs::create_dir_all(apps.join("PCKT-0x0050000D-000000")).unwrap();
+        std::fs::create_dir_all(apps.join("Leftover")).unwrap();
+        std::fs::write(
+            apps.join("Bundle").join("meta.inf"),
+            "Type=\"Application\"
+PackageID=\"PCKT-0x00500001-000000\"
+Name=\"Included App Bundle\"
+",
+        )
+        .unwrap();
+        for g in ["Nomnom.bin", "Pixel_Art.bin", "Usb.bin"] {
+            std::fs::write(apps.join("Bundle").join("fapp").join(g), b"").unwrap();
+        }
+        std::fs::write(
+            apps.join("PCKT-0x0050000D-000000").join("meta.inf"),
+            "Type=\"Application\"
+PackageID=\"PCKT-0x0050000D-000000\"
+Name=\"Banzai Beans: Showdown Game Pack\"
+Version=\"1.0.3.16\"
+",
+        )
+        .unwrap();
+        let games = installed_games(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        let titles: Vec<&str> = games.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(titles, ["Banzai Beans: Showdown", "RockIt Twist Built-in Games"]);
+        assert!(games.iter().all(|g| g.family == Family::RockItTwist));
+        assert_eq!(games[1].tags, ["Internal"]);
+        assert_eq!(games[1].subtitle, "2 games built into the console", "the USB screen is not a game");
+        assert_eq!(games[0].tags, ["Installed"]);
+    }
     #[test]
     fn every_control_has_a_key_and_no_key_does_two_things() {
         for (i, (k, _)) in KEYS.iter().enumerate() {

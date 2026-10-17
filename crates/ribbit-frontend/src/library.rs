@@ -264,7 +264,9 @@ impl Library {
 
     /// Rescans `folders` (plus `extra` files, e.g. recent games) in the
     /// background. Without `art`, games without cached art show none.
-    pub fn scan(&mut self, folders: &[PathBuf], extra: &[PathBuf], art: Option<ArtSource>) {
+    /// `twist_content`: the RockIt Twist content folder, whose installed
+    /// games are listed too.
+    pub fn scan(&mut self, folders: &[PathBuf], extra: &[PathBuf], twist_content: Option<PathBuf>, art: Option<ArtSource>) {
         let (tx, rx) = channel();
         // The first scan fills the list as it goes; later ones replace it whole.
         self.incoming = (!self.games.is_empty()).then(Vec::new);
@@ -274,7 +276,7 @@ impl Library {
         let (folders, extra, art_dir) = (folders.to_vec(), extra.to_vec(), self.art_dir.clone());
         let spawned = std::thread::Builder::new()
             .name("ribbit-library".into())
-            .spawn(move || worker(&folders, &extra, &art_dir, art.as_ref(), &tx));
+            .spawn(move || worker(&folders, &extra, twist_content.as_deref(), &art_dir, art.as_ref(), &tx));
         if spawned.is_err() {
             self.scanning = false;
         }
@@ -371,8 +373,20 @@ impl Library {
     }
 }
 
-fn worker(folders: &[PathBuf], extra: &[PathBuf], art_dir: &Path, art: Option<&ArtSource>, tx: &Sender<Msg>) {
+fn worker(
+    folders: &[PathBuf],
+    extra: &[PathBuf],
+    twist_content: Option<&Path>,
+    art_dir: &Path,
+    art: Option<&ArtSource>,
+    tx: &Sender<Msg>,
+) {
     remove_stale_art(art_dir);
+    for game in twist_content.map(crate::twist::installed_games).unwrap_or_default() {
+        if tx.send(Msg::Game(game)).is_err() {
+            return;
+        }
+    }
     let mut files = Vec::new();
     for f in folders {
         collect(f, 0, &mut files);
