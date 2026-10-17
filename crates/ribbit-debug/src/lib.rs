@@ -17,6 +17,20 @@ pub fn init_logging(default_filter: &str) {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).with_writer(std::io::stderr).try_init();
 }
 
+/// As `init_logging`, also writing to the file `log` (replaced each start),
+/// for a windowed app whose stderr nobody sees. Without the file (not
+/// writable), stderr only.
+pub fn init_logging_to_file(default_filter: &str, log: &std::path::Path) {
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    let Some(file) = log.parent().and_then(|d| std::fs::create_dir_all(d).ok()).and_then(|()| std::fs::File::create(log).ok())
+    else {
+        return init_logging(default_filter);
+    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let writer = std::io::stderr.and(std::sync::Mutex::new(file));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).with_ansi(false).with_writer(writer).try_init();
+}
+
 /// Classic 16-bytes-per-line hex dump with addresses.
 pub fn hexdump(base: u32, data: &[u8]) -> String {
     let mut out = String::new();

@@ -247,7 +247,9 @@ type Connection = (wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter, wgpu::
 impl Gpu {
     /// A GPU set up to show pictures in `window`: the platform's usual API
     /// first (or the one `WGPU_BACKEND` names: vulkan, gl, dx12, metal),
-    /// then OpenGL. Some Linux setups (virtual machines, WSL, old drivers)
+    /// then OpenGL, then on Windows the software DirectX 12 renderer (WARP,
+    /// part of Windows 10 and 11) for graphics chips that offer neither
+    /// DirectX 12 nor a recent enough OpenGL. Some Linux setups (virtual machines, WSL, old drivers)
     /// offer a Vulkan device that says it can present to the window and
     /// then fails when the window is set up; that is tried and caught here.
     fn connect(
@@ -261,15 +263,28 @@ impl Gpu {
         let first = wgpu::Backends::from_env().unwrap_or(usual);
         let mut tried = Vec::new();
         let mut last = anyhow::anyhow!("no GPU backend available");
-        for backends in [first, wgpu::Backends::GL] {
-            if tried.contains(&backends) {
+        let software = cfg!(windows).then_some((wgpu::Backends::DX12, true));
+        // RIBBIT_SOFTWARE_GPU: straight to the software renderer (a GPU
+        // driver that draws wrongly or crashes).
+        let hardware = if std::env::var_os("RIBBIT_SOFTWARE_GPU").is_some() && software.is_some() {
+            vec![]
+        } else {
+            vec![(first, false), (wgpu::Backends::GL, false)]
+        };
+        for (backends, software) in hardware.into_iter().chain(software) {
+            if tried.contains(&(backends, software)) {
                 continue;
             }
-            tried.push(backends);
-            match Self::connect_with(window, backends) {
-                Ok(c) => return Ok(c),
+            tried.push((backends, software));
+            match Self::connect_with(window, backends, software) {
+                Ok(c) => {
+                    if software {
+                        tracing::warn!("no GPU can draw the window: drawing in software (WARP)");
+                    }
+                    return Ok(c);
+                }
                 Err(e) => {
-                    tracing::warn!("GPU ({backends:?}) cannot show the window: {e:#}");
+                    tracing::warn!("GPU ({backends:?}, software: {software}) cannot show the window: {e:#}");
                     last = e;
                 }
             }
@@ -277,9 +292,11 @@ impl Gpu {
         Err(last.context(format!("no GPU can draw to the window (tried {tried:?})")))
     }
 
+    /// `software`: the backend's software renderer instead of a GPU.
     fn connect_with(
         window: &Arc<Window>,
         backends: wgpu::Backends,
+        software: bool,
     ) -> Result<Connection> {
         // (OpenGL through EGL needs the display the window is on.)
         let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()));
@@ -288,6 +305,7 @@ impl Gpu {
         let surface = instance.create_surface(window.clone()).context("creating surface")?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
+            force_fallback_adapter: software,
             ..Default::default()
         }))
         .context("no compatible GPU adapter")?;

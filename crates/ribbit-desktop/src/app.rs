@@ -1,8 +1,27 @@
 //! ribbit-gui.exe: the windowed app (no console window on Windows).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use std::path::Path;
+
 fn main() {
-    ribbit_debug::init_logging("info");
+    let data_dir = ribbit_frontend::default_data_dir();
+    // Nobody sees this program's stderr: the log goes to a file as well, for
+    // players to send when something goes wrong.
+    let log = data_dir.join("ribbit.log");
+    ribbit_debug::init_logging_to_file("info", &log);
+    tracing::info!("Ribbit {} ({} {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    {
+        let log = log.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!("panic: {info}\n{backtrace}");
+            // A panic on the window's thread ends Ribbit (others are reported
+            // where they are caught).
+            if std::thread::current().name() == Some("main") {
+                failed(&format!("Ribbit stopped because of a bug:\n\n{info}"), &log);
+            }
+        }));
+    }
     // WSL's Wayland server drops the window's connection after a moment
     // (its X11 server works): use X11 there unless RIBBIT_WAYLAND is set.
     #[cfg(target_os = "linux")]
@@ -13,23 +32,36 @@ fn main() {
         // SAFETY: nothing else runs yet (no other threads read the environment).
         unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
     }
-    let data_dir = ribbit_frontend::default_data_dir();
     // A file passed on the command line (e.g. "Open with Ribbit") is a cartridge.
     let cartridge = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let opts = ribbit_frontend::StartOptions { data_dir, cartridge, ..Default::default() };
     if let Err(e) = ribbit_frontend::run(opts) {
-        let msg = format!(
-            "Ribbit could not start:
-
-{e:#}"
-        );
-        eprintln!("{msg}");
-        #[cfg(windows)]
-        let _ = rfd_message(&msg);
+        tracing::error!("Ribbit could not start: {e:#}");
+        failed(&format!("Ribbit could not start:\n\n{e:#}"), &log);
     }
 }
 
+/// Says why Ribbit stopped: stderr, `last-error.txt` next to the log, and on
+/// Windows a message box (the window may never have drawn anything).
+fn failed(msg: &str, log: &Path) {
+    eprintln!("{msg}");
+    let msg = format!("{msg}\n\nThe log, to send with a bug report:\n{}", log.display());
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::write(dir.join("last-error.txt"), &msg);
+    }
+    #[cfg(windows)]
+    message_box(&msg);
+}
+
 #[cfg(windows)]
-fn rfd_message(msg: &str) -> Option<()> {
-    std::fs::write(ribbit_frontend::default_data_dir().join("last-error.txt"), msg).ok()
+fn message_box(msg: &str) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+    const MB_ICONERROR: u32 = 0x10;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (text, caption) = (wide(msg), wide("Ribbit"));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_ICONERROR) };
 }
