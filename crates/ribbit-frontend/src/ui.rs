@@ -808,6 +808,9 @@ fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings
         .collapsible(false)
         .resizable(true)
         .default_width(520.0)
+        // In the middle of Ribbit's window (it can still be moved).
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
         .show(ctx, |ui| {
             let status = st.updates.status();
             let newer = st.updates.newer();
