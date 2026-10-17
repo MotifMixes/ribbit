@@ -814,7 +814,8 @@ fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings
                     });
                 }
                 (Status::Done(_), None) => {
-                    ui.label(format!("✔ You have the latest version ({CURRENT})."));
+                    let text = format!("✔ You're on the latest version ({CURRENT}).");
+                    ui.label(egui::RichText::new(text).color(ACCENT).strong());
                 }
                 (Status::NotChecked, _) => {
                     if ui.button("Check for updates").clicked() {
