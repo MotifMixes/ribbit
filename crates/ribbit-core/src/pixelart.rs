@@ -4,18 +4,21 @@
 //! manner of Kopf and Lischinski's "Depixelizing Pixel Art" (2011), much
 //! simplified.
 //!
-//! 1. Pixels of one colour joined side by side are one region; two pixels
-//!    of one colour that touch only at a corner join across it unless the
-//!    other diagonal of that 2 x 2 block joins too (then the sparser
-//!    colour, the one with fewer pixels around, keeps its diagonal, as
-//!    foreground lines do in pixel art).
+//! 1. Pixels of similar colour joined side by side are one region (similar:
+//!    within the paper's thresholds in YUV, so shading and dithering of one
+//!    surface are one region); two similar pixels that touch only at a
+//!    corner join across it unless the other diagonal of that 2 x 2 block
+//!    joins too (then the sparser colour, the one with fewer similar pixels
+//!    around, keeps its diagonal, as foreground lines do in pixel art).
 //! 2. Where a diagonal joins, the corners of the two other pixels are cut
 //!    (a quarter pixel each way), so the joined pixels meet along a slope.
 //! 3. The borders between regions become chains between junctions; each is
 //!    smoothed (through the middles of its straight runs, then corner
 //!    cutting), except at real corners: turns of 90 degrees or more between
 //!    runs at least two pixels long stay sharp.
-//! 4. The shapes are drawn anti-aliased at any scale.
+//! 4. The shapes are drawn anti-aliased at any scale; inside a region the
+//!    colour runs smoothly between its own pixels' colours (interpolated
+//!    from them alone), so a shaded surface is a gradient, not bands.
 //!
 //! The original pixels are always the default; this is a switchable look.
 
@@ -28,6 +31,8 @@ pub struct Traced {
     height: usize,
     /// Each pixel's region.
     region: Vec<u32>,
+    /// The pixels.
+    pixels: Vec<u32>,
     /// Each region's colour.
     colors: Vec<u32>,
     /// Smoothed border pieces: (from, to), the region on the side the
@@ -43,6 +48,7 @@ impl Traced {
     pub fn new(width: usize, height: usize, pixels: &[u32]) -> Traced {
         let (w, h) = (width, height);
         let at = |x: usize, y: usize| pixels[y * w + x];
+        let sim = |a: u32, b: u32| similar(a, b);
         // 1. Regions.
         let mut parent: Vec<u32> = (0..(w * h) as u32).collect();
         fn find(p: &mut [u32], mut i: u32) -> u32 {
@@ -60,10 +66,10 @@ impl Traced {
         };
         for y in 0..h {
             for x in 0..w {
-                if x + 1 < w && at(x, y) == at(x + 1, y) {
+                if x + 1 < w && sim(at(x, y), at(x + 1, y)) {
                     union(&mut parent, y * w + x, y * w + x + 1);
                 }
-                if y + 1 < h && at(x, y) == at(x, y + 1) {
+                if y + 1 < h && sim(at(x, y), at(x, y + 1)) {
                     union(&mut parent, y * w + x, (y + 1) * w + x);
                 }
             }
@@ -75,7 +81,7 @@ impl Traced {
             let mut n = 0;
             for y in cy.saturating_sub(4)..(cy + 4).min(h) {
                 for x in cx.saturating_sub(4)..(cx + 4).min(w) {
-                    n += (at(x, y) == c) as u32;
+                    n += sim(at(x, y), c) as u32;
                 }
             }
             n
@@ -83,8 +89,8 @@ impl Traced {
         for y in 0..h.saturating_sub(1) {
             for x in 0..w.saturating_sub(1) {
                 let (a, b, c, d) = (at(x, y), at(x + 1, y), at(x, y + 1), at(x + 1, y + 1));
-                let d1 = a == d && a != b && a != c;
-                let d2 = b == c && b != a && b != d;
+                let d1 = sim(a, d) && !sim(a, b) && !sim(a, c);
+                let d2 = sim(b, c) && !sim(b, a) && !sim(b, d);
                 let keep = match (d1, d2) {
                     (true, true) => Some(around(x + 1, y + 1, a) <= around(x + 1, y + 1, b)),
                     (true, false) => Some(true),
@@ -164,7 +170,7 @@ impl Traced {
             }
         }
         let segs = smooth(&border, w as i32 * 4, h as i32 * 4);
-        Traced { width, height, region, colors, segs }
+        Traced { width, height, region, pixels: pixels.to_vec(), colors, segs }
     }
 
     /// Draws the traced shapes at `scale` canvas pixels per pixel into
@@ -193,7 +199,6 @@ impl Traced {
                 by_row[y as usize - y0].push(i as u32);
             }
         }
-        let rgba = |c: u32| [(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF, c >> 24].map(|v| v as f32);
         let mut acc = vec![[0f32; 4]; x1 - x0];
         let mut xs: Vec<(f32, u32)> = vec![];
         for y in y0..y1 {
@@ -216,14 +221,15 @@ impl Traced {
                 let py = ((sy / s) as usize).min(self.height - 1);
                 let mut cur = self.region[py * self.width];
                 let mut from = 0f32;
+                let v = sy / s - 0.5;
                 let put = |a: f32, b: f32, r: u32, acc: &mut [[f32; 4]]| {
-                    let c = rgba(self.colors[r as usize]);
                     let (lo, hi) = (a.max(x0 as f32), b.min(x1 as f32));
                     if hi <= lo {
                         return;
                     }
                     for x in lo.floor() as usize..(hi.ceil() as usize).min(x1) {
                         let cov = (hi.min(x as f32 + 1.0) - lo.max(x as f32)).max(0.0);
+                        let c = self.color_at((x as f32 + 0.5) / s - 0.5, v, r);
                         for k in 0..4 {
                             acc[x - x0][k] += c[k] * cov;
                         }
@@ -241,6 +247,44 @@ impl Traced {
                 out[(y - first) * stride + x0 + i] = v[3] << 24 | v[0] << 16 | v[1] << 8 | v[2];
             }
         }
+    }
+
+    /// Region `r`'s colour at image position (u, v) (pixel centres at whole
+    /// numbers): interpolated from the nearest pixels of that region alone
+    /// (bilinear, renormalised), else its nearest pixel, else its mean.
+    fn color_at(&self, u: f32, v: f32, r: u32) -> [f32; 4] {
+        let (w, h) = (self.width as i32, self.height as i32);
+        let rgba = |c: u32| [(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF, c >> 24].map(|v| v as f32);
+        let (x0, y0) = (u.floor() as i32, v.floor() as i32);
+        let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+        let mut acc = [0f32; 4];
+        let mut wsum = 0f32;
+        for (dx, dy, wt) in [(0, 0, (1.0 - fx) * (1.0 - fy)), (1, 0, fx * (1.0 - fy)), (0, 1, (1.0 - fx) * fy), (1, 1, fx * fy)] {
+            let (x, y) = ((x0 + dx).clamp(0, w - 1), (y0 + dy).clamp(0, h - 1));
+            let i = (y * w + x) as usize;
+            if self.region[i] == r && wt > 0.0 {
+                let c = rgba(self.pixels[i]);
+                for k in 0..4 {
+                    acc[k] += c[k] * wt;
+                }
+                wsum += wt;
+            }
+        }
+        if wsum > 1e-4 {
+            return acc.map(|c| c / wsum);
+        }
+        let (cx, cy) = ((u + 0.5).floor() as i32, (v + 0.5).floor() as i32);
+        for d in 0..3 {
+            for y in (cy - d).max(0)..=(cy + d).min(h - 1) {
+                for x in (cx - d).max(0)..=(cx + d).min(w - 1) {
+                    let i = (y * w + x) as usize;
+                    if self.region[i] == r {
+                        return rgba(self.pixels[i]);
+                    }
+                }
+            }
+        }
+        rgba(self.colors[r as usize])
     }
 
     /// The whole image drawn at `scale` (A R G B, `width * scale` wide),
@@ -267,6 +311,25 @@ impl Traced {
     fn draw_band(&self, scale: usize, out: &mut [u32], stride: usize, y0: usize, y1: usize) {
         self.draw_rows(scale, out, stride, (y0, y1), (0, self.width * scale), y0);
     }
+}
+
+/// Whether two A R G B colours look alike (Kopf and Lischinski's test:
+/// differences in Y, U and V within 48, 7 and 6 of 255), with alpha.
+fn similar(a: u32, b: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    let ch = |c: u32, k: u32| ((c >> k) & 0xFF) as f32;
+    if (ch(a, 24) - ch(b, 24)).abs() > 16.0 {
+        return false;
+    }
+    let yuv = |c: u32| {
+        let (r, g, b) = (ch(c, 16), ch(c, 8), ch(c, 0));
+        let y = 0.299 * r + 0.587 * g + 0.114 * b;
+        (y, 0.492 * (b - y), 0.877 * (r - y))
+    };
+    let (p, q) = (yuv(a), yuv(b));
+    (p.0 - q.0).abs() <= 48.0 && (p.1 - q.1).abs() <= 7.0 && (p.2 - q.2).abs() <= 6.0
 }
 
 fn norm(e: (Q, Q)) -> (Q, Q) {

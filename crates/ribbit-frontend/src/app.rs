@@ -1587,7 +1587,7 @@ impl App {
         }
         if let Some(c) = self.session.as_ref().and_then(|s| s.hd.as_ref()).filter(|_| hd_frame) {
             if hd_dirty {
-                gpu.upload_hd(&c.pixels, c.size);
+                gpu.upload_hd(c.view(), c.size);
             }
             gpu.upload_hd_mask(&c.mask);
         }

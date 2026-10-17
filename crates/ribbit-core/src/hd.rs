@@ -1017,6 +1017,10 @@ pub struct HdCanvas {
     /// The LCD frame traced and drawn at the canvas's scale, by the frame's
     /// hash.
     traced_lcd: Option<(u64, Vec<u32>)>,
+    /// The canvas as shown when pixel art is traced: the canvas, with the
+    /// traced LCD where the canvas does not know the picture (the canvas
+    /// itself keeps only what renders drew).
+    traced_view: Option<Vec<u32>>,
     /// Bitmaps traced, by the image and the scale they were drawn at.
     traced_bitmaps: HashMap<(usize, usize), Arc<Image>>,
     /// RESEARCH: each block's reason at the last `update_mask` (0 none, 1 + the
@@ -1065,6 +1069,7 @@ impl HdCanvas {
             shape_offset: SHAPE_OFFSET,
             trace_pixels: false,
             traced_lcd: None,
+            traced_view: None,
             traced_bitmaps: HashMap::new(),
             why_block: vec![0; 160 * 160],
         }
@@ -1503,15 +1508,21 @@ impl HdCanvas {
                 self.traced_lcd = Some((hash, crate::pixelart::Traced::new(160, 160, &px).render(s)));
             }
             let traced = &self.traced_lcd.as_ref().unwrap().1;
+            let mut view = self.traced_view.take().unwrap_or_default();
+            view.clear();
+            view.extend_from_slice(&self.pixels);
             for i in 0..160 * 160 {
                 if self.mask[i] != 0 {
                     let (bx, by) = (i % 160, i / 160);
                     for y in by * s..(by + 1) * s {
-                        self.pixels[y * size + bx * s..y * size + (bx + 1) * s].copy_from_slice(&traced[y * size + bx * s..y * size + (bx + 1) * s]);
+                        view[y * size + bx * s..y * size + (bx + 1) * s].copy_from_slice(&traced[y * size + bx * s..y * size + (bx + 1) * s]);
                     }
                     self.mask[i] = 0;
                 }
             }
+            self.traced_view = Some(view);
+        } else {
+            self.traced_view = None;
         }
         self.prev_lcd.clear();
         self.prev_lcd.extend_from_slice(&lcd[..160 * 160]);
@@ -1522,6 +1533,11 @@ impl HdCanvas {
     /// The picture as shown, on the CPU (for saved pictures and tests):
     /// canvas where known and unmasked, else the LCD's own pixels (no
     /// smoothing), as the GPU shows it.
+    /// The canvas as shown (see `traced_view`): what to upload with `mask`.
+    pub fn view(&self) -> &[u32] {
+        self.traced_view.as_deref().unwrap_or(&self.pixels)
+    }
+
     pub fn composed(&self, lcd: &[u32]) -> Vec<u32> {
         let (s, size) = (self.scale as f32, self.size);
         let lcd_at = |x: f32, y: f32| -> [f32; 3] {
@@ -1532,7 +1548,7 @@ impl HdCanvas {
         let mut out = vec![0u32; size * size];
         for y in 0..size {
             for x in 0..size {
-                let p = self.pixels[y * size + x];
+                let p = self.view()[y * size + x];
                 let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
                 let keep = 1.0 - mask_at(cx, cy);
                 let a = (p >> 24) as f32 / 255.0 * keep;
