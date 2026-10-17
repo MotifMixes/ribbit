@@ -24,9 +24,12 @@ const EDGE_CTOR_SIG: [u8; 44] = [
     0x1c, 0xc8, 0xb4, 0xfc, 0x1c, 0x08, 0xb5, 0xfc, 0x1c, 0x48, 0xb5, 0xf1, 0xc0, 0xa4, 0xc1, 0x08, 0x75, 0x1c, 0x89,
     0x28, 0x76, 0x1a, 0x72, 0x24, 0xe8,
 ];
-/// The scanline driver at US v2.1 0x4005_0514 (20 bytes).
-const SCANLINE_SIG: [u8; 20] =
-    [0x1c, 0x86, 0x80, 0x20, 0x1f, 0x0f, 0xac, 0x10, 0x00, 0x80, 0x84, 0xe0, 0x1c, 0x01, 0x02, 0x00, 0xd4, 0x16, 0x03, 0x10];
+/// The scanline driver at US v2.1 0x4005_0514 (20 bytes). The wildcard is a
+/// structure offset (`ld r0,[r0,-84]`; -80 in Talking Words Factory's own
+/// copy of the player, 0x8001_6648: VERIFIED-FW, the code is otherwise the
+/// same).
+const SCANLINE_SIG: [u16; 20] =
+    [0x1c, 0x86, 0x80, 0x20, 0x1f, 0x0f, W, 0x10, 0x00, 0x80, 0x84, 0xe0, 0x1c, 0x01, 0x02, 0x00, 0xd4, 0x16, 0x03, 0x10];
 
 /// The solid-colour span painter at US v2.1 0x4005_544C (24 bytes): fills
 /// painted by it are plain colours; others (gradients, bitmaps) are not.
@@ -57,10 +60,34 @@ const GLYPH_CALL_SIG: [u8; 58] = [
     0xc0,
 ];
 const GLYPH_CALL_SIG_AT: u32 = 0x32;
+/// The same text loop in the v1.5 BIOS (155-10072-a, call at 0x4008_4300),
+/// with other registers: the string in r20, the run in r16, the baseline in
+/// r22 (VERIFIED-FW, the loops side by side).
+const GLYPH_CALL_SIG_V15: [u8; 58] = [
+    0x03, 0x14, 0xc0, 0x30, 0x02, 0x14, 0xc1, 0x30, 0xb8, 0x60, 0x2f, 0x25, 0x06, 0x00, 0x02, 0x26, 0x40, 0x20, 0x2f,
+    0x26, 0x06, 0x00, 0x08, 0x10, 0x00, 0x20, 0x01, 0x14, 0x8f, 0x30, 0x03, 0x80, 0x02, 0xc1, 0x41, 0x28, 0xc3, 0x01,
+    0xc3, 0xbb, 0x70, 0x7a, 0x2a, 0x70, 0x20, 0xc3, 0x98, 0x77, 0x4a, 0x77, 0x60, 0x7f, 0x0a, 0x27, 0xc0, 0x05, 0x21,
+    0xc0,
+];
+
+/// Where the text loop keeps the string, the run (+0x08 its font
+/// resource) and the baseline, at the glyph call (the index is r14, the pen
+/// x r13 and the colour r23 in both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlyphRegs {
+    pub string: u8,
+    pub run: u8,
+    pub baseline: u8,
+}
+
+const GLYPH_REGS_V21: GlyphRegs = GlyphRegs { string: 22, run: 17, baseline: 19 };
+const GLYPH_REGS_V15: GlyphRegs = GlyphRegs { string: 20, run: 16, baseline: 22 };
 
 /// The gradient span painter (US v2.1 0x4005_5394): fill +0x34 = 0x12 is
 /// radial, else linear (Flash's fill types).
-const GRADIENT_PAINTER_SIG: [u8; 20] = [0xe1, 0xc5, 0xf1, 0xc0, 0xad, 0x80, 0x0b, 0x0d, 0x91, 0x14, 0xb1, 0xff, 0x02, 0xf0, 0x7d, 0xff, 0xd1, 0xc0, 0xc1, 0xc5];
+/// The wildcards are the two calls' offsets (the linear and radial painters
+/// lie elsewhere in Talking Words Factory's own player, 0x8001_B494).
+const GRADIENT_PAINTER_SIG: [u16; 20] = [0xe1, 0xc5, 0xf1, 0xc0, 0xad, 0x80, 0x0b, 0x0d, 0x91, 0x14, W, 0xff, 0x02, 0xf0, W, 0xff, 0xd1, 0xc0, 0xc1, 0xc5];
 /// The point transform (US v2.1 0x4004_A368; r0 the matrix, 16.16 a b c d
 /// then tx ty; r1 the point; r2 where the rounded result goes).
 const TRANSFORM_SIG: [u8; 30] = [0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xf1, 0xc0, 0x08, 0x75, 0x28, 0x76, 0x1a, 0x72, 0x00, 0x85, 0x20, 0x86, 0x04, 0x28, 0x7e, 0x00];
@@ -94,6 +121,8 @@ pub struct Hooks {
     /// The device-font glyph blit call (None: device text stays as the
     /// LCD shows it).
     pub glyph: Option<u32>,
+    /// The text loop's registers at that call.
+    pub glyph_regs: GlyphRegs,
     /// The gradient painter and the blending gradient and bitmap painters
     /// (None: those fills show as the LCD shows them).
     pub gradient: Option<u32>,
@@ -154,11 +183,12 @@ impl Hooks {
         };
         Some(Hooks {
             edge_ctor: find(&EDGE_CTOR_SIG)?,
-            scanline: find(&SCANLINE_SIG)?,
+            scanline: find_masked(bios, base, &SCANLINE_SIG)?,
             solid_painter: find(&SOLID_PAINTER_SIG)?,
             bitmap_painter: find(&BITMAP_PAINTER_SIG)? - BITMAP_PAINTER_SIG_AT,
-            glyph: find(&GLYPH_CALL_SIG).map(|a| a + GLYPH_CALL_SIG_AT),
-            gradient: find(&GRADIENT_PAINTER_SIG),
+            glyph: find(&GLYPH_CALL_SIG).or_else(|| find(&GLYPH_CALL_SIG_V15)).map(|a| a + GLYPH_CALL_SIG_AT),
+            glyph_regs: if find(&GLYPH_CALL_SIG).is_none() && find(&GLYPH_CALL_SIG_V15).is_some() { GLYPH_REGS_V15 } else { GLYPH_REGS_V21 },
+            gradient: find_masked(bios, base, &GRADIENT_PAINTER_SIG),
             gradient_blend: find_masked(bios, base, &GRADIENT_BLEND_SIG),
             bitmap_blend: find_masked(bios, base, &BITMAP_BLEND_SIG),
             transform: find(&TRANSFORM_SIG),
@@ -173,11 +203,11 @@ impl Hooks {
         let find = |sig: &[u8]| image.windows(sig.len()).enumerate().step_by(2).find(|(_, w)| *w == sig).map(|(i, _)| base + i as u32);
         vec![
             ("edge_ctor", find(&EDGE_CTOR_SIG)),
-            ("scanline", find(&SCANLINE_SIG)),
+            ("scanline", find_masked(image, base, &SCANLINE_SIG)),
             ("solid_painter", find(&SOLID_PAINTER_SIG)),
             ("bitmap_painter", find(&BITMAP_PAINTER_SIG)),
-            ("glyph", find(&GLYPH_CALL_SIG)),
-            ("gradient", find(&GRADIENT_PAINTER_SIG)),
+            ("glyph", find(&GLYPH_CALL_SIG).or_else(|| find(&GLYPH_CALL_SIG_V15))),
+            ("gradient", find_masked(image, base, &GRADIENT_PAINTER_SIG)),
             ("gradient_blend", find_masked(image, base, &GRADIENT_BLEND_SIG)),
             ("bitmap_blend", find_masked(image, base, &BITMAP_BLEND_SIG)),
             ("transform", find(&TRANSFORM_SIG)),
@@ -562,10 +592,11 @@ impl HdCapture {
             .collect();
         let nib = |c: u32| ((c & 0xF0) | (c >> 4)) as u8;
         let c = regs[23];
-        // The text loop's own registers: r22 the string, r14 the index,
-        // r17 the run (+0x08 the BIOS font resource), r13 the pen x, r19
+        // The text loop's own registers (see `GlyphRegs`): the string, r14
+        // the index, the run (+0x08 the BIOS font resource), r13 the pen x,
         // the baseline.
-        let res = w(regs[17] + 8);
+        let gr = self.players[self.active].glyph_regs;
+        let res = w(regs[gr.run as usize] + 8);
         let name_at = w(res + 4);
         let font: String = (0..32).map(|i| peek(name_at + i)).take_while(|&b| b != 0).map(|b| b as char).collect();
         let g = Glyph {
@@ -576,10 +607,10 @@ impl HdCapture {
             coverage,
             clip: [h(surface + 0x14), h(surface + 0x16), h(surface + 0x18), h(surface + 0x1A)],
             rgb: [nib(c & 0xFF), nib((c >> 8) & 0xFF), nib((c >> 16) & 0xFF)],
-            ch: peek(regs[22] + regs[14]) as u16,
+            ch: peek(regs[gr.string as usize] + regs[14]) as u16,
             font,
             em: peek(res + 0x10) as f32,
-            pen: (regs[13] as i16 as i32, regs[19] as i16 as i32),
+            pen: (regs[13] as i16 as i32, regs[gr.baseline as usize] as i16 as i32),
         };
         // Text drawn after a render's scanlines goes over that render;
         // text drawn before the next render, under it (VERIFIED-FW:
@@ -1832,7 +1863,7 @@ mod tests {
     fn finds_hooks_by_signature_at_any_even_offset() {
         let mut bios = vec![0u8; 0x400];
         bios[0x100..0x100 + 44].copy_from_slice(&EDGE_CTOR_SIG);
-        bios[0x202..0x202 + 20].copy_from_slice(&SCANLINE_SIG);
+        bios[0x202..0x202 + 20].copy_from_slice(&SCANLINE_SIG.map(|b| b as u8));
         bios[0x300..0x300 + 24].copy_from_slice(&SOLID_PAINTER_SIG);
         bios[0x382..0x382 + 32].copy_from_slice(&BITMAP_PAINTER_SIG);
         assert_eq!(
@@ -1843,6 +1874,7 @@ mod tests {
                 solid_painter: 0x4000_0300,
                 bitmap_painter: 0x4000_0350,
                 glyph: None,
+                glyph_regs: GLYPH_REGS_V21,
                 gradient: None,
                 gradient_blend: None,
                 bitmap_blend: None,
@@ -1870,7 +1902,7 @@ mod tests {
             put(&mut mem, 0x128 + 4 * i, &v.to_le_bytes());
         }
         let peek = |a: u32| mem[a as usize];
-        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None, gradient: None, gradient_blend: None, bitmap_blend: None, transform: None, shape_curve: None, stroke: None });
+        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None, glyph_regs: GLYPH_REGS_V21, gradient: None, gradient_blend: None, bitmap_blend: None, transform: None, shape_curve: None, stroke: None });
         c.edge(0, peek); // built before its render's first scanline event
         c.scanline(0x100, 1, peek);
         c.scanline(0x100, 2, peek); // later scanlines of the same render
