@@ -171,7 +171,7 @@ impl Cpu {
         self.instructions_retired += 1;
         let stall = bus.take_stall();
         let (now, taken) = (self.cycles, matches!(flow, Flow::Jump(_)));
-        let cost = self.pipeline_cost(now, i.reg_reads(), i.load_dst(), taken, i.delay, i.is_compare_branch(), stall);
+        let cost = self.pipeline_cost(now, i.read_regs(), i.load_dst(), taken, i.delay, i.is_compare_branch(), stall);
         let delay_slot_of = self.delay_target.take();
         match flow {
             Flow::Halt(reason) => {
@@ -238,11 +238,39 @@ impl Cpu {
         }
         // Counters stay in locals in the loop and are written back after.
         let (start, mut n, mut spent) = (self.cycles, 0u64, 0u64);
-        while spent < budget {
+        // Read-only code runs a block at a time (`icache::Blocks`): no cache
+        // lookup or per-instruction checks inside a block, each instruction
+        // run as below. The blocks are taken out of the cache meanwhile.
+        let mut blocks = std::mem::take(&mut self.icache.blocks);
+        'run: while spent < budget {
             let pc = self.pc;
             if pc >= fence {
                 out.exit = BlockExit::Slow;
                 break;
+            }
+            if let Some(head) = blocks.find(&self.icache, pc, |a| decode(bus, a))
+                && head.last < fence
+            {
+                let entries = &blocks.entries[head.first as usize..(head.first + head.len) as usize];
+                // Only a block's first instruction can be in a delay slot
+                // (a block ends at a branch).
+                if entries[0].hot.branchy && self.delay_target.is_some() {
+                    out.exit = BlockExit::Slow;
+                    break;
+                }
+                for e in entries {
+                    if self.batch_one(bus, ext, &e.hot, None, e.fetch, e.bus_exit, start, &mut spent, &mut n, &mut out, &mut watch) {
+                        break 'run;
+                    }
+                    if spent >= budget {
+                        break 'run;
+                    }
+                    // Taken branch, loop end or delay slot: the next block.
+                    if self.pc != e.hot.next {
+                        continue 'run;
+                    }
+                }
+                continue;
             }
             // Cached (ROM) code: the pre-digested form. Elsewhere, decode now.
             let mut uncached = None;
@@ -257,62 +285,11 @@ impl Cpu {
                 out.exit = BlockExit::Slow;
                 break;
             }
-            bus.instruction(pc, hot.next.wrapping_sub(pc));
-            let flow = match hot.fast {
-                Fast::General => {
-                    let i = match uncached {
-                        Some(i) => i,
-                        None => self.icache.get(pc, || decode(bus, pc)),
-                    };
-                    self.cycles = start + spent;
-                    bus.at(start + spent, pc);
-                    match self.execute(&i, bus, ext) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            out.exit = BlockExit::Error(e);
-                            break;
-                        }
-                    }
-                }
-                f => {
-                    if f.accesses_memory() {
-                        bus.at(start + spent, pc);
-                    }
-                    self.execute_fast(f, &hot, bus)
-                }
-            };
-            let stall = bus.take_stall();
-            let taken = matches!(flow, Flow::Jump(_));
-            spent += self.pipeline_cost(start + spent, hot.reads, hot.load_dst, taken, hot.delay, hot.compare_branch, stall);
-            let delay_slot_of = self.delay_target.take();
-            match flow {
-                Flow::Jump(target) if hot.delay => {
-                    self.delay_target = Some(target);
-                    self.pc = hot.next;
-                }
-                Flow::Jump(target) => self.pc = target,
-                Flow::Next => {
-                    self.pc = match delay_slot_of {
-                        Some(target) => target,
-                        None => self.loop_end_check(hot.next),
-                    };
-                }
-                // Only produced by the instructions excluded above.
-                Flow::Halt(_) | Flow::Exception(_) => unreachable!("halt or exception in run_block at {pc:#x}"),
-            }
-            n += 1;
-            if bus.block_exit() || (hot.recheck && self.pending_interrupt().is_some()) {
-                out.from = pc;
-                out.exit = BlockExit::Bus;
+            if self.batch_one(bus, ext, &hot, uncached, true, true, start, &mut spent, &mut n, &mut out, &mut watch) {
                 break;
             }
-            if self.pc <= pc && self.delay_target.is_none() && watch(self.pc, start + spent) {
-                out.from = pc;
-                out.exit = BlockExit::Backward;
-                break;
-            }
-            out.from = pc;
         }
+        self.icache.blocks = blocks;
         self.instructions_retired += n;
         out.executed = n;
         // What `tick` did per step: before the last instruction no timer
@@ -322,6 +299,89 @@ impl Cpu {
             out.exit = BlockExit::Error(e);
         }
         out
+    }
+
+    /// One instruction of `run_block` at `hot.addr` (`uncached`: its decode,
+    /// when not in the cache), and the checks after it. `fetch`: time its
+    /// fetch in full (else it is on the line just fetched); `bus_exit`: it
+    /// may have touched a device. True when the batch ends (`out.exit` set).
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn batch_one<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        ext: &mut impl AuxExt,
+        hot: &Hot,
+        uncached: Option<Instr>,
+        fetch: bool,
+        bus_exit: bool,
+        start: u64,
+        spent: &mut u64,
+        n: &mut u64,
+        out: &mut Block,
+        watch: &mut impl FnMut(u32, u64) -> bool,
+    ) -> bool {
+        let pc = hot.addr;
+        if fetch {
+            bus.instruction(pc, hot.next.wrapping_sub(pc));
+        } else {
+            bus.instruction_same_line();
+        }
+        let flow = match hot.fast {
+            Fast::General => {
+                let i = match uncached {
+                    Some(i) => i,
+                    None => self.icache.get(pc, || decode(bus, pc)),
+                };
+                self.cycles = start + *spent;
+                bus.at(start + *spent, pc);
+                match self.execute(&i, bus, ext) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        out.exit = BlockExit::Error(e);
+                        return true;
+                    }
+                }
+            }
+            f => {
+                if f.accesses_memory() {
+                    bus.at(start + *spent, pc);
+                }
+                self.execute_fast(f, hot, bus)
+            }
+        };
+        let stall = bus.take_stall();
+        let taken = matches!(flow, Flow::Jump(_));
+        *spent += self.pipeline_cost(start + *spent, hot.reads, hot.load_dst, taken, hot.delay, hot.compare_branch, stall);
+        let delay_slot_of = self.delay_target.take();
+        match flow {
+            Flow::Jump(target) if hot.delay => {
+                self.delay_target = Some(target);
+                self.pc = hot.next;
+            }
+            Flow::Jump(target) => self.pc = target,
+            Flow::Next => {
+                self.pc = match delay_slot_of {
+                    Some(target) => target,
+                    None => self.loop_end_check(hot.next),
+                };
+            }
+            // Only produced by the instructions excluded from batches.
+            Flow::Halt(_) | Flow::Exception(_) => unreachable!("halt or exception in run_block at {pc:#x}"),
+        }
+        *n += 1;
+        if (bus_exit && bus.block_exit()) || (hot.recheck && self.pending_interrupt().is_some()) {
+            out.from = pc;
+            out.exit = BlockExit::Bus;
+            return true;
+        }
+        if self.pc <= pc && self.delay_target.is_none() && watch(self.pc, start + *spent) {
+            out.from = pc;
+            out.exit = BlockExit::Backward;
+            return true;
+        }
+        out.from = pc;
+        false
     }
 
     /// A pre-digested instruction (`icache::fast_form`): what `execute` does
@@ -614,7 +674,7 @@ impl Cpu {
     fn pipeline_cost(
         &mut self,
         now: u64,
-        reads: u64,
+        reads: [u8; 4],
         load_dst: u8,
         taken: bool,
         delay: bool,
@@ -624,15 +684,11 @@ impl Cpu {
         if !self.config.pipeline_timing {
             return 1;
         }
-        let mut wait = 0;
-        if now < self.ready_max {
-            let mut m = reads;
-            while m != 0 {
-                let r = m.trailing_zeros() as usize;
-                m &= m - 1;
-                wait = wait.max(self.ready[r].saturating_sub(now));
-            }
-        }
+        // The latest of the registers read (padding reads as 0), branch-free:
+        // the same as the wait over each (none if all have arrived).
+        let ready = |r: u8| self.ready.get(r as usize).copied().unwrap_or(0);
+        let latest = ready(reads[0]).max(ready(reads[1])).max(ready(reads[2]).max(ready(reads[3])));
+        let wait = latest.saturating_sub(now);
         if load_dst != NO_LOAD {
             let at = now + wait + memory + self.config.load_latency;
             self.ready[load_dst as usize] = at;
