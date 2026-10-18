@@ -1855,15 +1855,27 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     }
 }
 
+/// A green button: at least `min`, else its text plus padding. Drawn here so
+/// its size never depends on hover (egui's button grew or shrank with the
+/// state's outline) and its hover colour comes from its own response (a
+/// fixed-size one never lit up before).
 fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
-    let id = ui.next_auto_id();
-    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-    let b = egui::Button::new(egui::RichText::new(text).strong().color(egui::Color32::WHITE))
-        .fill(if hovered { ACCENT_HOVER } else { ACCENT })
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(8)
-        .min_size(min);
-    if min.x > 0.0 { ui.add_sized(min, b) } else { ui.add(b) }
+    let galley = egui::WidgetText::from(egui::RichText::new(text).strong()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let pad = ui.spacing().button_padding;
+    let size = (galley.size() + 2.0 * pad).max(min);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if response.hovered() || response.has_focus() { ACCENT_HOVER } else { ACCENT };
+        ui.painter().rect_filled(rect, 8, fill);
+        let at = rect.center() - galley.size() / 2.0;
+        ui.painter().galley(at, galley, egui::Color32::WHITE);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Red banner: the last game was closed because the console (`console`, as
