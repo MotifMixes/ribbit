@@ -54,6 +54,7 @@ const NOW: i32 = offset_of!(JitCtx, now) as i32;
 const END: i32 = offset_of!(JitCtx, end) as i32;
 
 const FENCE: i32 = offset_of!(JitCtx, fence) as i32;
+const DISPATCH: i32 = offset_of!(JitCtx, dispatch) as i32;
 const TIMING_ON: i32 = offset_of!(JitCtx, timing_on) as i32;
 const ARMED: i32 = offset_of!(JitCtx, armed) as i32;
 const STALL: i32 = offset_of!(JitCtx, stall) as i32;
@@ -221,7 +222,9 @@ pub(crate) fn generic_ok(i: &Instr) -> bool {
         Op::Mov | Op::Bset | Op::Bclr | Op::Bxor | Op::Bmsk | Op::RorM => srcs,
         Op::Cmp | Op::Rcmp | Op::Tst | Op::Btst => srcs,
         Op::Asl | Op::Asr | Op::Lsr | Op::Ror | Op::Rrc | Op::Rlc => srcs,
-        Op::Sexb | Op::Sexw | Op::Extb | Op::Extw | Op::Not | Op::Neg | Op::Swap | Op::Abs => srcs,
+        Op::Sexb | Op::Sexw | Op::Extb | Op::Extw | Op::Not | Op::Neg | Op::Swap | Op::Abs | Op::Norm => srcs,
+        // A zero-overhead loop's set-up (`Gen::lp`).
+        Op::Lp => true,
         Op::Ld | Op::St => {
             // The base's write-back must be a plain register too, and a load
             // writing back into its own destination is an error the executor
@@ -345,6 +348,9 @@ pub(crate) fn emit(items: &[Item], mmid_low: bool, id: u32, links: *mut crate::L
         }
         if is_branch(it.hot.fast) {
             break g.branch(items, k);
+        }
+        if it.general().is_some_and(|i| i.op == Op::Lp) {
+            break g.lp(items, k);
         }
         g.instr(it);
         let h = it.hot;
@@ -526,7 +532,30 @@ impl Gen {
         let miss = self.ops.new_dynamic_label();
         dynasm!(self.ops ; .arch x64 ; mov rax, QWORD link);
         if let Pc::R14 = target {
-            dynasm!(self.ops ; .arch x64 ; cmp r14d, DWORD [rax] ; jne =>miss);
+            // A computed target: this exit's last one, else the shared
+            // table (`crate::DISPATCH_SIZE` slots by address).
+            let cached = self.ops.new_dynamic_label();
+            dynasm!(self.ops
+                ; .arch x64
+                ; cmp r14d, DWORD [rax]
+                ; je =>cached
+                ; mov ecx, r14d
+                ; shr ecx, 1
+                ; and ecx, (crate::DISPATCH_SIZE - 1) as i32
+                ; shl rcx, 4
+                ; add rcx, QWORD [r12 + DISPATCH]
+                ; cmp r14d, DWORD [rcx]
+                ; jne =>miss
+                ; mov edx, DWORD [rcx + 4]
+                ; cmp edx, DWORD [r12 + FENCE]
+                ; jae =>miss
+                ; mov rdx, QWORD [rcx + 8]
+                ; test rdx, rdx
+                ; jz =>miss
+                ; add DWORD [r12 + EXECUTED], executed as i32
+                ; jmp rdx
+                ; =>cached
+            );
         }
         dynasm!(self.ops
             ; .arch x64
@@ -1327,6 +1356,31 @@ impl Gen {
                     self.merge_flags(writes);
                 }
             }
+            Op::Norm => {
+                // `norm32`: 31 for 0 and all ones, else the leading sign
+                // bits less one; Z/N describe the source (with .F, short or not).
+                self.gread(c, 0);
+                let done = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov esi, eax
+                    ; mov edx, eax
+                    ; sar edx, 31
+                    ; xor edx, eax
+                    ; mov eax, 31
+                    ; bsr edx, edx
+                    ; jz =>done
+                    ; mov eax, 30
+                    ; sub eax, edx
+                    ; =>done
+                );
+                self.gwrite(d);
+                if i.set_flags {
+                    dynasm!(self.ops ; .arch x64 ; test esi, esi);
+                    self.flags(Writes::Zn);
+                    self.merge_flags(Writes::Zn);
+                }
+            }
             Op::Abs => {
                 // C = the source's sign, V = it was 0x8000_0000 (PRM, ABS).
                 self.gread(c, 0);
@@ -1756,6 +1810,39 @@ impl Gen {
         self.after_sequential(s.next, executed + 1, s.addr, mem);
         self.flow(Pc::Const(s.next), executed + 1, s.addr);
         k + 2
+    }
+
+    /// LPcc at `k` (the last of its block): if the condition holds,
+    /// LP_START/LP_END are set (in the context, the authority while
+    /// compiled code runs) and the flow goes on in sequence, else it jumps
+    /// to the loop's end (`Cpu::execute`, Op::Lp).
+    fn lp(&mut self, items: &[Item], k: usize) -> usize {
+        let it = items[k];
+        let (h, i) = (it.hot, it.instr.expect("an LP's decode"));
+        self.pc = h.addr;
+        let executed = k as u32 + 1;
+        if !self.inline {
+            self.prep(&h, it.fetch);
+        }
+        let skip = self.ops.new_dynamic_label();
+        self.cond_skip(i.cc, skip);
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov DWORD [r12 + LP_START], h.next as i32
+            ; mov DWORD [r12 + LP_END], i.target as i32
+        );
+        self.stall(&h, it.fetch, false);
+        self.cost(&h, 0);
+        self.after_sequential(h.next, executed, h.addr, false);
+        self.flow(Pc::Const(h.next), executed, h.addr);
+        if i.cc != COND_AL {
+            // Not set up: a taken jump (its slot killed: +1).
+            dynasm!(self.ops ; .arch x64 ; =>skip);
+            self.stall(&h, it.fetch, false);
+            self.cost(&h, 1);
+            self.flow(Pc::Const(i.target), executed, h.addr);
+        }
+        k + 1
     }
 
     /// After `cmp b, c`: jumps to `skip` unless BRcc's condition holds.

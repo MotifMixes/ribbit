@@ -100,12 +100,18 @@ impl Arena {
             self.chunks.push(Chunk { ptr, size, used: 0 });
         }
         let c = self.chunks.last_mut().expect("a chunk");
-        sys::protect_rw(c.ptr, c.size)?;
-        // SAFETY: the chunk is read-write now and has room for `code`.
+        // Only the pages the new code lands on change protection (their
+        // other code is not running: one thread).
+        let page = page_size();
+        let (from, to) = (c.used / page * page, (c.used + need).div_ceil(page) * page);
+        // SAFETY: within the chunk (`to` <= its size, a multiple of the page size).
+        let pages = unsafe { c.ptr.add(from) };
+        sys::protect_rw(pages, to - from)?;
+        // SAFETY: those pages are read-write now and hold room for `code`.
         let at = unsafe { c.ptr.add(c.used) };
         unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), at, code.len()) };
         c.used += need;
-        sys::protect_rx(c.ptr, c.size)?;
+        sys::protect_rx(pages, to - from)?;
         Ok(at)
     }
 

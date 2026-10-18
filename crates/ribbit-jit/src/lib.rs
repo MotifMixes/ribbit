@@ -91,7 +91,7 @@ pub struct JitCtx {
     pub now: u64,
     /// Stop once `now` reaches this (`run_block`'s budget).
     pub end: u64,
-    /// `Cpu::lp_start` / `lp_end` (compiled code never changes them).
+    /// `Cpu::lp_start` / `lp_end`: in, and out (an LP sets them).
     pub lp_start: u32,
     pub lp_end: u32,
     /// Out: the next PC.
@@ -106,6 +106,9 @@ pub struct JitCtx {
     pub delay_target: u32,
     /// `run_block`'s fence: no compiled block reaching it is entered.
     pub fence: u32,
+    /// `DISPATCH_SIZE` links by address (slot `(pc >> 1) % DISPATCH_SIZE`),
+    /// for computed jumps (`Jit` fills them; null: none).
+    pub dispatch: *const Link,
     pub watch: WatchFn,
     pub watch_data: *mut c_void,
     /// Out (a `Flow` exit): the link slot of that exit (null: none).
@@ -201,6 +204,12 @@ extern "sysv64" fn slow_write32<B: Bus>(bus: *mut c_void, a: u32, v: u32, now: u
 
 static NEVER: bool = false;
 
+/// Slots of the computed-jump table (a power of two).
+pub const DISPATCH_SIZE: usize = 8192;
+
+/// A table with nothing in it (for code run alone).
+static EMPTY_DISPATCH: [Link; DISPATCH_SIZE] = [Link { pc: 0, last: 0, code: 0 }; DISPATCH_SIZE];
+
 /// `JitCtx::watch` for a `&mut dyn FnMut(u32, u64) -> bool` at `data`.
 extern "sysv64" fn watch_dyn(data: *mut c_void, pc: u32, now: u64) -> u32 {
     // SAFETY: `data` is the `&mut &mut dyn FnMut` the context was made with.
@@ -293,6 +302,7 @@ impl JitCtx {
             delay_pending: 0,
             delay_target: 0,
             fence: u32::MAX,
+            dispatch: EMPTY_DISPATCH.as_ptr(),
             watch: watch_never,
             watch_data: std::ptr::null_mut(),
             link: std::ptr::null_mut(),
@@ -431,6 +441,7 @@ impl Block {
         };
         cpu.pc = exit.pc;
         cpu.delay_target = exit.delay_target;
+        (cpu.lp_start, cpu.lp_end) = (ctx.lp_start, ctx.lp_end);
         exit
     }
 
@@ -590,6 +601,8 @@ pub static PROFILE: std::sync::Mutex<Option<[std::collections::HashMap<u32, u64>
 pub struct Jit {
     epoch: u64,
     slots: Vec<Slot>,
+    /// Compiled blocks by address, for computed jumps (`JitCtx::dispatch`).
+    dispatch: Box<[Link]>,
     /// The code (dropped after the blocks pointing into it).
     arena: exec_mem::Arena,
     /// Check every compiled run against the interpreter (`RIBBIT_JIT_CHECK`):
@@ -600,7 +613,14 @@ pub struct Jit {
 
 impl Default for Jit {
     fn default() -> Self {
-        Jit { epoch: u64::MAX, slots: Vec::new(), arena: exec_mem::Arena::default(), check: false, stats: JitStats::default() }
+        Jit {
+            epoch: u64::MAX,
+            slots: Vec::new(),
+            dispatch: vec![Link::default(); DISPATCH_SIZE].into_boxed_slice(),
+            arena: exec_mem::Arena::default(),
+            check: false,
+            stats: JitStats::default(),
+        }
     }
 }
 
@@ -618,6 +638,7 @@ impl Jit {
 
     fn start_over(&mut self, epoch: u64) {
         self.slots.clear();
+        self.dispatch.fill(Link::default());
         self.arena = exec_mem::Arena::default();
         self.epoch = epoch;
     }
@@ -715,6 +736,12 @@ impl<B: Bus> BlockRunner<B> for Jit {
             ctx.set_view(v);
         }
         ctx.fence = fence;
+        // (The table is never reallocated: written through this pointer
+        // while a block is borrowed.)
+        let dispatch = self.dispatch.as_mut_ptr();
+        if !self.check {
+            ctx.dispatch = dispatch;
+        }
         ctx.watch = watch_dyn;
         ctx.watch_data = &mut watch as *mut &mut dyn FnMut(u32, u64) -> bool as *mut c_void;
         let mut head = head;
@@ -741,9 +768,14 @@ impl<B: Bus> BlockRunner<B> for Jit {
                 out.resume = Some((head, 0));
                 return Some(out);
             }
-            if !pending.is_null() && !check {
-                // SAFETY: the slot belongs to a block of this epoch (still held).
-                unsafe { *pending = Link { pc: head.start, last: block.last, code: block.chain as u64 } };
+            if !check {
+                let link = Link { pc: head.start, last: block.last, code: block.chain as u64 };
+                if !pending.is_null() {
+                    // SAFETY: the slot belongs to a block of this epoch (still held).
+                    unsafe { *pending = link };
+                }
+                // SAFETY: within the table (masked index).
+                unsafe { *dispatch.add((head.start as usize >> 1) & (DISPATCH_SIZE - 1)) = link };
             }
             let exit = if check {
                 let entries = &blocks.entries[head.first as usize..(head.first + head.len) as usize];
@@ -950,6 +982,7 @@ struct CpuState {
     delay_target: Option<u32>,
     ready: Vec<u64>,
     ready_max: u64,
+    lp: (u32, u32),
 }
 
 impl CpuState {
@@ -961,6 +994,7 @@ impl CpuState {
             delay_target: cpu.delay_target,
             ready: cpu.ready.clone(),
             ready_max: cpu.ready_max,
+            lp: (cpu.lp_start, cpu.lp_end),
         }
     }
     fn restore(&self, cpu: &mut Cpu) {
@@ -970,6 +1004,7 @@ impl CpuState {
         cpu.delay_target = self.delay_target;
         cpu.ready.clone_from(&self.ready);
         cpu.ready_max = self.ready_max;
+        (cpu.lp_start, cpu.lp_end) = self.lp;
     }
 }
 
