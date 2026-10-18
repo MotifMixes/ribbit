@@ -79,6 +79,19 @@ software list. Region pickers move on by themselves after about 30 s.
 Images whose first bytes are not "LEAP" are later cartridges with a different header layout;
 the BIOS boots them all the same.
 
+### Prototypes and unreleased builds
+
+Player reports (tester, 2026-10-18). These images are not in MAME's software list, so no CRC32 is given.
+
+| Build | Status | Checked | Notes |
+|---|---|---|---|
+| Bratz J2S | **Perfect** | tester, 2026-10-18 | A graphics showcase rather than a game; the tester counts it as fully working |
+| Disney Princess: Enchanted Learning (1.8 Beta) | **Works** | tester, 2026-10-18 | Seems to work fine; more testing needed |
+| The Incredibles: Animation Sample 1 | **Works** | tester, 2026-10-18 | Boots and runs fine; little content. Shows the red "Content NOT approved by LeapFrog" screen instead of the LeapFrog logo |
+| The Incredibles: Animation Submission 2 | **Works** | tester, 2026-10-18 | As Animation Sample 1 |
+| ROX Alpha 1.15 | **Works** | tester, 2026-10-18 | Boots and runs; an alpha-quality build |
+| ROX Alpha 1.15r2 | **Works** | tester, 2026-10-18 | Boots and runs; revised menus and significant fixes over 1.15; pause works
+
 ## Leapster 2 and L-MAX (experimental)
 
 Automated check 2026-10-16: 60 s from power-on, no input, straps 0x63FF_FFFF (no calibration screen), each game on
