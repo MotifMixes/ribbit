@@ -446,6 +446,17 @@ impl App {
     }
 
     fn set_bios(&mut self, path: PathBuf) {
+        // A Zippity's system NAND (as dropping it on the window takes it):
+        // kept with the BIOSes opened, as the Zippity's; the Leapster's BIOS
+        // stays as it is.
+        if crate::library::is_internal(&path) {
+            self.settings.opened_bios.retain(|p| p != &path);
+            self.settings.opened_bios.insert(0, path);
+            self.save_settings();
+            self.ui.toast("BIOS: Zippity");
+            self.rescan_library();
+            return;
+        }
         match ribbit_core::load_firmware(&path) {
             Ok(fw) => {
                 let name = fw.known().map_or("unknown dump".to_string(), |k| k.name.to_string());
@@ -518,6 +529,10 @@ impl App {
                 "",
             );
         };
+        // The Zippity with no cartridge: its built-in games.
+        if hw == Hardware::Zippity {
+            return self.start_zippity(bios.clone(), bios);
+        }
         self.next_bios = Some(bios);
         if let Err(e) = self.boot(None) {
             let (title, explain) = explain_load_error(&e);
@@ -574,7 +589,10 @@ impl App {
             if !family.runs_on(console) && self.library.consoles().contains(&family.console()) {
                 self.settings.library_console = family.console().name().to_string();
                 self.save_settings();
-                self.ui.library.tab = Some(self.library.tab_for(family.console()));
+                // The page stays when it lists the game (the Leapster 2's).
+                if !self.ui.library.tab.is_none_or(|t| t.lists(family)) {
+                    self.ui.library.tab = Some(self.library.tab_for(family.console()));
+                }
             }
             match self.console_bios(&path) {
                 Ok(Some(nand)) if self.library.selected_console(&self.settings.library_console) == ribbit_memory::known::Hardware::Zippity => {
@@ -1509,9 +1527,12 @@ impl App {
         }
     }
 
-    /// Paused by the user, or by being in the background.
+    /// Paused by the user, or by being in the background. A RockIt Twist
+    /// plugged into the PC keeps running in the background: the program
+    /// talking to it over USB (LeapFrog Connect) is the active window then.
     fn halted(&self) -> bool {
-        self.paused || (self.background && self.settings.pause_in_background)
+        let on_usb = self.twist.is_some() && self.settings.twist_usb;
+        self.paused || (self.background && self.settings.pause_in_background && !on_usb)
     }
 
     /// The window became active (or not).

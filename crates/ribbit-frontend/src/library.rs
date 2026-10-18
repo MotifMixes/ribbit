@@ -150,8 +150,8 @@ pub enum Family {
 const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 
 impl Family {
-    /// The library tabs, in order.
-    pub const ALL: [Family; 4] = [Family::Leapster, Family::Leapster2, Family::Zippity, Family::RockItTwist];
+    /// The library tabs, in alphabetical order.
+    pub const ALL: [Family; 4] = [Family::Leapster, Family::Leapster2, Family::RockItTwist, Family::Zippity];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -172,8 +172,7 @@ impl Family {
         }
     }
 
-    /// The console a tab is about: its page lists every game this console
-    /// plays (the Leapster 2 page has the Leapster games too).
+    /// The console a tab is about.
     pub fn console(self) -> Hardware {
         match self {
             Family::Leapster => Hardware::Leapster,
@@ -185,7 +184,12 @@ impl Family {
 
     /// Whether a tab's page lists a game of family `game`.
     pub fn lists(self, game: Family) -> bool {
-        game.runs_on(self.console())
+        match self {
+            // The Leapster 2's page: its own games only (the Leapster's are
+            // on theirs).
+            Family::Leapster2 => game == Family::Leapster2,
+            _ => game.runs_on(self.console()),
+        }
     }
 }
 
@@ -276,6 +280,11 @@ pub struct Library {
     /// A rescan's games, collected while the previous list stays on show
     /// (so the library never goes blank); swapped in once listed.
     incoming: Option<Vec<Game>>,
+    /// Ribbit's own folder for the RockIt Twist's system packages.
+    twist_system_dir: PathBuf,
+    /// The RockIt Twist's system packages are there (in the games folders
+    /// or Ribbit's own folder): the console can start.
+    pub twist_ready: bool,
 }
 
 impl Library {
@@ -290,6 +299,8 @@ impl Library {
             art_dir: data_dir.join("art"),
             rx: None,
             incoming: None,
+            twist_system_dir: crate::twist::system_dir(data_dir),
+            twist_ready: false,
         }
     }
 
@@ -337,6 +348,10 @@ impl Library {
                     }
                 }
                 Msg::Scanned => {
+                    let mut known = crate::twist::packages_in(&self.twist_system_dir);
+                    let games = self.incoming.as_ref().unwrap_or(&self.games);
+                    known.extend(games.iter().filter(|g| g.family == Family::RockItTwist).map(|g| g.path.clone()));
+                    self.twist_ready = crate::twist::SystemPackages::find(None, &known).is_some();
                     if let Some(list) = self.incoming.take() {
                         self.games = list;
                     }
@@ -366,6 +381,10 @@ impl Library {
     /// folder.
     pub fn set_opened_bios(&mut self, opened: &[PathBuf]) {
         self.opened = opened.iter().map(|p| {
+            // A Zippity's system NAND: the Zippity's BIOS.
+            if let Some(Found::ZippityNand(game)) = classify(p) {
+                return BiosFile { hardware: Hardware::Zippity, path: p.to_path_buf(), name: game.title };
+            }
             let known = ribbit_core::load_firmware(p).ok().and_then(|f| f.known().copied());
             let hardware = known.map_or(Hardware::Leapster, |k| k.hardware);
             let name = known.map_or_else(
@@ -407,6 +426,17 @@ impl Library {
         self.bios_file(hw).map(|b| b.path.as_path())
     }
 
+    /// Whether this console can start: its BIOS (or the RockIt Twist's
+    /// system packages) is here. The Leapster's page always shows: it is
+    /// where a BIOS is asked for.
+    pub fn has_console(&self, hw: Hardware) -> bool {
+        match hw {
+            Hardware::Leapster => true,
+            Hardware::RockItTwist => self.twist_ready,
+            _ => self.bios_for(hw).is_some(),
+        }
+    }
+
     /// The consoles Leapster games can play on: the Leapster models with a
     /// BIOS (chosen with File > Open BIOS or in a games folder); the
     /// original Leapster when there is none at all. Zippity and RockIt Twist
@@ -427,13 +457,12 @@ impl Library {
         consoles.iter().copied().find(|hw| hw.name() == chosen).unwrap_or(consoles[0])
     }
 
-    /// The tab that lists a console's games: the Leapster 2 page only when
-    /// there are games for the Leapster 2 alone.
+    /// The tab that lists a console's games (the Leapster 2 plays the
+    /// Leapster's: its own page has only the games for it alone).
     pub fn tab_for(&self, hw: Hardware) -> Family {
         match hw {
             Hardware::Zippity => Family::Zippity,
             Hardware::RockItTwist => Family::RockItTwist,
-            Hardware::Leapster2 if self.games.iter().any(|g| g.family == Family::Leapster2) => Family::Leapster2,
             _ => Family::Leapster,
         }
     }

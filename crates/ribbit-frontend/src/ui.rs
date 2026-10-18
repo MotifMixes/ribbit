@@ -546,14 +546,16 @@ fn idle_countdown(ui: &egui::Ui, area: egui::Rect, left: u32) {
     p.galley(egui::pos2(rect.center().x - g2.size().x / 2.0, y), g2, egui::Color32::WHITE);
 }
 
-/// The library's pages: all games, then each family that has games (all
-/// the Leapster models share one page; the Leapster 2 has its own when there
-/// are games for it alone). The console is chosen in the header's menu.
+/// The library's pages: all games, then each console that is here and has
+/// games (all the Leapster models share one page; the Leapster 2's page has
+/// the games for it alone). The console is chosen in the header's menu.
 fn console_tabs(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: &mut Option<Family>, actions: &mut Vec<Action>) {
     let count = |f: Option<Family>| library.games.iter().filter(|g| f.is_none_or(|f| f.lists(g.family))).count();
-    // A page for each family that has games of its own.
-    let families: Vec<Family> =
-        Family::ALL.into_iter().filter(|&f| library.games.iter().any(|g| g.family == f)).collect();
+    // A page for each console that is here and has games.
+    let families: Vec<Family> = Family::ALL
+        .into_iter()
+        .filter(|&f| library.has_console(f.console()) && library.games.iter().any(|g| f.lists(g.family)))
+        .collect();
     if tab.is_some_and(|t| !families.contains(&t)) {
         *tab = None;
     }
@@ -660,58 +662,66 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         if item(ui, "Open BIOS…", "") {
             actions.push(Action::Pick(Pick::Bios));
         }
-        if ui
-            .add(egui::Button::new("RockIt Twist (early emulation)"))
-            .on_hover_text(ribbit_twist::STATUS)
-            .clicked()
-        {
-            actions.push(Action::OpenTwist);
-            ui.close();
-        }
-        if ui
-            .button("Import RockIt Twist games (.zip)…")
-            .on_hover_text(
-                "Unpacks a zip of RockIt Twist package folders (each with its meta.inf) for one region and \
-                 installs them on the emulated console, where its own firmware finds them.",
-            )
-            .clicked()
-        {
-            actions.push(Action::Pick(Pick::TwistZip));
-            ui.close();
-        }
-        let content = settings.twist_content.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-        if ui
-            .button(match &content {
-                Some(n) => format!("RockIt Twist content: {n}…"),
-                None => "RockIt Twist content folder…".to_string(),
-            })
-            .on_hover_text(
-                "A folder written onto the RockIt Twist's internal storage when it starts, laid out like the \
-                 console's F: drive (Applications, Music, Trailers...). For your own programs, or content \
-                 copied from your own console.",
-            )
-            .clicked()
-        {
-            actions.push(Action::Pick(Pick::TwistContent));
-            ui.close();
-        }
-        if content.is_some() && ui.button("Remove RockIt Twist content").clicked() {
-            actions.push(Action::SetTwistContent(None));
-            ui.close();
-        }
-        let usb = settings.twist_usb;
-        if ui
-            .button(format!("{}Plug the RockIt Twist into this PC (USB)", if usb { "✓ " } else { "" }))
-            .on_hover_text(
-                "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
-                 so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
-                 usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
-            )
-            .clicked()
-        {
-            actions.push(Action::SetTwistUsb(!usb));
-            ui.close();
-        }
+        // The RockIt Twist's own items, in a menu of their own.
+        ui.menu_button("RockIt Twist", |ui| {
+            if ui
+                .add(egui::Button::new("Turn on (early emulation)"))
+                .on_hover_text(ribbit_twist::STATUS)
+                .clicked()
+            {
+                actions.push(Action::OpenTwist);
+                ui.close();
+            }
+            if ui
+                .button("Import games (.zip)…")
+                .on_hover_text(
+                    "Unpacks a zip of RockIt Twist package folders (each with its meta.inf) for one region and \
+                     installs them on the emulated console, where its own firmware finds them.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::TwistZip));
+                ui.close();
+            }
+            let content = settings.twist_content.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+            if ui
+                .button(match &content {
+                    Some(n) => format!("Content: {n}…"),
+                    None => "Content folder…".to_string(),
+                })
+                .on_hover_text(
+                    "A folder written onto the RockIt Twist's internal storage when it starts, laid out like the \
+                     console's F: drive (Applications, Music, Trailers...). For your own programs, or content \
+                     copied from your own console.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::TwistContent));
+                ui.close();
+            }
+            if content.is_some() && ui.button("Remove content").clicked() {
+                actions.push(Action::SetTwistContent(None));
+                ui.close();
+            }
+            let usb = settings.twist_usb;
+            if ui
+                .button(if usb {
+                    // Green while plugged in, red while not.
+                    egui::RichText::new("🔌  Unplug from this PC (USB)").color(egui::Color32::from_rgb(80, 200, 110))
+                } else {
+                    egui::RichText::new("🔌  Plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
+                })
+                .on_hover_text(
+                    "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
+                     so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
+                     usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
+                )
+                .clicked()
+            {
+                actions.push(Action::SetTwistUsb(!usb));
+                ui.close();
+            }
+        });
         ui.separator();
         if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
             actions.push(Action::Screenshot);
@@ -790,7 +800,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         });
         if ui
             .checkbox(&mut settings.pause_in_background, "Pause in background")
-            .on_hover_text("Pause the game while another window is active.")
+            .on_hover_text("Pause the game while another window is active (not a RockIt Twist plugged into this PC over USB).")
             .changed()
         {
             actions.push(Action::SettingsChanged);
@@ -1583,6 +1593,8 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     if phone {
         return phone_library_header(ui, settings, library, tab, actions);
     }
+    let header_id = egui::Id::new("library header controls width");
+    let mut wrapped = true;
     ui.horizontal(|ui| {
         let frog = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("frog icon"))).unwrap_or_else(|| {
             let img = egui::ColorImage::from_rgba_unmultiplied([256, 256], &crate::icon::frog_glyph_rgba(256));
@@ -1593,43 +1605,17 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         ui.add(egui::Image::new((frog.id(), egui::vec2(42.0, 42.0))));
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Games").size(34.0).family(crate::fonts::title()).color(egui::Color32::WHITE));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if ui
-                .add(egui::Button::new(egui::RichText::new("⟳").size(16.0)).corner_radius(8).min_size(egui::vec2(36.0, 32.0)))
-                .on_hover_text("Look for new games in your folders")
-                .clicked()
-            {
-                actions.push(Action::RescanLibrary);
-            }
-            if ui.add(egui::Button::new("Open Cartridge…").corner_radius(8).min_size(egui::vec2(0.0, 32.0))).clicked() {
-                actions.push(Action::Pick(Pick::Cartridge));
-            }
-            if primary_button(ui, "➕  Add games folder", egui::vec2(0.0, 32.0)).clicked() {
-                actions.push(Action::Pick(Pick::RomFolder));
-            }
-            // Zippity and RockIt Twist games play on their own console: no
-            // choice to make on their pages.
-            if !matches!(tab, Some(Family::Zippity | Family::RockItTwist)) {
-                // (Right to left: the BIOS button shows to the right of the
-                // console menu.)
-                bios_picker(ui, settings, library, actions);
-                console_picker(ui, settings, library, tab, actions);
-            }
-            // The Leapster 2 chosen: its own system (main menu, drawing,
-            // games from the cartridge icon), with or without a cartridge.
-            let console = library.selected_console(&settings.library_console);
-            if console == Hardware::Leapster2
-                && library.bios_for(console).is_some()
-                && tab.is_none_or(|f| f.runs_on(console))
-                && system_button(ui, "Leapster 2 Main Menu")
-                    .on_hover_text("Turn on the Leapster 2 without a game: its start-up screens and main menu")
-                    .clicked()
-            {
-                actions.push(Action::StartSystem(console));
-            }
-        });
+        // The buttons beside the title when they fit (their width from the
+        // last frame), else on a row of their own under it.
+        if ui.available_width() >= ui.ctx().data(|d| d.get_temp::<f32>(header_id).unwrap_or(0.0)) {
+            header_controls(ui, settings, library, tab, actions, header_id);
+            wrapped = false;
+        }
     });
+    if wrapped {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| header_controls(ui, settings, library, tab, actions, header_id));
+    }
     // Progress on a line of its own under the heading (beside it, it ran
     // under the buttons in a narrow window).
     let pending = library.games.iter().filter(|g| matches!(g.art, Art::Pending)).count();
@@ -1642,6 +1628,42 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         });
     }
     ui.add_space(10.0);
+}
+
+/// The library header's buttons, right-aligned: the console and its BIOS,
+/// power, Open Cartridge, Add games folder, rescan. Their width is kept
+/// under `width_id` for the header to know whether they fit beside the title.
+fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>, width_id: egui::Id) {
+    let inner = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if ui
+            .add(egui::Button::new(egui::RichText::new("⟳").size(16.0)).corner_radius(8).min_size(egui::vec2(36.0, 32.0)))
+            .on_hover_text("Look for new games in your folders")
+            .clicked()
+        {
+            actions.push(Action::RescanLibrary);
+        }
+        if primary_button(ui, "➕  Add games folder", egui::vec2(0.0, 32.0)).clicked() {
+            actions.push(Action::Pick(Pick::RomFolder));
+        }
+        if ui.add(egui::Button::new("Open Cartridge…").corner_radius(8).min_size(egui::vec2(0.0, 32.0))).clicked() {
+            actions.push(Action::Pick(Pick::Cartridge));
+        }
+        // Next to Open Cartridge: the console chosen on the left, then on
+        // with a game or without.
+        turn_on_button(ui, settings, library, tab, actions);
+        // Zippity and RockIt Twist games play on their own console: no
+        // choice to make on their pages.
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist)) {
+            // (Right to left: the BIOS button shows to the right of the
+            // console menu.)
+            bios_picker(ui, settings, library, actions);
+            console_picker(ui, settings, library, tab, actions);
+        }
+        ui.min_rect().width()
+    });
+    // Room to spare from the title, too.
+    ui.ctx().data_mut(|d| d.insert_temp(width_id, inner.inner + 24.0));
 }
 
 /// The library's header on a phone: the title and progress, then the
@@ -1680,14 +1702,7 @@ fn phone_library_header(ui: &mut egui::Ui, settings: &Settings, library: &Librar
             console_picker(ui, settings, library, tab, actions);
             bios_picker(ui, settings, library, actions);
         }
-        let console = library.selected_console(&settings.library_console);
-        if console == Hardware::Leapster2
-            && library.bios_for(console).is_some()
-            && tab.is_none_or(|f| f.runs_on(console))
-            && system_button(ui, "Leapster 2 Main Menu").clicked()
-        {
-            actions.push(Action::StartSystem(console));
-        }
+        turn_on_button(ui, settings, library, tab, actions);
     });
     ui.add_space(8.0);
 }
@@ -1741,8 +1756,9 @@ fn bios_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, action
         ui.spacing_mut().interact_size.y = 32.0;
         ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
         egui::ComboBox::from_id_salt("library bios")
-            .selected_text(format!("💾  {}", current.short_name()))
+            .selected_text(format!("💾  BIOS: {}", current.short_name()))
             .show_ui(ui, |ui| {
+                ui.label(egui::RichText::new(format!("Select a {} BIOS", console.name())).weak());
                 for b in &list {
                     let file = b.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let label = egui::RichText::new(&b.name);
@@ -1764,19 +1780,41 @@ fn bios_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, action
     });
 }
 
-/// A console's own system (no game), in the Leapster 2's purple.
-fn system_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    const PURPLE: egui::Color32 = egui::Color32::from_rgb(108, 72, 190);
-    const PURPLE_HOVER: egui::Color32 = egui::Color32::from_rgb(128, 92, 212);
-    let id = ui.next_auto_id();
-    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-    ui.add(
-        egui::Button::new(egui::RichText::new(text).strong().color(egui::Color32::WHITE))
-            .fill(if hovered { PURPLE_HOVER } else { PURPLE })
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(8)
-            .min_size(egui::vec2(0.0, 32.0)),
-    )
+/// Turns on the page's console on its own, no game in: its start-up screens
+/// and menu (the Leapster 2's main menu, the Zippity's built-in games, the
+/// RockIt Twist's menu). On the Leapster page, the console chosen there.
+fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
+    let console = match tab {
+        Some(Family::Zippity) => Hardware::Zippity,
+        Some(Family::RockItTwist) => Hardware::RockItTwist,
+        _ => library.selected_console(&settings.library_console),
+    };
+    // The RockIt Twist starts from its system packages (it says which are
+    // missing); the others need their BIOS.
+    let can = console == Hardware::RockItTwist || library.bios_for(console).is_some();
+    if !can || !tab.is_none_or(|f| f.runs_on(console)) {
+        return;
+    }
+    // A power button, the size of the rescan button. The symbol is drawn:
+    // the fonts may not have it.
+    let r = ui.add(egui::Button::new("").corner_radius(8).min_size(egui::vec2(36.0, 32.0))).on_hover_text("Boot without cartridge");
+    let color = ui.style().interact(&r).fg_stroke.color;
+    let stroke = egui::Stroke::new(2.2, color);
+    let c = r.rect.center() + egui::vec2(0.0, 1.0);
+    let radius = 7.5;
+    // A ring open at the top (clockwise from 1 o'clock round to 11, angles
+    // from 12 o'clock), and the bar through the opening.
+    let ring: Vec<egui::Pos2> = (0..=32)
+        .map(|i| {
+            let a = (40.0f32 + 280.0 * i as f32 / 32.0).to_radians();
+            c + egui::vec2(a.sin(), -a.cos()) * radius
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(ring, stroke));
+    ui.painter().line_segment([c + egui::vec2(0.0, -radius - 2.0), c + egui::vec2(0.0, -2.0)], stroke);
+    if r.clicked() {
+        actions.push(if console == Hardware::RockItTwist { Action::OpenTwist } else { Action::StartSystem(console) });
+    }
 }
 
 fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
