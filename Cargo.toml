@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/ribbit-core",
     "crates/ribbit-cpu",
+    "crates/ribbit-jit",
     "crates/ribbit-arm",
     "crates/ribbit-zippity",
     "crates/ribbit-twist",
@@ -18,6 +19,7 @@ members = [
 default-members = [
     "crates/ribbit-core",
     "crates/ribbit-cpu",
+    "crates/ribbit-jit",
     "crates/ribbit-arm",
     "crates/ribbit-zippity",
     "crates/ribbit-twist",
@@ -42,6 +44,7 @@ publish = false
 [workspace.dependencies]
 ribbit-core = { path = "crates/ribbit-core" }
 ribbit-cpu = { path = "crates/ribbit-cpu" }
+ribbit-jit = { path = "crates/ribbit-jit" }
 ribbit-arm = { path = "crates/ribbit-arm" }
 ribbit-zippity = { path = "crates/ribbit-zippity" }
 ribbit-twist = { path = "crates/ribbit-twist" }

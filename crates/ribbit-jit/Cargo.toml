@@ -1,0 +1,27 @@
+[package]
+name = "ribbit-jit"
+description = "ARCompact (ARCtangent-A5) just-in-time compiler for the Leapster's CPU (docs/jit-design.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ribbit-cpu.workspace = true
+ribbit-memory.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+dynasm = "=5.1.0"
+dynasmrt = "=5.1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.190"
