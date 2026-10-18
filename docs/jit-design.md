@@ -5,9 +5,9 @@ Goal: run Leapster code (original Leapster, Leapster TV, L-MAX, Leapster 2: the 
 belts, ~125% of real time on one i9-13900K P-core) holds 100% on a 15 W i3-1315U laptop, and later on phones.
 
 Hard requirement: **bit-identical to the interpreter**, cycles included. Every speed-up so far was accepted only
-with an unchanged state digest; the JIT is held to the same rule. Status: DESIGN (2026-10-18), nothing built yet.
-It builds on the block cache being added to `run_block` (straight-line decoded blocks with per-block checks and
-precomputed instruction-fetch line crossings).
+with an unchanged state digest; the JIT is held to the same rule. Status: phase 1 foundation built (2026-10-18,
+`crates/ribbit-jit`, section 12); not yet hooked into `run_block`. It builds on the block cache being added to
+`run_block` (straight-line decoded blocks with per-block checks and precomputed instruction-fetch line crossings).
 
 Confidence labels: **FIXED** = a requirement from the existing code; **PLAN** = chosen design; **ESTIMATE**.
 
@@ -150,3 +150,45 @@ changes (`pipeline_timing`, `load_latency`) drop it too.
 * **Executable memory policies** (macOS hardened runtime, Android vendors): test early on each platform.
 * **Debuggability**: crashes in generated code; keep the per-block disassembly dump and the off switch.
 * **Maintenance**: two executors to keep in sync; the interpreter stays the reference.
+
+## 12. Phase 1 foundation: what is built (2026-10-18)
+
+`crates/ribbit-jit` (x86-64; other targets build a stub, `SUPPORTED = false`):
+
+* `compile(&[Instr]) -> Block`: a straight run of decoded instructions. Every `icache::Fast` form compiles (MOV,
+  ALU with and without .F and with conditions, CMP, single-operand ops, LD/ST with write-back, PUSH/POP), ending
+  after a branch (BRcc, Bcc, BL, BL.D, J, Jcc) and its delay slot, or with a **fallback exit** before the first
+  instruction it cannot compile. The zero-overhead loop check follows every sequential instruction (out-of-line
+  stub, `ExitKind::Loop`).
+* `Block::run(cpu, bus) -> Exit { kind, pc, executed, delay_target }`: writes `cpu.pc` and `cpu.delay_target`;
+  registers, STATUS32, LP_COUNT and memory change in place. Cycles, timers, `ready`/`ready_max` and
+  `instructions_retired` are the caller's (from `executed`), until the timing part below.
+* `JitCtx` (repr(C)): pointers to `regs` and `status32`, the bus and six memory helpers, LP_START/LP_END in, PC /
+  executed / delay slot out.
+* Lockstep tests (tests/lockstep.rs) against `Cpu::step`, the general executor: 138 instruction kinds (every ALU
+  operation in every form) from random encodings through the real decoder, 103k single instructions, 29k runs
+  with branches, delay slots and loop ends, 28k runs of real BIOS code; no differences. Planted bugs are caught.
+* examples/jitbench.rs (16-instruction loop body, one P-core, no timing on either side): `Cpu::step` ~46 M
+  instructions/s, `run_block` ~145 M/s, JIT ~780 M/s (5.2-5.6x `run_block`). An upper bound: timing will cost.
+
+Deviations from the plan above, and why:
+
+* **Helpers use `extern "sysv64"` on every OS** (also Windows): one calling convention, so the generated code is
+  identical on Windows and Linux (rdi/rsi/rdx arguments; rbx, r12-r15 survive calls). A panic inside a helper
+  aborts the process instead of unwinding through generated code (which has no unwind tables).
+* **dynasm-rs's `VecAssembler` + our own `ExecMemory`** instead of dynasmrt's executable buffer: the code is
+  position-independent (relative jumps, calls through `JitCtx`), so it is assembled into a `Vec` and copied into
+  pages mapped RW and then flipped to RX (`VirtualAlloc`/`VirtualProtect`/`FlushInstructionCache`,
+  `mmap`/`mprotect`). One mapping per block for now; an arena comes with the block cache integration.
+* `JitCtx` has no `ready`/`spent`/`budget` yet; they arrive with timing.
+
+Integration points left (after the block engine lands):
+
+1. `Cpu::run_block`: look up a compiled block for `pc` (in the block cache entry), call `Block::run`/`enter`
+   with a `JitCtx` whose helpers are the `MachineBus` methods; on `Fallback`, one interpreted instruction.
+2. Timing: per instruction the exit index tells which instructions ran; next step is computing `spent`
+   in generated code (static costs folded, `ready` scoreboard inline, `MemTiming::instruction` at line
+   crossings, `bus.at`/`take_stall` via helpers) and returning before the budget.
+3. Exits for `bus.block_exit()` after device accesses (a helper return flag), the backward-jump `watch`, and
+   `recheck`.
+4. Invalidation with `ICache::clear`/`set_stops`/`set_rom_ranges`; a setting/`--no-jit` and `RIBBIT_JIT_CHECK`.
