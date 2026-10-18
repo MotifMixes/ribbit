@@ -55,6 +55,53 @@ pub trait Bus {
     fn block_exit(&self) -> bool {
         false
     }
+
+    /// What a JIT (ribbit-jit) may do itself instead of calling this bus,
+    /// with exactly the same effects (`JitView`); None: it calls the bus.
+    /// Valid until the bus is next used otherwise than through the view.
+    #[inline(always)]
+    fn jit_view(&mut self) -> Option<JitView> {
+        None
+    }
+}
+
+/// Plain memory a JIT may read (and, if `writable`, write) itself: at an
+/// address in `[base, base + len)`, a bus access of 1, 2 or 4 bytes (at the
+/// address with its low bits cleared as the bus clears them) is a
+/// little-endian access to `ptr[addr - base..]` plus the data timing below,
+/// nothing else (no `at`, no logging). `len` 0: unused.
+#[derive(Debug, Clone, Copy)]
+pub struct JitRegion {
+    pub base: u32,
+    pub len: u32,
+    pub ptr: *mut u8,
+    pub writable: bool,
+}
+
+/// The memory system's state, for a JIT (`Bus::jit_view`): what the bus's
+/// `instruction`, `instruction_same_line`, `take_stall`, `block_exit` and a
+/// region access's data timing do, done in place. The caches are 4-way, 512
+/// sets of 16-byte lines; set `(addr >> 4) % 512` holds 4 tags `addr >> 4 |
+/// 1 << 31` (valid), data tags also `1 << 30` when dirty. A lookup that
+/// hits changes nothing but a data write's dirty bit; a miss is the bus's
+/// (`instruction`, or the region access itself through the bus). While an
+/// instruction executes, `armed` is true (set by `instruction` or
+/// `instruction_same_line`); `take_stall` returns `stall` and clears both.
+/// `timing` false: the memory system does no timing (none of the above).
+#[derive(Debug, Clone, Copy)]
+pub struct JitView {
+    pub regions: [JitRegion; 3],
+    pub timing: bool,
+    pub armed: *mut bool,
+    pub stall: *mut u64,
+    pub code_tags: *const u32,
+    pub data_tags: *mut u32,
+    /// `block_exit`'s flag.
+    pub exit: *const bool,
+}
+
+impl JitRegion {
+    pub const NONE: JitRegion = JitRegion { base: 0, len: 0, ptr: std::ptr::null_mut(), writable: false };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +254,19 @@ impl SystemBus {
 
     pub fn sram(&self) -> &[u8] {
         &self.sram
+    }
+
+    /// RAM, VRAM and the BIOS (at its mirror, where code runs) as plain
+    /// memory for a JIT (`JitView`): RAM and VRAM writable unless the write
+    /// log (idle probes) is on.
+    pub fn jit_regions(&mut self) -> [JitRegion; 3] {
+        let writable = self.write_log.is_none();
+        let bios_len = (self.bios.len() as u32).min(BIOS_WINDOW);
+        [
+            JitRegion { base: RAM_BASE, len: self.ram.len() as u32, ptr: self.ram.as_mut_ptr(), writable },
+            JitRegion { base: VRAM_BASE, len: self.vram.len() as u32, ptr: self.vram.as_mut_ptr(), writable },
+            JitRegion { base: BIOS_MIRROR, len: bios_len, ptr: self.bios.as_mut_ptr(), writable: false },
+        ]
     }
 
     /// RAM/VRAM/ROM byte without side effects (no logging); None elsewhere.

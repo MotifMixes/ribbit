@@ -629,6 +629,15 @@ impl Bus for MachineBus<'_> {
         self.io.mem.take_stall()
     }
 
+    // RAM, VRAM and the BIOS mirror never decode as device registers
+    // (`is_mmio`), and their accesses are `mem.data` plus the plain access.
+    fn jit_view(&mut self) -> Option<ribbit_memory::JitView> {
+        let regions = self.sys.jit_regions();
+        debug_assert!(regions.iter().all(|r| r.len == 0 || !(is_mmio(r.base) || is_mmio(r.base + r.len - 1))));
+        let (timing, armed, stall, code_tags, data_tags) = self.io.mem.jit_parts();
+        Some(ribbit_memory::JitView { regions, timing, armed, stall, code_tags, data_tags, exit: &self.io.sync_needed })
+    }
+
     #[inline(always)]
     fn fetch16(&mut self, addr: u32) -> u16 {
         if !is_mmio(addr) {

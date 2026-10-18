@@ -186,6 +186,12 @@ impl MemTiming {
         }
     }
 
+    /// For a JIT (`ribbit_memory::JitView`): whether it times anything,
+    /// `armed`, `stall`, the code and the data caches' tags.
+    pub fn jit_parts(&mut self) -> (bool, *mut bool, *mut u64, *const u32, *mut u32) {
+        (self.enabled, &mut self.armed, &mut self.stall, self.code.tags.as_ptr(), self.data.tags.as_mut_ptr())
+    }
+
     /// Stall cycles of the instruction just executed.
     #[inline(always)]
     pub fn take_stall(&mut self) -> u64 {

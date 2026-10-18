@@ -13,7 +13,7 @@ mod known_carts;
 pub mod map;
 pub mod serde_array;
 
-pub use bus::{Bus, SystemBus, UnmappedAccess};
+pub use bus::{Bus, JitRegion, JitView, SystemBus, UnmappedAccess};
 pub use cartridge::{CartHeader, Cartridge, CartridgeError, Nvram};
 pub use firmware::{Firmware, FirmwareError};
 pub use image::ImageId;

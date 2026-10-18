@@ -114,7 +114,92 @@ pub struct JitCtx {
     /// of the instruction left to the interpreter.
     pub fb_block: u32,
     pub fb_index: u32,
+    /// Inline memory (`ribbit_memory::JitView`; code compiled `inline`).
+    pub timing_on: u32,
+    pub armed: *mut bool,
+    pub stall: *mut u64,
+    pub code_tags: *const u32,
+    pub data_tags: *mut u32,
+    pub exit_flag: *const bool,
+    pub regions: [CtxRegion; 3],
+    /// The bus's `instruction` (a fetch that missed the code cache).
+    pub ifetch: FetchFn,
+    /// Accesses outside the regions, or missing the data cache: `at`, then
+    /// the access, through the bus. (bus, address, cycle, pc) -> value.
+    pub slow_read8: SlowReadFn,
+    pub slow_read16: SlowReadFn,
+    pub slow_read32: SlowReadFn,
+    /// (bus, address, value, cycle, pc).
+    pub slow_write8: SlowWriteFn,
+    pub slow_write16: SlowWriteFn,
+    pub slow_write32: SlowWriteFn,
 }
+
+/// A `ribbit_memory::JitRegion` as compiled code reads it: an access at
+/// `addr` is inside when `addr - base < limit` (`limit` = its length less 3,
+/// so a 4-byte access fits; 0: never).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CtxRegion {
+    pub base: u32,
+    pub limit: u32,
+    pub ptr: *mut u8,
+    pub writable: u32,
+}
+
+impl CtxRegion {
+    const NONE: CtxRegion = CtxRegion { base: 0, limit: 0, ptr: std::ptr::null_mut(), writable: 0 };
+}
+
+/// (bus, pc, length).
+pub type FetchFn = extern "sysv64" fn(*mut c_void, u32, u32);
+/// (bus, address, cycle, pc) -> value.
+pub type SlowReadFn = extern "sysv64" fn(*mut c_void, u32, u64, u32) -> u32;
+/// (bus, address, value, cycle, pc).
+pub type SlowWriteFn = extern "sysv64" fn(*mut c_void, u32, u32, u64, u32);
+
+extern "sysv64" fn ifetch<B: Bus>(bus: *mut c_void, pc: u32, len: u32) {
+    // SAFETY: as `read8`.
+    unsafe { (*(bus as *mut B)).instruction(pc, len) }
+}
+extern "sysv64" fn slow_read8<B: Bus>(bus: *mut c_void, a: u32, now: u64, pc: u32) -> u32 {
+    // SAFETY: as `read8`.
+    let b = unsafe { &mut *(bus as *mut B) };
+    b.at(now, pc);
+    b.read8(a) as u32
+}
+extern "sysv64" fn slow_read16<B: Bus>(bus: *mut c_void, a: u32, now: u64, pc: u32) -> u32 {
+    // SAFETY: as `read8`.
+    let b = unsafe { &mut *(bus as *mut B) };
+    b.at(now, pc);
+    b.read16(a) as u32
+}
+extern "sysv64" fn slow_read32<B: Bus>(bus: *mut c_void, a: u32, now: u64, pc: u32) -> u32 {
+    // SAFETY: as `read8`.
+    let b = unsafe { &mut *(bus as *mut B) };
+    b.at(now, pc);
+    b.read32(a)
+}
+extern "sysv64" fn slow_write8<B: Bus>(bus: *mut c_void, a: u32, v: u32, now: u64, pc: u32) {
+    // SAFETY: as `read8`.
+    let b = unsafe { &mut *(bus as *mut B) };
+    b.at(now, pc);
+    b.write8(a, v as u8)
+}
+extern "sysv64" fn slow_write16<B: Bus>(bus: *mut c_void, a: u32, v: u32, now: u64, pc: u32) {
+    // SAFETY: as `read8`.
+    let b = unsafe { &mut *(bus as *mut B) };
+    b.at(now, pc);
+    b.write16(a, v as u16)
+}
+extern "sysv64" fn slow_write32<B: Bus>(bus: *mut c_void, a: u32, v: u32, now: u64, pc: u32) {
+    // SAFETY: as `read8`.
+    let b = unsafe { &mut *(bus as *mut B) };
+    b.at(now, pc);
+    b.write32(a, v)
+}
+
+static NEVER: bool = false;
 
 /// `JitCtx::watch` for a `&mut dyn FnMut(u32, u64) -> bool` at `data`.
 extern "sysv64" fn watch_dyn(data: *mut c_void, pc: u32, now: u64) -> u32 {
@@ -213,6 +298,34 @@ impl JitCtx {
             link: std::ptr::null_mut(),
             fb_block: 0,
             fb_index: 0,
+            timing_on: 0,
+            armed: std::ptr::null_mut(),
+            stall: std::ptr::null_mut(),
+            code_tags: std::ptr::null(),
+            data_tags: std::ptr::null_mut(),
+            exit_flag: &NEVER,
+            regions: [CtxRegion::NONE; 3],
+            ifetch: ifetch::<B>,
+            slow_read8: slow_read8::<B>,
+            slow_read16: slow_read16::<B>,
+            slow_read32: slow_read32::<B>,
+            slow_write8: slow_write8::<B>,
+            slow_write16: slow_write16::<B>,
+            slow_write32: slow_write32::<B>,
+        }
+    }
+
+    /// Sets the inline-memory fields from the bus's view (code compiled
+    /// `inline` needs them).
+    fn set_view(&mut self, v: &ribbit_memory::JitView) {
+        self.timing_on = v.timing as u32;
+        self.armed = v.armed;
+        self.stall = v.stall;
+        self.code_tags = v.code_tags;
+        self.data_tags = v.data_tags;
+        self.exit_flag = v.exit;
+        for (c, r) in self.regions.iter_mut().zip(&v.regions) {
+            *c = CtxRegion { base: r.base, limit: r.len.saturating_sub(3), ptr: r.ptr, writable: r.writable as u32 };
         }
     }
 }
@@ -385,7 +498,7 @@ pub fn compile(instrs: &[Instr]) -> Result<Block, CompileError> {
 /// never linked (it runs alone).
 pub fn compile_items(items: &[Item], mmid_low: bool) -> Result<Block, CompileError> {
     let mut links = links_for(items);
-    let (code, compiled, chain) = generate(items, mmid_low, 0, &mut links)?;
+    let (code, compiled, chain) = generate(items, mmid_low, 0, &mut links, false)?;
     let own = exec_mem::ExecMemory::new(&code).map_err(|e| CompileError::Memory(e.to_string()))?;
     let base = own.as_ptr();
     Ok(Block {
@@ -407,7 +520,7 @@ fn links_for(items: &[Item]) -> Box<[Link]> {
 }
 
 /// The code, the instructions it covers and its chain entry's offset.
-fn generate(items: &[Item], mmid_low: bool, id: u32, links: &mut [Link]) -> Result<(Vec<u8>, usize, usize), CompileError> {
+fn generate(items: &[Item], mmid_low: bool, id: u32, links: &mut [Link], inline: bool) -> Result<(Vec<u8>, usize, usize), CompileError> {
     if items.windows(2).any(|w| w[1].hot.addr != w[0].hot.next) {
         return Err(CompileError::NotSequential);
     }
@@ -417,7 +530,7 @@ fn generate(items: &[Item], mmid_low: bool, id: u32, links: &mut [Link]) -> Resu
     #[cfg(target_arch = "x86_64")]
     {
         let x: Vec<x64::Item> = items.iter().map(|i| x64::Item { hot: i.hot, fetch: i.fetch }).collect();
-        let e = x64::emit(&x, mmid_low, id, links.as_mut_ptr(), links.len()).ok_or(CompileError::NotCompilable)?;
+        let e = x64::emit(&x, mmid_low, id, links.as_mut_ptr(), links.len(), inline).ok_or(CompileError::NotCompilable)?;
         if e.compiled == 0 {
             return Err(CompileError::NotCompilable);
         }
@@ -425,7 +538,7 @@ fn generate(items: &[Item], mmid_low: bool, id: u32, links: &mut [Link]) -> Resu
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        let _ = (mmid_low, id, links);
+        let _ = (mmid_low, id, links, inline);
         Err(CompileError::Unsupported)
     }
 }
@@ -508,7 +621,9 @@ impl Jit {
         }
         let mmid_low = cpu.config.mmid == MmidMode::LowLeapster;
         let mut links = links_for(&items);
-        let Ok((code, compiled, chain)) = generate(&items, mmid_low, head.id, &mut links) else {
+        // Inline memory, except when checking (the check records every
+        // access and timing step through the bus).
+        let Ok((code, compiled, chain)) = generate(&items, mmid_low, head.id, &mut links, !self.check) else {
             return Slot::Never;
         };
         let Ok(ptr) = self.arena.add(&code) else {
@@ -573,7 +688,12 @@ impl<B: Bus> BlockRunner<B> for Jit {
         }
         let mut out = RunnerExit { executed: 0, now, from: cpu.pc, stop: None, resume: None };
         let mut watch: &mut dyn FnMut(u32, u64) -> bool = watch;
+        // Code compiled with inline memory needs the bus's view.
+        let view = if self.check { None } else { Some(bus.jit_view()?) };
         let mut ctx = JitCtx::new(cpu, bus, now, end);
+        if let Some(v) = &view {
+            ctx.set_view(v);
+        }
         ctx.fence = fence;
         ctx.watch = watch_dyn;
         ctx.watch_data = &mut watch as *mut &mut dyn FnMut(u32, u64) -> bool as *mut c_void;
