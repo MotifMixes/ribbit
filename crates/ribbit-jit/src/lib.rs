@@ -473,13 +473,15 @@ pub enum CompileError {
     Memory(String),
 }
 
-/// One instruction to compile: its pre-digested form, and whether its fetch
-/// is timed in full (`icache::Entry::fetch`; else it is on the 16-byte line
-/// the instruction before it ended on).
+/// One instruction to compile: its pre-digested form, whether its fetch is
+/// timed in full (`icache::Entry::fetch`; else it is on the 16-byte line
+/// the instruction before it ended on), and its full decode (needed for an
+/// instruction with no fast form, `Fast::General`).
 #[derive(Clone, Copy, Debug)]
 pub struct Item {
     pub hot: Hot,
     pub fetch: bool,
+    pub instr: Option<Instr>,
 }
 
 /// Compiles `instrs`, a straight run of decoded instructions (from
@@ -489,7 +491,7 @@ pub struct Item {
 /// becomes a fallback exit) or after the first branch or jump and its delay
 /// slot.
 pub fn compile(instrs: &[Instr]) -> Result<Block, CompileError> {
-    let items: Vec<Item> = instrs.iter().map(|i| Item { hot: Hot::of(i), fetch: true }).collect();
+    let items: Vec<Item> = instrs.iter().map(|i| Item { hot: Hot::of(i), fetch: true, instr: Some(*i) }).collect();
     compile_items(&items, true)
 }
 
@@ -529,7 +531,7 @@ fn generate(items: &[Item], mmid_low: bool, id: u32, links: &mut [Link], inline:
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let x: Vec<x64::Item> = items.iter().map(|i| x64::Item { hot: i.hot, fetch: i.fetch }).collect();
+        let x: Vec<x64::Item> = items.iter().map(|i| x64::Item { hot: i.hot, fetch: i.fetch, instr: i.instr }).collect();
         let e = x64::emit(&x, mmid_low, id, links.as_mut_ptr(), links.len(), inline).ok_or(CompileError::NotCompilable)?;
         if e.compiled == 0 {
             return Err(CompileError::NotCompilable);
@@ -564,7 +566,21 @@ pub struct JitStats {
     pub fallbacks: u64,
     pub code_bytes: u64,
     pub checked: u64,
+    /// Returns from compiled code by `ExitKind` (flow, fallback, -, bus,
+    /// backward, budget).
+    pub exits: [u64; 6],
+    /// Flow exits continued in the next block, and blocks left to the
+    /// interpreter (not compiled yet, or never).
+    pub continued: u64,
+    pub interpreted: u64,
+    pub batches: u64,
 }
+
+/// Research (RIBBIT_JIT_PROFILE): per address, how often compiled code
+/// stopped there for the interpreter (a fallback), and how often a block
+/// starting there was interpreted.
+#[allow(clippy::type_complexity)]
+pub static PROFILE: std::sync::Mutex<Option<[std::collections::HashMap<u32, u64>; 3]>> = std::sync::Mutex::new(None);
 
 /// The JIT as a `BlockRunner`: per block of `icache::Blocks` (by id, for
 /// one epoch of the cache), interpreted until it has run `TIER` times, then
@@ -609,14 +625,17 @@ impl Jit {
     /// Compiles block `head`: its entries, and its branch's delay slot when
     /// the slot is in read-only code (so a BL.D's link is known).
     fn compile<B: Bus>(&mut self, cpu: &mut Cpu, bus: &mut B, head: &BlockHead, entries: &[Entry]) -> Slot {
-        let mut items: Vec<Item> = entries.iter().map(|e| Item { hot: e.hot, fetch: e.fetch }).collect();
+        // The full decode of instructions with no fast form.
+        let full = |cpu: &mut Cpu, bus: &mut B, h: &Hot| (h.fast == ribbit_cpu::icache::Fast::General).then(|| cpu.icache.get(h.addr, || decode(bus, h.addr)));
+        let mut items: Vec<Item> = entries.iter().map(|e| Item { hot: e.hot, fetch: e.fetch, instr: full(cpu, bus, &e.hot) }).collect();
         let last = entries[entries.len() - 1].hot;
         if last.delay && last.branchy {
             let at = last.next;
             if let Some(h) = cpu.icache.hot(at, || decode(bus, at)) {
                 // Timed as `icache::Blocks::build` would time it after `last`.
                 let fetch = (last.next.wrapping_sub(1) >> 4) != at >> 4 || (h.next.wrapping_sub(1) >> 4) != at >> 4;
-                items.push(Item { hot: h, fetch });
+                let instr = full(cpu, bus, &h);
+                items.push(Item { hot: h, fetch, instr });
             }
         }
         let mmid_low = cpu.config.mmid == MmidMode::LowLeapster;
@@ -687,6 +706,7 @@ impl<B: Bus> BlockRunner<B> for Jit {
             self.start_over(head.epoch);
         }
         let mut out = RunnerExit { executed: 0, now, from: cpu.pc, stop: None, resume: None };
+        self.stats.batches += 1;
         let mut watch: &mut dyn FnMut(u32, u64) -> bool = watch;
         // Code compiled with inline memory needs the bus's view.
         let view = if self.check { None } else { Some(bus.jit_view()?) };
@@ -704,6 +724,10 @@ impl<B: Bus> BlockRunner<B> for Jit {
             let check = self.check;
             let Some(block) = self.block(cpu, bus, blocks, &head) else {
                 // Interpreted (for now).
+                self.stats.interpreted += 1;
+                if let Some(p) = PROFILE.lock().unwrap().as_mut() {
+                    *p[1].entry(head.start).or_default() += 1;
+                }
                 if out.executed == 0 {
                     return None;
                 }
@@ -728,6 +752,7 @@ impl<B: Bus> BlockRunner<B> for Jit {
                 block.run_ctx(cpu, &mut ctx)
             };
             self.stats.runs += 1;
+            self.stats.exits[exit.kind as usize] += 1;
             self.stats.checked += check as u64;
             self.stats.instructions += exit.executed as u64;
             out.executed += exit.executed as u64;
@@ -742,6 +767,9 @@ impl<B: Bus> BlockRunner<B> for Jit {
                 ExitKind::Budget => out.stop = Some(RunnerStop::Budget),
                 ExitKind::Fallback => {
                     self.stats.fallbacks += 1;
+                    if let Some(p) = PROFILE.lock().unwrap().as_mut() {
+                        *p[0].entry(cpu.pc).or_default() += 1;
+                    }
                     let h = blocks.heads[ctx.fb_block as usize];
                     out.resume = Some((h, ctx.fb_index as usize));
                 }
@@ -759,6 +787,7 @@ impl<B: Bus> BlockRunner<B> for Jit {
                                 pending = std::ptr::null_mut();
                             }
                             head = next;
+                            self.stats.continued += 1;
                             continue;
                         }
                     }

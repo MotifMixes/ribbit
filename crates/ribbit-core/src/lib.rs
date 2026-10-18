@@ -977,6 +977,11 @@ impl Machine {
             None => self.cpu.run_block(&mut bus, &mut ribbit_cpu::NoAuxExt, budget, fence, watch),
         };
         let synced = bus.synced;
+        if matches!(block.exit, ribbit_cpu::BlockExit::Slow)
+            && let Some(p) = ribbit_jit::PROFILE.lock().unwrap().as_mut()
+        {
+            *p[2].entry(self.cpu.pc).or_default() += 1;
+        }
         if block.executed == 0 {
             self.batch_stats[4] += 1;
             return match block.exit {

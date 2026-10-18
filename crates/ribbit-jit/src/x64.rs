@@ -22,7 +22,7 @@ use crate::JitCtx;
 use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use ribbit_cpu::icache::{AluOp, DISCARD, Fast, Hot, LdKind, RotOp, UnOp};
-use ribbit_cpu::isa::{BrCond, COND_AL, Cond, NO_LOAD, Size, WriteBack, cond_holds};
+use ribbit_cpu::isa::{BrCond, COND_AL, Cond, Dst, Instr, NO_LOAD, Op, Size, Src, WriteBack, cond_holds};
 use ribbit_cpu::reg;
 use std::mem::offset_of;
 
@@ -130,12 +130,113 @@ enum Pc {
     R14,
 }
 
-/// One instruction to compile: its pre-digested form, and whether its fetch
-/// is timed in full (`icache::Entry::fetch`).
+/// One instruction to compile: its pre-digested form, whether its fetch
+/// is timed in full (`icache::Entry::fetch`), and its full decode when it
+/// has no fast form (`Fast::General`; see `generic_ok`).
 #[derive(Clone, Copy, Debug)]
 pub struct Item {
     pub hot: Hot,
     pub fetch: bool,
+    pub instr: Option<Instr>,
+}
+
+impl Item {
+    /// Reads or writes memory (prepared and timed as such).
+    fn mem(&self) -> bool {
+        self.hot.fast.accesses_memory() || self.general().is_some_and(|i| matches!(i.op, Op::Ld | Op::St))
+    }
+
+    /// The full decode, for an instruction compiled from it.
+    fn general(&self) -> Option<&Instr> {
+        if self.hot.fast == Fast::General { self.instr.as_ref() } else { None }
+    }
+}
+
+/// A source the generic code reads like `Cpu::read`: a constant (an
+/// immediate, a limm, no operand, PCL) or a register with no side effect.
+#[derive(Clone, Copy)]
+enum GSrc {
+    Imm(u32),
+    Reg(u8),
+}
+
+fn gsrc(s: Src, i: &Instr) -> Option<GSrc> {
+    match s {
+        Src::None => Some(GSrc::Imm(0)),
+        Src::Imm(v) | Src::Limm(v) => Some(GSrc::Imm(v)),
+        // r57-r60 (MLO, MMID, MHI, LP_COUNT) read plainly, with or without
+        // the XY extension (`Cpu::read_reg_slow`); r63 is PCL.
+        Src::Reg(r) if r < 32 || (57..=60).contains(&r) => Some(GSrc::Reg(r)),
+        Src::Reg(63) => Some(GSrc::Imm(i.addr & !3)),
+        Src::Reg(_) => None,
+    }
+}
+
+/// A destination written like `Cpu::write_dst` with no side effect: none,
+/// or r0-r31, LP_COUNT.
+fn gdst(d: Dst) -> Option<Option<u8>> {
+    match d {
+        Dst::None | Dst::Discard => Some(None),
+        Dst::Reg(r) if r < 32 || r == 60 => Some(Some(r)),
+        Dst::Reg(_) => None,
+    }
+}
+
+/// `AluOp` for an executor op (`icache::AluOp::of`).
+fn alu_op(op: Op) -> Option<AluOp> {
+    Some(match op {
+        Op::Add => AluOp::Add,
+        Op::Add1 => AluOp::Add1,
+        Op::Add2 => AluOp::Add2,
+        Op::Add3 => AluOp::Add3,
+        Op::Sub => AluOp::Sub,
+        Op::Sub1 => AluOp::Sub1,
+        Op::Sub2 => AluOp::Sub2,
+        Op::Sub3 => AluOp::Sub3,
+        Op::Rsub => AluOp::Rsub,
+        Op::And => AluOp::And,
+        Op::Or => AluOp::Or,
+        Op::Xor => AluOp::Xor,
+        Op::Bic => AluOp::Bic,
+        Op::AslM => AluOp::Asl,
+        Op::LsrM => AluOp::Lsr,
+        Op::AsrM => AluOp::Asr,
+        Op::Adc => AluOp::Adc,
+        Op::Sbc => AluOp::Sbc,
+        _ => return None,
+    })
+}
+
+/// Whether `generic` compiles `i` (a `Fast::General` instruction): the
+/// shapes of `Cpu::execute`'s ALU part, compares, bit operations,
+/// single-operand operations and loads/stores, under any condition, with
+/// operands and destinations that have no side effect.
+pub(crate) fn generic_ok(i: &Instr) -> bool {
+    let srcs = gsrc(i.src1, i).is_some() && gsrc(i.src2, i).is_some();
+    let Some(d) = gdst(i.dst) else {
+        return false;
+    };
+    match i.op {
+        op if alu_op(op).is_some() => srcs,
+        Op::Mov | Op::Bset | Op::Bclr | Op::Bxor | Op::Bmsk | Op::RorM => srcs,
+        Op::Cmp | Op::Rcmp | Op::Tst | Op::Btst => srcs,
+        Op::Asl | Op::Asr | Op::Lsr | Op::Ror | Op::Rrc | Op::Rlc => srcs,
+        Op::Sexb | Op::Sexw | Op::Extb | Op::Extw | Op::Not | Op::Neg | Op::Swap | Op::Abs => srcs,
+        Op::Ld | Op::St => {
+            // The base's write-back must be a plain register too, and a load
+            // writing back into its own destination is an error the executor
+            // reports.
+            let wb = matches!(i.mem.wb, WriteBack::Pre | WriteBack::Post);
+            let base_ok = !wb || match i.src1 {
+                Src::Reg(r) => gdst(Dst::Reg(r)).is_some_and(|b| b.is_some()),
+                _ => true,
+            };
+            let own = matches!((i.dst, i.src1), (Dst::Reg(a), Src::Reg(b)) if a == b) && wb && i.op == Op::Ld;
+            let data_ok = i.op == Op::Ld || gsrc(i.data, i).is_some();
+            srcs && base_ok && !own && data_ok && (i.op == Op::St || d.is_some() || i.dst == Dst::Discard)
+        }
+        _ => false,
+    }
 }
 
 fn is_branch(f: Fast) -> bool {
@@ -154,8 +255,8 @@ fn is_branch(f: Fast) -> bool {
 }
 
 /// Compiled by this generator (everything else falls back).
-pub(crate) fn compilable(h: &Hot) -> bool {
-    !h.stop && h.fast != Fast::General
+pub(crate) fn compilable(it: &Item) -> bool {
+    !it.hot.stop && (it.hot.fast != Fast::General || it.instr.as_ref().is_some_and(generic_ok))
 }
 
 /// For each condition code, bit `i` says whether it holds for flags
@@ -221,8 +322,8 @@ pub(crate) struct Emitted {
 /// Generates the code for `items` (block `id`, link slots at `links`), or
 /// None if the first instruction cannot be compiled.
 pub(crate) fn emit(items: &[Item], mmid_low: bool, id: u32, links: *mut crate::Link, links_cap: usize, inline: bool) -> Option<Emitted> {
-    let first = &items.first()?.hot;
-    if !compilable(first) || matches!(first.fast, Fast::BlD { .. } | Fast::JlD { .. }) && items.len() < 2 {
+    let first = items.first()?;
+    if !compilable(first) || matches!(first.hot.fast, Fast::BlD { .. } | Fast::JlD { .. }) && items.len() < 2 {
         return None;
     }
     let mut ops = Asm::new(0);
@@ -238,7 +339,7 @@ pub(crate) fn emit(items: &[Item], mmid_low: bool, id: u32, links: *mut crate::L
             g.flow(Pc::Const(last.next), k as u32, last.addr);
             break k;
         };
-        if !compilable(&it.hot) {
+        if !compilable(it) {
             g.fallback(it.hot.addr, k as u32, items[k - 1].hot.addr);
             break k;
         }
@@ -247,7 +348,7 @@ pub(crate) fn emit(items: &[Item], mmid_low: bool, id: u32, links: *mut crate::L
         }
         g.instr(it);
         let h = it.hot;
-        g.after_sequential(h.next, k as u32 + 1, h.addr, h.fast.accesses_memory());
+        g.after_sequential(h.next, k as u32 + 1, h.addr, it.mem());
         k += 1;
     };
     g.epilogue();
@@ -473,15 +574,22 @@ impl Gen {
     fn instr(&mut self, it: &Item) {
         let h = it.hot;
         self.pc = h.addr;
-        let mem = h.fast.accesses_memory();
+        let mem = it.mem();
         if mem {
             if self.inline {
                 self.prep_inline(&h, it.fetch);
             } else {
                 self.prep(&h, it.fetch);
             }
+        } else if it.general().is_some() && !self.inline {
+            // `run_block` stamps the bus before every general instruction
+            // (`at`; only seen by a recording bus when it touches no device).
+            self.prep(&h, it.fetch);
         }
-        self.body(&h);
+        match it.general() {
+            Some(i) => self.generic(i),
+            None => self.body(&h),
+        }
         self.stall(&h, it.fetch, mem);
         self.cost(&h, 0);
     }
@@ -504,6 +612,8 @@ impl Gen {
         if self.inline {
             return self.stall_inline(h, fetch, mem);
         }
+        // A general instruction was prepared (`prep`) like a memory one.
+        let mem = mem || h.fast == Fast::General;
         if mem {
             dynasm!(self.ops
                 ; .arch x64
@@ -933,6 +1043,11 @@ impl Gen {
     /// `eax = op(eax, ecx)` with .F (`Cpu::alu_flags`); result stored to
     /// `d` unless discarded.
     fn alu_flags(&mut self, op: AluOp, d: u8) {
+        self.alu_flags_to(op, (d != DISCARD).then_some(d & 31));
+    }
+
+    /// `alu_flags` storing to any plain register (`d`), or nowhere.
+    fn alu_flags_to(&mut self, op: AluOp, d: Option<u8>) {
         let writes = match op {
             AluOp::Add | AluOp::Add1 | AluOp::Add2 | AluOp::Add3 => {
                 let k = match op {
@@ -1004,9 +1119,7 @@ impl Gen {
             }
         };
         self.flags(writes);
-        if d != DISCARD {
-            dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + r(d)], eax);
-        }
+        self.gwrite(d);
         self.merge_flags(writes);
     }
 
@@ -1076,6 +1189,247 @@ impl Gen {
                 dynasm!(self.ops ; .arch x64 ; add esi, (off << scale) as i32)
             }
         }
+    }
+
+    /// `reg` (eax, ecx, edx or esi) = a generic source.
+    fn gread(&mut self, s: GSrc, reg: u8) {
+        match (s, reg) {
+            (GSrc::Imm(v), 0) => dynasm!(self.ops ; .arch x64 ; mov eax, v as i32),
+            (GSrc::Imm(v), 1) => dynasm!(self.ops ; .arch x64 ; mov ecx, v as i32),
+            (GSrc::Imm(v), 2) => dynasm!(self.ops ; .arch x64 ; mov edx, v as i32),
+            (GSrc::Imm(v), _) => dynasm!(self.ops ; .arch x64 ; mov esi, v as i32),
+            (GSrc::Reg(r), 0) => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + 4 * r as i32]),
+            (GSrc::Reg(r), 1) => dynasm!(self.ops ; .arch x64 ; mov ecx, DWORD [rbx + 4 * r as i32]),
+            (GSrc::Reg(r), 2) => dynasm!(self.ops ; .arch x64 ; mov edx, DWORD [rbx + 4 * r as i32]),
+            (GSrc::Reg(r), _) => dynasm!(self.ops ; .arch x64 ; mov esi, DWORD [rbx + 4 * r as i32]),
+        }
+    }
+
+    /// Writes `eax` to a generic destination (none: nothing).
+    fn gwrite(&mut self, d: Option<u8>) {
+        if let Some(r) = d {
+            dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + 4 * r as i32], eax);
+        }
+    }
+
+    /// `eax` result, Z/N from it: captured, written, merged (the
+    /// executor's `write_dst` then `flags(r, None, None)`).
+    fn result_zn(&mut self, d: Option<u8>, f: bool) {
+        if f {
+            dynasm!(self.ops ; .arch x64 ; test eax, eax);
+            self.flags(Writes::Zn);
+        }
+        self.gwrite(d);
+        if f {
+            self.merge_flags(Writes::Zn);
+        }
+    }
+
+    /// An instruction with no fast form, from its full decode, as
+    /// `Cpu::execute` runs it (`generic_ok` shapes only).
+    fn generic(&mut self, i: &Instr) {
+        let skip = self.ops.new_dynamic_label();
+        self.cond_skip(i.cc, skip);
+        let (b, c) = (gsrc(i.src1, i).expect("generic_ok"), gsrc(i.src2, i).expect("generic_ok"));
+        let d = gdst(i.dst).expect("generic_ok");
+        // The executor sets flags from results only for 32-bit encodings.
+        let f = i.set_flags && !i.short;
+        match i.op {
+            Op::Ld => self.gload(i, b, c, d),
+            Op::St => self.gstore(i, b, c),
+            op if alu_op(op).is_some() => {
+                let op = alu_op(op).unwrap();
+                self.gread(b, 0);
+                self.gread(c, 1);
+                if f {
+                    self.alu_flags_to(op, d);
+                } else {
+                    self.alu(op);
+                    self.gwrite(d);
+                }
+            }
+            Op::Mov => {
+                self.gread(c, 0);
+                self.result_zn(d, f);
+            }
+            Op::Bset | Op::Bclr | Op::Bxor | Op::Bmsk => {
+                self.gread(b, 0);
+                self.gread(c, 1);
+                match i.op {
+                    Op::Bset => dynasm!(self.ops ; .arch x64 ; mov edx, 1 ; shl edx, cl ; or eax, edx),
+                    Op::Bclr => dynasm!(self.ops ; .arch x64 ; mov edx, 1 ; shl edx, cl ; not edx ; and eax, edx),
+                    Op::Bxor => dynasm!(self.ops ; .arch x64 ; mov edx, 1 ; shl edx, cl ; xor eax, edx),
+                    // (2 << n) - 1: all ones for n = 31 (the shift gives 0).
+                    _ => dynasm!(self.ops ; .arch x64 ; and ecx, 31 ; mov edx, 2 ; shl edx, cl ; sub edx, 1 ; and eax, edx),
+                }
+                self.result_zn(d, f);
+            }
+            Op::RorM => {
+                self.gread(b, 0);
+                self.gread(c, 1);
+                if f {
+                    // C = the last bit rotated out, unchanged for a zero count.
+                    self.load_carry();
+                    dynasm!(self.ops ; .arch x64 ; ror eax, cl);
+                    self.flags(Writes::Znc);
+                    self.gwrite(d);
+                    self.merge_flags(Writes::Znc);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; ror eax, cl);
+                    self.gwrite(d);
+                }
+            }
+            Op::Cmp | Op::Rcmp => {
+                self.gread(b, 0);
+                self.gread(c, 1);
+                if i.op == Op::Cmp {
+                    dynasm!(self.ops ; .arch x64 ; sub eax, ecx);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; sub ecx, eax ; mov eax, ecx);
+                }
+                self.flags(Writes::All);
+                self.merge_flags(Writes::All);
+            }
+            Op::Tst | Op::Btst => {
+                self.gread(b, 0);
+                self.gread(c, 1);
+                if i.op == Op::Btst {
+                    dynasm!(self.ops ; .arch x64 ; mov edx, 1 ; shl edx, cl ; and eax, edx);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; and eax, ecx);
+                }
+                self.flags(Writes::Zn);
+                self.merge_flags(Writes::Zn);
+            }
+            Op::Asl | Op::Asr | Op::Lsr | Op::Ror | Op::Rrc | Op::Rlc => {
+                self.gread(c, 0);
+                let asl = i.op == Op::Asl;
+                match i.op {
+                    Op::Asl => dynasm!(self.ops ; .arch x64 ; shl eax, 1),
+                    Op::Asr => dynasm!(self.ops ; .arch x64 ; sar eax, 1),
+                    Op::Lsr => dynasm!(self.ops ; .arch x64 ; shr eax, 1),
+                    Op::Ror => dynasm!(self.ops ; .arch x64 ; ror eax, 1),
+                    Op::Rrc => {
+                        self.load_carry();
+                        dynasm!(self.ops ; .arch x64 ; rcr eax, 1)
+                    }
+                    _ => {
+                        self.load_carry();
+                        dynasm!(self.ops ; .arch x64 ; rcl eax, 1)
+                    }
+                }
+                let writes = if asl { Writes::All } else { Writes::Znc };
+                if f {
+                    self.flags(writes);
+                }
+                self.gwrite(d);
+                if f {
+                    self.merge_flags(writes);
+                }
+            }
+            Op::Abs => {
+                // C = the source's sign, V = it was 0x8000_0000 (PRM, ABS).
+                self.gread(c, 0);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov esi, eax
+                    ; mov edx, eax
+                    ; sar edx, 31
+                    ; xor eax, edx
+                    ; sub eax, edx
+                );
+                if f {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; cmp esi, 0x8000_0000u32 as i32
+                        ; sete r8b
+                        ; bt esi, 31
+                        ; setc r9b
+                        ; test eax, eax
+                        ; setz r10b
+                        ; sets r11b
+                    );
+                }
+                self.gwrite(d);
+                if f {
+                    self.merge_flags(Writes::All);
+                }
+            }
+            _ => {
+                // Sexb, Sexw, Extb, Extw, Not, Neg, Swap: Z/N from the result.
+                self.gread(c, 0);
+                match i.op {
+                    Op::Sexb => dynasm!(self.ops ; .arch x64 ; movsx eax, al),
+                    Op::Sexw => dynasm!(self.ops ; .arch x64 ; movsx eax, ax),
+                    Op::Extb => dynasm!(self.ops ; .arch x64 ; movzx eax, al),
+                    Op::Extw => dynasm!(self.ops ; .arch x64 ; movzx eax, ax),
+                    Op::Not => dynasm!(self.ops ; .arch x64 ; not eax),
+                    Op::Neg => dynasm!(self.ops ; .arch x64 ; neg eax),
+                    Op::Swap => dynasm!(self.ops ; .arch x64 ; rol eax, 16),
+                    other => unreachable!("generic_ok let {other:?} through"),
+                }
+                self.result_zn(d, f);
+            }
+        }
+        dynasm!(self.ops ; .arch x64 ; =>skip);
+    }
+
+    /// `esi` = the effective address of a generic load/store (`Cpu::address`),
+    /// the base written back; eax and ecx clobbered, edx kept.
+    fn gaddress(&mut self, i: &Instr, b: GSrc, c: GSrc) {
+        self.gread(b, 3);
+        self.gread(c, 1);
+        let base = match i.src1 {
+            Src::Reg(r) => Some(r),
+            _ => None,
+        };
+        match i.mem.wb {
+            WriteBack::None => dynasm!(self.ops ; .arch x64 ; add esi, ecx),
+            WriteBack::Scaled => {
+                let scale = match i.mem.size {
+                    Size::Word => 2,
+                    Size::Half => 1,
+                    Size::Byte => 0,
+                };
+                dynasm!(self.ops ; .arch x64 ; shl ecx, scale ; add esi, ecx);
+            }
+            WriteBack::Pre => {
+                dynasm!(self.ops ; .arch x64 ; add esi, ecx);
+                if let Some(r) = base {
+                    dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + 4 * r as i32], esi);
+                }
+            }
+            WriteBack::Post => {
+                dynasm!(self.ops ; .arch x64 ; lea eax, [rsi + rcx]);
+                if let Some(r) = base {
+                    dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + 4 * r as i32], eax);
+                }
+            }
+        }
+    }
+
+    fn gload(&mut self, i: &Instr, b: GSrc, c: GSrc, d: Option<u8>) {
+        self.gaddress(i, b, c);
+        // PREFETCH (to no register): no access (`Cpu::exec_load`).
+        if i.dst == Dst::Discard {
+            return;
+        }
+        let kind = match (i.mem.size, i.mem.sign_extend) {
+            (Size::Word, _) => LdKind::Word,
+            (Size::Half, false) => LdKind::Half,
+            (Size::Half, true) => LdKind::HalfSigned,
+            (Size::Byte, false) => LdKind::Byte,
+            (Size::Byte, true) => LdKind::ByteSigned,
+        };
+        self.load(kind);
+        self.gwrite(d);
+    }
+
+    fn gstore(&mut self, i: &Instr, b: GSrc, c: GSrc) {
+        // The value is read before the address (`Cpu::exec_store`).
+        self.gread(gsrc(i.data, i).expect("generic_ok"), 2);
+        self.gaddress(i, b, c);
+        self.store(i.mem.size);
     }
 
     /// One non-branch instruction (`Cpu::execute_fast`).
@@ -1299,7 +1653,7 @@ impl Gen {
         let prev = if k > 0 { items[k - 1].hot.addr } else { h.addr };
         // The delay slot, when it can run here: compiled, and not itself a
         // branch (the interpreter reports that as unpredictable).
-        let slot = items.get(k + 1).copied().filter(|s| h.delay && compilable(&s.hot) && !is_branch(s.hot.fast) && !s.hot.branchy);
+        let slot = items.get(k + 1).copied().filter(|s| h.delay && compilable(s) && !is_branch(s.hot.fast) && !s.hot.branchy);
         // The link: the next instruction, or the one after the delay slot.
         let link = match h.fast {
             Fast::Bl { .. } | Fast::Jl { .. } => Some(h.next),
@@ -1390,7 +1744,7 @@ impl Gen {
         self.instr(&slot);
         // After the slot: the taken branch's target, or on in sequence.
         let s = slot.hot;
-        let mem = s.fast.accesses_memory();
+        let mem = slot.mem();
         let sequential = self.ops.new_dynamic_label();
         dynasm!(self.ops ; .arch x64 ; test r15d, r15d ; jz =>sequential);
         if mem {

@@ -119,6 +119,9 @@ fn main() {
     // `none`: no cartridge inserted.
     let cart = (cart != "none").then(|| ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap());
     let straps = std::env::var("RIBBIT_STRAPS").map_or(0x63FF_FFFF, |s| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap());
+    if std::env::var_os("RIBBIT_JIT_PROFILE").is_some() {
+        *ribbit_jit::PROFILE.lock().unwrap() = Some(Default::default());
+    }
     let mut m = Machine::with_straps(fw, cart, straps);
     if let Some(p) = rest.first() {
         m.io.eeprom.load(&std::fs::read(p).unwrap());
@@ -828,6 +831,21 @@ fn main() {
     println!("\nworst window: {:.0}% ({})", meter.worst, meter.worst_label);
     if meter.wall > 0.0 {
         println!("average: {:.0}% ({:.1} s emulated in {:.2} s)", 100.0 * meter.emu / meter.wall, meter.emu, meter.wall);
+        if let Some(j) = &m.jit {
+            println!("jit: {:?}", j.stats);
+        }
+        if let Some([fb, interp, ends]) = ribbit_jit::PROFILE.lock().unwrap().take() {
+            for (what, map) in [("fallback", fb), ("interpreted block", interp), ("batch end (slow/none)", ends)] {
+                let mut v: Vec<_> = map.into_iter().collect();
+                v.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+                for (pc, n) in v.into_iter().take(25) {
+                    let i = ribbit_cpu::decode::decode_with(pc, |a| {
+                        u16::from_le_bytes([m.bus.peek8(a).unwrap_or(0), m.bus.peek8(a + 1).unwrap_or(0)])
+                    });
+                    println!("jit {what} {pc:08x} x{n}: {}", ribbit_cpu::disasm::disassemble(&i));
+                }
+            }
+        }
     }
     let mut by: Vec<(String, f64, f64, usize)> = vec![];
     for (l, s, idle) in &meter.rows {
