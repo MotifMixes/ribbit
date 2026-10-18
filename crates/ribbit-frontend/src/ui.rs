@@ -141,6 +141,8 @@ pub struct UiState {
     restarting: bool,
     /// Android: the side menu is open.
     drawer: bool,
+    /// Android: asking whether to save a state before exiting the game.
+    confirm_back: bool,
 }
 
 /// What the library shows.
@@ -345,21 +347,67 @@ fn side_menu(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, inf
             });
         });
     });
+    if st.confirm_back {
+        back_to_games_question(ctx, st, info, actions);
+    }
     // Something chosen: back to the game.
     if actions.len() > before {
         st.drawer = false;
     }
 }
 
+/// Before exiting the game (back to the games): save a state first?
+fn back_to_games_question(ctx: &egui::Context, st: &mut UiState, info: &Info, actions: &mut Vec<Action>) {
+    let modal = egui::Modal::new(egui::Id::new("back-to-games")).frame(ai_card_frame()).show(ctx, |ui| {
+        ui.set_width(ctx.content_rect().width().min(440.0) - 64.0);
+        ui.label(egui::RichText::new("Exit the game?").size(20.0).strong().color(egui::Color32::WHITE));
+        ui.add_space(6.0);
+        let note = match info.slots.first().cloned().flatten() {
+            Some(when) => format!("Save a state first to carry on from here later (it replaces the one from {when})."),
+            None => "Save a state first to carry on from here later.".to_string(),
+        };
+        ui.add(egui::Label::new(egui::RichText::new(note).size(15.0).color(egui::Color32::from_gray(205))).wrap());
+        ui.add_space(14.0);
+        let full = ui.available_width();
+        let button = |text: &str, fill: Option<egui::Color32>| {
+            let text = egui::RichText::new(text).size(16.0).color(egui::Color32::WHITE);
+            let b = egui::Button::new(text).corner_radius(10).min_size(egui::vec2(full, 44.0));
+            match fill {
+                Some(f) => b.fill(f),
+                None => b,
+            }
+        };
+        if ui.add(button("💾  Save and exit", Some(ACCENT))).clicked() {
+            actions.push(Action::SaveState(1));
+            actions.push(Action::CloseCartridge);
+            st.confirm_back = false;
+        }
+        if ui.add(button("Exit without saving", None)).clicked() {
+            actions.push(Action::CloseCartridge);
+            st.confirm_back = false;
+        }
+        if ui.add(button("Cancel", None).frame(false)).clicked() {
+            st.confirm_back = false;
+        }
+    });
+    if modal.should_close() {
+        st.confirm_back = false;
+    }
+}
+
 /// The side menu's header: Ribbit and what is running, on the frog's green.
 fn drawer_header(ui: &mut egui::Ui, info: &Info, width: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 84.0), egui::Sense::hover());
+    // The game's name under Ribbit, two lines at most; the header grows to
+    // fit it (a long name used to run into its bottom edge).
+    let sub = if info.running { info.title.clone() } else { "No game running".to_string() };
+    let mut job = egui::text::LayoutJob::simple(sub, egui::FontId::proportional(14.0), egui::Color32::from_gray(225), width - 36.0);
+    job.wrap.max_rows = 2;
+    let sub = ui.painter().layout_job(job);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 52.0 + sub.size().y + 14.0), egui::Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 120, 58));
     let left = rect.left() + 18.0;
     p.text(egui::pos2(left, rect.top() + 30.0), egui::Align2::LEFT_CENTER, "🐸 Ribbit", egui::FontId::proportional(24.0), egui::Color32::WHITE);
-    let sub = if info.running { info.title.clone() } else { "No game running".to_string() };
-    let sub = p.layout(sub, egui::FontId::proportional(14.0), egui::Color32::from_gray(225), width - 36.0);
     p.galley(egui::pos2(left, rect.top() + 52.0), sub, egui::Color32::from_gray(225));
 }
 
@@ -399,6 +447,10 @@ fn side_menu_items(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings,
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 2.0);
     if info.running {
         drawer_section(ui, "Game");
+        // (Asks about a save state first: the menu stays open meanwhile.)
+        if drawer_row(ui, "⏏", "Exit game", "", None, true) {
+            st.confirm_back = true;
+        }
         let (icon, label) = if info.paused { ("▶", "Resume") } else { ("⏸", "Pause") };
         if drawer_row(ui, icon, label, "", None, true) {
             actions.push(Action::TogglePause);
@@ -415,9 +467,6 @@ fn side_menu_items(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings,
         }
         if drawer_row(ui, "📷", "Screenshot", "", None, true) {
             actions.push(Action::Screenshot);
-        }
-        if drawer_row(ui, "⏏", "Close game", "", None, true) {
-            actions.push(Action::CloseCartridge);
         }
         drawer_section(ui, &format!("Speed · {:.0}% now", info.speed));
         speed_picker(ui, settings, actions);
@@ -442,8 +491,6 @@ fn side_menu_items(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings,
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
     ui.vertical(|ui| menus(ui, st, settings, info, actions, true));
     ui.add_space(14.0);
-    ui.label(egui::RichText::new("Swipe left, tap outside or press Back to close.").size(13.0).weak());
-    ui.add_space(10.0);
 }
 
 /// Speed as a segmented control: normal, double, four times, unlimited.
