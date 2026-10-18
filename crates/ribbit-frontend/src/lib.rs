@@ -19,6 +19,7 @@ mod held;
 mod icon;
 mod install;
 mod library;
+mod manual;
 mod perf;
 pub mod saves;
 pub mod settings;

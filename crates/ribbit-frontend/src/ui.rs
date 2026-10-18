@@ -143,6 +143,8 @@ pub struct UiState {
     drawer: bool,
     /// Android: asking whether to save a state before exiting the game.
     confirm_back: bool,
+    /// Help › User Guide.
+    pub manual: crate::manual::ManualState,
 }
 
 /// What the library shows.
@@ -329,6 +331,7 @@ fn side_menu(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, inf
         }
     });
     let before = actions.len();
+    let windows = open_windows(st);
     let at = screen.min + egui::vec2(-width * (1.0 - shown), 0.0);
     egui::Area::new("side-menu".into()).order(egui::Order::Foreground).fixed_pos(at).interactable(st.drawer).show(ctx, |ui| {
         let panel = egui::Rect::from_min_size(at, egui::vec2(width, screen.height()));
@@ -350,10 +353,19 @@ fn side_menu(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, inf
     if st.confirm_back {
         back_to_games_question(ctx, st, info, actions);
     }
-    // Something chosen: back to the game.
-    if actions.len() > before {
+    // Something chosen, or a window opened from a menu (the guide, the
+    // controls...): the menu goes, so it is not left on top of it.
+    if actions.len() > before || open_windows(st) > windows {
         st.drawer = false;
     }
+}
+
+/// How many of the UI's windows are open.
+fn open_windows(st: &UiState) -> usize {
+    [st.manual.open, st.show_updates, st.show_controls, st.show_about, st.show_bindings, st.show_status, st.browser.open.is_some()]
+        .into_iter()
+        .filter(|&o| o)
+        .count()
 }
 
 /// Before exiting the game (back to the games): save a state first?
@@ -990,6 +1002,10 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         }
     });
     top_menu(ui, rows, "❓", "Help", |ui| {
+        if item(ui, "User Guide", "") {
+            st.manual.open_at(None);
+        }
+        ui.separator();
         if item(ui, "Controls", "F1") {
             st.show_controls = true;
         }
@@ -1052,7 +1068,15 @@ fn top_menu(ui: &mut egui::Ui, rows: bool, icon: &str, label: &str, add_contents
     }
     let text = egui::RichText::new(format!("{icon}    {label}")).size(17.0).color(egui::Color32::from_gray(230));
     let button = egui::Button::new(text).frame(false).min_size(egui::vec2(ui.available_width(), 48.0));
-    egui::containers::menu::MenuButton::from_button(button).ui(ui, add_contents);
+    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        // Sized for fingers, like the rest of the side menu.
+        let style = ui.style_mut();
+        style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(17.0));
+        style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+        style.spacing.button_padding = egui::vec2(12.0, 9.0);
+        style.spacing.interact_size.y = 40.0;
+        add_contents(ui)
+    });
 }
 
 /// Help → Patch notes: every release, newest first; one opens its notes.
@@ -1269,14 +1293,12 @@ fn welcome(ui: &mut egui::Ui, settings: &mut Settings, info: &Info, actions: &mu
     let gap = (ui.available_height() * 0.18).max(12.0);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| ui.vertical_centered(|ui| {
         ui.add_space(if phone { 12.0 } else { gap });
-        ui.heading(egui::RichText::new("🐸 Ribbit").size(34.0));
-        ui.label("An emulator for LeapFrog's handhelds and TV consoles");
-        ui.add_space(18.0);
-        // On a phone, a quick start: the AI note on a page of its own first,
-        // then the BIOS and games.
+        // On a phone, a quick start: the AI note on a page of its own first
+        // (its card is the page's title: all of it and Continue fit a phone
+        // held sideways), then the BIOS and games.
         if phone && !settings.ai_notice_seen {
             ai_notice(ui);
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             let text = egui::RichText::new("Continue").size(18.0).color(egui::Color32::WHITE);
             let button = egui::Button::new(text).fill(ACCENT).corner_radius(10).min_size(egui::vec2(240.0, 48.0));
             if ui.add(button).clicked() {
@@ -1286,6 +1308,9 @@ fn welcome(ui: &mut egui::Ui, settings: &mut Settings, info: &Info, actions: &mu
             ui.add_space(12.0);
             return;
         }
+        ui.heading(egui::RichText::new("🐸 Ribbit").size(34.0));
+        ui.label("An emulator for LeapFrog's handhelds and TV consoles");
+        ui.add_space(18.0);
         match &info.bios_name {
             Some(name) => ui.label(format!("BIOS: {name}")),
             None => ui.label("Step 1: choose the BIOS dumped from your own Leapster."),
@@ -1324,7 +1349,8 @@ fn welcome(ui: &mut egui::Ui, settings: &mut Settings, info: &Info, actions: &mu
 /// The README's "This project was made with AI", shortened, on the first
 /// screen: players should know before they start.
 fn ai_notice(ui: &mut egui::Ui) {
-    let width = ui.available_width().min(560.0);
+    // Wider on a phone held sideways: fewer lines, so Continue fits under it.
+    let width = ui.available_width().min(if cfg!(target_os = "android") { 760.0 } else { 560.0 });
     ai_card_frame().show(ui, |ui| {
         ui.set_width(width - 48.0);
         ai_notice_text(ui);
@@ -2046,7 +2072,18 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         p.galley(b.min + egui::vec2(6.0, 2.0), g, egui::Color32::from_gray(200));
         x = b.max.x + 8.0;
     }
-    p.galley(egui::pos2(x, y + 1.0), sub, egui::Color32::from_gray(140));
+    // The rest of the line, cut short with … where it would run past the
+    // card's edge.
+    let room = card.right() - pad - x;
+    if room > 12.0 {
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            game.subtitle.clone(),
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_gray(140),
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+        p.galley(egui::pos2(x, y + 1.0), p.layout_job(job), egui::Color32::from_gray(140));
+    }
     ui.set_opacity(opacity);
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| {
         ui.label(egui::RichText::new(&game.title).strong());
@@ -2284,6 +2321,7 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
     });
 
     updates_window(ctx, st, settings, actions);
+    crate::manual::window(ctx, &mut st.manual);
     // Installed (even with the window closed since): restart into it, once.
     if st.updates.installer.state() == crate::install::State::Ready && !st.restarting {
         st.restarting = true;

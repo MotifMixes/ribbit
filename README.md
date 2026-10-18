@@ -40,6 +40,8 @@ old `Ribbit` folder** (replace the files when asked).
 `%APPDATA%\Ribbit` on Windows (paste that into the File Explorer address bar) and `~/.config/ribbit` on macOS and
 Linux.
 
+**→ [User guide](docs/manual/01-welcome.md)** (also in Ribbit: **Help → User Guide**)
+
 **→ [Compatibility list: every console and every game tested](docs/compatibility.md)**
 
 > [!IMPORTANT]
