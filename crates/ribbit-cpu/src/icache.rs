@@ -157,6 +157,50 @@ impl UnOp {
 /// `d` of `Fast::AluF`/`AluFI` when the result is discarded (flags only).
 pub const DISCARD: u8 = 0xFF;
 
+/// Shifts and rotates by one bit (ASL/ASR/LSR/ROR/RRC/RLC, source in
+/// src2), with the flags the general executor gives them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RotOp {
+    Asl,
+    Asr,
+    Lsr,
+    Ror,
+    Rrc,
+    Rlc,
+}
+
+impl RotOp {
+    fn of(op: Op) -> Option<RotOp> {
+        Some(match op {
+            Op::Asl => RotOp::Asl,
+            Op::Asr => RotOp::Asr,
+            Op::Lsr => RotOp::Lsr,
+            Op::Ror => RotOp::Ror,
+            Op::Rrc => RotOp::Rrc,
+            Op::Rlc => RotOp::Rlc,
+            _ => return None,
+        })
+    }
+
+    /// Result, C and V (None: unchanged) of `c` with carry in `carry`, as
+    /// `Cpu::execute` computes them.
+    #[inline(always)]
+    pub fn apply(self, c: u32, carry: bool) -> (u32, bool, Option<bool>) {
+        match self {
+            RotOp::Asl => {
+                let r = c << 1;
+                (r, c >> 31 != 0, Some((c ^ r) >> 31 != 0))
+            }
+            RotOp::Asr => (((c as i32) >> 1) as u32, c & 1 != 0, None),
+            RotOp::Lsr => (c >> 1, c & 1 != 0, None),
+            RotOp::Ror => (c.rotate_right(1), c & 1 != 0, None),
+            RotOp::Rrc => (((carry as u32) << 31) | (c >> 1), c & 1 != 0, None),
+            // RLC: "V = Undefined"; left unchanged.
+            RotOp::Rlc => ((c << 1) | carry as u32, c >> 31 != 0, None),
+        }
+    }
+}
+
 /// Load widths with a fast form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LdKind {
@@ -213,6 +257,16 @@ pub enum Fast {
     Jcc { cc: Cond, s: u8 },
     Cmp { b: u8, c: u8 },
     CmpI { b: u8, v: u32 },
+    /// Shift or rotate by one (`d` may be `DISCARD`); Z, N, C (and V for
+    /// ASL) set when `f` (.F on a 32-bit encoding).
+    Rot { op: RotOp, f: bool, d: u8, c: u8 },
+    /// MUL64 (`signed`) or MULU64 b,c into MLO/MHI/MMID.
+    Mul64 { signed: bool, b: u8, c: u8 },
+    Mul64I { signed: bool, b: u8, v: u32 },
+    /// JL [s] (always, no flags, no delay slot): BLINK = next.
+    Jl { s: u8 },
+    /// JL.D [s]: BLINK = the address after the delay slot.
+    JlD { s: u8 },
 }
 
 impl Fast {
@@ -442,6 +496,28 @@ pub fn fast_form(i: &Instr) -> Fast {
             (Some(b), _, Some(v)) => Some(Fast::CmpI { b, v }),
             _ => None,
         },
+        // (Those without .F that `Un` covers took the arm above.) The
+        // executor reads src1 first; only when that is free.
+        op if i.cc == COND_AL && RotOp::of(op).is_some() && (i.src1 == Src::None || reg(i.src1).is_some()) => {
+            let d = match i.dst {
+                Dst::Discard => Some(DISCARD),
+                d => dreg(d),
+            };
+            match (d, reg(i.src2)) {
+                (Some(d), Some(c)) => Some(Fast::Rot { op: RotOp::of(op).unwrap(), f: i.set_flags && !i.short, d, c }),
+                _ => None,
+            }
+        }
+        Op::Mul64 | Op::Mulu64 if i.cc == COND_AL && matches!(i.dst, Dst::None | Dst::Discard) => {
+            let signed = i.op == Op::Mul64;
+            match (reg(i.src1), reg(i.src2), imm(i.src2)) {
+                (Some(b), Some(c), _) => Some(Fast::Mul64 { signed, b, c }),
+                (Some(b), _, Some(v)) => Some(Fast::Mul64I { signed, b, v }),
+                _ => None,
+            }
+        }
+        Op::Jl if plain && !i.delay => reg(i.src2).map(|s| Fast::Jl { s }),
+        Op::Jl if plain => reg(i.src2).map(|s| Fast::JlD { s }),
         _ => None,
     };
     f.unwrap_or(Fast::General)
@@ -680,7 +756,7 @@ impl Blocks {
             }
             let end_line = hot.next.wrapping_sub(1) >> 4;
             let fetch = prev_line != Some(at >> 4) || end_line != at >> 4;
-            let bus_exit = hot.fast.accesses_memory() || matches!(hot.fast, Fast::General | Fast::BlD { .. });
+            let bus_exit = hot.fast.accesses_memory() || matches!(hot.fast, Fast::General | Fast::BlD { .. } | Fast::JlD { .. });
             self.entries.push(Entry { hot, fetch, bus_exit });
             last = at;
             prev_line = Some(end_line);

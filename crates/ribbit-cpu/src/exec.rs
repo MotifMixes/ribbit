@@ -490,6 +490,28 @@ impl Cpu {
                     return Flow::Jump(target);
                 }
             }
+            Fast::Rot { op, f, d, c } => {
+                let (v, cf, vf) = op.apply(self.regs[r(c)], self.flag(status32::C));
+                if d != DISCARD {
+                    self.regs[r(d)] = v;
+                }
+                if f {
+                    self.flags(v, Some(cf), vf);
+                }
+            }
+            Fast::Mul64 { signed, b, c } => self.mul64(signed, self.regs[r(b)], self.regs[r(c)]),
+            Fast::Mul64I { signed, b, v } => self.mul64(signed, self.regs[r(b)], v),
+            // The target is read before BLINK is written (JL [blink]).
+            Fast::Jl { s } => {
+                let target = self.regs[r(s)] & !1;
+                self.regs[reg::BLINK] = hot.next;
+                return Flow::Jump(target);
+            }
+            Fast::JlD { s } => {
+                let target = self.regs[r(s)] & !1;
+                self.regs[reg::BLINK] = self.after_slot(bus, hot.next);
+                return Flow::Jump(target);
+            }
         }
         Flow::Next
     }
@@ -1269,28 +1291,7 @@ impl Cpu {
                 (Some(b.rotate_right(n)), shift_carry(n, n.wrapping_sub(1)), None)
             }
             Op::Mul64 | Op::Mulu64 => {
-                let p = if matches!(i.op, Op::Mul64) {
-                    ((b as i32 as i64) * (c as i32 as i64)) as u64
-                } else {
-                    b as u64 * c as u64
-                };
-                // Leapster: r57 is the dual MAC's low-lane accumulator (see
-                // MULDW), and MUL64 leaves it alone; the low word is read from
-                // MMID instead. HYPOTHESIS from the Leapster 2 BIOS 0.6: its
-                // interrupt entry (0x4004_B308) saves only r58/r59 and restores
-                // them with `mulu64 0,r0,1; sr r6,[mulhi]` (0x4004_B434), while
-                // its PCM filter reads r57 after MACs (0x4003_E0B0). With MUL64
-                // writing r57, every interrupt landing on that read corrupted
-                // the filter, which then rang at full scale (audible clicks in
-                // The Talking Words Factory, each one at an interrupt there).
-                if self.config.mmid != MmidMode::LowLeapster {
-                    self.regs[reg::MLO] = p as u32;
-                }
-                self.regs[reg::MHI] = (p >> 32) as u32;
-                self.regs[reg::MMID] = match self.config.mmid {
-                    MmidMode::Middle => (p >> 16) as u32,
-                    MmidMode::LowLeapster => p as u32,
-                };
+                self.mul64(matches!(i.op, Op::Mul64), b, c);
                 return Ok(Flow::Next);
             }
             Op::Adds => {
@@ -1456,6 +1457,30 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
+    /// MUL64 / MULU64 (`signed`): the 64-bit product of `b` and `c` into
+    /// MHI, MMID and (by `config.mmid`) MLO.
+    #[inline(always)]
+    fn mul64(&mut self, signed: bool, b: u32, c: u32) {
+        let p = if signed { ((b as i32 as i64) * (c as i32 as i64)) as u64 } else { b as u64 * c as u64 };
+        // Leapster: r57 is the dual MAC's low-lane accumulator (see
+        // MULDW), and MUL64 leaves it alone; the low word is read from
+        // MMID instead. HYPOTHESIS from the Leapster 2 BIOS 0.6: its
+        // interrupt entry (0x4004_B308) saves only r58/r59 and restores
+        // them with `mulu64 0,r0,1; sr r6,[mulhi]` (0x4004_B434), while
+        // its PCM filter reads r57 after MACs (0x4003_E0B0). With MUL64
+        // writing r57, every interrupt landing on that read corrupted
+        // the filter, which then rang at full scale (audible clicks in
+        // The Talking Words Factory, each one at an interrupt there).
+        if self.config.mmid != MmidMode::LowLeapster {
+            self.regs[reg::MLO] = p as u32;
+        }
+        self.regs[reg::MHI] = (p >> 32) as u32;
+        self.regs[reg::MMID] = match self.config.mmid {
+            MmidMode::Middle => (p >> 16) as u32,
+            MmidMode::LowLeapster => p as u32,
+        };
+    }
+
     fn sticky_saturation(&mut self, s1: bool, s2: bool) {
         if s1 {
             self.macmode |= MACMODE_S1;
@@ -1521,5 +1546,84 @@ impl Cpu {
             Size::Byte => bus.write8(addr, v as u8),
         }
         Ok(Flow::Next)
+    }
+}
+
+#[cfg(test)]
+mod fast_form_tests {
+    use super::*;
+    use crate::icache::fast_form;
+    use crate::{CpuConfig, NoAuxExt};
+    use ribbit_memory::{Firmware, SystemBus};
+
+    /// Where control goes after an instruction (`Flow` has no Eq).
+    fn next(f: Flow) -> Option<u32> {
+        match f {
+            Flow::Next => None,
+            Flow::Jump(t) => Some(t),
+            _ => panic!("unexpected halt or exception"),
+        }
+    }
+
+    /// An instruction at 0x4000_0100: `op` with these operands, 32-bit.
+    fn instr(op: Op, set_flags: bool, delay: bool, dst: Dst, src1: Src, src2: Src) -> Instr {
+        let mut i = crate::decode::decode_with(0x4000_0100, |_| 0);
+        (i.op, i.cc, i.set_flags, i.delay, i.short, i.len) = (op, COND_AL, set_flags, delay, false, 4);
+        (i.dst, i.src1, i.src2, i.data, i.limm) = (dst, src1, src2, Src::None, None);
+        i
+    }
+
+    /// Every case runs through the general executor and through its fast
+    /// form, from the same random states: the CPUs must end up equal.
+    #[test]
+    fn new_fast_forms_match_the_executor() {
+        let bus_of = || SystemBus::new(&Firmware::from_bytes(vec![0; 0x1000]).unwrap(), None);
+        let mut cases = Vec::new();
+        for op in [Op::Asl, Op::Asr, Op::Lsr, Op::Ror, Op::Rrc, Op::Rlc] {
+            for f in [false, true] {
+                for dst in [Dst::Reg(1), Dst::Reg(2), Dst::Discard] {
+                    // (Without .F the first four are `Un`, which has no
+                    // discarded form: that pointless case stays general.)
+                    if !f && dst == Dst::Discard && !matches!(op, Op::Rrc | Op::Rlc) {
+                        continue;
+                    }
+                    cases.push(instr(op, f, false, dst, Src::None, Src::Reg(2)));
+                }
+            }
+        }
+        for op in [Op::Mul64, Op::Mulu64] {
+            cases.push(instr(op, false, false, Dst::None, Src::Reg(3), Src::Reg(4)));
+            cases.push(instr(op, false, false, Dst::None, Src::Reg(3), Src::Imm(0xFFFF_8001)));
+        }
+        for delay in [false, true] {
+            cases.push(instr(Op::Jl, false, delay, Dst::None, Src::None, Src::Reg(5)));
+            cases.push(instr(Op::Jl, false, delay, Dst::None, Src::None, Src::Reg(reg::BLINK as u8)));
+        }
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for mmid in [MmidMode::LowLeapster, MmidMode::Middle] {
+            for i in &cases {
+                let fast = fast_form(i);
+                assert!(!matches!(fast, Fast::General), "{:?} has no fast form", i.op);
+                for _ in 0..200 {
+                    let mut cpu = Cpu::new(CpuConfig { mmid, ..CpuConfig::leapster() });
+                    for r in 0..32 {
+                        cpu.regs[r] = rand() as u32;
+                    }
+                    cpu.status32 = (cpu.status32 & !0xF00) | (rand() as u32 & 0xF00);
+                    let (mut a, mut b) = (cpu.clone(), cpu);
+                    let (mut bus_a, mut bus_b) = (bus_of(), bus_of());
+                    let want = next(a.execute(i, &mut bus_a, &mut NoAuxExt).unwrap());
+                    let got = next(b.execute_fast(fast, &Hot::of(i), &mut bus_b));
+                    assert_eq!(got, want, "{:?} flow", i.op);
+                    assert!(a == b, "{:?} (f {}, {:?}): {:?} vs {:?}", i.op, i.set_flags, i.dst, a, b);
+                }
+            }
+        }
     }
 }
