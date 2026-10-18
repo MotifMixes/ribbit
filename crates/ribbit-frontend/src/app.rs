@@ -53,6 +53,12 @@ pub struct StartOptions {
     /// that on, and Android waits for Ribbit to stop before it can start the
     /// app again.
     pub destroyed: Option<fn() -> bool>,
+    /// Android: opens the system's file picker (true: for a folder); false
+    /// if it can't (Ribbit's own browser is used then).
+    pub pick_start: Option<fn(bool) -> bool>,
+    /// Android: the picker's answer once it is in: the path, None if
+    /// cancelled, or why the choice can't be used.
+    pub pick_poll: Option<fn() -> Option<Result<Option<PathBuf>, String>>>,
 }
 
 struct Session {
@@ -148,6 +154,11 @@ pub struct App {
     /// macOS: the open panel showing as a sheet, until it is answered.
     #[cfg(target_os = "macos")]
     sheet: Option<crate::files::SheetPick>,
+    /// Android: what the system's file picker, open now, is choosing.
+    native_pick: Option<Pick>,
+    /// Android: the side menu was open last frame, and whether opening it
+    /// paused the game (closing it then lets it go on).
+    side_menu: (bool, bool),
     fatal: Option<anyhow::Error>,
     quit: bool,
     /// Everything is saved for good: nothing more is written (after an
@@ -248,6 +259,8 @@ impl App {
             fit_window: 0,
             #[cfg(target_os = "macos")]
             sheet: None,
+            native_pick: None,
+            side_menu: (false, false),
             library: Library::new(&opts_data_dir),
             discord: crate::discord::Discord::start(),
             fatal: None,
@@ -965,11 +978,31 @@ impl App {
         if let Some(path) = crate::files::native_pick(what, start.as_deref()) {
             self.picked(what, path);
         }
+        // Android: the system's own picker; Ribbit's browser if it can't open.
         #[cfg(target_os = "android")]
-        self.ui.browser.start(what, start.as_deref());
+        if self.opts.pick_start.is_some_and(|open| open(what.is_folder())) {
+            self.native_pick = Some(what);
+        } else {
+            self.ui.browser.start(what, start.as_deref());
+        }
     }
 
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    /// Android: acts on the system picker's answer once it is in.
+    fn poll_native_pick(&mut self) {
+        let (Some(what), Some(poll)) = (self.native_pick, self.opts.pick_poll) else {
+            return;
+        };
+        let Some(answer) = poll() else {
+            return;
+        };
+        self.native_pick = None;
+        match answer {
+            Ok(Some(path)) => self.picked(what, path),
+            Ok(None) => {}
+            Err(why) => self.ui.problem("Ribbit can't use that", why, String::new()),
+        }
+    }
+
     fn picked(&mut self, what: Pick, path: PathBuf) {
         match what {
             Pick::Bios => self.set_bios(path),
@@ -1837,19 +1870,34 @@ impl App {
         }
     }
 
+    /// Android: the game waits while the side menu is open, as in other
+    /// emulators, and goes on when it closes (unless it was paused before).
+    fn pause_for_side_menu(&mut self) {
+        let open = self.ui.side_menu_open();
+        let (was_open, paused_by_menu) = self.side_menu;
+        if open && !was_open {
+            let running = self.session.is_some() || self.zippity.is_some() || self.twist.is_some();
+            let pause = running && !self.paused;
+            if pause {
+                self.toggle_pause();
+            }
+            self.side_menu = (true, pause);
+        } else if !open && was_open {
+            if paused_by_menu && self.paused {
+                self.toggle_pause();
+            }
+            self.side_menu = (false, false);
+        }
+    }
+
     /// Android gamepad buttons (winit reports them as raw key codes; the
     /// D-pad usually arrives as arrow keys, its own codes are taken too).
     /// The layout matches the desktop's (`gamepad`, `twist::pad_button`).
     fn android_key(&mut self, code: u32, pressed: bool) {
         use ribbit_input::Button;
+        // Back opens and closes the side menu (egui sees it as BrowserBack).
         const BACK: u32 = 4;
         if code == BACK {
-            if pressed {
-                self.ui.menu_visible = true;
-                if !self.paused {
-                    self.toggle_pause();
-                }
-            }
             return;
         }
         if pressed {
@@ -2187,6 +2235,7 @@ impl App {
         for a in actions {
             self.act(a, event_loop);
         }
+        self.pause_for_side_menu();
         let took = frame_start.elapsed();
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
@@ -2357,6 +2406,7 @@ impl ApplicationHandler for App {
         }
         #[cfg(target_os = "macos")]
         self.poll_sheet();
+        self.poll_native_pick();
         if let Some(g) = &self.gpu {
             g.window.request_redraw();
         }

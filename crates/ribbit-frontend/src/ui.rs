@@ -176,6 +176,11 @@ impl UiState {
         self.delete_save = Some((path, title));
     }
 
+    /// Android: whether the side menu is open.
+    pub fn side_menu_open(&self) -> bool {
+        self.drawer
+    }
+
     pub fn toast(&mut self, text: impl Into<String>) {
         self.toasts.push((text.into(), Instant::now()));
         if self.toasts.len() > 4 {
@@ -411,7 +416,7 @@ fn side_menu_items(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings,
         if drawer_row(ui, "📷", "Screenshot", "", None, true) {
             actions.push(Action::Screenshot);
         }
-        if drawer_row(ui, "✕", "Close game", "", None, true) {
+        if drawer_row(ui, "⏏", "Close game", "", None, true) {
             actions.push(Action::CloseCartridge);
         }
         drawer_section(ui, &format!("Speed · {:.0}% now", info.speed));

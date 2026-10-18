@@ -102,14 +102,28 @@ def main():
     run([tools / f'aapt2{exe}', 'link', '-o', unsigned, '-I', platform / 'android.jar', '--manifest', PACKAGE_DIR / 'AndroidManifest.xml',
          '--min-sdk-version', '26', '--target-sdk-version', '36', '--version-name', ver, '--version-code', str(code), '--replace-version', flat])
 
-    # 4. Native library into the APK.
-    # (A UTC time: zip stores local times, which would give away the zone.)
-    with zipfile.ZipFile(unsigned, 'a', compression=zipfile.ZIP_DEFLATED) as z:
-        info = zipfile.ZipInfo('lib/arm64-v8a/libribbit.so', date_time=time.gmtime(lib.stat().st_mtime)[:6])
-        info.compress_type = zipfile.ZIP_DEFLATED
-        z.writestr(info, lib.read_bytes())
+    # 4. The Java part (Android's file picker): javac, then d8 into classes.dex.
+    java_src = PACKAGE_DIR / 'java'
+    classes = OUT / 'classes'
+    dex_dir = OUT / 'dex'
+    for d in (classes, dex_dir):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+    sources = sorted(java_src.rglob('*.java'))
+    run(['javac', '--release', '11', '-g:none', '-encoding', 'UTF-8', '-classpath', platform / 'android.jar', '-d', classes, *sources])
+    run([tools / f'd8{bat}', '--release', '--min-api', '26', '--lib', platform / 'android.jar', '--output', dex_dir,
+         *sorted(classes.rglob('*.class'))], shell=os.name == 'nt')
+    dex = dex_dir / 'classes.dex'
 
-    # 5. Align and sign.
+    # 5. Native library and code into the APK.
+    # (UTC times: zip stores local times, which would give away the zone.)
+    with zipfile.ZipFile(unsigned, 'a', compression=zipfile.ZIP_DEFLATED) as z:
+        for name, f in (('lib/arm64-v8a/libribbit.so', lib), ('classes.dex', dex)):
+            info = zipfile.ZipInfo(name, date_time=time.gmtime(f.stat().st_mtime)[:6])
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, f.read_bytes())
+
+    # 6. Align and sign.
     aligned = OUT / 'ribbit-aligned.apk'
     run([tools / f'zipalign{exe}', '-p', '-f', '4', unsigned, aligned])
     if not KEYSTORE.exists():

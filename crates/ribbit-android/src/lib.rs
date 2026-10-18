@@ -31,7 +31,13 @@ fn android_main(app: AndroidApp) {
             return;
         }
     };
-    let opts = ribbit_frontend::StartOptions { data_dir, destroyed: Some(activity_destroyed), ..Default::default() };
+    let opts = ribbit_frontend::StartOptions {
+        data_dir,
+        destroyed: Some(activity_destroyed),
+        pick_start: Some(pick_start),
+        pick_poll: Some(pick_poll),
+        ..Default::default()
+    };
     if let Err(e) = ribbit_frontend::run_with(event_loop, opts) {
         log::error!("ribbit stopped: {e:#}");
     }
@@ -60,6 +66,63 @@ fn activity_destroyed() -> bool {
         env.call_method(&activity, "isDestroyed", "()Z", &[])?.z()
     };
     destroyed().unwrap_or(false)
+}
+
+/// Runs `f` with the JNI environment and the activity, in a local frame of
+/// its own (this thread runs for the app's life: references would pile up);
+/// None if it fails (a Java exception is cleared).
+fn with_activity<T>(f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<T>) -> Option<T> {
+    let &(vm, activity) = ACTIVITY.get()?;
+    // SAFETY: the pointers come from the running NativeActivity.
+    let vm = unsafe { jni::JavaVM::from_raw(vm as *mut _) }.ok()?;
+    let mut env = vm.get_env().ok()?;
+    let activity = unsafe { JObject::from_raw(activity as jni::sys::jobject) };
+    let result = env.with_local_frame(16, |env| f(env, &activity));
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    result.map_err(|e| log::warn!("JNI: {e}")).ok()
+}
+
+/// The app's PickerActivity (Android's file picker), loaded by the app's
+/// class loader (this native thread's own only knows Android's classes).
+fn picker<'a>(env: &mut jni::JNIEnv<'a>, activity: &JObject) -> jni::errors::Result<jni::objects::JClass<'a>> {
+    use jni::objects::JValue;
+    let loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?.l()?;
+    let name = env.new_string("dev.ribbit.emulator.PickerActivity")?;
+    let class = env.call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(&name)])?.l()?;
+    Ok(class.into())
+}
+
+/// Opens Android's file picker for a file (or a folder); false if it can't.
+fn pick_start(folder: bool) -> bool {
+    use jni::objects::JValue;
+    with_activity(|env, activity| {
+        let class = picker(env, activity)?;
+        env.call_static_method(&class, "start", "(Landroid/app/Activity;Z)V", &[JValue::Object(activity), JValue::Bool(folder.into())])?;
+        Ok(())
+    })
+    .is_some()
+}
+
+/// The picker's answer once it is in: the chosen path, None if cancelled, or
+/// why it can't be used.
+fn pick_poll() -> Option<Result<Option<PathBuf>, String>> {
+    with_activity(|env, activity| {
+        let class = picker(env, activity)?;
+        let answer = env.call_static_method(&class, "poll", "()Ljava/lang/String;", &[])?.l()?;
+        if answer.is_null() {
+            return Ok(None);
+        }
+        let answer: String = env.get_string(&answer.into())?.into();
+        Ok(Some(match answer.strip_prefix('!') {
+            _ if answer.is_empty() => Ok(None),
+            Some(why) => Err(why.to_string()),
+            None => Ok(Some(PathBuf::from(answer))),
+        }))
+    })
+    .flatten()
 }
 
 /// Opens Android's "All files access" screen for Ribbit if not yet granted

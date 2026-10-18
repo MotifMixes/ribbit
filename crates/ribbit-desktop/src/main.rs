@@ -490,6 +490,8 @@ fn start_options(images: &Images, config: &Config) -> ribbit_frontend::StartOpti
         experimental_touch: config.experimental_mame_touch.then_some(true),
         cpu_mhz: config.cpu_mhz,
         destroyed: None,
+        pick_start: None,
+        pick_poll: None,
     }
 }
 

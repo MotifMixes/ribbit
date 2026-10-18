@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Ribbit for Android: a NativeActivity app (no Java code). -->
+<!-- Ribbit for Android: a NativeActivity app; one small Java activity opens
+     Android's own file picker for it (java/.../PickerActivity.java). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.ribbit.emulator"
     android:versionCode="1"
@@ -16,7 +17,7 @@
     <application
         android:label="Ribbit"
         android:icon="@mipmap/ic_launcher"
-        android:hasCode="false"
+        android:hasCode="true"
         android:extractNativeLibs="true"
         android:appCategory="game"
         android:isGame="true"
@@ -33,5 +34,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name="dev.ribbit.emulator.PickerActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
     </application>
 </manifest>
