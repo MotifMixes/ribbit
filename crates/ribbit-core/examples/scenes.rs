@@ -121,6 +121,7 @@ fn main() {
     let straps = std::env::var("RIBBIT_STRAPS").map_or(0x63FF_FFFF, |s| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap());
     if std::env::var_os("RIBBIT_JIT_PROFILE").is_some() {
         *ribbit_jit::PROFILE.lock().unwrap() = Some(Default::default());
+        ribbit_jit::PROFILING.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let mut m = Machine::with_straps(fw, cart, straps);
     if let Some(p) = rest.first() {
