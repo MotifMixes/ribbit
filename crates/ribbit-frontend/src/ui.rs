@@ -115,6 +115,7 @@ pub struct UiState {
     /// A RockIt Twist action waiting for its new key.
     pub capturing_twist: Option<crate::twist::TwistKey>,
     pub browser: Browser,
+    /// Messages and when each stops showing.
     toasts: Vec<(String, Instant)>,
     pub error: Option<Problem>,
     /// A Zippity dump holding a previous owner's players: asks whether to
@@ -188,7 +189,12 @@ impl UiState {
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
-        self.toasts.push((text.into(), Instant::now()));
+        self.toast_for(text, TOAST_TIME);
+    }
+
+    /// A message shown for `time` (longer than the usual few seconds).
+    pub fn toast_for(&mut self, text: impl Into<String>, time: Duration) {
+        self.toasts.push((text.into(), Instant::now() + time));
         if self.toasts.len() > 4 {
             self.toasts.remove(0);
         }
@@ -225,7 +231,7 @@ pub fn draw(
     }
     if settings.show_status_bar && !info.fullscreen && !phone {
         // The newest message shows in the status bar (nothing to cover).
-        st.toasts.retain(|(_, t)| t.elapsed() < TOAST_TIME);
+        st.toasts.retain(|(_, until)| Instant::now() < *until);
         let message = st.toasts.last().map(|(m, _)| m.clone());
         egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, info, message.as_deref()));
     }
@@ -2571,7 +2577,7 @@ fn zippity_clean_prompt(ctx: &egui::Context, path: &std::path::Path) -> Option<A
 }
 
 fn toasts(ctx: &egui::Context, st: &mut UiState) {
-    st.toasts.retain(|(_, t)| t.elapsed() < TOAST_TIME);
+    st.toasts.retain(|(_, until)| Instant::now() < *until);
     if st.toasts.is_empty() {
         return;
     }

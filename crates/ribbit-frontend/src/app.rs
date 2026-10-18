@@ -350,7 +350,14 @@ impl App {
         {
             saves.cart = Some(p.clone());
         }
+        // No save yet: a game may set one up on its first start, which can
+        // take a while behind a black screen (Pet Pals: about 20 s, as on
+        // the console; docs/compatibility.md).
+        let first_start = saves.cart.as_ref().is_some_and(|p| !p.exists());
         saves.load(&mut machine)?;
+        if first_start {
+            self.ui.toast_for("First start of this game: it may take a while to set up its save", std::time::Duration::from_secs(25));
+        }
         // Leapster 2: it cannot finish calibrating at boot (its Flash player
         // asserts about 2 s in and the BIOS restarts the console), so it
         // boots with the stored calibration, a new console getting the
