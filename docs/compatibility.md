@@ -67,7 +67,7 @@ software list. Region pickers move on by themselves after about 30 s.
 | NASCAR | 95c78f34 | Menus | automated 2026-10-16 | Region choice, intro, NASCAR logo. (Was stuck on a black screen until the ADC delivered battery samples, 2026-10-16) |
 | Number Raiders | 0f6d55cf | Menus | automated | LeapFrog logo |
 | Numbers on the Run: Counting on Zero | 01f12ce7 | **Works** | tester, Ribbit 1.2.1 (Windows), 2026-10-17 | Reported working by a player. (Was stuck on a black screen until the ADC delivered battery samples, 2026-10-16) |
-| Pet Pals | 3c428a13 | Menus | automated | LeapFrog logo |
+| Pet Pals | 3c428a13 | Menus | automated 2026-10-18 | Region choice, title, the pets' room and pet choice on every Leapster model. **The first start on a cartridge with an empty save shows ~20 s of black screen** while the game creates its save (~690 bytes, VERIFIED; authentic as far as known: the work is the game's own, not timing). Later starts: ~4 s, as a real original Leapster (video) |
 | Scooby-Doo!: Spooky Snacks | 19da3dd8 | Menus | automated | LeapFrog logo |
 | Sonic X | a9d2cdbd | **Works** | tester, Ribbit 1.2.1 (Windows), 2026-10-17 | Reported working by a player |
 | Spider-Man: The Case of the Sinister Speller | 0ef61cbb | Menus | automated | LeapFrog logo |
