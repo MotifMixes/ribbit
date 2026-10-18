@@ -515,7 +515,13 @@ fn links_for(items: &[Item]) -> Box<[Link]> {
 }
 
 /// The code, the instructions it covers and its chain entry's offset.
-fn generate(items: &[Item], mmid_low: bool, id: u32, links: &mut [Link], inline: bool) -> Result<(Vec<u8>, usize, usize), CompileError> {
+fn generate(
+    items: &[Item],
+    mmid_low: bool,
+    id: u32,
+    links: &mut [Link],
+    inline: bool,
+) -> Result<(Vec<u8>, usize, usize), CompileError> {
     if items.windows(2).any(|w| w[1].hot.addr != w[0].hot.next) {
         return Err(CompileError::NotSequential);
     }
@@ -524,8 +530,10 @@ fn generate(items: &[Item], mmid_low: bool, id: u32, links: &mut [Link], inline:
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let x: Vec<crate::x64::Item> = items.iter().map(|i| crate::x64::Item { hot: i.hot, fetch: i.fetch, instr: i.instr }).collect();
-        let e = crate::x64::emit(&x, mmid_low, id, links.as_mut_ptr(), links.len(), inline).ok_or(CompileError::NotCompilable)?;
+        let x: Vec<crate::x64::Item> =
+            items.iter().map(|i| crate::x64::Item { hot: i.hot, fetch: i.fetch, instr: i.instr }).collect();
+        let e = crate::x64::emit(&x, mmid_low, id, links.as_mut_ptr(), links.len(), inline)
+            .ok_or(CompileError::NotCompilable)?;
         if e.compiled == 0 {
             return Err(CompileError::NotCompilable);
         }
@@ -548,7 +556,7 @@ enum Slot {
 }
 
 /// Runs a block compiled after it has run this many times interpreted.
-const TIER: u32 = 8;
+const TIER: u32 = 32;
 
 /// What the JIT did (speed diagnostics).
 #[derive(Debug, Clone, Copy, Default)]
@@ -567,6 +575,9 @@ pub struct JitStats {
     pub continued: u64,
     pub interpreted: u64,
     pub batches: u64,
+    /// Time spent generating code, and putting it in executable memory.
+    pub compile_ns: u64,
+    pub map_ns: u64,
 }
 
 /// Research (RIBBIT_JIT_PROFILE): per address, how often compiled code
@@ -574,6 +585,8 @@ pub struct JitStats {
 /// starting there was interpreted.
 #[allow(clippy::type_complexity)]
 pub static PROFILE: std::sync::Mutex<Option<[std::collections::HashMap<u32, u64>; 3]>> = std::sync::Mutex::new(None);
+/// `PROFILE` is being filled (checked first: no lock otherwise).
+pub static PROFILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The JIT as a `BlockRunner`: per block of `icache::Blocks` (by id, for
 /// one epoch of the cache), interpreted until it has run `TIER` times, then
@@ -629,8 +642,11 @@ impl Jit {
     /// the slot is in read-only code (so a BL.D's link is known).
     fn compile<B: Bus>(&mut self, cpu: &mut Cpu, bus: &mut B, head: &BlockHead, entries: &[Entry]) -> Slot {
         // The full decode of instructions with no fast form.
-        let full = |cpu: &mut Cpu, bus: &mut B, h: &Hot| (h.fast == ribbit_cpu::icache::Fast::General).then(|| cpu.icache.get(h.addr, || decode(bus, h.addr)));
-        let mut items: Vec<Item> = entries.iter().map(|e| Item { hot: e.hot, fetch: e.fetch, instr: full(cpu, bus, &e.hot) }).collect();
+        let full = |cpu: &mut Cpu, bus: &mut B, h: &Hot| {
+            (h.fast == ribbit_cpu::icache::Fast::General).then(|| cpu.icache.get(h.addr, || decode(bus, h.addr)))
+        };
+        let mut items: Vec<Item> =
+            entries.iter().map(|e| Item { hot: e.hot, fetch: e.fetch, instr: full(cpu, bus, &e.hot) }).collect();
         let last = entries[entries.len() - 1].hot;
         if last.delay && last.branchy {
             let at = last.next;
@@ -643,14 +659,18 @@ impl Jit {
         }
         let mmid_low = cpu.config.mmid == MmidMode::LowLeapster;
         let mut links = links_for(&items);
+        let t0 = std::time::Instant::now();
         // Inline memory, except when checking (the check records every
         // access and timing step through the bus).
         let Ok((code, compiled, chain)) = generate(&items, mmid_low, head.id, &mut links, !self.check) else {
             return Slot::Never;
         };
+        let t1 = std::time::Instant::now();
         let Ok(ptr) = self.arena.add(&code) else {
             return Slot::Never;
         };
+        self.stats.compile_ns += (t1 - t0).as_nanos() as u64;
+        self.stats.map_ns += t1.elapsed().as_nanos() as u64;
         self.stats.compiled += 1;
         self.stats.code_bytes += code.len() as u64;
         Slot::Compiled(Block {
@@ -734,7 +754,9 @@ impl<B: Bus> BlockRunner<B> for Jit {
             let Some(block) = self.block(cpu, bus, blocks, &head) else {
                 // Interpreted (for now).
                 self.stats.interpreted += 1;
-                if let Some(p) = PROFILE.lock().unwrap().as_mut() {
+                if PROFILING.load(std::sync::atomic::Ordering::Relaxed)
+                    && let Some(p) = PROFILE.lock().unwrap().as_mut()
+                {
                     *p[1].entry(head.start).or_default() += 1;
                 }
                 if out.executed == 0 {
@@ -781,7 +803,9 @@ impl<B: Bus> BlockRunner<B> for Jit {
                 ExitKind::Budget => out.stop = Some(RunnerStop::Budget),
                 ExitKind::Fallback => {
                     self.stats.fallbacks += 1;
-                    if let Some(p) = PROFILE.lock().unwrap().as_mut() {
+                    if PROFILING.load(std::sync::atomic::Ordering::Relaxed)
+                        && let Some(p) = PROFILE.lock().unwrap().as_mut()
+                    {
                         *p[0].entry(cpu.pc).or_default() += 1;
                     }
                     let h = blocks.heads[ctx.fb_block as usize];
@@ -815,11 +839,25 @@ impl<B: Bus> BlockRunner<B> for Jit {
 /// What a bus saw, in order (`Jit::check`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Event {
-    At { cycle: u64, pc: u32 },
-    Read { width: u8, addr: u32, value: u32 },
-    Write { width: u8, addr: u32, value: u32 },
+    At {
+        cycle: u64,
+        pc: u32,
+    },
+    Read {
+        width: u8,
+        addr: u32,
+        value: u32,
+    },
+    Write {
+        width: u8,
+        addr: u32,
+        value: u32,
+    },
     /// A stall taken, for the instruction at `pc`.
-    Take { pc: u32, stall: u64 },
+    Take {
+        pc: u32,
+        stall: u64,
+    },
 }
 
 /// The real bus, recording what the compiled code does with it.
@@ -901,7 +939,10 @@ impl<B: Bus> Replay<'_, B> {
     }
     fn expect(&mut self, want: Event) -> Option<Event> {
         let got = self.next();
-        if self.trouble.is_none() && !matches!((&got, &want), (Some(Event::Read { width: a, addr: b, .. }), Event::Read { width: c, addr: d, .. }) if a == c && b == d) && got.as_ref() != Some(&want) {
+        if self.trouble.is_none()
+            && !matches!((&got, &want), (Some(Event::Read { width: a, addr: b, .. }), Event::Read { width: c, addr: d, .. }) if a == c && b == d)
+            && got.as_ref() != Some(&want)
+        {
             self.trouble = Some(format!("the interpreter did {want:?} where the compiled code did {got:?}"));
         }
         got
@@ -1022,7 +1063,13 @@ fn check_run<B: Bus>(block: &Block, cpu: &mut Cpu, ctx: &mut JitCtx, bus: &mut B
             Err(e) => panic!("JIT check: the interpreter failed at {:#x} in block {:#x}: {e}", cpu.pc, block.start),
         }
     }
-    let leftover: Vec<Event> = replay.peeked.take().into_iter().chain(replay.events.by_ref()).filter(|e| !matches!(e, Event::Take { stall: 0, .. })).collect();
+    let leftover: Vec<Event> = replay
+        .peeked
+        .take()
+        .into_iter()
+        .chain(replay.events.by_ref())
+        .filter(|e| !matches!(e, Event::Take { stall: 0, .. }))
+        .collect();
     let interp = CpuState::of(cpu);
     let mut trouble = replay.trouble.take();
     if trouble.is_none() && !leftover.is_empty() {
@@ -1039,11 +1086,20 @@ fn check_run<B: Bus>(block: &Block, cpu: &mut Cpu, ctx: &mut JitCtx, bus: &mut B
             .collect();
         trouble = Some(format!(
             "results differ: cycle interpreter {t}, jit {}; status32 {:#x} / {:#x}; pc {:#x} / {:#x}; delay {:x?} / {:x?}; ready_max {} / {}; {regs:?} {ready:?}",
-            exit.now, interp.status32, jit.status32, interp.pc, jit.pc, interp.delay_target, jit.delay_target, interp.ready_max, jit.ready_max
+            exit.now,
+            interp.status32,
+            jit.status32,
+            interp.pc,
+            jit.pc,
+            interp.delay_target,
+            jit.delay_target,
+            interp.ready_max,
+            jit.ready_max
         ));
     }
     if let Some(t) = trouble {
-        let forms: Vec<String> = entries.iter().map(|e| format!("  {:08x} {:?} fetch={}", e.hot.addr, e.hot.fast, e.fetch)).collect();
+        let forms: Vec<String> =
+            entries.iter().map(|e| format!("  {:08x} {:?} fetch={}", e.hot.addr, e.hot.fast, e.fetch)).collect();
         panic!(
             "JIT check failed in block {:#x} ({} compiled, exit {exit:?}): {t}\nran: {trace:x?}\nblock:\n{}\nrecorded: {recorded:?}",
             block.start,

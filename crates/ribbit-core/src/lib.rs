@@ -569,7 +569,8 @@ impl Machine {
         }
         let t = self.idle_timer?;
         let bus = &self.bus;
-        let word = |a: u32| Some(u32::from_le_bytes([bus.peek8(a)?, bus.peek8(a + 1)?, bus.peek8(a + 2)?, bus.peek8(a + 3)?]));
+        let word =
+            |a: u32| Some(u32::from_le_bytes([bus.peek8(a)?, bus.peek8(a + 1)?, bus.peek8(a + 2)?, bus.peek8(a + 3)?]));
         let state = word(t.state_ptr).filter(|&s| s != 0)?;
         Some((state + t.count_offset, word(state + t.count_offset)?, word(state + t.reload_offset)?))
     }
@@ -835,7 +836,8 @@ impl Machine {
         // Device state may have been changed from outside since the last run.
         self.io.sync_needed = true;
         // Batches need nothing observed per instruction.
-        let batch = breakpoints.is_empty() && self.trace_sink.is_none() && self.coverage.is_none() && !self.cpu.record_last;
+        let batch =
+            breakpoints.is_empty() && self.trace_sink.is_none() && self.coverage.is_none() && !self.cpu.record_last;
         while report.steps < max_steps {
             if report.steps > 0 && breakpoints.hit(self.cpu.pc) {
                 report.stop = StopReason::Breakpoint { pc: self.cpu.pc };
@@ -978,6 +980,7 @@ impl Machine {
         };
         let synced = bus.synced;
         if matches!(block.exit, ribbit_cpu::BlockExit::Slow)
+            && ribbit_jit::PROFILING.load(std::sync::atomic::Ordering::Relaxed)
             && let Some(p) = ribbit_jit::PROFILE.lock().unwrap().as_mut()
         {
             *p[2].entry(self.cpu.pc).or_default() += 1;

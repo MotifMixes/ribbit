@@ -21,11 +21,15 @@ pub struct JitStats {
     pub continued: u64,
     pub interpreted: u64,
     pub batches: u64,
+    pub compile_ns: u64,
+    pub map_ns: u64,
 }
 
 /// Research (RIBBIT_JIT_PROFILE): unused here.
 #[allow(clippy::type_complexity)]
 pub static PROFILE: std::sync::Mutex<Option<[std::collections::HashMap<u32, u64>; 3]>> = std::sync::Mutex::new(None);
+/// `PROFILE` is being filled (checked first: no lock otherwise).
+pub static PROFILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The JIT: never made on this architecture.
 #[derive(Default)]

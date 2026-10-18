@@ -65,16 +65,24 @@ fn page_size() -> usize {
 }
 
 /// Code for many blocks in shared mappings ("chunks"), still never writable
-/// and executable at once: adding code makes its chunk read-write, copies
-/// it in, and makes the chunk read-execute again (the caller runs no code
-/// meanwhile: one thread). Everything is freed on drop.
+/// and executable at once. Where the system allows it, a chunk is mapped
+/// twice, a read-write view the code is copied into and a read-execute view
+/// it runs from, so adding code needs no system call (Windows: a section
+/// mapped twice; Linux: a memfd mapped twice). Elsewhere the pages the new
+/// code lands on are made read-write, written, and made read-execute again
+/// (the caller runs no code meanwhile: one thread). Everything is freed on
+/// drop.
 #[derive(Default)]
 pub struct Arena {
     chunks: Vec<Chunk>,
 }
 
 struct Chunk {
-    ptr: *mut u8,
+    /// Where the code runs.
+    exec: *mut u8,
+    /// Where it is written: a second view of the same memory, or `exec`
+    /// (protection flipped around each write).
+    write: *mut u8,
     size: usize,
     used: usize,
 }
@@ -91,27 +99,38 @@ impl Arena {
         let need = code.len().next_multiple_of(16);
         if self.chunks.last().is_none_or(|c| c.used + need > c.size) {
             let size = need.max(CHUNK).div_ceil(page_size()) * page_size();
-            let ptr = sys::map_rw(size)?;
-            if let Err(e) = sys::protect_rx(ptr, size) {
-                // SAFETY: the mapping made above.
-                unsafe { sys::unmap(ptr, size) };
-                return Err(e);
-            }
-            self.chunks.push(Chunk { ptr, size, used: 0 });
+            let chunk = match sys::map_dual(size) {
+                Some((exec, write)) => Chunk { exec, write, size, used: 0 },
+                None => {
+                    let ptr = sys::map_rw(size)?;
+                    if let Err(e) = sys::protect_rx(ptr, size) {
+                        // SAFETY: the mapping made above.
+                        unsafe { sys::unmap(ptr, size) };
+                        return Err(e);
+                    }
+                    Chunk { exec: ptr, write: ptr, size, used: 0 }
+                }
+            };
+            self.chunks.push(chunk);
         }
         let c = self.chunks.last_mut().expect("a chunk");
-        // Only the pages the new code lands on change protection (their
-        // other code is not running: one thread).
-        let page = page_size();
-        let (from, to) = (c.used / page * page, (c.used + need).div_ceil(page) * page);
-        // SAFETY: within the chunk (`to` <= its size, a multiple of the page size).
-        let pages = unsafe { c.ptr.add(from) };
-        sys::protect_rw(pages, to - from)?;
-        // SAFETY: those pages are read-write now and hold room for `code`.
-        let at = unsafe { c.ptr.add(c.used) };
-        unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), at, code.len()) };
+        // SAFETY: both views hold room for `code` at `used` (checked above).
+        let (at, dst) = unsafe { (c.exec.add(c.used), c.write.add(c.used)) };
+        if c.write != c.exec {
+            // SAFETY: the write view is read-write.
+            unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
+            sys::flush(at, code.len());
+        } else {
+            let page = page_size();
+            let (from, to) = (c.used / page * page, (c.used + need).div_ceil(page) * page);
+            // SAFETY: within the chunk (`to` <= its size, a multiple of the page size).
+            let pages = unsafe { c.exec.add(from) };
+            sys::protect_rw(pages, to - from)?;
+            // SAFETY: those pages are read-write now.
+            unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
+            sys::protect_rx(pages, to - from)?;
+        }
         c.used += need;
-        sys::protect_rx(pages, to - from)?;
         Ok(at)
     }
 
@@ -124,8 +143,14 @@ impl Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         for c in &self.chunks {
-            // SAFETY: each chunk is a mapping made by `add`.
-            unsafe { sys::unmap(c.ptr, c.size) };
+            // SAFETY: each chunk's views were made by `add`.
+            unsafe {
+                if c.write != c.exec {
+                    sys::unmap_dual(c.exec, c.write, c.size);
+                } else {
+                    sys::unmap(c.exec, c.size);
+                }
+            }
         }
     }
 }
@@ -133,10 +158,12 @@ impl Drop for Arena {
 #[cfg(windows)]
 mod sys {
     use std::io;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, VirtualAlloc, VirtualFree,
-        VirtualProtect,
+        CreateFileMappingW, FILE_MAP_EXECUTE, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
+        MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
+        UnmapViewOfFile, VirtualAlloc, VirtualFree, VirtualProtect,
     };
     use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
@@ -181,6 +208,55 @@ mod sys {
         // SAFETY: the caller's contract.
         unsafe { VirtualFree(ptr as _, 0, MEM_RELEASE) };
     }
+
+    /// A pagefile-backed section of `size` bytes mapped twice: (read-execute
+    /// view, read-write view). None if the system refuses (then pages are
+    /// flipped instead).
+    pub fn map_dual(size: usize) -> Option<(*mut u8, *mut u8)> {
+        // SAFETY: a fresh section; each view is checked, and the handle is
+        // closed once mapped (the views keep the section).
+        unsafe {
+            let h = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                PAGE_EXECUTE_READWRITE,
+                (size as u64 >> 32) as u32,
+                size as u32,
+                std::ptr::null(),
+            );
+            if h.is_null() {
+                return None;
+            }
+            let w = MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, size);
+            let x = MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_EXECUTE, 0, 0, size);
+            CloseHandle(h);
+            if w.Value.is_null() || x.Value.is_null() {
+                if !w.Value.is_null() {
+                    UnmapViewOfFile(w);
+                }
+                if !x.Value.is_null() {
+                    UnmapViewOfFile(x);
+                }
+                return None;
+            }
+            Some((x.Value as *mut u8, w.Value as *mut u8))
+        }
+    }
+
+    /// # Safety
+    /// The views must come from `map_dual` and not be used afterwards.
+    pub unsafe fn unmap_dual(exec: *mut u8, write: *mut u8, _size: usize) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: exec as _ });
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: write as _ });
+        }
+    }
+
+    /// x86-64 keeps instruction fetches coherent with stores, also through
+    /// another view of the same memory (it snoops by physical address), so
+    /// the system call `FlushInstructionCache` would only cost time here.
+    pub fn flush(_: *const u8, _: usize) {}
 }
 
 #[cfg(unix)]
@@ -226,6 +302,55 @@ mod sys {
         // SAFETY: the caller's contract.
         unsafe { libc::munmap(ptr as _, size) };
     }
+
+    /// Linux: a memfd of `size` bytes mapped twice: (read-execute view,
+    /// read-write view). None elsewhere or if refused.
+    #[cfg(target_os = "linux")]
+    pub fn map_dual(size: usize) -> Option<(*mut u8, *mut u8)> {
+        // SAFETY: a fresh memfd; each mapping is checked; the descriptor is
+        // closed once mapped (the mappings keep the memory).
+        unsafe {
+            let fd = libc::memfd_create(c"ribbit-jit".as_ptr(), libc::MFD_CLOEXEC);
+            if fd < 0 {
+                return None;
+            }
+            if libc::ftruncate(fd, size as libc::off_t) != 0 {
+                libc::close(fd);
+                return None;
+            }
+            let w = libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
+            let x = libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_EXEC, libc::MAP_SHARED, fd, 0);
+            libc::close(fd);
+            if w == libc::MAP_FAILED || x == libc::MAP_FAILED {
+                if w != libc::MAP_FAILED {
+                    libc::munmap(w, size);
+                }
+                if x != libc::MAP_FAILED {
+                    libc::munmap(x, size);
+                }
+                return None;
+            }
+            Some((x as *mut u8, w as *mut u8))
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn map_dual(_: usize) -> Option<(*mut u8, *mut u8)> {
+        None
+    }
+
+    /// # Safety
+    /// The views must come from `map_dual` and not be used afterwards.
+    pub unsafe fn unmap_dual(exec: *mut u8, write: *mut u8, size: usize) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            libc::munmap(exec as _, size);
+            libc::munmap(write as _, size);
+        }
+    }
+
+    /// x86-64 keeps instruction fetches coherent with stores.
+    pub fn flush(_: *const u8, _: usize) {}
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -249,4 +374,12 @@ mod sys {
     }
 
     pub unsafe fn unmap(_: *mut u8, _: usize) {}
+
+    pub fn map_dual(_: usize) -> Option<(*mut u8, *mut u8)> {
+        None
+    }
+
+    pub unsafe fn unmap_dual(_: *mut u8, _: *mut u8, _: usize) {}
+
+    pub fn flush(_: *const u8, _: usize) {}
 }
