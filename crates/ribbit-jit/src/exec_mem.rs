@@ -64,6 +64,66 @@ fn page_size() -> usize {
     sys::page_size()
 }
 
+/// Code for many blocks in shared mappings ("chunks"), still never writable
+/// and executable at once: adding code makes its chunk read-write, copies
+/// it in, and makes the chunk read-execute again (the caller runs no code
+/// meanwhile: one thread). Everything is freed on drop.
+#[derive(Default)]
+pub struct Arena {
+    chunks: Vec<Chunk>,
+}
+
+struct Chunk {
+    ptr: *mut u8,
+    size: usize,
+    used: usize,
+}
+
+// As `ExecMemory`: the chunks are only written by `add`, which takes `&mut`.
+unsafe impl Send for Arena {}
+
+/// Chunk size (a multiple of every page size in use).
+const CHUNK: usize = 1 << 20;
+
+impl Arena {
+    /// Copies `code` into a chunk and returns its address (16-byte aligned).
+    pub fn add(&mut self, code: &[u8]) -> io::Result<*const u8> {
+        let need = code.len().next_multiple_of(16);
+        if self.chunks.last().is_none_or(|c| c.used + need > c.size) {
+            let size = need.max(CHUNK).div_ceil(page_size()) * page_size();
+            let ptr = sys::map_rw(size)?;
+            if let Err(e) = sys::protect_rx(ptr, size) {
+                // SAFETY: the mapping made above.
+                unsafe { sys::unmap(ptr, size) };
+                return Err(e);
+            }
+            self.chunks.push(Chunk { ptr, size, used: 0 });
+        }
+        let c = self.chunks.last_mut().expect("a chunk");
+        sys::protect_rw(c.ptr, c.size)?;
+        // SAFETY: the chunk is read-write now and has room for `code`.
+        let at = unsafe { c.ptr.add(c.used) };
+        unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), at, code.len()) };
+        c.used += need;
+        sys::protect_rx(c.ptr, c.size)?;
+        Ok(at)
+    }
+
+    /// Bytes of code held.
+    pub fn used(&self) -> usize {
+        self.chunks.iter().map(|c| c.used).sum()
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        for c in &self.chunks {
+            // SAFETY: each chunk is a mapping made by `add`.
+            unsafe { sys::unmap(c.ptr, c.size) };
+        }
+    }
+}
+
 #[cfg(windows)]
 mod sys {
     use std::io;
@@ -88,6 +148,13 @@ mod sys {
         // SAFETY: a fresh anonymous allocation.
         let p = unsafe { VirtualAlloc(std::ptr::null(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
         if p.is_null() { Err(io::Error::last_os_error()) } else { Ok(p as *mut u8) }
+    }
+
+    pub fn protect_rw(ptr: *mut u8, size: usize) -> io::Result<()> {
+        let mut old = 0;
+        // SAFETY: `ptr`/`size` is a mapping made by `map_rw`.
+        let ok = unsafe { VirtualProtect(ptr as _, size, PAGE_READWRITE, &mut old) };
+        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
     pub fn protect_rx(ptr: *mut u8, size: usize) -> io::Result<()> {
@@ -135,6 +202,12 @@ mod sys {
         if p == libc::MAP_FAILED { Err(io::Error::last_os_error()) } else { Ok(p as *mut u8) }
     }
 
+    pub fn protect_rw(ptr: *mut u8, size: usize) -> io::Result<()> {
+        // SAFETY: `ptr`/`size` is a mapping made by `map_rw`.
+        let r = unsafe { libc::mprotect(ptr as _, size, libc::PROT_READ | libc::PROT_WRITE) };
+        if r != 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
     pub fn protect_rx(ptr: *mut u8, size: usize) -> io::Result<()> {
         // SAFETY: `ptr`/`size` is a mapping made by `map_rw`.
         let r = unsafe { libc::mprotect(ptr as _, size, libc::PROT_READ | libc::PROT_EXEC) };
@@ -158,6 +231,10 @@ mod sys {
     }
 
     pub fn map_rw(_: usize) -> io::Result<*mut u8> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no executable memory on this platform"))
+    }
+
+    pub fn protect_rw(_: *mut u8, _: usize) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "no executable memory on this platform"))
     }
 

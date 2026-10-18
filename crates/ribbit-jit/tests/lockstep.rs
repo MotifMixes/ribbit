@@ -6,7 +6,8 @@
 //! from the same state twice: compiled (`Block::run`) and in the general
 //! executor (`Cpu::step`, the reference: not the batched `execute_fast`),
 //! then compares every core register, STATUS32, the PC, a pending delay
-//! slot and all of data memory.
+//! slot, all of data memory, the cycle count and the pipeline scoreboard
+//! (the test bus has no memory stalls).
 
 #![cfg(target_arch = "x86_64")]
 
@@ -136,12 +137,16 @@ fn kind_of(f: Fast) -> String {
         | Fast::AluF { op: o, .. }
         | Fast::AluFI { op: o, .. } => op(o),
         Fast::Un { op: o, .. } => format!("{name}:{o:?}"),
+        Fast::Rot { op: o, f, .. } => format!("{name}:{o:?}:{f}"),
         _ => name,
     }
 }
 
 fn is_branch(f: Fast) -> bool {
-    matches!(f, Fast::Br { .. } | Fast::BrR { .. } | Fast::B { .. } | Fast::Bl { .. } | Fast::BlD { .. } | Fast::J { .. } | Fast::Jcc { .. })
+    matches!(
+        f,
+        Fast::Br { .. } | Fast::BrR { .. } | Fast::B { .. } | Fast::Bl { .. } | Fast::BlD { .. } | Fast::J { .. } | Fast::Jcc { .. } | Fast::Jl { .. } | Fast::JlD { .. }
+    )
 }
 
 /// Random encodings, decoded, kept when they have a fast form; at most
@@ -212,9 +217,13 @@ fn check(instrs: &[Instr], code: Arc<Vec<u8>>, base: u32, cpu: Cpu, what: &str) 
         && ci.status32 == cj.status32
         && ci.pc == cj.pc
         && ci.delay_target == cj.delay_target
-        && bi.data == bus.data;
+        && bi.data == bus.data
+        && ci.cycles == exit.now
+        && ci.ready == cj.ready
+        && ci.ready_max == cj.ready_max;
     if !same {
         let mem = bi.data.iter().zip(&bus.data).position(|(a, b)| a != b);
+        eprintln!("cycles: interpreter {}, jit {}; ready interpreter {:?} jit {:?}", ci.cycles, exit.now, ci.ready_max, cj.ready_max);
         panic!(
             "{what}: JIT differs from the interpreter after {exit:?}\n{}\nstart:\n{cpu:?}\ninterpreter:\n{ci:?}\njit:\n{cj:?}\nfirst memory difference at {mem:x?}",
             listing(instrs)
@@ -244,8 +253,11 @@ fn every_fast_form_matches_the_interpreter_alone() {
             assert!(kinds.contains_key(&format!("{form}:{op}")), "no {form}:{op} generated; kinds: {kinds:?}");
         }
     }
-    for k in ["Mov", "MovI", "Ld", "LdR", "LdX", "St", "StX", "Push", "Pop", "Br", "BrR", "B", "Bl", "BlD", "J", "Jcc", "Cmp", "CmpI"] {
-        assert!(kinds.contains_key(k), "no {k} generated; kinds: {kinds:?}");
+    for k in [
+        "Mov", "MovI", "Ld", "LdR", "LdX", "St", "StX", "Push", "Pop", "Br", "BrR", "B", "Bl", "BlD", "J", "Jcc", "Cmp", "CmpI", "Rot", "Mul64", "Mul64I", "Jl",
+        "JlD",
+    ] {
+        assert!(kinds.keys().any(|n| n == k || n.starts_with(&format!("{k}:"))), "no {k} generated; kinds: {kinds:?}");
     }
     let mut cases = 0;
     for e in &pool {
@@ -261,6 +273,41 @@ fn every_fast_form_matches_the_interpreter_alone() {
     }
     eprintln!("{} encodings, {} kinds, {cases} single-instruction cases", pool.len(), kinds.len());
     assert!(cases > 30_000);
+}
+
+/// Rotates and shifts by one are rare among random encodings: searched for
+/// on their own, every operation with and without .F.
+#[test]
+fn rotates_match_the_interpreter() {
+    let mut rng = Rng(0x5EED_0004);
+    let mut found: BTreeMap<String, Vec<Enc>> = BTreeMap::new();
+    for _ in 0..30_000_000 {
+        let bytes: Vec<u8> = (0..8).map(|_| rng.next() as u8).collect();
+        let i = decode_with(CODE, |a| fetch(&bytes, CODE, a));
+        let h = Hot::of(&i);
+        if h.stop || !matches!(h.fast, Fast::Rot { .. }) {
+            continue;
+        }
+        let list = found.entry(kind_of(h.fast)).or_default();
+        if list.len() < 60 {
+            list.push(Enc { bytes: bytes[..i.len as usize].to_vec(), branch: false, kind: kind_of(h.fast) });
+        }
+    }
+    let mut cases = 0;
+    for e in found.values().flatten() {
+        for _ in 0..20 {
+            let (code, instrs) = layout(&[e]);
+            let cpu = random_cpu(&mut rng, CODE);
+            if check(&instrs, code, CODE, cpu, &e.kind).is_some() {
+                cases += 1;
+            }
+        }
+    }
+    eprintln!("rotate kinds {:?}, {cases} cases", found.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>());
+    for op in ["Asl", "Asr", "Lsr", "Ror", "Rrc", "Rlc"] {
+        assert!(found.keys().any(|k| k.starts_with(&format!("Rot:{op}:"))), "no {op} found: {:?}", found.keys());
+    }
+    assert!(cases > 500);
 }
 
 #[test]
@@ -294,7 +341,7 @@ fn straight_runs_with_a_branch_and_delay_slot_match() {
     }
     eprintln!("{cases} runs; exits {kinds:?}");
     assert!(cases > 25_000);
-    for k in ["End", "Loop"] {
+    for k in ["Flow"] {
         assert!(kinds.contains_key(k), "no {k} exit seen: {kinds:?}");
     }
 }
