@@ -218,6 +218,10 @@ const IRQ_EXT_B: u32 = 7;
 /// 27, as on the Zippity's chip of the same family; the menu unmasks it
 /// (mask 0x79FFFE59 once it runs) and waits for its handler (0xBFA0).
 const IRQ_VIDEO: u32 = 27;
+/// The ADC's conversion-done interrupt (0xC00C0004 bits 14 enable, 15
+/// pending): the System's battery monitor registers line 29 (0x22B4C,
+/// handler 0x229B8).
+const IRQ_ADC: u32 = 29;
 const EXT_STATUS: u32 = 0x40 | 0x80 | 0x800 | 0x2000 | 0x8000;
 /// The panel's tearing-effect pulses per second (ASSUMED: a 60 Hz panel).
 /// The firmware turns the signal on (panel command 0x35) and takes it on
@@ -772,17 +776,25 @@ impl Bus {
             // The ADC (0xC00C0000), from the bootloader's reader 0xF00000:
             // +4 bits 2-0 channel, bit 6 starts a conversion, bit 7 says it
             // is done, bits 5-4 error flags (write 1s to clear); +8 the
-            // 12-bit result in bits 15-4.
+            // 12-bit result in bits 15-4. The System's battery monitor
+            // (0x22BB0) sets bit 14 to be interrupted when a conversion is
+            // done: bit 15 is then pending, cleared by writing it back
+            // (handler 0x229B8). Without it the monitor waits for good and
+            // reports BATTERYLEVEL=0 to LeapFrog Connect.
             0xC00C_0004 => {
-                let mut v = now & !0x30;
+                let mut v = (now & !0x30 & !0x8000) | (old & !written & 0x8000);
                 if written & 0x40 != 0 {
                     let ch = (now & 7) as usize;
                     self.io.insert(0xC00C_0008, self.adc[ch] << 4);
                     v = (v & !0x40) | 0x80;
+                    if v & 0x4000 != 0 {
+                        v |= 0x8000;
+                    }
                 } else if written & 0x80 == 0 {
                     v &= !0x80;
                 }
                 self.io.insert(w, v);
+                self.lines_dirty = true;
             }
             0xD0C0_0000..=0xD0C0_0FFF => {
                 if self.gfx_regs.len() < 256 {
@@ -1053,6 +1065,9 @@ impl Bus {
         }
         if self.latch(0xD050_018C) & self.latch(0xD050_0188) & 1 != 0 {
             lines |= 1 << IRQ_VIDEO;
+        }
+        if self.latch(0xC00C_0004) & 0xC000 == 0xC000 {
+            lines |= 1 << IRQ_ADC;
         }
         // A DAC channel wants samples: enabled (bit 14) and half empty.
         for c in 0..2 {

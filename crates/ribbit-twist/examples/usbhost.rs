@@ -213,6 +213,9 @@ fn main() {
     show("GET_DESCRIPTOR device", &h.control([0x80, 6, 0, 1, 0, 0, 18, 0]));
     show("SET_ADDRESS", &h.control([0, 5, 3, 0, 0, 0, 0, 0]));
     show("GET_DESCRIPTOR config", &h.control([0x80, 6, 0, 2, 0, 0, 0xFF, 0]));
+    // Windows asks for Microsoft's OS string descriptor first; the console
+    // stalls it.
+    show("GET_DESCRIPTOR string 0xEE", &h.control([0x80, 6, 0xEE, 3, 0, 0, 0x12, 0]));
     for i in 0..3u8 {
         let r = h.control([0x80, 6, i, 3, 9, 4, 0xFF, 0]);
         let s = r.as_ref().map(|(_, d)| d.iter().skip(2).step_by(2).map(|&c| c as char).collect::<String>());

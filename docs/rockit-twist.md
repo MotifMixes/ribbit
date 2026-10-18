@@ -338,10 +338,25 @@ or over USB/IP: VERIFIED that the console enumerates (descriptors, configuration
 CAPACITY and TEST UNIT READY, and runs LeapFrog's file protocol (INFO "VERSION=4", LIST, GETS BASEVERSION /
 FREESPACE / MFG_SERIAL, RETR of a file through LBA 0x40).
 
-In the app: File → "Plug the RockIt Twist into this PC (USB)" starts the server with the console; then, with
-usbip-win2 installed, `usbip attach -r 127.0.0.1 -b 1-1` plugs it into Windows. Whether LeapFrog Connect accepts the
-emulated console (its serial number is Ribbit's own, "RIBBIT00000000000001") and whether its servers still work is
-UNVERIFIED: not tried yet.
+In the app: File → RockIt Twist → "Plug into this PC (USB)" starts the server with the console; then, with
+usbip-win2 installed, `usbip attach -r 127.0.0.1 -b 1-1` plugs it into Windows. While plugged in, the console keeps
+running when another window (LeapFrog Connect) is active.
+
+LeapFrog Connect 2 (4.6.5) accepts the emulated console (serial "RIBBIT00000000000001") and flashes it (user report,
+2026-10-18). Found on the way (2026-10-18):
+* Windows asks for Microsoft's OS string descriptor (0xEE) first; the firmware stalls it, and afterwards leaves the
+  EP0 IN-token event (0xE8 bit 4) enabled. A token raised with the next SETUP was then cleared by the firmware's
+  "enable and clear" (E4 |= 0x14; E8 = 0x10) before it was handled, and the console never answered again (the app
+  fell behind real time). `udc.rs` raises the token again when the firmware clears it while keeping it enabled.
+* Connect asks `GETS BATTERYLEVEL` (the RockIt Twist plugin's strings; `BATTERYSTATUS` is "504 Unknown setting" on
+  the real firmware too). The System's battery monitor (0x31824, every 250 ticks) starts ADC conversions on channel 5
+  with interrupt enable (0xC00C0004 bit 14) and waits for the conversion-done interrupt (bit 15 pending, line 29,
+  handler 0x229B8); without it the level stayed 0 and Connect kept asking to charge. Now 2560 (0xA00), above the
+  firmware's "good" threshold 0x8C3 (callback 0x31630: good > 0x8C3, low <= 0x863). What a real unit reads is
+  UNVERIFIED.
+* OPEN: Connect's update ends in "Error 2" although the flash is written (the console boots fine afterwards). The USB
+  log (`ribbit::twist::usb` in ribbit.log; the file-protocol commands and replies, SCSI commands and control
+  requests) should show what it waits for, probably the console restarting and coming back on USB.
 
 ## Using it in Ribbit
 

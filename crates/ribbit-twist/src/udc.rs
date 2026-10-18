@@ -119,7 +119,22 @@ impl Bus {
         let off = a - BASE;
         match off {
             // Write-1-to-clear status registers.
-            0xE8 | 0xF0 | 0x178 | 0x1AC | 0x150 | 0x164 => self.udc_set(off, old & !written),
+            0xE8 | 0xF0 | 0x178 | 0x1AC | 0x150 | 0x164 => {
+                self.udc_set(off, old & !written);
+                // The firmware arms the IN token by enabling it and clearing
+                // any old one (E4 |= 0x14; E8 = 0x10). After a STALL it
+                // stays enabled, so a token raised with the next SETUP is
+                // cleared that way before it is handled: raise it again.
+                // (Handling it disables it first: E4 &= ~0x10; E8 = 0x10.)
+                if off == 0xE8
+                    && written & 0x10 != 0
+                    && self.udc_latch(0xE4) & 0x10 != 0
+                    && let Some(c) = &mut self.udc.control
+                    && c.data.is_empty()
+                {
+                    c.in_raised = false;
+                }
+            }
             0xCC => {
                 self.udc.ep0_fifo.push(written as u8);
             }

@@ -502,6 +502,7 @@ impl Machine {
             }
         });
         let server = server.flatten();
+        let mut trace = UsbTrace::default();
         let slice = machine::CLOCK / 120;
         let mut pixels = vec![0u32; ribbit_twist::SCREEN_W * ribbit_twist::SCREEN_H];
         // The console's time follows the clock from `origin` (moved on
@@ -537,7 +538,7 @@ impl Machine {
             }
             t.bus.slider_pads = s.slider_pads.load(Ordering::Relaxed) as u8;
             if let Some(srv) = &server {
-                Self::run_usb(srv, &mut t, s);
+                Self::run_usb(srv, &mut t, s, &mut trace);
             }
             while let Ok(op) = s.ops.lock().unwrap().try_recv() {
                 match op {
@@ -564,7 +565,7 @@ impl Machine {
             }
             t.run(slice);
             if let Some(srv) = &server {
-                Self::run_usb(srv, &mut t, s);
+                Self::run_usb(srv, &mut t, s, &mut trace);
             }
             // The picture changes only when the panel is sent a frame.
             if t.bus.panel_frames != shown {
@@ -628,9 +629,10 @@ impl Machine {
 
     /// Passes the PC's transfers to the console's USB controller and its
     /// answers back.
-    fn run_usb(srv: &ribbit_twist::usbip::Server, t: &mut ribbit_twist::machine::Twist, s: &Shared) {
+    fn run_usb(srv: &ribbit_twist::usbip::Server, t: &mut ribbit_twist::machine::Twist, s: &Shared, trace: &mut UsbTrace) {
         use ribbit_twist::usbip::Event;
         while let Some(e) = srv.next_event() {
+            trace.event(&e, t.bus.now);
             match e {
                 Event::Attached => {
                     t.bus.udc_attach(true);
@@ -649,6 +651,7 @@ impl Machine {
             }
         }
         for (seq, status, data, length) in t.bus.udc_take_done() {
+            trace.done(seq, status, &data, t.bus.now);
             srv.complete(seq, status, data, length);
         }
     }
@@ -713,6 +716,79 @@ pub enum UsbNews {
     Attached,
     Detached,
     Failed(String),
+}
+
+/// Writes what LeapFrog Connect and the console say to each other over USB
+/// to the log (target `ribbit::twist::usb`): control requests, SCSI
+/// commands, and LeapFrog's file protocol, whose commands are a WRITE of
+/// block 0x20 and whose replies a READ of it (file data moves at block
+/// 0x40 and up, logged only at debug level).
+#[derive(Default)]
+struct UsbTrace {
+    /// The last command block's operation and first block.
+    scsi: Option<(u8, u32)>,
+    /// Control transfers waiting for their answer, by sequence number.
+    control: BTreeMap<u32, [u8; 8]>,
+}
+
+impl UsbTrace {
+    fn event(&mut self, e: &ribbit_twist::usbip::Event, now: u64) {
+        use ribbit_twist::usbip::Event;
+        let at = now as f64 / ribbit_twist::machine::CLOCK as f64;
+        match e {
+            Event::Attached => tracing::info!(target: "ribbit::twist::usb", "{at:.3} attached"),
+            Event::Detached => tracing::info!(target: "ribbit::twist::usb", "{at:.3} detached"),
+            Event::Unlink(seq) => tracing::info!(target: "ribbit::twist::usb", "{at:.3} unlink {seq}"),
+            Event::Submit(u) if u.endpoint & 0x0F == 0 => {
+                tracing::info!(target: "ribbit::twist::usb", "{at:.3} control {:02X?} out {:02X?}", u.setup, &u.data[..u.data.len().min(32)]);
+                self.control.insert(u.seq, u.setup);
+            }
+            Event::Submit(u) if !u.dir_in => {
+                let d = &u.data;
+                if d.len() == 31 && d.starts_with(b"USBC") {
+                    let cdb = &d[15..15 + (d[14] as usize).min(16)];
+                    let lba = cdb.get(2..6).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+                    let blocks = cdb.get(7..9).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
+                    self.scsi = Some((cdb[0], lba));
+                    match cdb[0] {
+                        0x28 | 0x2A if lba >= 0x40 => tracing::debug!(target: "ribbit::twist::usb", "{at:.3} {} block {lba:#X} x{blocks}", if cdb[0] == 0x28 { "READ" } else { "WRITE" }),
+                        // The file protocol's own blocks: the text says it.
+                        0x28 | 0x2A if lba == 0x20 => {}
+                        _ => tracing::info!(target: "ribbit::twist::usb", "{at:.3} SCSI {cdb:02X?}"),
+                    }
+                } else if self.scsi == Some((0x2A, 0x20)) {
+                    tracing::info!(target: "ribbit::twist::usb", "{at:.3} -> {:?}", text(d));
+                }
+            }
+            Event::Submit(_) => {}
+        }
+    }
+
+    fn done(&mut self, seq: u32, status: i32, data: &[u8], now: u64) {
+        let at = now as f64 / ribbit_twist::machine::CLOCK as f64;
+        if let Some(setup) = self.control.remove(&seq) {
+            tracing::info!(target: "ribbit::twist::usb", "{at:.3} control {:02X?} status {status}, in {:02X?}", setup, &data[..data.len().min(32)]);
+        } else if data.len() == 13 && data.starts_with(b"USBS") {
+            // Command status: 0 passed, 1 failed, 2 phase error.
+            if data[12] != 0 || status != 0 {
+                tracing::info!(target: "ribbit::twist::usb", "{at:.3} SCSI status {} (urb {status})", data[12]);
+            }
+        } else if self.scsi == Some((0x28, 0x20)) && !data.is_empty() {
+            let reply = text(data);
+            // "102 BUSY": asked again until the console has an answer.
+            if !reply.starts_with("102") {
+                tracing::info!(target: "ribbit::twist::usb", "{at:.3} <- {reply:?}");
+            }
+        } else if status != 0 {
+            tracing::info!(target: "ribbit::twist::usb", "{at:.3} urb {seq} status {status}");
+        }
+    }
+}
+
+/// A file-protocol block as text (up to its first NUL).
+fn text(d: &[u8]) -> String {
+    let end = d.iter().position(|&b| b == 0).unwrap_or(d.len());
+    String::from_utf8_lossy(&d[..end]).into_owned()
 }
 
 /// The device as the console's firmware describes itself over USB
