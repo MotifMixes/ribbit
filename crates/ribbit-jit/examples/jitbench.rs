@@ -125,6 +125,10 @@ fn fresh(code: &[u8], instrs: &[Instr]) -> (Cpu, Ram) {
     (cpu, Ram { code: code.to_vec(), data: vec![0x5A; 0x1_0000] })
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let (code, instrs) = body();
     const N: u64 = 200_000_000;

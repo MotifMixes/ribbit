@@ -341,9 +341,7 @@ fn straight_runs_with_a_branch_and_delay_slot_match() {
     }
     eprintln!("{cases} runs; exits {kinds:?}");
     assert!(cases > 25_000);
-    for k in ["Flow"] {
-        assert!(kinds.contains_key(k), "no {k} exit seen: {kinds:?}");
-    }
+    assert!(kinds.contains_key("Flow"), "no Flow exit seen: {kinds:?}");
 }
 
 /// Straight runs from the user's own BIOS (roms/bios/152-11265_2.1.bin in
