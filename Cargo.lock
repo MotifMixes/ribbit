@@ -2738,6 +2738,7 @@ dependencies = [
  "ribbit-cpu",
  "ribbit-debug",
  "ribbit-input",
+ "ribbit-jit",
  "ribbit-memory",
  "ribbit-video",
  "serde",

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 ribbit-cpu.workspace = true
+ribbit-jit.workspace = true
 ribbit-memory.workspace = true
 ribbit-video.workspace = true
 ribbit-audio.workspace = true

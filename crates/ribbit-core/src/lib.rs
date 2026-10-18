@@ -358,6 +358,10 @@ pub struct Machine {
     idle_timer: Option<idle_timer::IdleTimer>,
     firmware: Firmware,
     cartridge: Option<Cartridge>,
+    /// The JIT (`ribbit-jit`; x86-64 only): compiled blocks of read-only
+    /// code, with the interpreter's exact results. On where it can run,
+    /// unless RIBBIT_JIT=0; None runs everything interpreted. Not saved.
+    pub jit: Option<ribbit_jit::Jit>,
 }
 
 impl Machine {
@@ -457,6 +461,7 @@ impl Machine {
             idle_timer: None,
             firmware,
             cartridge,
+            jit: ribbit_jit::Jit::from_env(),
         };
         if m.firmware.is_leapster_tv() {
             m.enable_leapster_tv();
@@ -963,11 +968,20 @@ impl Machine {
             clock: Some(&mut self.clock),
             synced: start,
         };
-        let block = self.cpu.run_block(&mut bus, &mut ribbit_cpu::NoAuxExt, budget, fence, |pc, cycles| match probe_head {
+        let watch = |pc, cycles| match probe_head {
             Some(head) => pc == head,
             None => skip && idle.watch(pc, cycles),
-        });
+        };
+        let block = match &mut self.jit {
+            Some(jit) => self.cpu.run_block_with(&mut bus, &mut ribbit_cpu::NoAuxExt, budget, fence, watch, jit),
+            None => self.cpu.run_block(&mut bus, &mut ribbit_cpu::NoAuxExt, budget, fence, watch),
+        };
         let synced = bus.synced;
+        if matches!(block.exit, ribbit_cpu::BlockExit::Slow)
+            && let Some(p) = ribbit_jit::PROFILE.lock().unwrap().as_mut()
+        {
+            *p[2].entry(self.cpu.pc).or_default() += 1;
+        }
         if block.executed == 0 {
             self.batch_stats[4] += 1;
             return match block.exit {

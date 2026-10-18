@@ -48,6 +48,81 @@ pub enum BlockExit {
     Error(CpuError),
 }
 
+/// Runs blocks of the block cache another way than instruction by
+/// instruction (the JIT, `ribbit-jit`), with exactly the interpreter's
+/// results, timing included. `run_block_with` offers it each block before
+/// interpreting it.
+pub trait BlockRunner<B: Bus> {
+    /// Runs from block `head` (at `cpu.pc`, below `fence`, no delay slot
+    /// pending), at cycle `now`, as `run_block` would, block after block
+    /// for as long as it can: it makes `run_block`'s checks after each
+    /// instruction (a device access, the backward-jump `watch`, the budget
+    /// `end`) and stops when one ends the batch (`RunnerExit::stop`), or
+    /// leaves the rest to the interpreter (`RunnerExit::resume`, or the flow
+    /// at `cpu.pc`). Sets `cpu.pc`, `cpu.delay_target`, registers, flags and
+    /// the pipeline scoreboard (`ready`, `ready_max`); not `cycles` or
+    /// `instructions_retired` (the caller's, from the result). It may build
+    /// blocks in `blocks`. None: it ran nothing, the interpreter runs `head`.
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &mut self,
+        cpu: &mut Cpu,
+        bus: &mut B,
+        blocks: &mut crate::icache::Blocks,
+        head: crate::icache::BlockHead,
+        now: u64,
+        end: u64,
+        fence: u32,
+        watch: &mut dyn FnMut(u32, u64) -> bool,
+    ) -> Option<RunnerExit>;
+}
+
+/// Why a `BlockRunner` ended the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerStop {
+    /// The last instruction made the bus request an exit.
+    Bus,
+    /// A backward jump that `watch` accepted.
+    Backward,
+    /// The budget was reached.
+    Budget,
+}
+
+/// What a `BlockRunner` ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunnerExit {
+    /// Instructions executed (at least one).
+    pub executed: u64,
+    /// The cycle after the last one.
+    pub now: u64,
+    /// Address of the last instruction executed.
+    pub from: u32,
+    pub stop: Option<RunnerStop>,
+    /// The interpreter carries on with block `.0`'s entries from index `.1`
+    /// (at `cpu.pc`). None (and no `stop`): it carries on at `cpu.pc`.
+    pub resume: Option<(crate::icache::BlockHead, usize)>,
+}
+
+/// No runner: every block is interpreted.
+pub struct NoRunner;
+
+impl<B: Bus> BlockRunner<B> for NoRunner {
+    #[inline(always)]
+    fn run(
+        &mut self,
+        _: &mut Cpu,
+        _: &mut B,
+        _: &mut crate::icache::Blocks,
+        _: crate::icache::BlockHead,
+        _: u64,
+        _: u64,
+        _: u32,
+        _: &mut dyn FnMut(u32, u64) -> bool,
+    ) -> Option<RunnerExit> {
+        None
+    }
+}
+
 enum Flow {
     Next,
     Jump(u32),
@@ -224,7 +299,21 @@ impl Cpu {
         ext: &mut impl AuxExt,
         budget: u64,
         fence: u32,
+        watch: impl FnMut(u32, u64) -> bool,
+    ) -> Block {
+        self.run_block_with(bus, ext, budget, fence, watch, &mut NoRunner)
+    }
+
+    /// `run_block`, offering each block of read-only code to `runner` first
+    /// (`BlockRunner`): same results.
+    pub fn run_block_with<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        ext: &mut impl AuxExt,
+        budget: u64,
+        fence: u32,
         mut watch: impl FnMut(u32, u64) -> bool,
+        runner: &mut impl BlockRunner<B>,
     ) -> Block {
         // A block ends with the instruction that reaches `budget`, so only
         // that last one can take a processor timer to LIMIT (an instruction
@@ -251,14 +340,38 @@ impl Cpu {
             if let Some(head) = blocks.find(&self.icache, pc, |a| decode(bus, a))
                 && head.last < fence
             {
-                let entries = &blocks.entries[head.first as usize..(head.first + head.len) as usize];
                 // Only a block's first instruction can be in a delay slot
                 // (a block ends at a branch).
-                if entries[0].hot.branchy && self.delay_target.is_some() {
+                if blocks.entries[head.first as usize].hot.branchy && self.delay_target.is_some() {
                     out.exit = BlockExit::Slow;
                     break;
                 }
-                for e in entries {
+                let (mut head, mut resume) = (head, 0);
+                if self.delay_target.is_none()
+                    && let Some(x) = runner.run(self, bus, &mut blocks, head, start + spent, start + budget, fence, &mut watch)
+                {
+                    n += x.executed;
+                    spent = x.now - start;
+                    out.from = x.from;
+                    match x.stop {
+                        Some(RunnerStop::Bus) => {
+                            out.exit = BlockExit::Bus;
+                            break;
+                        }
+                        Some(RunnerStop::Backward) => {
+                            out.exit = BlockExit::Backward;
+                            break;
+                        }
+                        Some(RunnerStop::Budget) => break,
+                        None => {}
+                    }
+                    match x.resume {
+                        Some((h, i)) => (head, resume) = (h, i),
+                        None => continue,
+                    }
+                }
+                let entries = &blocks.entries[head.first as usize..(head.first + head.len) as usize];
+                for e in &entries[resume..] {
                     if self.batch_one(bus, ext, &e.hot, None, e.fetch, e.bus_exit, start, &mut spent, &mut n, &mut out, &mut watch) {
                         break 'run;
                     }
@@ -382,6 +495,28 @@ impl Cpu {
         }
         out.from = pc;
         false
+    }
+
+    /// One instruction as `run_block` runs it (`fetch`: its fetch timed in
+    /// full), starting at cycle `now`; returns the cycle after it. For
+    /// checking a `BlockRunner` against the interpreter (`instructions_retired`
+    /// and `cycles` are left alone; exit conditions are the caller's).
+    pub fn check_one<B: Bus>(&mut self, bus: &mut B, ext: &mut impl AuxExt, now: u64, fetch: bool) -> Result<u64, CpuError> {
+        let pc = self.pc;
+        let mut uncached = None;
+        let hot = match self.icache.hot(pc, || decode(bus, pc)) {
+            Some(h) => h,
+            None => Hot::of(uncached.insert(decode(bus, pc))),
+        };
+        let (mut spent, mut n) = (0, 0);
+        let mut out = Block { executed: 0, exit: BlockExit::Budget, from: pc };
+        let cycles = self.cycles;
+        self.batch_one(bus, ext, &hot, uncached, fetch, false, now, &mut spent, &mut n, &mut out, &mut |_, _| false);
+        self.cycles = cycles;
+        match out.exit {
+            BlockExit::Error(e) => Err(e),
+            _ => Ok(now + spent),
+        }
     }
 
     /// A pre-digested instruction (`icache::fast_form`): what `execute` does

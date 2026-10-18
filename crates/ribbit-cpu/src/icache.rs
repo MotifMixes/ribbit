@@ -679,13 +679,18 @@ pub struct Entry {
 
 /// A run of instructions in read-only code, from `start`, that the batched
 /// loop executes in order while each one falls through to the next.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlockHead {
     pub start: u32,
     pub first: u32,
     pub len: u32,
     /// Address of the last instruction (the fence check).
     pub last: u32,
+    /// Index of the block in `Blocks::heads` (stable until the cache starts
+    /// over: see `Blocks::epoch`).
+    pub id: u32,
+    /// `Blocks::epoch` when it was built (with `id`, names this block).
+    pub epoch: u64,
 }
 
 /// The block cache: blocks of `Hot` forms built from the `ICache`'s ROM
@@ -699,6 +704,9 @@ pub struct Blocks {
     pub heads: Vec<BlockHead>,
     pub entries: Vec<Entry>,
     generation: u32,
+    /// Counts the times the cache started over: block ids from an earlier
+    /// epoch name other blocks (a block runner keyed by id starts over too).
+    pub epoch: u64,
 }
 
 /// Longest block, and the entries kept before the cache starts over.
@@ -715,6 +723,7 @@ impl Blocks {
         self.heads.clear();
         self.entries.clear();
         self.generation = generation;
+        self.epoch += 1;
     }
 
     /// The block starting at `pc`, built on a miss; None when `pc` is not in
@@ -769,7 +778,7 @@ impl Blocks {
         if len == 0 {
             return None;
         }
-        let head = BlockHead { start: pc, first: first as u32, len: len as u32, last };
+        let head = BlockHead { start: pc, first: first as u32, len: len as u32, last, id: self.heads.len() as u32, epoch: self.epoch };
         self.heads.push(head);
         self.index[slot] = self.heads.len() as u32;
         Some(head)
