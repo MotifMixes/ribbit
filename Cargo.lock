@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-android"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "android_logger",
  "jni 0.21.1",
@@ -2661,18 +2661,18 @@ dependencies = [
 
 [[package]]
 name = "ribbit-arm"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ribbit-audio"
-version = "1.2.2"
+version = "1.2.3"
 
 [[package]]
 name = "ribbit-core"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "backtrace",
  "bincode",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-cpu"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "ribbit-memory",
  "serde",
@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-debug"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -2711,7 +2711,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-desktop"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-frontend"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2766,14 +2766,14 @@ dependencies = [
 
 [[package]]
 name = "ribbit-input"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ribbit-memory"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "crc32fast",
  "serde",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-twist"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "bincode",
  "png",
@@ -2795,14 +2795,14 @@ dependencies = [
 
 [[package]]
 name = "ribbit-video"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ribbit-zippity"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "bincode",
  "ribbit-arm",
