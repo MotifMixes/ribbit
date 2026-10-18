@@ -88,7 +88,9 @@ fn is_branch(f: Fast) -> bool {
 
 /// Compiled by this generator (everything else falls back).
 fn compilable(h: &Hot) -> bool {
-    !h.stop && h.fast != Fast::General
+    // Fast forms added with the block engine (not compiled yet): stepped.
+    let newer = matches!(h.fast, Fast::Rot { .. } | Fast::Mul64 { .. } | Fast::Mul64I { .. } | Fast::Jl { .. } | Fast::JlD { .. });
+    !h.stop && h.fast != Fast::General && !newer
 }
 
 /// For each condition code, bit `i` says whether it holds for flags
@@ -614,6 +616,11 @@ impl Gen {
                 );
             }
             Fast::General
+            | Fast::Rot { .. }
+            | Fast::Mul64 { .. }
+            | Fast::Mul64I { .. }
+            | Fast::Jl { .. }
+            | Fast::JlD { .. }
             | Fast::Br { .. }
             | Fast::BrR { .. }
             | Fast::B { .. }
