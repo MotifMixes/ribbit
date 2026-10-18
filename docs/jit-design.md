@@ -5,9 +5,9 @@ Goal: run Leapster code (original Leapster, Leapster TV, L-MAX, Leapster 2: the 
 belts, ~125% of real time on one i9-13900K P-core) holds 100% on a 15 W i3-1315U laptop, and later on phones.
 
 Hard requirement: **bit-identical to the interpreter**, cycles included. Every speed-up so far was accepted only
-with an unchanged state digest; the JIT is held to the same rule. Status: phase 1 foundation built (2026-10-18,
-`crates/ribbit-jit`, section 12); not yet hooked into `run_block`. It builds on the block cache being added to
-`run_block` (straight-line decoded blocks with per-block checks and precomputed instruction-fetch line crossings).
+with an unchanged state digest; the JIT is held to the same rule. Status (2026-10-18): phase 1 built and on by
+default on x86-64 (`crates/ribbit-jit`; sections 12 and 13), compiling the block cache's blocks
+(`icache::Blocks`) with the interpreter's exact timing.
 
 Confidence labels: **FIXED** = a requirement from the existing code; **PLAN** = chosen design; **ESTIMATE**.
 
@@ -192,3 +192,48 @@ Integration points left (after the block engine lands):
 3. Exits for `bus.block_exit()` after device accesses (a helper return flag), the backward-jump `watch`, and
    `recheck`.
 4. Invalidation with `ICache::clear`/`set_stops`/`set_rom_ranges`; a setting/`--no-jit` and `RIBBIT_JIT_CHECK`.
+
+## 13. Phase 1, part 2: in the machine (2026-10-18)
+
+`Cpu::run_block_with` offers each block of read-only code to a `BlockRunner`; `ribbit_jit::Jit` is one, and
+`Machine::jit` holds it (`Jit::from_env`: on where `SUPPORTED`, off with RIBBIT_JIT=0; other architectures build a
+stub with the same API, `src/stub.rs`). Built (all VERIFIED by the checks below):
+
+* **Tiering and invalidation.** A block (`BlockHead::id`, per `Blocks::epoch`) is compiled after 32 interpreted
+  runs; everything compiled is dropped when the block cache starts over (ROM ranges, HD capture stops, a full
+  cache). Nothing is saved in a save state.
+* **Timing in the code.** `pipeline_cost` inline (the `ready` scoreboard read and written in place, `ready_max`
+  first); the fetch timed in full where `Entry::fetch` says, else nothing (arming and taking a zero stall change
+  nothing); `bus.at` before a memory access that goes through the bus; the stall taken after it. Each instruction is
+  followed by `run_block`'s checks: the zero-overhead loop end, a device access's exit request, the budget; a
+  backward jump calls `watch` (the idle-loop detector) from the code. Interrupts stay at batch boundaries.
+* **Inline memory** (`Bus::jit_view`, `ribbit_memory::JitView`): RAM, VRAM and the BIOS mirror read and written in
+  place, the data cache's 4-way lookup inline (dirty bit on a write), the code cache's lookup inline for a fetch
+  timed in full; a miss, a device, the cartridge and anything else goes through the bus (with `at`). The view is
+  MemTiming's own state (tags, `armed`, `stall`) and `sync_needed`, so both paths share one state.
+* **Chaining.** Every exit with a known next PC has a link slot (`Link`): the next compiled block runs without
+  returning to Rust; computed jumps also look in a shared table (`DISPATCH_SIZE` slots by address).
+* **More than the fast forms.** Instructions with no fast form compile from their full decode when their shape is
+  `Cpu::execute`'s ALU part, a compare, a bit operation (BSET/BCLR/BXOR/BMSK/BTST), a single-operand operation,
+  NORM, a load/store with any base (jump tables), LPcc, under any condition, with r57-r60, PCL and limm operands
+  (`x64::generic_ok`). Left to the interpreter: LR/SR/FLAG and the rest of `stop`, BRcc with a constant first
+  operand, BBIT, MAX/MIN, NORMW, the DSP/XY instructions.
+* **Code memory.** Mapped twice where the system allows (Windows: a section, two views; Linux: a memfd, two
+  mappings), so no page is ever writable and executable and a compile needs no system call; elsewhere the pages
+  written are flipped RW and back to RX.
+* **Check mode** (`RIBBIT_JIT_CHECK=1`): blocks compile with every memory and timing step as a bus call; each
+  compiled run is recorded, then replayed in the interpreter (`Cpu::check_one`) from the same state; any difference
+  in a register, flag, the scoreboard, LP_START/LP_END, the cycle count, or a bus access or its cycle stamp panics.
+
+Verification (2026-10-18): belt digest `9c6fde55d3b9f32a` at cycle 25523091575 (Windows and Linux, JIT on, and
+checked: 190 M compiled runs replayed); `examples/bench.rs` on Wormhole, 2 billion steps, digest `63e5fcb972577c07`
+with identical idle-skip counts; five digests each over scripted play of Sonic X and Pet Pals on the US v2.1 and
+Leapster 2 0.6 BIOSes, Sonic X on the Leapster TV and Wormhole on the L-MAX v2.2: identical JIT off, on and
+checked; the `user_bios` tests with the user's BIOSes; the lockstep tests (now with cycles and the scoreboard).
+
+Speed (belt benchmark, one i9-13900K P-core, interleaved runs, same session): interpreter (block engine) average
+203-208%, worst 250 ms window 181-195%; JIT average 283-286%, worst 235-243% (about 1.38x and 1.27x). Linux (WSL):
+198% / 263% average. Compiling 7.6k blocks takes ~60 ms of code generation and ~18 ms of first-touch page faults.
+
+Left: generated-code quality (flags computed only when read, registers cached in host registers, shared exit
+stubs: blocks average ~4.8 KB of code), the remaining fallbacks above, aarch64 (phase 3).
