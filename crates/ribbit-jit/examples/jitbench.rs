@@ -74,10 +74,21 @@ fn body() -> (Vec<u8>, Vec<Instr>) {
         seed ^= seed >> 27;
         seed.wrapping_mul(0x2545_F491_4F6C_DD1D)
     };
-    let want = |f: Fast| match f {
-        Fast::Ld { .. } | Fast::St { .. } | Fast::Alu { .. } | Fast::AluI { .. } | Fast::Mov { .. } | Fast::MovI { .. } => true,
-        Fast::AluF { .. } | Fast::AluFI { .. } | Fast::CmpI { .. } | Fast::Cmp { .. } | Fast::Un { .. } => true,
-        _ => false,
+    let want = |f: Fast| {
+        matches!(
+            f,
+            Fast::Ld { .. }
+                | Fast::St { .. }
+                | Fast::Alu { .. }
+                | Fast::AluI { .. }
+                | Fast::Mov { .. }
+                | Fast::MovI { .. }
+                | Fast::AluF { .. }
+                | Fast::AluFI { .. }
+                | Fast::CmpI { .. }
+                | Fast::Cmp { .. }
+                | Fast::Un { .. }
+        )
     };
     let mut code = Vec::new();
     while code.len() < 16 {
