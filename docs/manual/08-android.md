@@ -34,6 +34,10 @@ The on-screen D-pad and buttons appear when you touch the screen and hide when a
 
 ![Touch controls (the game's picture is left out)](images/android-touch-controls.png)
 
+## The screen
+
+While a game plays, the screen stays on, even if you only watch or play with a controller. Paused, with the side menu open or in the library, the phone dims and sleeps as usual.
+
 ## The library on a phone
 
 The library scrolls as a whole, header included. Pull it down at the top and let go to look for new games.

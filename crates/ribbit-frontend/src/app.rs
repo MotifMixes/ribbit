@@ -59,6 +59,8 @@ pub struct StartOptions {
     /// Android: the picker's answer once it is in: the path, None if
     /// cancelled, or why the choice can't be used.
     pub pick_poll: Option<fn() -> Option<Result<Option<PathBuf>, String>>>,
+    /// Android: keeps the screen from sleeping (true) or lets it (false).
+    pub keep_screen_on: Option<fn(bool)>,
 }
 
 struct Session {
@@ -159,6 +161,8 @@ pub struct App {
     /// Android: the side menu was open last frame, and whether opening it
     /// paused the game (closing it then lets it go on).
     side_menu: (bool, bool),
+    /// Android: the screen is being kept on (a game is playing).
+    screen_on: bool,
     fatal: Option<anyhow::Error>,
     quit: bool,
     /// Everything is saved for good: nothing more is written (after an
@@ -261,6 +265,7 @@ impl App {
             sheet: None,
             native_pick: None,
             side_menu: (false, false),
+            screen_on: false,
             library: Library::new(&opts_data_dir),
             discord: crate::discord::Discord::start(),
             fatal: None,
@@ -1890,6 +1895,20 @@ impl App {
         }
     }
 
+    /// Android: the screen stays on while a game plays (as on the console,
+    /// it may be played with a controller, or watched); paused, or in the
+    /// library, the phone sleeps as usual.
+    fn keep_screen_on(&mut self) {
+        let Some(set) = self.opts.keep_screen_on else {
+            return;
+        };
+        let playing = (self.session.is_some() || self.zippity.is_some() || self.twist.is_some()) && !self.paused;
+        if playing != self.screen_on {
+            set(playing);
+            self.screen_on = playing;
+        }
+    }
+
     /// Android gamepad buttons (winit reports them as raw key codes; the
     /// D-pad usually arrives as arrow keys, its own codes are taken too).
     /// The layout matches the desktop's (`gamepad`, `twist::pad_button`).
@@ -2236,6 +2255,7 @@ impl App {
             self.act(a, event_loop);
         }
         self.pause_for_side_menu();
+        self.keep_screen_on();
         let took = frame_start.elapsed();
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");

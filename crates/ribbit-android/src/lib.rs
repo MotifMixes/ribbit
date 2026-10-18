@@ -36,6 +36,7 @@ fn android_main(app: AndroidApp) {
         destroyed: Some(activity_destroyed),
         pick_start: Some(pick_start),
         pick_poll: Some(pick_poll),
+        keep_screen_on: Some(keep_screen_on),
         ..Default::default()
     };
     if let Err(e) = ribbit_frontend::run_with(event_loop, opts) {
@@ -46,6 +47,19 @@ fn android_main(app: AndroidApp) {
     // as the C exit handlers abort while other threads (sound, Discord) run.
     // SAFETY: ends the process; nothing is left to write.
     unsafe { libc::_exit(0) };
+}
+
+/// Keeps the screen on (or lets it sleep again): on while a game plays.
+/// Done in Java on Android's UI thread (Screen.keepOn): android-activity's
+/// own `set_window_flags` waits for state winit holds while Ribbit handles
+/// an event, and never returned ("Ribbit isn't responding").
+fn keep_screen_on(on: bool) {
+    use jni::objects::JValue;
+    with_activity(|env, activity| {
+        let class = app_class(env, activity, "dev.ribbit.emulator.Screen")?;
+        env.call_static_method(&class, "keepOn", "(Landroid/app/Activity;Z)V", &[JValue::Object(activity), JValue::Bool(on.into())])?;
+        Ok(())
+    });
 }
 
 /// The Java VM and the activity, for `activity_destroyed`.
@@ -85,12 +99,17 @@ fn with_activity<T>(f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::R
     result.map_err(|e| log::warn!("JNI: {e}")).ok()
 }
 
-/// The app's PickerActivity (Android's file picker), loaded by the app's
-/// class loader (this native thread's own only knows Android's classes).
+/// The app's PickerActivity (Android's file picker).
 fn picker<'a>(env: &mut jni::JNIEnv<'a>, activity: &JObject) -> jni::errors::Result<jni::objects::JClass<'a>> {
+    app_class(env, activity, "dev.ribbit.emulator.PickerActivity")
+}
+
+/// One of the app's own Java classes, loaded by the app's class loader (this
+/// native thread's own only knows Android's classes).
+fn app_class<'a>(env: &mut jni::JNIEnv<'a>, activity: &JObject, name: &str) -> jni::errors::Result<jni::objects::JClass<'a>> {
     use jni::objects::JValue;
     let loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?.l()?;
-    let name = env.new_string("dev.ribbit.emulator.PickerActivity")?;
+    let name = env.new_string(name)?;
     let class = env.call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(&name)])?.l()?;
     Ok(class.into())
 }

@@ -492,6 +492,7 @@ fn start_options(images: &Images, config: &Config) -> ribbit_frontend::StartOpti
         destroyed: None,
         pick_start: None,
         pick_poll: None,
+        keep_screen_on: None,
     }
 }
 
