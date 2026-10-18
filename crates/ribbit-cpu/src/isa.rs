@@ -354,6 +354,8 @@ pub enum Dst {
 
 /// `Instr::load_dst` of an instruction that loads nothing.
 pub const NO_LOAD: u8 = 0xFF;
+/// `Instr::read_regs` padding: no register (reads as never pending).
+pub const NO_READ: u8 = 0xFF;
 
 /// A fully decoded instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,6 +410,22 @@ impl Instr {
         };
         let sp = if matches!(self.op, Op::Push | Op::Pop) { 1 << 28 } else { 0 };
         bit(self.src1) | bit(self.src2) | bit(self.data) | sp
+    }
+
+    /// The registers `reg_reads` names, as up to four indices padded with
+    /// `NO_READ` (pipeline timing without a loop over the mask).
+    pub fn read_regs(&self) -> [u8; 4] {
+        let mut out = [NO_READ; 4];
+        let mut m = self.reg_reads();
+        for slot in &mut out {
+            if m == 0 {
+                break;
+            }
+            *slot = m.trailing_zeros() as u8;
+            m &= m - 1;
+        }
+        debug_assert_eq!(m, 0, "more than four register reads");
+        out
     }
 
     /// The register a load (LD, POP_S) writes, or `NO_LOAD`.

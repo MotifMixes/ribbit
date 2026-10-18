@@ -30,6 +30,12 @@ pub trait Bus {
     #[inline(always)]
     fn instruction(&mut self, _pc: u32, _len: u32) {}
 
+    /// As `instruction`, for an instruction on the same 16-byte line as the
+    /// end of the one just executed (and not crossing into the next): its
+    /// fetch is known to hit that line, so only the timing is armed.
+    #[inline(always)]
+    fn instruction_same_line(&mut self) {}
+
     /// An instruction-stream read (decoding): like `read16`, but never timed
     /// as a data access (fetch timing is `instruction`'s).
     #[inline(always)]

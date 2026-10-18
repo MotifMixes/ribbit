@@ -620,6 +620,11 @@ impl Bus for MachineBus<'_> {
     }
 
     #[inline(always)]
+    fn instruction_same_line(&mut self) {
+        self.io.mem.instruction_same_line();
+    }
+
+    #[inline(always)]
     fn take_stall(&mut self) -> u64 {
         self.io.mem.take_stall()
     }

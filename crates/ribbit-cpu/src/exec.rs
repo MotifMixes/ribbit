@@ -171,7 +171,7 @@ impl Cpu {
         self.instructions_retired += 1;
         let stall = bus.take_stall();
         let (now, taken) = (self.cycles, matches!(flow, Flow::Jump(_)));
-        let cost = self.pipeline_cost(now, i.reg_reads(), i.load_dst(), taken, i.delay, i.is_compare_branch(), stall);
+        let cost = self.pipeline_cost(now, i.read_regs(), i.load_dst(), taken, i.delay, i.is_compare_branch(), stall);
         let delay_slot_of = self.delay_target.take();
         match flow {
             Flow::Halt(reason) => {
@@ -238,11 +238,39 @@ impl Cpu {
         }
         // Counters stay in locals in the loop and are written back after.
         let (start, mut n, mut spent) = (self.cycles, 0u64, 0u64);
-        while spent < budget {
+        // Read-only code runs a block at a time (`icache::Blocks`): no cache
+        // lookup or per-instruction checks inside a block, each instruction
+        // run as below. The blocks are taken out of the cache meanwhile.
+        let mut blocks = std::mem::take(&mut self.icache.blocks);
+        'run: while spent < budget {
             let pc = self.pc;
             if pc >= fence {
                 out.exit = BlockExit::Slow;
                 break;
+            }
+            if let Some(head) = blocks.find(&self.icache, pc, |a| decode(bus, a))
+                && head.last < fence
+            {
+                let entries = &blocks.entries[head.first as usize..(head.first + head.len) as usize];
+                // Only a block's first instruction can be in a delay slot
+                // (a block ends at a branch).
+                if entries[0].hot.branchy && self.delay_target.is_some() {
+                    out.exit = BlockExit::Slow;
+                    break;
+                }
+                for e in entries {
+                    if self.batch_one(bus, ext, &e.hot, None, e.fetch, e.bus_exit, start, &mut spent, &mut n, &mut out, &mut watch) {
+                        break 'run;
+                    }
+                    if spent >= budget {
+                        break 'run;
+                    }
+                    // Taken branch, loop end or delay slot: the next block.
+                    if self.pc != e.hot.next {
+                        continue 'run;
+                    }
+                }
+                continue;
             }
             // Cached (ROM) code: the pre-digested form. Elsewhere, decode now.
             let mut uncached = None;
@@ -257,62 +285,11 @@ impl Cpu {
                 out.exit = BlockExit::Slow;
                 break;
             }
-            bus.instruction(pc, hot.next.wrapping_sub(pc));
-            let flow = match hot.fast {
-                Fast::General => {
-                    let i = match uncached {
-                        Some(i) => i,
-                        None => self.icache.get(pc, || decode(bus, pc)),
-                    };
-                    self.cycles = start + spent;
-                    bus.at(start + spent, pc);
-                    match self.execute(&i, bus, ext) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            out.exit = BlockExit::Error(e);
-                            break;
-                        }
-                    }
-                }
-                f => {
-                    if f.accesses_memory() {
-                        bus.at(start + spent, pc);
-                    }
-                    self.execute_fast(f, &hot, bus)
-                }
-            };
-            let stall = bus.take_stall();
-            let taken = matches!(flow, Flow::Jump(_));
-            spent += self.pipeline_cost(start + spent, hot.reads, hot.load_dst, taken, hot.delay, hot.compare_branch, stall);
-            let delay_slot_of = self.delay_target.take();
-            match flow {
-                Flow::Jump(target) if hot.delay => {
-                    self.delay_target = Some(target);
-                    self.pc = hot.next;
-                }
-                Flow::Jump(target) => self.pc = target,
-                Flow::Next => {
-                    self.pc = match delay_slot_of {
-                        Some(target) => target,
-                        None => self.loop_end_check(hot.next),
-                    };
-                }
-                // Only produced by the instructions excluded above.
-                Flow::Halt(_) | Flow::Exception(_) => unreachable!("halt or exception in run_block at {pc:#x}"),
-            }
-            n += 1;
-            if bus.block_exit() || (hot.recheck && self.pending_interrupt().is_some()) {
-                out.from = pc;
-                out.exit = BlockExit::Bus;
+            if self.batch_one(bus, ext, &hot, uncached, true, true, start, &mut spent, &mut n, &mut out, &mut watch) {
                 break;
             }
-            if self.pc <= pc && self.delay_target.is_none() && watch(self.pc, start + spent) {
-                out.from = pc;
-                out.exit = BlockExit::Backward;
-                break;
-            }
-            out.from = pc;
         }
+        self.icache.blocks = blocks;
         self.instructions_retired += n;
         out.executed = n;
         // What `tick` did per step: before the last instruction no timer
@@ -322,6 +299,89 @@ impl Cpu {
             out.exit = BlockExit::Error(e);
         }
         out
+    }
+
+    /// One instruction of `run_block` at `hot.addr` (`uncached`: its decode,
+    /// when not in the cache), and the checks after it. `fetch`: time its
+    /// fetch in full (else it is on the line just fetched); `bus_exit`: it
+    /// may have touched a device. True when the batch ends (`out.exit` set).
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn batch_one<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        ext: &mut impl AuxExt,
+        hot: &Hot,
+        uncached: Option<Instr>,
+        fetch: bool,
+        bus_exit: bool,
+        start: u64,
+        spent: &mut u64,
+        n: &mut u64,
+        out: &mut Block,
+        watch: &mut impl FnMut(u32, u64) -> bool,
+    ) -> bool {
+        let pc = hot.addr;
+        if fetch {
+            bus.instruction(pc, hot.next.wrapping_sub(pc));
+        } else {
+            bus.instruction_same_line();
+        }
+        let flow = match hot.fast {
+            Fast::General => {
+                let i = match uncached {
+                    Some(i) => i,
+                    None => self.icache.get(pc, || decode(bus, pc)),
+                };
+                self.cycles = start + *spent;
+                bus.at(start + *spent, pc);
+                match self.execute(&i, bus, ext) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        out.exit = BlockExit::Error(e);
+                        return true;
+                    }
+                }
+            }
+            f => {
+                if f.accesses_memory() {
+                    bus.at(start + *spent, pc);
+                }
+                self.execute_fast(f, hot, bus)
+            }
+        };
+        let stall = bus.take_stall();
+        let taken = matches!(flow, Flow::Jump(_));
+        *spent += self.pipeline_cost(start + *spent, hot.reads, hot.load_dst, taken, hot.delay, hot.compare_branch, stall);
+        let delay_slot_of = self.delay_target.take();
+        match flow {
+            Flow::Jump(target) if hot.delay => {
+                self.delay_target = Some(target);
+                self.pc = hot.next;
+            }
+            Flow::Jump(target) => self.pc = target,
+            Flow::Next => {
+                self.pc = match delay_slot_of {
+                    Some(target) => target,
+                    None => self.loop_end_check(hot.next),
+                };
+            }
+            // Only produced by the instructions excluded from batches.
+            Flow::Halt(_) | Flow::Exception(_) => unreachable!("halt or exception in run_block at {pc:#x}"),
+        }
+        *n += 1;
+        if (bus_exit && bus.block_exit()) || (hot.recheck && self.pending_interrupt().is_some()) {
+            out.from = pc;
+            out.exit = BlockExit::Bus;
+            return true;
+        }
+        if self.pc <= pc && self.delay_target.is_none() && watch(self.pc, start + *spent) {
+            out.from = pc;
+            out.exit = BlockExit::Backward;
+            return true;
+        }
+        out.from = pc;
+        false
     }
 
     /// A pre-digested instruction (`icache::fast_form`): what `execute` does
@@ -429,6 +489,28 @@ impl Cpu {
                 if self.cond(cc) {
                     return Flow::Jump(target);
                 }
+            }
+            Fast::Rot { op, f, d, c } => {
+                let (v, cf, vf) = op.apply(self.regs[r(c)], self.flag(status32::C));
+                if d != DISCARD {
+                    self.regs[r(d)] = v;
+                }
+                if f {
+                    self.flags(v, Some(cf), vf);
+                }
+            }
+            Fast::Mul64 { signed, b, c } => self.mul64(signed, self.regs[r(b)], self.regs[r(c)]),
+            Fast::Mul64I { signed, b, v } => self.mul64(signed, self.regs[r(b)], v),
+            // The target is read before BLINK is written (JL [blink]).
+            Fast::Jl { s } => {
+                let target = self.regs[r(s)] & !1;
+                self.regs[reg::BLINK] = hot.next;
+                return Flow::Jump(target);
+            }
+            Fast::JlD { s } => {
+                let target = self.regs[r(s)] & !1;
+                self.regs[reg::BLINK] = self.after_slot(bus, hot.next);
+                return Flow::Jump(target);
             }
         }
         Flow::Next
@@ -614,7 +696,7 @@ impl Cpu {
     fn pipeline_cost(
         &mut self,
         now: u64,
-        reads: u64,
+        reads: [u8; 4],
         load_dst: u8,
         taken: bool,
         delay: bool,
@@ -624,15 +706,11 @@ impl Cpu {
         if !self.config.pipeline_timing {
             return 1;
         }
-        let mut wait = 0;
-        if now < self.ready_max {
-            let mut m = reads;
-            while m != 0 {
-                let r = m.trailing_zeros() as usize;
-                m &= m - 1;
-                wait = wait.max(self.ready[r].saturating_sub(now));
-            }
-        }
+        // The latest of the registers read (padding reads as 0), branch-free:
+        // the same as the wait over each (none if all have arrived).
+        let ready = |r: u8| self.ready.get(r as usize).copied().unwrap_or(0);
+        let latest = ready(reads[0]).max(ready(reads[1])).max(ready(reads[2]).max(ready(reads[3])));
+        let wait = latest.saturating_sub(now);
         if load_dst != NO_LOAD {
             let at = now + wait + memory + self.config.load_latency;
             self.ready[load_dst as usize] = at;
@@ -1213,28 +1291,7 @@ impl Cpu {
                 (Some(b.rotate_right(n)), shift_carry(n, n.wrapping_sub(1)), None)
             }
             Op::Mul64 | Op::Mulu64 => {
-                let p = if matches!(i.op, Op::Mul64) {
-                    ((b as i32 as i64) * (c as i32 as i64)) as u64
-                } else {
-                    b as u64 * c as u64
-                };
-                // Leapster: r57 is the dual MAC's low-lane accumulator (see
-                // MULDW), and MUL64 leaves it alone; the low word is read from
-                // MMID instead. HYPOTHESIS from the Leapster 2 BIOS 0.6: its
-                // interrupt entry (0x4004_B308) saves only r58/r59 and restores
-                // them with `mulu64 0,r0,1; sr r6,[mulhi]` (0x4004_B434), while
-                // its PCM filter reads r57 after MACs (0x4003_E0B0). With MUL64
-                // writing r57, every interrupt landing on that read corrupted
-                // the filter, which then rang at full scale (audible clicks in
-                // The Talking Words Factory, each one at an interrupt there).
-                if self.config.mmid != MmidMode::LowLeapster {
-                    self.regs[reg::MLO] = p as u32;
-                }
-                self.regs[reg::MHI] = (p >> 32) as u32;
-                self.regs[reg::MMID] = match self.config.mmid {
-                    MmidMode::Middle => (p >> 16) as u32,
-                    MmidMode::LowLeapster => p as u32,
-                };
+                self.mul64(matches!(i.op, Op::Mul64), b, c);
                 return Ok(Flow::Next);
             }
             Op::Adds => {
@@ -1400,6 +1457,30 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
+    /// MUL64 / MULU64 (`signed`): the 64-bit product of `b` and `c` into
+    /// MHI, MMID and (by `config.mmid`) MLO.
+    #[inline(always)]
+    fn mul64(&mut self, signed: bool, b: u32, c: u32) {
+        let p = if signed { ((b as i32 as i64) * (c as i32 as i64)) as u64 } else { b as u64 * c as u64 };
+        // Leapster: r57 is the dual MAC's low-lane accumulator (see
+        // MULDW), and MUL64 leaves it alone; the low word is read from
+        // MMID instead. HYPOTHESIS from the Leapster 2 BIOS 0.6: its
+        // interrupt entry (0x4004_B308) saves only r58/r59 and restores
+        // them with `mulu64 0,r0,1; sr r6,[mulhi]` (0x4004_B434), while
+        // its PCM filter reads r57 after MACs (0x4003_E0B0). With MUL64
+        // writing r57, every interrupt landing on that read corrupted
+        // the filter, which then rang at full scale (audible clicks in
+        // The Talking Words Factory, each one at an interrupt there).
+        if self.config.mmid != MmidMode::LowLeapster {
+            self.regs[reg::MLO] = p as u32;
+        }
+        self.regs[reg::MHI] = (p >> 32) as u32;
+        self.regs[reg::MMID] = match self.config.mmid {
+            MmidMode::Middle => (p >> 16) as u32,
+            MmidMode::LowLeapster => p as u32,
+        };
+    }
+
     fn sticky_saturation(&mut self, s1: bool, s2: bool) {
         if s1 {
             self.macmode |= MACMODE_S1;
@@ -1465,5 +1546,84 @@ impl Cpu {
             Size::Byte => bus.write8(addr, v as u8),
         }
         Ok(Flow::Next)
+    }
+}
+
+#[cfg(test)]
+mod fast_form_tests {
+    use super::*;
+    use crate::icache::fast_form;
+    use crate::{CpuConfig, NoAuxExt};
+    use ribbit_memory::{Firmware, SystemBus};
+
+    /// Where control goes after an instruction (`Flow` has no Eq).
+    fn next(f: Flow) -> Option<u32> {
+        match f {
+            Flow::Next => None,
+            Flow::Jump(t) => Some(t),
+            _ => panic!("unexpected halt or exception"),
+        }
+    }
+
+    /// An instruction at 0x4000_0100: `op` with these operands, 32-bit.
+    fn instr(op: Op, set_flags: bool, delay: bool, dst: Dst, src1: Src, src2: Src) -> Instr {
+        let mut i = crate::decode::decode_with(0x4000_0100, |_| 0);
+        (i.op, i.cc, i.set_flags, i.delay, i.short, i.len) = (op, COND_AL, set_flags, delay, false, 4);
+        (i.dst, i.src1, i.src2, i.data, i.limm) = (dst, src1, src2, Src::None, None);
+        i
+    }
+
+    /// Every case runs through the general executor and through its fast
+    /// form, from the same random states: the CPUs must end up equal.
+    #[test]
+    fn new_fast_forms_match_the_executor() {
+        let bus_of = || SystemBus::new(&Firmware::from_bytes(vec![0; 0x1000]).unwrap(), None);
+        let mut cases = Vec::new();
+        for op in [Op::Asl, Op::Asr, Op::Lsr, Op::Ror, Op::Rrc, Op::Rlc] {
+            for f in [false, true] {
+                for dst in [Dst::Reg(1), Dst::Reg(2), Dst::Discard] {
+                    // (Without .F the first four are `Un`, which has no
+                    // discarded form: that pointless case stays general.)
+                    if !f && dst == Dst::Discard && !matches!(op, Op::Rrc | Op::Rlc) {
+                        continue;
+                    }
+                    cases.push(instr(op, f, false, dst, Src::None, Src::Reg(2)));
+                }
+            }
+        }
+        for op in [Op::Mul64, Op::Mulu64] {
+            cases.push(instr(op, false, false, Dst::None, Src::Reg(3), Src::Reg(4)));
+            cases.push(instr(op, false, false, Dst::None, Src::Reg(3), Src::Imm(0xFFFF_8001)));
+        }
+        for delay in [false, true] {
+            cases.push(instr(Op::Jl, false, delay, Dst::None, Src::None, Src::Reg(5)));
+            cases.push(instr(Op::Jl, false, delay, Dst::None, Src::None, Src::Reg(reg::BLINK as u8)));
+        }
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for mmid in [MmidMode::LowLeapster, MmidMode::Middle] {
+            for i in &cases {
+                let fast = fast_form(i);
+                assert!(!matches!(fast, Fast::General), "{:?} has no fast form", i.op);
+                for _ in 0..200 {
+                    let mut cpu = Cpu::new(CpuConfig { mmid, ..CpuConfig::leapster() });
+                    for r in 0..32 {
+                        cpu.regs[r] = rand() as u32;
+                    }
+                    cpu.status32 = (cpu.status32 & !0xF00) | (rand() as u32 & 0xF00);
+                    let (mut a, mut b) = (cpu.clone(), cpu);
+                    let (mut bus_a, mut bus_b) = (bus_of(), bus_of());
+                    let want = next(a.execute(i, &mut bus_a, &mut NoAuxExt).unwrap());
+                    let got = next(b.execute_fast(fast, &Hot::of(i), &mut bus_b));
+                    assert_eq!(got, want, "{:?} flow", i.op);
+                    assert!(a == b, "{:?} (f {}, {:?}): {:?} vs {:?}", i.op, i.set_flags, i.dst, a, b);
+                }
+            }
+        }
     }
 }

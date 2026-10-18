@@ -42,6 +42,9 @@ struct Meter {
     worst: f64,
     worst_label: String,
     rows: Vec<(String, f64, f64)>,
+    /// Emulated and wall seconds of every window (the average speed).
+    emu: f64,
+    wall: f64,
     /// `record`: the host sound as the frontend plays it, both ways (32 kHz).
     rec: Option<Recording>,
 }
@@ -174,7 +177,7 @@ fn main() {
         m.clock = ribbit_core::Clock::new(mhz.parse::<u64>().unwrap() * 1_000_000, m.clock.peripheral_hz);
     }
     let mut kept: Vec<Box<[u32; WIDTH * HEIGHT]>> = vec![];
-    let mut meter = Meter { label: "boot".into(), worst: f64::MAX, worst_label: String::new(), rows: vec![], rec: None };
+    let mut meter = Meter { label: "boot".into(), worst: f64::MAX, worst_label: String::new(), rows: vec![], emu: 0.0, wall: 0.0, rec: None };
     for line in std::fs::read_to_string(script).unwrap().lines() {
         let line = line.split('#').next().unwrap().trim();
         let w: Vec<&str> = line.split_whitespace().collect();
@@ -255,6 +258,13 @@ fn main() {
                 if std::env::var_os("RIBBIT_NO_TIMING").is_some() {
                     // Research: one cycle per instruction, no memory timing.
                     m.cpu.config.pipeline_timing = false;
+                    m.io.mem.enabled = false;
+                }
+                // Research (speed): either part alone.
+                if std::env::var_os("RIBBIT_NO_PIPE").is_some() {
+                    m.cpu.config.pipeline_timing = false;
+                }
+                if std::env::var_os("RIBBIT_NO_MEMT").is_some() {
                     m.io.mem.enabled = false;
                 }
             }
@@ -816,6 +826,9 @@ fn main() {
         }
     }
     println!("\nworst window: {:.0}% ({})", meter.worst, meter.worst_label);
+    if meter.wall > 0.0 {
+        println!("average: {:.0}% ({:.1} s emulated in {:.2} s)", 100.0 * meter.emu / meter.wall, meter.emu, meter.wall);
+    }
     let mut by: Vec<(String, f64, f64, usize)> = vec![];
     for (l, s, idle) in &meter.rows {
         match by.iter_mut().find(|r| &r.0 == l) {
@@ -859,6 +872,8 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
         let wall = t.elapsed().as_secs_f64();
         assert_eq!(r.stop, ribbit_core::StopReason::StepLimit, "{r:?}");
         let speed = 100.0 * (chunk as f64 / 1000.0) / wall;
+        meter.emu += chunk as f64 / 1000.0;
+        meter.wall += wall;
         let idle = 100.0 * (m.idle_skipped_steps() - skipped0) as f64 / r.steps as f64;
         if let Some(rec) = meter.rec.as_mut() {
             rec.take(m);

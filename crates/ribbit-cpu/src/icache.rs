@@ -157,6 +157,50 @@ impl UnOp {
 /// `d` of `Fast::AluF`/`AluFI` when the result is discarded (flags only).
 pub const DISCARD: u8 = 0xFF;
 
+/// Shifts and rotates by one bit (ASL/ASR/LSR/ROR/RRC/RLC, source in
+/// src2), with the flags the general executor gives them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RotOp {
+    Asl,
+    Asr,
+    Lsr,
+    Ror,
+    Rrc,
+    Rlc,
+}
+
+impl RotOp {
+    fn of(op: Op) -> Option<RotOp> {
+        Some(match op {
+            Op::Asl => RotOp::Asl,
+            Op::Asr => RotOp::Asr,
+            Op::Lsr => RotOp::Lsr,
+            Op::Ror => RotOp::Ror,
+            Op::Rrc => RotOp::Rrc,
+            Op::Rlc => RotOp::Rlc,
+            _ => return None,
+        })
+    }
+
+    /// Result, C and V (None: unchanged) of `c` with carry in `carry`, as
+    /// `Cpu::execute` computes them.
+    #[inline(always)]
+    pub fn apply(self, c: u32, carry: bool) -> (u32, bool, Option<bool>) {
+        match self {
+            RotOp::Asl => {
+                let r = c << 1;
+                (r, c >> 31 != 0, Some((c ^ r) >> 31 != 0))
+            }
+            RotOp::Asr => (((c as i32) >> 1) as u32, c & 1 != 0, None),
+            RotOp::Lsr => (c >> 1, c & 1 != 0, None),
+            RotOp::Ror => (c.rotate_right(1), c & 1 != 0, None),
+            RotOp::Rrc => (((carry as u32) << 31) | (c >> 1), c & 1 != 0, None),
+            // RLC: "V = Undefined"; left unchanged.
+            RotOp::Rlc => ((c << 1) | carry as u32, c >> 31 != 0, None),
+        }
+    }
+}
+
 /// Load widths with a fast form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LdKind {
@@ -213,6 +257,16 @@ pub enum Fast {
     Jcc { cc: Cond, s: u8 },
     Cmp { b: u8, c: u8 },
     CmpI { b: u8, v: u32 },
+    /// Shift or rotate by one (`d` may be `DISCARD`); Z, N, C (and V for
+    /// ASL) set when `f` (.F on a 32-bit encoding).
+    Rot { op: RotOp, f: bool, d: u8, c: u8 },
+    /// MUL64 (`signed`) or MULU64 b,c into MLO/MHI/MMID.
+    Mul64 { signed: bool, b: u8, c: u8 },
+    Mul64I { signed: bool, b: u8, v: u32 },
+    /// JL [s] (always, no flags, no delay slot): BLINK = next.
+    Jl { s: u8 },
+    /// JL.D [s]: BLINK = the address after the delay slot.
+    JlD { s: u8 },
 }
 
 impl Fast {
@@ -254,8 +308,8 @@ pub struct Hot {
     pub flag_reg: u8,
     /// A branch, jump or LP: unpredictable in a delay slot.
     pub branchy: bool,
-    /// Pipeline timing (`Instr::reg_reads`, `load_dst`, `is_compare_branch`).
-    pub reads: u64,
+    /// Pipeline timing (`Instr::read_regs`, `load_dst`, `is_compare_branch`).
+    pub reads: [u8; 4],
     pub load_dst: u8,
     pub compare_branch: bool,
 }
@@ -275,7 +329,7 @@ impl Hot {
                 _ => NO_REG,
             },
             branchy: i.is_branch() || matches!(i.op, Op::Lp),
-            reads: i.reg_reads(),
+            reads: i.read_regs(),
             load_dst: i.load_dst(),
             compare_branch: i.is_compare_branch(),
         }
@@ -442,6 +496,28 @@ pub fn fast_form(i: &Instr) -> Fast {
             (Some(b), _, Some(v)) => Some(Fast::CmpI { b, v }),
             _ => None,
         },
+        // (Those without .F that `Un` covers took the arm above.) The
+        // executor reads src1 first; only when that is free.
+        op if i.cc == COND_AL && RotOp::of(op).is_some() && (i.src1 == Src::None || reg(i.src1).is_some()) => {
+            let d = match i.dst {
+                Dst::Discard => Some(DISCARD),
+                d => dreg(d),
+            };
+            match (d, reg(i.src2)) {
+                (Some(d), Some(c)) => Some(Fast::Rot { op: RotOp::of(op).unwrap(), f: i.set_flags && !i.short, d, c }),
+                _ => None,
+            }
+        }
+        Op::Mul64 | Op::Mulu64 if i.cc == COND_AL && matches!(i.dst, Dst::None | Dst::Discard) => {
+            let signed = i.op == Op::Mul64;
+            match (reg(i.src1), reg(i.src2), imm(i.src2)) {
+                (Some(b), Some(c), _) => Some(Fast::Mul64 { signed, b, c }),
+                (Some(b), _, Some(v)) => Some(Fast::Mul64I { signed, b, v }),
+                _ => None,
+            }
+        }
+        Op::Jl if plain && !i.delay => reg(i.src2).map(|s| Fast::Jl { s }),
+        Op::Jl if plain => reg(i.src2).map(|s| Fast::JlD { s }),
         _ => None,
     };
     f.unwrap_or(Fast::General)
@@ -457,7 +533,7 @@ const EMPTY: Hot = Hot {
     recheck: false,
     flag_reg: NO_REG,
     branchy: false,
-    reads: 0,
+    reads: [crate::isa::NO_READ; 4],
     load_dst: crate::isa::NO_LOAD,
     compare_branch: false,
 };
@@ -477,6 +553,12 @@ pub struct ICache {
     /// batched loop's hits are not counted).
     pub hits: u64,
     pub misses: u64,
+    /// Straight-line blocks for the batched loop (`Blocks`); taken out while
+    /// a batch runs.
+    pub blocks: Blocks,
+    /// Bumped whenever cached forms may have changed (ranges, stops): blocks
+    /// built before are dropped.
+    generation: u32,
 }
 
 impl PartialEq for ICache {
@@ -497,6 +579,7 @@ impl ICache {
     /// Declares read-only ranges (start, end exclusive) and clears the cache.
     pub fn set_rom_ranges(&mut self, ranges: &[(u32, u32)]) {
         self.ranges = ranges.to_vec();
+        self.generation = self.generation.wrapping_add(1);
         let blank = crate::decode::decode_with(0, |_| 0);
         (self.hot, self.instrs) =
             if ranges.is_empty() { (Vec::new(), Vec::new()) } else { (vec![EMPTY; SETS], vec![blank; SETS]) };
@@ -510,6 +593,7 @@ impl ICache {
 
     pub fn clear(&mut self) {
         self.hot.iter_mut().for_each(|e| *e = EMPTY);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Makes `run_block` stop before each of `pcs` (in read-only ranges), so
@@ -572,6 +656,123 @@ impl ICache {
             }
             None => (decode.take().unwrap())(),
         }
+    }
+}
+
+/// One instruction of a block: its pre-digested form, and what the batched
+/// loop may skip for it because the instruction before it in the block ran
+/// just before.
+#[derive(Clone, Copy, Debug)]
+pub struct Entry {
+    pub hot: Hot,
+    /// Its fetch must be timed in full (`Bus::instruction`): first of its
+    /// block, or on another 16-byte line than the end of the one before, or
+    /// across two lines. Otherwise it is on the line the instruction before
+    /// it (run just before, in this block) ended on, which its fetch put in
+    /// the code cache: only arming the timing is left
+    /// (`Bus::instruction_same_line`).
+    pub fetch: bool,
+    /// Can end the batch through the bus (`Bus::block_exit`): it accesses
+    /// memory or devices, or reads instruction memory (BLcc.D, general).
+    pub bus_exit: bool,
+}
+
+/// A run of instructions in read-only code, from `start`, that the batched
+/// loop executes in order while each one falls through to the next.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockHead {
+    pub start: u32,
+    pub first: u32,
+    pub len: u32,
+    /// Address of the last instruction (the fence check).
+    pub last: u32,
+}
+
+/// The block cache: blocks of `Hot` forms built from the `ICache`'s ROM
+/// ranges and stops, stored back to back (speed only; dropped when the
+/// `ICache` changes). A block ends after a branch, jump, LP, FLAG or SR and
+/// before any instruction left to `step` or with a register FLAG.
+#[derive(Clone, Default)]
+pub struct Blocks {
+    /// Per slot ((pc >> 1) & (SETS - 1)): index + 1 into `heads`, 0 = none.
+    index: Vec<u32>,
+    pub heads: Vec<BlockHead>,
+    pub entries: Vec<Entry>,
+    generation: u32,
+}
+
+/// Longest block, and the entries kept before the cache starts over.
+const BLOCK_MAX: usize = 48;
+const ENTRIES_MAX: usize = 1 << 19;
+
+impl Blocks {
+    fn reset(&mut self, generation: u32) {
+        if self.index.is_empty() {
+            self.index = vec![0; SETS];
+        } else {
+            self.index.iter_mut().for_each(|i| *i = 0);
+        }
+        self.heads.clear();
+        self.entries.clear();
+        self.generation = generation;
+    }
+
+    /// The block starting at `pc`, built on a miss; None when `pc` is not in
+    /// a ROM range or its instruction cannot start a block.
+    #[inline(always)]
+    pub fn find(&mut self, cache: &ICache, pc: u32, decode: impl FnMut(u32) -> Instr) -> Option<BlockHead> {
+        if self.generation != cache.generation || self.index.is_empty() {
+            self.reset(cache.generation);
+        }
+        let slot = (pc as usize >> 1) & (SETS - 1);
+        let id = self.index[slot];
+        if id != 0 {
+            let h = self.heads[id as usize - 1];
+            if h.start == pc {
+                return Some(h);
+            }
+        }
+        self.build(cache, pc, slot, decode)
+    }
+
+    #[inline(never)]
+    fn build(&mut self, cache: &ICache, pc: u32, slot: usize, mut decode: impl FnMut(u32) -> Instr) -> Option<BlockHead> {
+        if cache.hot.is_empty() {
+            return None;
+        }
+        if self.entries.len() + BLOCK_MAX > ENTRIES_MAX {
+            self.reset(cache.generation);
+        }
+        let first = self.entries.len();
+        let (mut at, mut last) = (pc, pc);
+        // The end of the previous instruction's fetch (its last byte's line).
+        let mut prev_line = None;
+        while self.entries.len() - first < BLOCK_MAX && cache.cacheable(at) {
+            let i = decode(at);
+            let mut hot = Hot::of(&i);
+            hot.stop |= cache.stops.contains(&at);
+            if hot.stop || hot.flag_reg != NO_REG {
+                break;
+            }
+            let end_line = hot.next.wrapping_sub(1) >> 4;
+            let fetch = prev_line != Some(at >> 4) || end_line != at >> 4;
+            let bus_exit = hot.fast.accesses_memory() || matches!(hot.fast, Fast::General | Fast::BlD { .. } | Fast::JlD { .. });
+            self.entries.push(Entry { hot, fetch, bus_exit });
+            last = at;
+            prev_line = Some(end_line);
+            if hot.branchy || hot.recheck {
+                break;
+            }
+            at = hot.next;
+        }
+        let len = self.entries.len() - first;
+        if len == 0 {
+            return None;
+        }
+        let head = BlockHead { start: pc, first: first as u32, len: len as u32, last };
+        self.heads.push(head);
+        self.index[slot] = self.heads.len() as u32;
+        Some(head)
     }
 }
 

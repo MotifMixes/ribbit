@@ -57,19 +57,10 @@ impl Cache {
     fn find(&self, addr: u32) -> Option<usize> {
         let (tag, set) = (addr >> 4 | VALID, (addr >> 4) as usize % SETS);
         let ways: &[u32; WAYS] = self.tags[set * WAYS..set * WAYS + WAYS].try_into().unwrap();
-        let hit = |w: usize| ways[w] & !DIRTY == tag;
-        // Unrolled (the iterator form was a loop with a bounds check per way).
-        if hit(0) {
-            Some(set * WAYS)
-        } else if hit(1) {
-            Some(set * WAYS + 1)
-        } else if hit(2) {
-            Some(set * WAYS + 2)
-        } else if hit(3) {
-            Some(set * WAYS + 3)
-        } else {
-            None
-        }
+        let hit = |w: usize| (ways[w] & !DIRTY == tag) as u32;
+        // Which way, without a branch per way (a line is in one way at most).
+        let m = hit(0) | hit(1) << 1 | hit(2) << 2 | hit(3) << 3;
+        if m == 0 { None } else { Some(set * WAYS + m.trailing_zeros() as usize) }
     }
 
     /// Brings the line of `addr` in; returns its slot and whether the line
@@ -84,31 +75,6 @@ impl Cache {
         (i, evicted_dirty)
     }
 }
-
-/// The last line looked up in one cache and its slot (speed only): a hit
-/// changes no cache state and only that cache's own fills evict, so until
-/// its next fill the line is still at that slot. Not state: compares equal,
-/// not saved.
-#[derive(Debug, Clone, Copy)]
-struct LastLine {
-    /// Address >> 4 (u32::MAX: none).
-    line: u32,
-    slot: usize,
-}
-
-impl Default for LastLine {
-    fn default() -> Self {
-        Self { line: u32::MAX, slot: 0 }
-    }
-}
-
-impl PartialEq for LastLine {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl Eq for LastLine {}
 
 /// Cost of filling a line at `addr` from its memory.
 fn fill_cost(addr: u32) -> u64 {
@@ -136,11 +102,6 @@ pub struct MemTiming {
     /// idle fast-forward: an iteration that missed is not repeatable).
     #[serde(skip)]
     pub misses: [u64; 3],
-    #[serde(skip)]
-    last_code: LastLine,
-    /// The last two data lines (a copy loop alternates between two).
-    #[serde(skip)]
-    last_data: [LastLine; 2],
 }
 
 impl Default for MemTiming {
@@ -152,8 +113,6 @@ impl Default for MemTiming {
             armed: false,
             stall: 0,
             misses: [0; 3],
-            last_code: LastLine::default(),
-            last_data: [LastLine::default(); 2],
         }
     }
 }
@@ -173,20 +132,26 @@ impl MemTiming {
         }
     }
 
+    /// `instruction` for an instruction on the line the one just executed
+    /// ended on, not crossing out of it: that line is in the code cache (it
+    /// was just fetched; only code fills evict code lines, and a fetch that
+    /// crossed lines filled the two adjacent lines, which are in different
+    /// sets), so the fetch hits and changes nothing. What `instruction`
+    /// would do then.
+    #[inline(always)]
+    pub fn instruction_same_line(&mut self) {
+        if self.enabled {
+            self.armed = true;
+        }
+    }
+
     #[inline(always)]
     fn fetch(&mut self, addr: u32) {
-        if addr >> 4 == self.last_code.line {
-            return;
+        if self.code.find(addr).is_none() {
+            self.stall += fill_cost(addr);
+            self.misses[0] += 1;
+            self.code.fill(addr);
         }
-        let slot = match self.code.find(addr) {
-            Some(i) => i,
-            None => {
-                self.stall += fill_cost(addr);
-                self.misses[0] += 1;
-                self.code.fill(addr).0
-            }
-        };
-        self.last_code = LastLine { line: addr >> 4, slot };
     }
 
     /// A memory (not device) access by the executing instruction.
@@ -195,21 +160,10 @@ impl MemTiming {
         if !self.armed {
             return;
         }
-        let line = addr >> 4;
-        let slot = match self.last_data.iter().find(|l| l.line == line) {
-            Some(l) => Some(l.slot),
-            None => self.data.find(addr),
-        };
-        let slot = match slot {
+        let slot = match self.data.find(addr) {
             Some(i) => i,
             None => {
                 let (i, dirty) = self.data.fill(addr);
-                // That slot no longer holds the line remembered for it.
-                for l in &mut self.last_data {
-                    if l.slot == i {
-                        *l = LastLine::default();
-                    }
-                }
                 self.stall += fill_cost(addr);
                 self.misses[1] += 1;
                 if dirty {
@@ -219,9 +173,6 @@ impl MemTiming {
                 i
             }
         };
-        if self.last_data[0].line != line {
-            self.last_data = [LastLine { line, slot }, self.last_data[0]];
-        }
         if write {
             self.data.tags[slot] |= DIRTY;
         }
