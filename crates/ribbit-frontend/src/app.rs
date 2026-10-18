@@ -236,6 +236,14 @@ impl App {
             egui_ctx: {
                 let ctx = egui::Context::default();
                 crate::fonts::install(&ctx);
+                // Buttons keep their size when pointed at or pressed (egui
+                // grows them a pixel, so their text jumped).
+                ctx.all_styles_mut(|s| {
+                    let w = &mut s.visuals.widgets;
+                    for state in [&mut w.hovered, &mut w.active, &mut w.open] {
+                        state.expansion = 0.0;
+                    }
+                });
                 ctx
             },
             egui_state: None,
@@ -1091,6 +1099,7 @@ impl App {
                 self.rescan_library();
             }
             Action::RescanLibrary => self.rescan_library(),
+            Action::OpenFolder(path) => open_folder(&path),
             Action::RemakeArt(p) => {
                 self.library.forget_art(&p);
                 self.rescan_library();
@@ -2592,5 +2601,18 @@ fn explain_load_error(e: &anyhow::Error) -> (String, String) {
             "Couldn't unpack the zip file".to_string(),
             format!("\"{}\" is a .zip archive Ribbit couldn't unpack. It may be damaged or hold no game.", file_name(path)),
         ),
+    }
+}
+
+/// Shows a folder in the system's file manager.
+fn open_folder(path: &Path) {
+    #[cfg(windows)]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let program = "xdg-open";
+    if let Err(e) = std::process::Command::new(program).arg(path).spawn() {
+        tracing::warn!(target: "ribbit::ui", %e, path = %path.display(), "could not open the folder");
     }
 }

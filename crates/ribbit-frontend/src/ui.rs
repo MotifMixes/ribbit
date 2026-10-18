@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Pick(Pick),
+    /// Show this folder in the system's file manager.
+    OpenFolder(PathBuf),
     OpenCartridge(PathBuf),
     /// A game chosen in the library (on the console chosen in its menu).
     PlayFromLibrary(PathBuf),
@@ -1643,9 +1645,7 @@ fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, ta
         {
             actions.push(Action::RescanLibrary);
         }
-        if primary_button(ui, "➕  Add games folder", egui::vec2(0.0, 32.0)).clicked() {
-            actions.push(Action::Pick(Pick::RomFolder));
-        }
+        games_folder_button(ui, settings, actions);
         if ui.add(egui::Button::new("Open Cartridge…").corner_radius(8).min_size(egui::vec2(0.0, 32.0))).clicked() {
             actions.push(Action::Pick(Pick::Cartridge));
         }
@@ -1777,6 +1777,38 @@ fn bios_picker(ui: &mut egui::Ui, settings: &Settings, library: &Library, action
             })
             .response
             .on_hover_text(format!("The {} BIOS your games play on", console.name()));
+    });
+}
+
+/// "Add games folder" until there is one; then "Open games folder", which
+/// shows it in the file manager (with several, a menu of them). More are
+/// added from File › Games Folders.
+fn games_folder_button(ui: &mut egui::Ui, settings: &Settings, actions: &mut Vec<Action>) {
+    let folders = &settings.rom_folders;
+    if folders.is_empty() {
+        if primary_button(ui, "➕  Add games folder", egui::vec2(0.0, 32.0)).clicked() {
+            actions.push(Action::Pick(Pick::RomFolder));
+        }
+        return;
+    }
+    let r = primary_button(ui, "📂  Open games folder", egui::vec2(0.0, 32.0));
+    if let [only] = folders.as_slice() {
+        if r.on_hover_text(format!("{}
+(Add more in File › Games Folders)", only.display())).clicked() {
+            actions.push(Action::OpenFolder(only.clone()));
+        }
+        return;
+    }
+    egui::Popup::menu(&r).show(|ui| {
+        for f in folders {
+            if ui.button(f.display().to_string()).clicked() {
+                actions.push(Action::OpenFolder(f.clone()));
+            }
+        }
+        ui.separator();
+        if ui.button("Add games folder…").clicked() {
+            actions.push(Action::Pick(Pick::RomFolder));
+        }
     });
 }
 
