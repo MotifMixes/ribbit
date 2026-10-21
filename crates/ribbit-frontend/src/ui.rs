@@ -936,13 +936,15 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::SettingsChanged);
         }
         ui.add_enabled_ui(settings.turn_off_when_idle, |ui| {
-            if ui
-                .checkbox(&mut settings.flash_before_idle_off, "    Flash taskbar before turning off")
-                .on_hover_text("Flash Ribbit's taskbar button in the last minute. On Windows this also shows an auto-hidden taskbar until you click Ribbit.")
-                .changed()
-            {
-                actions.push(Action::SettingsChanged);
-            }
+            ui.indent("flash_indent", |ui| {
+                if ui
+                    .checkbox(&mut settings.flash_before_idle_off, "Flash taskbar before turning off")
+                    .on_hover_text("Flash Ribbit's taskbar button in the last minute. On Windows this also shows an auto-hidden taskbar until you click Ribbit.")
+                    .changed()
+                {
+                    actions.push(Action::SettingsChanged);
+                }
+            });
         });
         if ui
             .checkbox(&mut settings.pause_in_background, "Pause in background")
@@ -1015,10 +1017,14 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 actions.push(Action::SettingsChanged);
             }
         });
-        ui.separator();
-        if ui.add_enabled(info.running, egui::Button::new("🔍  Cheat / Memory Search…")).clicked() {
+    });
+    top_menu(ui, rows, "🔍", "Cheats", |ui| {
+        if ui.add_enabled(info.running, egui::Button::new("Memory Search…")).clicked() {
             st.show_cheat = true;
             ui.close();
+        }
+        if !info.running {
+            ui.label(egui::RichText::new("Start a game to use cheats").weak());
         }
     });
     top_menu(ui, rows, "🖥", "Video", |ui| {
