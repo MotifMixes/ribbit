@@ -4,7 +4,7 @@
 use crate::gpu::Display;
 use ribbit_input::Button;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use winit::keyboard::KeyCode;
 
@@ -12,6 +12,13 @@ pub const MAX_RECENT: usize = 8;
 
 fn default_true() -> bool {
     true
+}
+
+/// A user-made folder grouping library games.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct LibraryFolder {
+    pub name: String,
+    pub games: Vec<PathBuf>,
 }
 
 /// Screen recording encoder preset.
@@ -158,6 +165,13 @@ pub struct Settings {
     /// library (save is always done first; skipped if a save state was loaded).
     #[serde(default = "default_true")]
     pub close_with_shutdown: bool,
+    /// Favorited games (paths), in the order they were starred.
+    pub favorites: Vec<PathBuf>,
+    /// Tabs where "Internal" (built-in) games are hidden; key is the tab name
+    /// ("all", "Leapster", "Leapster 2", …).
+    pub hide_builtin_tabs: BTreeSet<String>,
+    /// User-made folders grouping library games.
+    pub folders: Vec<LibraryFolder>,
 }
 
 impl Default for Settings {
@@ -211,6 +225,9 @@ impl Default for Settings {
             record_encoder: RecordEncoder::H264,
             record_folder: None,
             close_with_shutdown: true,
+            favorites: Vec::new(),
+            hide_builtin_tabs: BTreeSet::new(),
+            folders: Vec::new(),
         }
     }
 }

@@ -82,6 +82,25 @@ pub enum Action {
     /// Unfreeze this address.
     CheatUnfreeze(u32),
     Quit,
+    /// Star or unstar a game.
+    ToggleFavorite(PathBuf),
+    /// Toggle visibility of "Internal" (built-in) games for this tab
+    /// (None = "All games").
+    ToggleBuiltinGames(Option<Family>),
+    /// Create a new folder with these games (immediately shows rename dialog).
+    CreateFolder(Vec<PathBuf>),
+    /// Navigate into a library folder by index.
+    OpenLibraryFolder(usize),
+    /// Return to the main library from an open folder.
+    CloseLibraryFolder,
+    /// Rename the folder at this index.
+    RenameFolder { idx: usize, name: String },
+    /// Delete the folder at this index (games stay in the library).
+    DeleteFolder(usize),
+    /// Add a game to an existing folder.
+    AddToFolder { folder: usize, game: PathBuf },
+    /// Remove a game from a folder.
+    RemoveFromFolder { folder: usize, game: PathBuf },
 }
 
 pub const STATE_SLOTS: u8 = 5;
@@ -183,6 +202,10 @@ pub struct UiState {
     pub cheat_op: crate::cheat::SearchOp,
     /// Cheat search: value width.
     pub cheat_ty: crate::cheat::ValueType,
+    /// The folder currently being renamed (index into settings.folders).
+    pub renaming_folder: Option<usize>,
+    /// Text in the rename-folder input.
+    pub rename_text: String,
 }
 
 /// What the library shows.
@@ -198,6 +221,10 @@ pub struct LibraryView {
     /// The finger touched down with the list at its top (only then does a
     /// pull count).
     pub pull_armed: bool,
+    /// Show only favorited games (the ★ Favorites tab).
+    pub favorites_only: bool,
+    /// A library folder is open: its index in settings.folders.
+    pub open_folder: Option<usize>,
 }
 
 const TOAST_TIME: Duration = Duration::from_millis(4000);
@@ -607,7 +634,14 @@ fn idle_countdown(ui: &egui::Ui, area: egui::Rect, left: u32) {
 /// The library's pages: all games, then each console that is here and has
 /// games (all the Leapster models share one page; the Leapster 2's page has
 /// the games for it alone). The console is chosen in the header's menu.
-fn console_tabs(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: &mut Option<Family>, actions: &mut Vec<Action>) {
+fn console_tabs(
+    ui: &mut egui::Ui,
+    settings: &Settings,
+    library: &Library,
+    tab: &mut Option<Family>,
+    favorites_only: &mut bool,
+    actions: &mut Vec<Action>,
+) {
     let count = |f: Option<Family>| library.games.iter().filter(|g| f.is_none_or(|f| f.lists(g.family))).count();
     // A page for each console that is here and has games.
     let families: Vec<Family> = Family::ALL
@@ -617,13 +651,14 @@ fn console_tabs(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: 
     if tab.is_some_and(|t| !families.contains(&t)) {
         *tab = None;
     }
-    // Tabs: a label each over a shared rule; the open one in the accent
-    // colour with a bar under it.
+    let fav_count = settings.favorites.iter().filter(|p| library.games.iter().any(|g| &g.path == *p)).count();
+    // Tabs: a label each over a shared rule; the open one in the accent colour.
     let top = ui.cursor().min.y;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(26.0, 6.0);
+        // Regular family tabs (None = All games).
         for choice in std::iter::once(None).chain(families.into_iter().map(Some)) {
-            let selected = *tab == choice;
+            let selected = !*favorites_only && *tab == choice;
             let name = choice.map_or("All games", Family::name);
             let font = egui::FontId::proportional(16.0);
             let name_g = ui.painter().layout_no_wrap(name.to_string(), font.clone(), egui::Color32::WHITE);
@@ -632,13 +667,7 @@ fn console_tabs(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: 
             let size = egui::vec2(name_g.size().x + 6.0 + count_g.size().x, 34.0);
             let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-            let fg = if selected {
-                ACCENT
-            } else if resp.hovered() {
-                egui::Color32::from_gray(240)
-            } else {
-                egui::Color32::from_gray(165)
-            };
+            let fg = if selected { ACCENT } else if resp.hovered() { egui::Color32::from_gray(240) } else { egui::Color32::from_gray(165) };
             let p = ui.painter();
             let y = rect.top() + 4.0;
             p.galley(egui::pos2(rect.left(), y), name_g.clone(), fg);
@@ -649,9 +678,8 @@ fn console_tabs(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: 
                 p.rect_filled(bar, 2.0, ACCENT);
             }
             if resp.clicked() {
+                *favorites_only = false;
                 *tab = choice;
-                // A page whose games the chosen console can't play switches
-                // to the page's console.
                 let console = library.selected_console(&settings.library_console);
                 if let Some(f) = choice
                     && !f.runs_on(console)
@@ -659,6 +687,30 @@ fn console_tabs(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: 
                 {
                     actions.push(Action::SetLibraryConsole(f.console()));
                 }
+            }
+        }
+        // ★ Favorites tab (only when there are any).
+        if fav_count > 0 {
+            let selected = *favorites_only;
+            let font = egui::FontId::proportional(16.0);
+            let name_g = ui.painter().layout_no_wrap("★ Favorites".to_string(), font, egui::Color32::WHITE);
+            let count_g = ui.painter().layout_no_wrap(fav_count.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+            let size = egui::vec2(name_g.size().x + 6.0 + count_g.size().x, 34.0);
+            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let fg = if selected { ACCENT } else if resp.hovered() { egui::Color32::from_gray(240) } else { egui::Color32::from_gray(165) };
+            let p = ui.painter();
+            let y = rect.top() + 4.0;
+            p.galley(egui::pos2(rect.left(), y), name_g.clone(), fg);
+            let count_pos = egui::pos2(rect.left() + name_g.size().x + 6.0, y + name_g.size().y - count_g.size().y - 1.0);
+            p.galley(count_pos, count_g, fg.gamma_multiply(0.7));
+            if selected {
+                let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom());
+                p.rect_filled(bar, 2.0, ACCENT);
+            }
+            if resp.clicked() {
+                *favorites_only = true;
+                *tab = None;
             }
         }
     });
@@ -1568,7 +1620,7 @@ fn library_screen(
     since: Instant,
     actions: &mut Vec<Action>,
 ) {
-    let LibraryView { tab, search, pull, pull_armed } = view;
+    let LibraryView { tab, search, pull, pull_armed, favorites_only, open_folder } = view;
     let ctx = ui.ctx().clone();
     for g in &mut library.games {
         if let Art::Image(img) = &g.art {
@@ -1591,9 +1643,15 @@ fn library_screen(
             empty_library(ui, settings, actions);
             return;
         }
+        // Non-floating bar: reserves its own column so it never covers the
+        // game cards. Fixed bar_width so it stays the same size on hover.
+        {
+            let sc = &mut ui.style_mut().spacing.scroll;
+            sc.floating = false;
+            sc.bar_width = 8.0;
+        }
         let out = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
             if phone {
                 pull_to_refresh_hint(ui, *pull);
@@ -1615,17 +1673,27 @@ fn library_screen(
                 hero(ui, game, actions);
                 ui.add_space(28.0);
             }
-            console_tabs(ui, settings, library, tab, actions);
+            console_tabs(ui, settings, library, tab, favorites_only, actions);
             ui.add_space(14.0);
             let query = search.trim().to_lowercase();
             let matches = |g: &crate::library::Game| {
                 query.is_empty() || g.title.to_lowercase().contains(&query) || g.subtitle.to_lowercase().contains(&query)
             };
-            let shown_games: Vec<&crate::library::Game> =
-                library.games.iter().filter(|g| tab.is_none_or(|f| f.lists(g.family)) && matches(g)).collect();
-            let heading = match tab {
-                None => "ALL GAMES".to_string(),
-                Some(f) => f.name().to_uppercase(),
+            let tab_name = tab.map_or("all", |f| f.name());
+            let shown_games: Vec<&crate::library::Game> = library.games.iter().filter(|g| {
+                if !tab.is_none_or(|f| f.lists(g.family)) { return false; }
+                if !matches(g) { return false; }
+                if *favorites_only && !settings.favorites.contains(&g.path) { return false; }
+                if g.tags.contains(&"Internal") && settings.hide_builtin_tabs.contains(tab_name) { return false; }
+                true
+            }).collect();
+            let heading = if *favorites_only {
+                "FAVORITES".to_string()
+            } else {
+                match tab {
+                    None => "ALL GAMES".to_string(),
+                    Some(f) => f.name().to_uppercase(),
+                }
             };
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("{heading}  ·  {}", shown_games.len())).size(13.0).strong().color(ACCENT));
@@ -1643,20 +1711,71 @@ fn library_screen(
                     if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         search.clear();
                     }
+                    // Built-in toggle: only when the current tab has Internal games.
+                    let tab_has_builtins = library.games.iter().any(|g| {
+                        g.tags.contains(&"Internal") && tab.is_none_or(|f| f.lists(g.family))
+                    });
+                    if tab_has_builtins && !*favorites_only {
+                        let hidden = settings.hide_builtin_tabs.contains(tab_name);
+                        let label = if hidden { "Built-in: hidden" } else { "Built-in: shown" };
+                        if ui.add(egui::Button::new(egui::RichText::new(label).size(11.0)).frame(true)).clicked() {
+                            actions.push(Action::ToggleBuiltinGames(*tab));
+                        }
+                    }
                 });
             });
             ui.add_space(12.0);
+            // Folder cards (skip when inside an open folder or showing favorites).
+            if open_folder.is_none() && !*favorites_only && !settings.folders.is_empty() {
+                let avail = ui.available_width();
+                let fcols = (((avail + card_gap) / (card_width + card_gap)).floor() as usize).max(1);
+                let fc_w = ((avail - card_gap * (fcols - 1) as f32) / fcols as f32).floor().min(card_width * 1.4);
+                let folders_snapshot: Vec<(usize, String)> = settings.folders.iter().enumerate().map(|(i, f)| (i, f.name.clone())).collect();
+                for row in folders_snapshot.chunks(fcols) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = card_gap;
+                        for &(idx, ref name) in row {
+                            let art_paths: Vec<std::path::PathBuf> = settings.folders[idx].games.iter().take(4).cloned().collect();
+                            let art_games: Vec<&crate::library::Game> = art_paths.iter()
+                                .filter_map(|p| library.games.iter().find(|g| &g.path == p))
+                                .collect();
+                            folder_card(ui, idx, name, &art_games, fc_w, actions);
+                        }
+                    });
+                    ui.add_space(card_gap);
+                }
+                ui.add_space(4.0);
+            }
+            // "← Back" breadcrumb when inside an open folder.
+            if let Some(folder_idx) = open_folder {
+                if let Some(folder) = settings.folders.get(*folder_idx) {
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new("← Back").frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            actions.push(Action::CloseLibraryFolder);
+                        }
+                        ui.label(egui::RichText::new(&folder.name).size(14.0).strong());
+                    });
+                    ui.add_space(8.0);
+                }
+            }
             if shown_games.is_empty() && !query.is_empty() {
                 ui.add_space(30.0);
                 ui.vertical_centered(|ui| {
                     ui.label(egui::RichText::new(format!("No games match \"{}\"", search.trim())).size(16.0).weak());
                 });
             }
+            // When in an open folder, filter to just that folder's games.
+            let folder_games: Option<Vec<&crate::library::Game>> = open_folder.and_then(|idx| {
+                settings.folders.get(idx).map(|f| {
+                    shown_games.iter().copied().filter(|g| f.games.contains(&g.path)).collect()
+                })
+            });
+            let display_games = folder_games.as_deref().unwrap_or(shown_games.as_slice());
             let avail = ui.available_width();
             let cols = (((avail + card_gap) / (card_width + card_gap)).floor() as usize).max(1);
             let card_w = ((avail - card_gap * (cols - 1) as f32) / cols as f32).floor().min(card_width * 1.4);
             let shown = since.elapsed().as_secs_f32();
-            for (r, row) in shown_games.chunks(cols).enumerate() {
+            for (r, row) in display_games.chunks(cols).enumerate() {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = card_gap;
                     for (c, game) in row.iter().enumerate() {
@@ -1666,7 +1785,9 @@ fn library_screen(
                         if t < 1.0 {
                             ui.ctx().request_repaint();
                         }
-                        game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), actions);
+                        let is_fav = settings.favorites.contains(&game.path);
+                        let in_folder = open_folder.and_then(|i| settings.folders.get(i)).map_or(false, |f| f.games.contains(&game.path));
+                        game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, in_folder, actions);
                     }
                 });
                 ui.add_space(card_gap);
@@ -2247,8 +2368,80 @@ const CARD_GROW: f32 = 0.28;
 /// within about half a second).
 const CARD_STAGGER_MAX: usize = 12;
 
+/// A folder tile: 2×2 art thumbnails, folder name, open/delete.
+fn folder_card(ui: &mut egui::Ui, idx: usize, name: &str, art_games: &[&crate::library::Game], w: f32, actions: &mut Vec<Action>) {
+    let pad = 10.0;
+    let inner_w = w - 2.0 * pad;
+    let label_h = 32.0;
+    let h = pad + inner_w + 8.0 + label_h + pad;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let resp = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let lift = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let card = rect.translate(egui::vec2(0.0, -4.0 * lift));
+    let p = ui.painter();
+    let shadow = egui::epaint::Shadow {
+        offset: [0, (4.0 + 6.0 * lift) as i8],
+        blur: (12.0 + 14.0 * lift) as u8,
+        spread: 0,
+        color: egui::Color32::from_black_alpha(80 + (50.0 * lift) as u8),
+    };
+    p.add(shadow.as_shape(card, 14));
+    p.rect_filled(card, 14, egui::Color32::from_rgb(28, 34, 28).lerp_to_gamma(egui::Color32::from_rgb(36, 44, 36), lift));
+    p.rect_stroke(card, 14, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(18 + (20.0 * lift) as u8)), egui::StrokeKind::Inside);
+    // 2×2 thumbnail grid inside the art area.
+    let art_area = egui::Rect::from_min_size(card.min + egui::vec2(pad, pad), egui::vec2(inner_w, inner_w));
+    let half = (inner_w - 4.0) / 2.0;
+    let quads = [
+        egui::Rect::from_min_size(art_area.min, egui::vec2(half, half)),
+        egui::Rect::from_min_size(egui::pos2(art_area.min.x + half + 4.0, art_area.min.y), egui::vec2(half, half)),
+        egui::Rect::from_min_size(egui::pos2(art_area.min.x, art_area.min.y + half + 4.0), egui::vec2(half, half)),
+        egui::Rect::from_min_size(egui::pos2(art_area.min.x + half + 4.0, art_area.min.y + half + 4.0), egui::vec2(half, half)),
+    ];
+    for (i, quad) in quads.iter().enumerate() {
+        if let Some(game) = art_games.get(i) {
+            paint_art(ui, game, *quad, 8);
+        } else {
+            ui.painter().rect_filled(*quad, 8, egui::Color32::from_white_alpha(8));
+        }
+    }
+    // Folder name.
+    let name_pos = egui::pos2(card.min.x + pad, art_area.max.y + 8.0);
+    let mut job = egui::text::LayoutJob::simple(name.to_string(), egui::FontId::proportional(14.0), egui::Color32::WHITE, inner_w - 24.0);
+    job.wrap.max_rows = 1;
+    let name_g = ui.painter().layout_job(job);
+    ui.painter().galley(name_pos, name_g, egui::Color32::WHITE);
+    // Delete button (×) at the right end.
+    let del_rect = egui::Rect::from_min_size(
+        egui::pos2(card.max.x - pad - 18.0, art_area.max.y + 6.0),
+        egui::vec2(18.0, 20.0),
+    );
+    let del_id = resp.id.with("del");
+    let del_resp = ui.interact(del_rect, del_id, egui::Sense::click());
+    let del_color = if del_resp.hovered() { egui::Color32::from_rgb(235, 87, 80) } else { egui::Color32::from_gray(110) };
+    ui.painter().text(del_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(16.0), del_color);
+    if del_resp.clicked() {
+        actions.push(Action::DeleteFolder(idx));
+    } else if resp.clicked() {
+        actions.push(Action::OpenLibraryFolder(idx));
+    }
+    resp.context_menu(|ui| {
+        if ui.button("Open folder").clicked() {
+            actions.push(Action::OpenLibraryFolder(idx));
+            ui.close();
+        }
+        if ui.button("Rename folder…").clicked() {
+            actions.push(Action::RenameFolder { idx, name: String::new() });
+            ui.close();
+        }
+        if ui.button(egui::RichText::new("Delete folder").color(egui::Color32::from_rgb(235, 87, 80))).clicked() {
+            actions.push(Action::DeleteFolder(idx));
+            ui.close();
+        }
+    });
+}
+
 /// `appear`: 0 to 1 as the card grows in (smaller and transparent at 0).
-fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, actions: &mut Vec<Action>) {
+fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, is_fav: bool, in_folder: bool, actions: &mut Vec<Action>) {
     let pad = 10.0;
     let inner_w = w - 2.0 * pad;
     let (name, region) = split_region(&game.title);
@@ -2291,6 +2484,35 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.painter().rect_filled(art, 10, egui::Color32::from_black_alpha((70.0 * lift) as u8));
         paint_play(ui.painter(), art.center(), 30.0, lift);
     }
+    // Star button — top-right corner of the art area.
+    let star_size = 22.0;
+    let star_rect = egui::Rect::from_min_size(
+        egui::pos2(art.max.x - star_size - 4.0, art.min.y + 4.0),
+        egui::vec2(star_size, star_size),
+    );
+    let star_id = response.id.with("star");
+    let star_resp = ui.interact(star_rect, star_id, egui::Sense::click());
+    let star_hovered = star_resp.hovered();
+    let star_char = if is_fav { "★" } else { "☆" };
+    let star_color = if is_fav {
+        ACCENT
+    } else if star_hovered {
+        egui::Color32::from_white_alpha(180)
+    } else {
+        egui::Color32::from_white_alpha(0)
+    };
+    if is_fav || star_hovered {
+        ui.painter().text(
+            star_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            star_char,
+            egui::FontId::proportional(16.0),
+            star_color,
+        );
+    }
+    if star_resp.clicked() {
+        actions.push(Action::ToggleFavorite(game.path.clone()));
+    }
     let p = ui.painter();
     let at = egui::pos2(card.min.x + pad, art.max.y + 12.0);
     p.galley(at, title, egui::Color32::WHITE);
@@ -2330,14 +2552,27 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
     if response.clicked() {
         actions.push(Action::PlayFromLibrary(game.path.clone()));
     }
+    let game_path = game.path.clone();
     response.context_menu(|ui| {
         if ui.button("▶ Play").clicked() {
-            actions.push(Action::PlayFromLibrary(game.path.clone()));
+            actions.push(Action::PlayFromLibrary(game_path.clone()));
             ui.close();
         }
         if ui.button("Get title screen again").clicked() {
-            actions.push(Action::RemakeArt(game.path.clone()));
+            actions.push(Action::RemakeArt(game_path.clone()));
             ui.close();
+        }
+        ui.separator();
+        let fav_label = if is_fav { "✕ Remove from favorites" } else { "★ Add to favorites" };
+        if ui.button(fav_label).clicked() {
+            actions.push(Action::ToggleFavorite(game_path.clone()));
+            ui.close();
+        }
+        if in_folder {
+            if ui.button("Remove from folder").clicked() {
+                actions.push(Action::RemoveFromFolder { folder: usize::MAX, game: game_path.clone() });
+                ui.close();
+            }
         }
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a
@@ -2351,13 +2586,58 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
             .on_hover_text("Removes this game's progress, profiles and save states")
             .on_disabled_hover_text("This console's saves belong to the whole console, not one game");
         if delete.clicked() {
-            actions.push(Action::AskDeleteSave(game.path.clone(), game.title.clone()));
+            actions.push(Action::AskDeleteSave(game_path.clone(), game.title.clone()));
             ui.close();
         }
     });
 }
 
 /// "Delete save data for <title>?" Delete / Cancel.
+/// Rename folder dialog. Returns Some(Some(action)) for commit, Some(None) for cancel, None while open.
+fn rename_folder_dialog(ctx: &egui::Context, idx: usize, text: &mut String) -> Option<Option<Action>> {
+    let screen = ctx.content_rect();
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("rename_folder_dim")))
+        .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
+    let mut answer: Option<Option<Action>> = None;
+    egui::Area::new(egui::Id::new("rename_folder"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(24, 27, 30))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(30)))
+                .corner_radius(14)
+                .inner_margin(egui::Margin::symmetric(26, 22))
+                .shadow(egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(140) })
+                .show(ui, |ui| {
+                    ui.set_width(300.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("Rename folder").size(18.0).strong().color(egui::Color32::WHITE));
+                    });
+                    ui.add_space(14.0);
+                    let field = ui.add(
+                        egui::TextEdit::singleline(text)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::vec2(10.0, 6.0)),
+                    );
+                    field.request_focus();
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.add_sized([120.0, 34.0], egui::Button::new("OK")).clicked() || enter;
+                        let cancel = ui.add_sized([100.0, 34.0], egui::Button::new("Cancel").frame(false)).clicked() || escape;
+                        if ok && !text.trim().is_empty() {
+                            answer = Some(Some(Action::RenameFolder { idx, name: text.trim().to_string() }));
+                        } else if cancel {
+                            answer = Some(None);
+                        }
+                    });
+                });
+        });
+    answer
+}
+
 fn delete_save_prompt(ctx: &egui::Context, path: &std::path::Path, title: &str) -> Option<Option<Action>> {
     let screen = ctx.content_rect();
     ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("delete_save_dim")))
@@ -2607,6 +2887,19 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
     {
         st.delete_save = None;
         actions.extend(answer);
+    }
+
+    if let Some(idx) = st.renaming_folder {
+        match rename_folder_dialog(ctx, idx, &mut st.rename_text) {
+            Some(Some(action)) => {
+                st.renaming_folder = None;
+                actions.push(action);
+            }
+            Some(None) => {
+                st.renaming_folder = None;
+            }
+            None => {}
+        }
     }
 
     if let Some(problem) = st.error.clone()

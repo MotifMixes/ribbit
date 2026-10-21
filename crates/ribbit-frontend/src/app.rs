@@ -1255,6 +1255,79 @@ impl App {
                 self.cheat.add_freeze(addr, val, label);
             }
             Action::CheatUnfreeze(addr) => self.cheat.remove_freeze(addr),
+            Action::ToggleFavorite(path) => {
+                if let Some(i) = self.settings.favorites.iter().position(|p| p == &path) {
+                    self.settings.favorites.remove(i);
+                } else {
+                    self.settings.favorites.push(path);
+                }
+                self.save_settings();
+            }
+            Action::ToggleBuiltinGames(tab) => {
+                let name = tab.map_or_else(|| "all".to_string(), |f| f.name().to_string());
+                if !self.settings.hide_builtin_tabs.remove(&name) {
+                    self.settings.hide_builtin_tabs.insert(name);
+                }
+                self.save_settings();
+            }
+            Action::CreateFolder(games) => {
+                self.settings.folders.push(crate::settings::LibraryFolder {
+                    name: "New Folder".to_string(),
+                    games,
+                });
+                self.save_settings();
+                let idx = self.settings.folders.len() - 1;
+                self.ui.renaming_folder = Some(idx);
+                self.ui.rename_text = "New Folder".to_string();
+            }
+            Action::OpenLibraryFolder(i) => {
+                self.ui.library.open_folder = Some(i);
+            }
+            Action::CloseLibraryFolder => {
+                self.ui.library.open_folder = None;
+            }
+            Action::RenameFolder { idx, name } => {
+                if name.is_empty() {
+                    // Empty name = open the rename dialog for this folder.
+                    let current = self.settings.folders.get(idx).map_or("", |f| f.name.as_str()).to_string();
+                    self.ui.renaming_folder = Some(idx);
+                    self.ui.rename_text = current;
+                } else {
+                    if let Some(f) = self.settings.folders.get_mut(idx) {
+                        f.name = name;
+                    }
+                    self.save_settings();
+                    self.ui.renaming_folder = None;
+                }
+            }
+            Action::DeleteFolder(idx) => {
+                if idx < self.settings.folders.len() {
+                    self.settings.folders.remove(idx);
+                }
+                self.save_settings();
+                if self.ui.library.open_folder == Some(idx) {
+                    self.ui.library.open_folder = None;
+                }
+            }
+            Action::AddToFolder { folder, game } => {
+                if let Some(f) = self.settings.folders.get_mut(folder) {
+                    if !f.games.contains(&game) {
+                        f.games.push(game);
+                    }
+                }
+                self.save_settings();
+            }
+            Action::RemoveFromFolder { folder, game } => {
+                if folder == usize::MAX {
+                    // Sentinel: remove from whichever folder contains the game.
+                    for f in &mut self.settings.folders {
+                        f.games.retain(|g| *g != game);
+                    }
+                } else if let Some(f) = self.settings.folders.get_mut(folder) {
+                    f.games.retain(|g| *g != game);
+                }
+                self.save_settings();
+            }
         }
     }
 
