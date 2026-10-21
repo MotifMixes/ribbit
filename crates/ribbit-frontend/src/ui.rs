@@ -1,10 +1,11 @@
 //! Menus, dialogs and overlays (egui). The UI only reads state and emits
 //! `Action`s; `app.rs` performs them.
 
+use crate::cheat::{SearchOp, ValueType};
 use crate::files::{Browser, Pick};
 use crate::gpu::Display;
 use crate::library::{Art, Family, Library};
-use crate::settings::{self, BINDABLE, Settings};
+use crate::settings::{self, RecordEncoder, BINDABLE, Settings};
 use ribbit_input::Button;
 use ribbit_memory::known::Hardware;
 use std::path::PathBuf;
@@ -64,6 +65,22 @@ pub enum Action {
     ConsoleViewChanged,
     /// The update is installed: save, start the new version and quit.
     RestartForUpdate,
+    /// Start or stop screen recording.
+    ToggleRecord,
+    /// Choose the recording output folder.
+    PickRecordFolder,
+    /// Set the recording output folder.
+    SetRecordFolder(PathBuf),
+    /// First pass of the cheat / memory search.
+    CheatFirstScan,
+    /// Subsequent pass filtering the cheat candidates.
+    CheatNextScan,
+    /// Reset / clear the cheat search.
+    CheatReset,
+    /// Freeze address at its current value.
+    CheatFreeze(u32, u32),
+    /// Unfreeze this address.
+    CheatUnfreeze(u32),
     Quit,
 }
 
@@ -92,6 +109,16 @@ pub struct Info {
     pub zippity_on_home: bool,
     /// The running console has a console view (None: nothing running).
     pub console_view_available: Option<bool>,
+    /// A recording is in progress (duration so far in seconds).
+    pub recording: Option<u64>,
+    /// An encoding task is running in the background.
+    pub encoding: bool,
+    /// Cheat search candidates (addr, value), capped at 200 for display.
+    pub cheat_candidates: Vec<(u32, u32)>,
+    /// A cheat scan has been done (next-scan is available).
+    pub cheat_has_scan: bool,
+    /// Active freezes (addr, value, label).
+    pub cheat_freezes: Vec<(u32, u32, String)>,
 }
 
 /// Something that went wrong, as the error card shows it.
@@ -148,6 +175,14 @@ pub struct UiState {
     confirm_back: bool,
     /// Help › User Guide.
     pub manual: crate::manual::ManualState,
+    /// Whether the cheat / memory search panel is open.
+    pub show_cheat: bool,
+    /// Cheat search: typed value text.
+    pub cheat_value_text: String,
+    /// Cheat search: comparison operator.
+    pub cheat_op: crate::cheat::SearchOp,
+    /// Cheat search: value width.
+    pub cheat_ty: crate::cheat::ValueType,
 }
 
 /// What the library shows.
@@ -272,10 +307,14 @@ pub fn draw(
             Pick::RomFolder => Action::AddRomFolder(path),
             Pick::TwistContent => Action::SetTwistContent(Some(path)),
             Pick::TwistZip => Action::ImportTwistZip(path),
+            Pick::RecordFolder => Action::SetRecordFolder(path),
         });
     }
     if phone {
         side_menu(&ctx, st, settings, info, actions);
+    }
+    if st.show_cheat {
+        cheat_window(&ctx, st, info, actions);
     }
     // First start (an update from an older version too): the AI note as a
     // pop-up, read once. Android's quick start shows it as its first page.
@@ -488,6 +527,17 @@ fn side_menu_items(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings,
         if drawer_row(ui, "📷", "Screenshot", "", None, true) {
             actions.push(Action::Screenshot);
         }
+        let (rec_icon, rec_label, rec_detail) = match &info.recording {
+            Some(secs) => {
+                let m = secs / 60;
+                let s = secs % 60;
+                ("⏹", "Stop recording", format!("{m}:{s:02}"))
+            }
+            None => ("⏺", "Record", "".to_string()),
+        };
+        if !info.encoding && drawer_row(ui, rec_icon, rec_label, &rec_detail, None, true) {
+            actions.push(Action::ToggleRecord);
+        }
         drawer_section(ui, &format!("Speed · {:.0}% now", info.speed));
         speed_picker(ui, settings, actions);
     } else {
@@ -635,7 +685,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         if item(ui, "Open Cartridge…", "Ctrl+O") {
             actions.push(Action::Pick(Pick::Cartridge));
         }
-        ui.menu_button("Open Recent", |ui| {
+        sub_menu(ui, "Open Recent", |ui| {
             if settings.recent_carts.is_empty() {
                 ui.label(egui::RichText::new("(none yet)").weak());
             }
@@ -647,7 +697,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 }
             }
         });
-        ui.menu_button("Games Folders", |ui| {
+        sub_menu(ui, "Games Folders", |ui| {
             for f in settings.rom_folders.clone() {
                 let b = egui::Button::new(format!("✕  {}", f.display()));
                 if ui.add(b).on_hover_text("Stop looking in this folder").clicked() {
@@ -671,7 +721,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::Pick(Pick::Bios));
         }
         // The RockIt Twist's own items, in a menu of their own.
-        ui.menu_button("RockIt Twist", |ui| {
+        sub_menu(ui, "RockIt Twist", |ui| {
             if ui
                 .add(egui::Button::new("Turn on (early emulation)"))
                 .on_hover_text(ribbit_twist::STATUS)
@@ -735,6 +785,42 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::Screenshot);
             ui.close();
         }
+        // Screen recording.
+        {
+            let label = match &info.recording {
+                Some(secs) => {
+                    let m = secs / 60;
+                    let s = secs % 60;
+                    egui::RichText::new(format!("⏹  Stop recording  ({m}:{s:02})"))
+                        .color(egui::Color32::from_rgb(220, 60, 60))
+                }
+                None => egui::RichText::new("⏺  Record…"),
+            };
+            if info.encoding {
+                ui.add_enabled(false, egui::Button::new("⏳  Encoding…"));
+            } else if ui.add_enabled(info.running || info.recording.is_some(), egui::Button::new(label)).clicked() {
+                actions.push(Action::ToggleRecord);
+                ui.close();
+            }
+            sub_menu(ui, "Recording settings", |ui| {
+                ui.label(egui::RichText::new("Encoder").strong());
+                for enc in [RecordEncoder::H264, RecordEncoder::H265, RecordEncoder::Vp9, RecordEncoder::Lossless] {
+                    if ui.radio_value(&mut settings.record_encoder, enc, enc.label()).clicked() {
+                        actions.push(Action::SettingsChanged);
+                    }
+                }
+                ui.separator();
+                let folder_label = settings.record_folder
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "recordings/ (default)".to_string());
+                if ui.button(format!("Output: {folder_label}…")).clicked() {
+                    actions.push(Action::PickRecordFolder);
+                    ui.close();
+                }
+            });
+        }
         if ui.checkbox(&mut settings.discord_presence, "Show my game on Discord").changed() {
             actions.push(Action::SettingsChanged);
         }
@@ -755,7 +841,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         }
         ui.separator();
         ui.add_enabled_ui(info.running, |ui| {
-            ui.menu_button("Save State", |ui| {
+            sub_menu(ui, "Save State", |ui| {
                 for slot in 1..=STATE_SLOTS {
                     let when = info.slots.get(slot as usize - 1).cloned().flatten().unwrap_or_else(|| "empty".into());
                     let key = if slot == 1 { "F5" } else { "" };
@@ -765,7 +851,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                     }
                 }
             });
-            ui.menu_button("Load State", |ui| {
+            sub_menu(ui, "Load State", |ui| {
                 for slot in 1..=STATE_SLOTS {
                     let when = info.slots.get(slot as usize - 1).cloned().flatten();
                     let key = if slot == 1 { "F9" } else { "" };
@@ -779,7 +865,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             ui.label(egui::RichText::new("Hold ` (left of 1) to rewind").weak());
         });
         ui.separator();
-        ui.menu_button("Speed", |ui| {
+        sub_menu(ui, "Speed", |ui| {
             for (p, label) in [(50, "50%"), (100, "100% (normal)"), (200, "200%"), (400, "400%"), (0, "Unlimited")] {
                 if ui.radio_value(&mut settings.speed_percent, p, label).clicked() {
                     actions.push(Action::SettingsChanged);
@@ -809,6 +895,13 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         if ui
             .checkbox(&mut settings.pause_in_background, "Pause in background")
             .on_hover_text("Pause the game while another window is active (not a RockIt Twist plugged into this PC over USB).")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        if ui
+            .checkbox(&mut settings.close_with_shutdown, "Animate game shutdown")
+            .on_hover_text("When closing a game to return to the library, play the console's own shutdown animation. Each game has its own. Not used if a save state was loaded this session.")
             .changed()
         {
             actions.push(Action::SettingsChanged);
@@ -844,7 +937,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::SettingsChanged);
         }
         ui.separator();
-        ui.menu_button("Advanced (experimental)", |ui| {
+        sub_menu(ui, "Advanced (experimental)", |ui| {
             ui.label(egui::RichText::new("Unverified guesses. Apply at the next start.").weak());
             if ui
                 .checkbox(&mut settings.mame_gpio_lines, "MAME power-line workaround")
@@ -861,7 +954,20 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                     actions.push(Action::SettingsChanged);
                 }
             }
+            ui.separator();
+            if ui
+                .checkbox(&mut settings.jit_enabled, "JIT compiler (x86-64)")
+                .on_hover_text("Compiles ARCompact blocks to x86-64 after 32 runs. Disable to run fully interpreted if a game misbehaves only with the JIT on. Applies at the next start.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
         });
+        ui.separator();
+        if ui.add_enabled(info.running, egui::Button::new("🔍  Cheat / Memory Search…")).clicked() {
+            st.show_cheat = true;
+            ui.close();
+        }
     });
     top_menu(ui, rows, "🖥", "Video", |ui| {
         if ui
@@ -873,7 +979,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         }
         // Art with no vector original: its pixels, or traced.
         ui.add_enabled_ui(settings.hd_vectors, |ui| {
-            ui.menu_button("HD pixel art", |ui| {
+            sub_menu(ui, "HD pixel art", |ui| {
                 let before = settings.hd_trace_pixel_art;
                 ui.radio_value(&mut settings.hd_trace_pixel_art, false, "Pixels (original)")
                     .on_hover_text("Bitmaps in the games' Flash movies, and games drawn by their own code, show their own pixels, sharp");
@@ -894,7 +1000,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         if settings.display != before {
             actions.push(Action::SettingsChanged);
         }
-        ui.menu_button("AI upscale settings", |ui| {
+        sub_menu(ui, "AI upscale settings", |ui| {
             use crate::upscale::{Model, Resolution, Style};
             let before = settings.ai;
             ui.label(egui::RichText::new("Style").strong());
@@ -926,7 +1032,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             }
         });
         ui.separator();
-        ui.menu_button("Window size", |ui| {
+        sub_menu(ui, "Window size", |ui| {
             for s in [0, 2, 3, 4, 16] {
                 let label = if s == 0 { "Fit screen".to_string() } else { format!("{s}x ({}x{})", 160 * s, 160 * s) };
                 if ui.radio(settings.window_scale == s, label).clicked() {
@@ -1036,7 +1142,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             st.show_updates = true;
             st.notes_open = None;
         }
-        ui.menu_button("Patch notes", |ui| patch_notes_menu(ui, st));
+        sub_menu(ui, "Patch notes", |ui| patch_notes_menu(ui, st));
         ui.separator();
         if item(ui, "About Ribbit", "") {
             st.show_about = true;
@@ -1084,17 +1190,51 @@ fn top_menu(ui: &mut egui::Ui, rows: bool, icon: &str, label: &str, add_contents
         }
         return;
     }
-    let text = egui::RichText::new(format!("{icon}    {label}")).size(17.0).color(egui::Color32::from_gray(230));
-    let button = egui::Button::new(text).frame(false).min_size(egui::vec2(ui.available_width(), 48.0));
-    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-        // Sized for fingers, like the rest of the side menu.
-        let style = ui.style_mut();
-        style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(17.0));
-        style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
-        style.spacing.button_padding = egui::vec2(12.0, 9.0);
-        style.spacing.interact_size.y = 40.0;
-        add_contents(ui)
-    });
+    // The side menu: the row folds its items open below it, inside the
+    // menu's own scrolling list (a pop-up beside it could not be swiped or
+    // scrolled, and could open off the screen).
+    let open = fold_row(ui, &format!("{icon}    {label}"), 17.0, 48.0);
+    if open {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 18, right: 0, top: 0, bottom: 8 }).show(ui, |ui| {
+            // Sized for fingers, like the rest of the side menu.
+            let style = ui.style_mut();
+            style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(17.0));
+            style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+            style.spacing.button_padding = egui::vec2(12.0, 9.0);
+            style.spacing.interact_size.y = 40.0;
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(IN_SIDE_MENU), true));
+            add_contents(ui);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(IN_SIDE_MENU), false));
+        });
+    }
+}
+
+/// Set while the side menu draws a menu's items: its submenus fold too.
+const IN_SIDE_MENU: &str = "drawing the side menu's items";
+
+/// A full-width row that folds open (its state kept by its label); true
+/// while open.
+fn fold_row(ui: &mut egui::Ui, label: &str, size: f32, height: f32) -> bool {
+    let id = ui.id().with(("fold", label));
+    let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let text = egui::RichText::new(format!("{label}  {}", if open { "⏷" } else { "⏵" })).size(size).color(egui::Color32::from_gray(230));
+    let button = egui::Button::new(text).frame(false).min_size(egui::vec2(ui.available_width(), height));
+    if ui.add(button).clicked() {
+        open = !open;
+        ui.ctx().data_mut(|d| d.insert_temp(id, open));
+    }
+    open
+}
+
+/// A submenu: a pop-up from the menu bar, folded open in the side menu.
+fn sub_menu(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    if ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new(IN_SIDE_MENU))).unwrap_or(false) {
+        if fold_row(ui, label, 16.0, 40.0) {
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 4 }).show(ui, add_contents);
+        }
+    } else {
+        ui.menu_button(label, add_contents);
+    }
 }
 
 /// Help → Patch notes: every release, newest first; one opens its notes.
@@ -1451,7 +1591,10 @@ fn library_screen(
             empty_library(ui, settings, actions);
             return;
         }
-        let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let out = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .show(ui, |ui| {
             if phone {
                 pull_to_refresh_hint(ui, *pull);
                 library_header(ui, settings, library, *tab, actions);
@@ -2615,4 +2758,88 @@ fn toasts(ctx: &egui::Context, st: &mut UiState) {
             }
         });
     ctx.request_repaint();
+}
+
+fn cheat_window(ctx: &egui::Context, st: &mut UiState, info: &Info, actions: &mut Vec<Action>) {
+    let mut open = st.show_cheat;
+    egui::Window::new("Cheat / Memory Search")
+        .open(&mut open)
+        .resizable(true)
+        .default_width(380.0)
+        .show(ctx, |ui| {
+            // Search parameters.
+            ui.horizontal(|ui| {
+                ui.label("Width:");
+                ui.radio_value(&mut st.cheat_ty, ValueType::U8, ValueType::U8.label());
+                ui.radio_value(&mut st.cheat_ty, ValueType::U16, ValueType::U16.label());
+                ui.radio_value(&mut st.cheat_ty, ValueType::U32, ValueType::U32.label());
+            });
+            ui.horizontal(|ui| {
+                ui.label("Compare:");
+                for op in [
+                    SearchOp::Equal,
+                    SearchOp::NotEqual,
+                    SearchOp::Less,
+                    SearchOp::Greater,
+                    SearchOp::Decreased,
+                    SearchOp::Increased,
+                    SearchOp::Unchanged,
+                ] {
+                    ui.radio_value(&mut st.cheat_op, op, op.label());
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(st.cheat_op.needs_value(), |ui| {
+                    ui.label("Value:");
+                    ui.add(egui::TextEdit::singleline(&mut st.cheat_value_text).desired_width(100.0));
+                });
+            });
+            ui.horizontal(|ui| {
+                if ui.button(if info.cheat_has_scan { "First scan" } else { "First scan" }).clicked() {
+                    actions.push(Action::CheatFirstScan);
+                }
+                if ui.add_enabled(info.cheat_has_scan, egui::Button::new("Next scan")).clicked() {
+                    actions.push(Action::CheatNextScan);
+                }
+                if ui.add_enabled(info.cheat_has_scan, egui::Button::new("Reset")).clicked() {
+                    actions.push(Action::CheatReset);
+                }
+            });
+            let n = info.cheat_candidates.len();
+            ui.label(format!("{n} candidate{}", if n == 1 { "" } else { "s" }));
+            // Candidate list.
+            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                for &(addr, val) in &info.cheat_candidates {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{addr:#010x}")).monospace());
+                        ui.label(format!("= {val}  (0x{val:x})"));
+                        if ui.small_button("Freeze").clicked() {
+                            actions.push(Action::CheatFreeze(addr, val));
+                        }
+                    });
+                }
+                if n > info.cheat_candidates.len() {
+                    ui.label(egui::RichText::new(format!("… and {} more (narrow the search)", n - info.cheat_candidates.len())).weak());
+                }
+            });
+            // Active freezes.
+            if !info.cheat_freezes.is_empty() {
+                ui.separator();
+                ui.label(egui::RichText::new("Frozen values").strong());
+                let mut unfreeze = None;
+                for (addr, val, label) in &info.cheat_freezes {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{addr:#010x}")).monospace());
+                        ui.label(format!("= {val}  ({label})"));
+                        if ui.small_button("Unfreeze").clicked() {
+                            unfreeze = Some(*addr);
+                        }
+                    });
+                }
+                if let Some(addr) = unfreeze {
+                    actions.push(Action::CheatUnfreeze(addr));
+                }
+            }
+        });
+    st.show_cheat = open;
 }

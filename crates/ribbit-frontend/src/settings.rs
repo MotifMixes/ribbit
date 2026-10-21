@@ -10,6 +10,24 @@ use winit::keyboard::KeyCode;
 
 pub const MAX_RECENT: usize = 8;
 
+fn default_true() -> bool {
+    true
+}
+
+/// Screen recording encoder preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RecordEncoder {
+    /// H.264 video + AAC audio (.mp4). Widely compatible, small files.
+    #[default]
+    H264,
+    /// H.265 video + AAC audio (.mp4). Smaller files, slower to encode.
+    H265,
+    /// VP9 video + Opus audio (.webm). Open formats.
+    Vp9,
+    /// FFV1 video + raw PCM audio (.mkv). Lossless, large files.
+    Lossless,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -128,6 +146,18 @@ pub struct Settings {
     /// Every BIOS opened with File > Open BIOS, newest first: the library
     /// keeps listing them all, not just the last one (`bios`).
     pub opened_bios: Vec<PathBuf>,
+    /// Enable the JIT (ARCompact → x86-64 compiled blocks). Applies at the
+    /// next start; disable if a game misbehaves only with the JIT on.
+    #[serde(default = "default_true")]
+    pub jit_enabled: bool,
+    /// Screen recording: encoder preset.
+    pub record_encoder: RecordEncoder,
+    /// Screen recording: output folder (None = recordings/ in data dir).
+    pub record_folder: Option<PathBuf>,
+    /// Play the console's shutdown animation when closing a game back to the
+    /// library (save is always done first; skipped if a save state was loaded).
+    #[serde(default = "default_true")]
+    pub close_with_shutdown: bool,
 }
 
 impl Default for Settings {
@@ -177,6 +207,10 @@ impl Default for Settings {
             skipped_update: String::new(),
             ai_notice_seen: false,
             opened_bios: Vec::new(),
+            jit_enabled: true,
+            record_encoder: RecordEncoder::H264,
+            record_folder: None,
+            close_with_shutdown: true,
         }
     }
 }

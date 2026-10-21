@@ -71,6 +71,9 @@ struct Session {
     /// When the BIOS began its power-off animation (it fades the screen to
     /// black in about 0.75 s); the game closes as soon as it is black.
     closing: Option<Instant>,
+    /// A save state was successfully loaded this session: skip the shutdown
+    /// animation on close (the game may be mid-state, not at a clean exit).
+    loaded_save_state: bool,
     /// The cartridge played.
     cart_path: Option<PathBuf>,
     /// EXPERIMENTAL HD picture, when HD vectors are on and this BIOS supports it.
@@ -168,12 +171,23 @@ pub struct App {
     /// Everything is saved for good: nothing more is written (after an
     /// update's restart the new version owns the settings and saves).
     shut_down: bool,
+    /// Waiting for the console's power-off animation to finish before closing
+    /// the session (triggered by CloseCartridge with close_with_shutdown on).
+    closing_animation: bool,
     /// The game closed for inactivity, its snapshot, and where its BIOS
     /// keeps the idle timer (for Resume).
     idle_resume: Option<(PathBuf, Vec<u8>, Option<ribbit_core::idle_timer::IdleTimer>)>,
     /// The library has opened on the chosen console's page (once, when its
     /// first scan is in).
     tab_shown: bool,
+    /// Active screen recording, or None.
+    recording: Option<crate::record::Recorder>,
+    /// Background thread encoding the last finished recording, or None.
+    encoding: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+    /// Scratch buffer for audio samples drained each frame while recording.
+    rec_audio: Vec<i16>,
+    /// Cheat / memory search state.
+    cheat: crate::cheat::CheatSearch,
 }
 
 fn hw_zippity() -> ribbit_memory::known::Hardware {
@@ -279,8 +293,13 @@ impl App {
             fatal: None,
             quit: false,
             shut_down: false,
+            closing_animation: false,
             idle_resume: None,
             tab_shown: false,
+            recording: None,
+            encoding: None,
+            rec_audio: Vec::new(),
+            cheat: crate::cheat::CheatSearch::default(),
         };
         // A game given on the command line starts at once; otherwise the
         // game library shows.
@@ -327,6 +346,11 @@ impl App {
         let mut machine = Machine::with_straps(firmware, cartridge, self.opts.straps.unwrap_or(default_straps));
         // Playing, not debugging: skip the per-instruction trace history.
         machine.record_trace_tail = false;
+        // Disable the JIT if the setting says so (for debugging; takes effect
+        // at this boot, not requiring a full restart of Ribbit).
+        if !self.settings.jit_enabled {
+            machine.jit = None;
+        }
         let mhz = self.opts.cpu_mhz.unwrap_or(self.settings.cpu_mhz).max(1);
         machine.clock = ribbit_core::Clock::new(mhz * 1_000_000, ribbit_core::Clock::PERIPHERAL_HZ);
         if self.settings.mame_gpio_lines {
@@ -405,6 +429,7 @@ impl App {
             idle_test_secs: std::env::var("RIBBIT_IDLE_TEST_SECS").ok().and_then(|v| v.parse().ok()),
             idle_snapshot: None,
             closing: None,
+            loaded_save_state: false,
             cart_path: cart.clone(),
             hd,
             experimental_touch: machine.experimental_touch_enabled(),
@@ -1005,6 +1030,7 @@ impl App {
             Pick::RomFolder => self.settings.rom_folders.last().cloned(),
             Pick::TwistContent => self.settings.twist_content.clone(),
             Pick::TwistZip => None,
+            Pick::RecordFolder => self.settings.record_folder.clone(),
         };
         #[cfg(target_os = "macos")]
         if self.sheet.is_none()
@@ -1048,6 +1074,10 @@ impl App {
             Pick::RomFolder => self.add_rom_folder(path),
             Pick::TwistContent => self.set_twist_content(Some(path)),
             Pick::TwistZip => self.import_twist_zip(path),
+            Pick::RecordFolder => {
+                self.settings.record_folder = Some(path);
+                self.save_settings();
+            }
         }
     }
 
@@ -1094,10 +1124,17 @@ impl App {
             Action::SetBios(p) => self.set_bios(p),
             Action::StartSystem(hw) => self.start_system(hw),
             Action::CloseCartridge => {
-                self.end_session();
-                self.update_title();
-                // Recently played games join the library.
-                self.rescan_library();
+                let can_animate = self.settings.close_with_shutdown
+                    && !self.closing_animation
+                    && self.session.as_ref().map_or(false, |s| !s.loaded_save_state);
+                if can_animate {
+                    self.start_closing_animation();
+                } else if !self.closing_animation {
+                    self.end_session();
+                    self.update_title();
+                    // Recently played games join the library.
+                    self.rescan_library();
+                }
             }
             Action::AddRomFolder(p) => self.add_rom_folder(p),
             Action::RemoveRomFolder(p) => {
@@ -1194,6 +1231,30 @@ impl App {
                 self.quit = true;
                 event_loop.exit();
             }
+            Action::ToggleRecord => self.toggle_record(),
+            Action::PickRecordFolder => self.pick(Pick::RecordFolder),
+            Action::SetRecordFolder(path) => {
+                self.settings.record_folder = Some(path);
+                self.save_settings();
+            }
+            Action::CheatFirstScan => {
+                self.sync_cheat_from_ui();
+                let Some(s) = &self.session else { return };
+                let m = s.emu.lock();
+                self.cheat.first_scan(&m);
+            }
+            Action::CheatNextScan => {
+                self.sync_cheat_from_ui();
+                let Some(s) = &self.session else { return };
+                let m = s.emu.lock();
+                self.cheat.next_scan(&m);
+            }
+            Action::CheatReset => self.cheat.reset(),
+            Action::CheatFreeze(addr, val) => {
+                let label = format!("0x{addr:08x}");
+                self.cheat.add_freeze(addr, val, label);
+            }
+            Action::CheatUnfreeze(addr) => self.cheat.remove_freeze(addr),
         }
     }
 
@@ -1250,6 +1311,58 @@ impl App {
         tracing::info!(target: "ribbit::boot", "the console turned itself off after inactivity: closing the game");
         self.idle_resume = s.cart_path.clone().zip(s.idle_snapshot.take()).map(|(p, st)| (p, st, timer));
         self.ui.idle_closed = Some((s.title.clone(), console));
+        self.end_session();
+        self.update_title();
+        self.rescan_library();
+    }
+
+    /// Begin the close-with-animation path: force the idle timer to zero so
+    /// the BIOS starts its shutdown sequence, then wait for the screen to go
+    /// black before ending the session.
+    fn start_closing_animation(&mut self) {
+        let Some(s) = &mut self.session else { return; };
+        s.closing = None;
+        {
+            let mut m = s.emu.lock();
+            m.keep_awake = false;
+            m.cap_idle_count(0);
+        }
+        self.closing_animation = true;
+    }
+
+    /// Called each frame while `closing_animation` is true: waits for the
+    /// BIOS power-off sequence, then ends the session once the screen is black.
+    fn check_closing_animation(&mut self) {
+        if !self.closing_animation {
+            return;
+        }
+        let Some(s) = &mut self.session else {
+            self.closing_animation = false;
+            return;
+        };
+        let since = *s.closing.get_or_insert_with(Instant::now);
+        let off = s.emu.lock().idle_powered_off();
+        if !off {
+            // The BIOS polls the timer on its own; give it up to 2 s to react
+            // before giving up and closing directly.
+            if since.elapsed().as_secs_f32() < 2.0 {
+                return;
+            }
+            tracing::info!(target: "ribbit::boot", "shutdown animation did not start; closing directly");
+            self.closing_animation = false;
+            self.end_session();
+            self.update_title();
+            self.rescan_library();
+            return;
+        }
+        // BIOS has begun its shutdown: wait for the screen to go black.
+        let light = self.frame.iter().map(|p| ((p >> 16) & 0xFF).max((p >> 8) & 0xFF).max(p & 0xFF) as u64).sum::<u64>();
+        let black = light < 4 * self.frame.len() as u64;
+        if !black && since.elapsed().as_secs_f32() < 1.5 {
+            return;
+        }
+        tracing::info!(target: "ribbit::boot", "shutdown animation complete; closing game");
+        self.closing_animation = false;
         self.end_session();
         self.update_title();
         self.rescan_library();
@@ -1489,8 +1602,9 @@ impl App {
         });
         match result {
             Ok(()) => {
-                if let Some(s) = &self.session {
+                if let Some(s) = &mut self.session {
                     s.emu.resync();
+                    s.loaded_save_state = true;
                 }
                 if let Some(a) = &mut self.audio {
                     a.clear();
@@ -1618,6 +1732,62 @@ impl App {
                 format!("{e:#}"),
             ),
         }
+    }
+
+    fn toggle_record(&mut self) {
+        // Poll finished encoding.
+        if let Some(t) = self.encoding.take() {
+            if t.is_finished() {
+                match t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("encoding thread panicked"))) {
+                    Ok(()) => {}
+                    Err(e) => self.ui.problem("Recording encoding failed", format!("{e:#}"), ""),
+                }
+            } else {
+                self.encoding = Some(t);
+            }
+        }
+
+        if let Some(mut rec) = self.recording.take() {
+            // Stop: flush remaining buffered audio and start encoding.
+            if let Some(s) = &self.session {
+                let mut remaining = Vec::new();
+                s.emu.stop_record_audio(&mut remaining);
+                let _ = rec.add_audio(&remaining);
+            }
+            let encoder = self.settings.record_encoder;
+            match rec.finish(encoder) {
+                Ok(task) => {
+                    let output = task.output_path.clone();
+                    self.ui.toast(format!("Recording stopped: encoding to {}…", output.display()));
+                    self.encoding = Some(std::thread::spawn(move || task.run()));
+                }
+                Err(e) => self.ui.problem("Recording failed", format!("{e:#}"), ""),
+            }
+        } else {
+            // Start.
+            let Some(s) = &self.session else { return };
+            let audio_rate = if self.settings.pcm_rate == crate::audio_out::PcmRate::Original32k {
+                ribbit_audio::DAC_RATE_HZ
+            } else {
+                8000
+            };
+            let dir = self.settings.record_folder.clone()
+                .unwrap_or_else(|| self.opts.data_dir.join("recordings"));
+            match crate::record::Recorder::start(&dir, audio_rate, self.settings.record_encoder) {
+                Ok(rec) => {
+                    self.ui.toast(format!("Recording to {}…", rec.output_path.display()));
+                    s.emu.start_record_audio();
+                    self.recording = Some(rec);
+                }
+                Err(e) => self.ui.problem("Could not start recording", format!("{e:#}"), ""),
+            }
+        }
+    }
+
+    fn sync_cheat_from_ui(&mut self) {
+        self.cheat.op = self.ui.cheat_op;
+        self.cheat.ty = self.ui.cheat_ty;
+        self.cheat.value_text = self.ui.cheat_value_text.clone();
     }
 
     /// Logs (every 5 s) how often the sound ran out.
@@ -1750,6 +1920,8 @@ impl App {
             if let Err(e) = s.autosave.tick(&s.saves, &mut m, now) {
                 tracing::warn!(target: "ribbit::saves", "autosave failed: {e:#}");
             }
+            // Apply cheat freezes: write frozen values to memory each frame.
+            self.cheat.apply_freezes(&mut m);
         }
         // Sound goes from the emulation thread straight to the output (real-
         // time speed only); at other speeds drop what is queued.
@@ -2068,7 +2240,11 @@ impl App {
         #[cfg(not(target_os = "android"))]
         self.poll_pads();
         self.emulate();
-        self.check_idle_power_off();
+        if self.closing_animation {
+            self.check_closing_animation();
+        } else {
+            self.check_idle_power_off();
+        }
         let (mut hd_frame, mut hd_dirty) = (false, false);
         if let Some(s) = &mut self.session {
             let passes = {
@@ -2076,6 +2252,14 @@ impl App {
                 m.render_frame(&mut self.frame);
                 m.hd.as_mut().map(|h| h.take()).unwrap_or_default()
             };
+            // Screen recording: capture this frame and any buffered audio.
+            if let Some(rec) = &mut self.recording {
+                let _ = rec.add_frame(&self.frame[..]);
+                s.emu.drain_record_audio(&mut self.rec_audio);
+                let _ = rec.add_audio(&self.rec_audio);
+                self.rec_audio.clear();
+                // Apply cheat freezes while recording so they show in the video.
+            }
             // Automatic calibration is hidden: black instead of its targets.
             let hidden = self.settings.auto_calibrate && crate::calibrate::target(&self.frame).is_some();
             if hidden {
@@ -2170,6 +2354,16 @@ impl App {
                 slots,
                 rewinding: self.rewinding,
                 console_view_available: view_available,
+                recording: self.recording.as_ref().map(|r| r.started.elapsed().as_secs()),
+                encoding: self.encoding.as_ref().is_some_and(|t| !t.is_finished()),
+                cheat_candidates: {
+                    let all = &self.cheat.candidates;
+                    all.iter().take(200).map(|c| (c.addr, c.prev)).collect()
+                },
+                cheat_has_scan: self.cheat.has_scan,
+                cheat_freezes: self.cheat.freezes.iter()
+                    .map(|f| (f.addr, f.value, f.label.clone()))
+                    .collect(),
             };
         let mut actions = Vec::new();
         let mut area = egui::Rect::NOTHING;
