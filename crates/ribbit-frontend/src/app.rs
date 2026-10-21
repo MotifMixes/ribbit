@@ -1316,22 +1316,25 @@ impl App {
         self.rescan_library();
     }
 
-    /// Begin the close-with-animation path: force the idle timer to zero so
-    /// the BIOS starts its shutdown sequence, then wait for the screen to go
-    /// black before ending the session.
+    /// Begin the close-with-animation path: press the virtual power button so
+    /// the BIOS plays its per-game shutdown animation, then wait for the screen
+    /// to go black before ending the session.
     fn start_closing_animation(&mut self) {
         let Some(s) = &mut self.session else { return; };
         s.closing = None;
         {
             let mut m = s.emu.lock();
-            m.keep_awake = false;
-            m.cap_idle_count(0);
+            // Clear the NO_POWER_OFF_REQUEST GPIO line (bit 11 low = power
+            // button held). The BIOS polls this and plays the game's own
+            // shutdown animation, which is different from (and more elaborate
+            // than) the idle-timeout fade.
+            m.io.gpio.board_lines &= !ribbit_core::io::gpio::NO_POWER_OFF_REQUEST;
         }
         self.closing_animation = true;
     }
 
     /// Called each frame while `closing_animation` is true: waits for the
-    /// BIOS power-off sequence, then ends the session once the screen is black.
+    /// power-button animation to finish (screen goes black), then closes.
     fn check_closing_animation(&mut self) {
         if !self.closing_animation {
             return;
@@ -1341,27 +1344,18 @@ impl App {
             return;
         };
         let since = *s.closing.get_or_insert_with(Instant::now);
-        let off = s.emu.lock().idle_powered_off();
-        if !off {
-            // The BIOS polls the timer on its own; give it up to 2 s to react
-            // before giving up and closing directly.
-            if since.elapsed().as_secs_f32() < 2.0 {
-                return;
-            }
-            tracing::info!(target: "ribbit::boot", "shutdown animation did not start; closing directly");
-            self.closing_animation = false;
-            self.end_session();
-            self.update_title();
-            self.rescan_library();
-            return;
-        }
-        // BIOS has begun its shutdown: wait for the screen to go black.
+        // Wait for the screen to go black. The per-game animation takes up to
+        // ~2 s; fall back to a direct close after 3 s if it never goes black.
         let light = self.frame.iter().map(|p| ((p >> 16) & 0xFF).max((p >> 8) & 0xFF).max(p & 0xFF) as u64).sum::<u64>();
         let black = light < 4 * self.frame.len() as u64;
-        if !black && since.elapsed().as_secs_f32() < 1.5 {
+        if !black && since.elapsed().as_secs_f32() < 3.0 {
             return;
         }
-        tracing::info!(target: "ribbit::boot", "shutdown animation complete; closing game");
+        if !black {
+            tracing::info!(target: "ribbit::boot", "shutdown animation did not complete; closing directly");
+        } else {
+            tracing::info!(target: "ribbit::boot", "shutdown animation complete; closing game");
+        }
         self.closing_animation = false;
         self.end_session();
         self.update_title();
