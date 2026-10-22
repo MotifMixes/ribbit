@@ -1001,8 +1001,8 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             }
             ui.separator();
             if ui
-                .checkbox(&mut settings.jit_enabled, "JIT compiler (x86-64)")
-                .on_hover_text("Compiles ARCompact blocks to x86-64 after 32 runs. Disable to run fully interpreted if a game misbehaves only with the JIT on. Applies at the next start.")
+                .checkbox(&mut settings.jit_enabled, "JIT compiler")
+                .on_hover_text("Translates Leapster code into this device's own machine code (x86-64 or 64-bit ARM) after it has run 32 times: much faster, same results. Turn it off if a game misbehaves only with it on. Applies when the next game starts.")
                 .changed()
             {
                 actions.push(Action::SettingsChanged);
