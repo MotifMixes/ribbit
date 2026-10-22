@@ -28,6 +28,10 @@ pub struct Pad {
     rect: Rect,
     label: &'static str,
     color: Color32,
+    /// Printed on the body above the button (the Leapster's HOME, HINT, PAUSE).
+    caption: &'static str,
+    /// Drawn in the Leapster's style: blue buttons, a silver cross in a blue ring.
+    leap: bool,
 }
 
 /// The controls for `hw` placed in `area` (points; the window's game area).
@@ -40,48 +44,58 @@ pub fn layout(hw: Hardware, area: Rect) -> Vec<Pad> {
     let round = |c: Pos2| Rect::from_center_size(c, vec2(1.35 * u, 1.35 * u));
     let right = area.right() - margin;
     let bottom = area.bottom() - margin;
-    // A (or the action button) lowest right, B left of it, the third above.
-    let first = round(pos2(right - 0.7 * u, bottom - 1.9 * u));
-    let second = round(pos2(right - 2.3 * u, bottom - 1.1 * u));
-    let third = round(pos2(right - 1.5 * u, bottom - 3.4 * u));
-    // Small buttons in rows above the D-pad (side 0) and the round buttons
-    // (side 1), clear of the middle where the game's screen is.
-    let pill = |side: u8, row: f32| {
-        let x = if side == 0 { dpad_c.x } else { right - 1.5 * u };
-        Rect::from_center_size(pos2(x, bottom - (4.5 + 0.85 * row) * u), vec2(2.2 * u, 0.6 * u))
-    };
     let l = Target::Leapster;
     let t = Target::Twist;
     let grey = Color32::from_gray(90);
     let mut pads = Vec::new();
     match hw {
         Hardware::RockItTwist => {
+            // A (or the action button) lowest right, B left of it, the third above.
+            let first = round(pos2(right - 0.7 * u, bottom - 1.9 * u));
+            let second = round(pos2(right - 2.3 * u, bottom - 1.1 * u));
+            let pill = |side: u8, row: f32| {
+                let x = if side == 0 { dpad_c.x } else { right - 1.5 * u };
+                Rect::from_center_size(pos2(x, bottom - (4.5 + 0.85 * row) * u), vec2(2.2 * u, 0.6 * u))
+            };
             let dirs = [TwistButton::DpadUp, TwistButton::DpadDown, TwistButton::DpadLeft, TwistButton::DpadRight];
-            pads.push(Pad { kind: Kind::Dpad(dirs.map(t)), rect: dpad, label: "", color: grey });
-            pads.push(Pad { kind: Kind::Round(t(TwistButton::Check)), rect: first, label: "✔", color: GREEN });
-            pads.push(Pad { kind: Kind::Round(t(TwistButton::Hint)), rect: second, label: "?", color: BLUE });
-            pads.push(Pad { kind: Kind::Pill(t(TwistButton::SwitchLeft)), rect: pill(0, 0.0), label: "◀ Switch", color: grey });
-            pads.push(Pad { kind: Kind::Pill(t(TwistButton::Home)), rect: pill(1, 1.0), label: "Home", color: grey });
-            pads.push(Pad { kind: Kind::Pill(t(TwistButton::SwitchRight)), rect: pill(1, 0.0), label: "Switch ▶", color: grey });
+            pads.push(Pad { kind: Kind::Dpad(dirs.map(t)), rect: dpad, label: "", color: grey, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Round(t(TwistButton::Check)), rect: first, label: "✔", color: GREEN, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Round(t(TwistButton::Hint)), rect: second, label: "?", color: BLUE, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Pill(t(TwistButton::SwitchLeft)), rect: pill(0, 0.0), label: "◀ Switch", color: grey, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Pill(t(TwistButton::Home)), rect: pill(1, 1.0), label: "Home", color: grey, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Pill(t(TwistButton::SwitchRight)), rect: pill(1, 0.0), label: "Switch ▶", color: grey, caption: "", leap: false });
         }
         Hardware::Zippity => {
+            let first = round(pos2(right - 0.7 * u, bottom - 1.9 * u));
+            let second = round(pos2(right - 2.3 * u, bottom - 1.1 * u));
+            let third = round(pos2(right - 1.5 * u, bottom - 3.4 * u));
+            let pill = |side: u8, row: f32| {
+                let x = if side == 0 { dpad_c.x } else { right - 1.5 * u };
+                Rect::from_center_size(pos2(x, bottom - (4.5 + 0.85 * row) * u), vec2(2.2 * u, 0.6 * u))
+            };
             let dirs = [Button::Up, Button::Down, Button::Left, Button::Right];
-            pads.push(Pad { kind: Kind::Dpad(dirs.map(l)), rect: dpad, label: "", color: grey });
-            pads.push(Pad { kind: Kind::Round(l(Button::A)), rect: first, label: "", color: GREEN });
-            pads.push(Pad { kind: Kind::Round(l(Button::B)), rect: second, label: "", color: RED });
-            pads.push(Pad { kind: Kind::Round(l(Button::Hint)), rect: third, label: "", color: BLUE });
-            pads.push(Pad { kind: Kind::Pill(l(Button::VolumeDown)), rect: pill(0, 0.0), label: "Left foot", color: grey });
-            pads.push(Pad { kind: Kind::Pill(l(Button::Home)), rect: pill(0, 1.0), label: "Home", color: grey });
-            pads.push(Pad { kind: Kind::Pill(l(Button::VolumeUp)), rect: pill(1, 0.0), label: "Right foot", color: grey });
+            pads.push(Pad { kind: Kind::Dpad(dirs.map(l)), rect: dpad, label: "", color: grey, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Round(l(Button::A)), rect: first, label: "", color: GREEN, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Round(l(Button::B)), rect: second, label: "", color: RED, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Round(l(Button::Hint)), rect: third, label: "", color: BLUE, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Pill(l(Button::VolumeDown)), rect: pill(0, 0.0), label: "Left foot", color: grey, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Pill(l(Button::Home)), rect: pill(0, 1.0), label: "Home", color: grey, caption: "", leap: false });
+            pads.push(Pad { kind: Kind::Pill(l(Button::VolumeUp)), rect: pill(1, 0.0), label: "Right foot", color: grey, caption: "", leap: false });
         }
         _ => {
+            // The Leapster's own layout: the D-pad in its blue ring lower left,
+            // HOME, HINT and PAUSE in a row above it (named on the body),
+            // A on the right with the smaller B right of it and lower.
             let dirs = [Button::Up, Button::Down, Button::Left, Button::Right];
-            pads.push(Pad { kind: Kind::Dpad(dirs.map(l)), rect: dpad, label: "", color: grey });
-            pads.push(Pad { kind: Kind::Round(l(Button::A)), rect: first, label: "A", color: GREEN });
-            pads.push(Pad { kind: Kind::Round(l(Button::B)), rect: second, label: "B", color: RED });
-            pads.push(Pad { kind: Kind::Round(l(Button::Hint)), rect: third, label: "Hint", color: BLUE });
-            pads.push(Pad { kind: Kind::Pill(l(Button::Home)), rect: pill(0, 0.0), label: "Home", color: grey });
-            pads.push(Pad { kind: Kind::Pill(l(Button::Pause)), rect: pill(1, 0.0), label: "Pause", color: grey });
+            pads.push(Pad { kind: Kind::Dpad(dirs.map(l)), rect: dpad, label: "", color: LEAP_BLUE, caption: "", leap: true });
+            let a = Rect::from_center_size(pos2(right - 2.0 * u, bottom - 2.4 * u), vec2(1.55 * u, 1.55 * u));
+            let b = Rect::from_center_size(pos2(right - 0.6 * u, bottom - 1.55 * u), vec2(1.2 * u, 1.2 * u));
+            pads.push(Pad { kind: Kind::Round(l(Button::A)), rect: a, label: "A", color: LEAP_BLUE, caption: "", leap: true });
+            pads.push(Pad { kind: Kind::Round(l(Button::B)), rect: b, label: "B", color: LEAP_BLUE, caption: "", leap: true });
+            let small = |dx: f32, dy: f32| Rect::from_center_size(dpad_c + vec2(dx * u, dy * u), vec2(0.8 * u, 0.8 * u));
+            pads.push(Pad { kind: Kind::Round(l(Button::Home)), rect: small(-1.1, -2.45), label: "", color: LEAP_BLUE, caption: "HOME", leap: true });
+            pads.push(Pad { kind: Kind::Round(l(Button::Hint)), rect: small(0.0, -2.45), label: "", color: LEAP_BLUE, caption: "HINT", leap: true });
+            pads.push(Pad { kind: Kind::Round(l(Button::Pause)), rect: small(1.1, -2.45), label: "", color: LEAP_BLUE, caption: "PAUSE", leap: true });
         }
     }
     pads
@@ -90,6 +104,12 @@ pub fn layout(hw: Hardware, area: Rect) -> Vec<Pad> {
 const GREEN: Color32 = Color32::from_rgb(46, 170, 82);
 const RED: Color32 = Color32::from_rgb(214, 64, 58);
 const BLUE: Color32 = Color32::from_rgb(52, 120, 220);
+/// The Leapster's periwinkle buttons and its silver plastic.
+const LEAP_BLUE: Color32 = Color32::from_rgb(84, 108, 220);
+const LEAP_BLUE_DARK: Color32 = Color32::from_rgb(52, 68, 160);
+const LEAP_SILVER: Color32 = Color32::from_rgb(196, 200, 210);
+const LEAP_SILVER_DOWN: Color32 = Color32::from_rgb(150, 154, 166);
+const LEAP_PRINT: Color32 = Color32::from_rgb(150, 168, 245);
 
 /// What a finger at `p` is on (the D-pad's side; round buttons answer a
 /// little outside their edge, as fingers are not precise).
@@ -173,9 +193,36 @@ pub fn paint(painter: &egui::Painter, pads: &[Pad], pad: &TouchPad) {
                     Rect::from_min_max(pos2(r.left(), c.y - arm / 2.0), pos2(c.x, c.y + arm / 2.0)),
                     Rect::from_min_max(pos2(c.x, c.y - arm / 2.0), pos2(r.right(), c.y + arm / 2.0)),
                 ];
-                for (a, t) in arms.iter().zip(ts) {
-                    painter.rect(*a, arm * 0.25, fill(p.color, pad.holds(t)), edge, egui::StrokeKind::Inside);
-                }
+                let arrow = if p.leap {
+                    // Solid, like the plastic (these sit beside the picture, not
+                    // over it): a blue ring around one silver cross, outlines
+                    // first so the fills hide them where the bars cross. The
+                    // arm held goes darker, pressed in.
+                    painter.circle(c, r.width() / 2.0, LEAP_BLUE, Stroke::new(3.0, LEAP_BLUE_DARK));
+                    painter.circle_stroke(c, r.width() / 2.0 - 5.0, Stroke::new(2.0, Color32::from_white_alpha(40)));
+                    let len = r.width() * 0.8;
+                    let bars = [Rect::from_center_size(c, vec2(arm, len)), Rect::from_center_size(c, vec2(len, arm))];
+                    let outline = Stroke::new(2.5, Color32::from_gray(60));
+                    for bar in bars {
+                        painter.rect_stroke(bar, arm * 0.3, outline, egui::StrokeKind::Outside);
+                    }
+                    for bar in bars {
+                        painter.rect_filled(bar, arm * 0.3, LEAP_SILVER);
+                    }
+                    for (a, t) in arms.iter().zip(ts) {
+                        if pad.holds(t) {
+                            let a = a.intersect(bars[0].union(bars[1]));
+                            painter.rect_filled(a, arm * 0.3, LEAP_SILVER_DOWN);
+                        }
+                    }
+                    painter.circle_filled(c, arm * 0.3, LEAP_SILVER_DOWN);
+                    Color32::from_gray(85)
+                } else {
+                    for (a, t) in arms.iter().zip(ts) {
+                        painter.rect(*a, arm * 0.25, fill(p.color, pad.holds(t)), edge, egui::StrokeKind::Inside);
+                    }
+                    text
+                };
                 // Arrows drawn as triangles: the fonts have ◀ and ▶ but no ▲ or
                 // ▼ (up and down showed as empty boxes).
                 for a in &arms {
@@ -186,14 +233,28 @@ pub fn paint(painter: &egui::Painter, pads: &[Pad], pad: &TouchPad) {
                     let tip = at + dir * size;
                     let base = at - dir * size;
                     let points = vec![tip, base + side * size, base - side * size];
-                    painter.add(egui::Shape::convex_polygon(points, text, Stroke::NONE));
+                    painter.add(egui::Shape::convex_polygon(points, arrow, Stroke::NONE));
                 }
             }
             Kind::Round(t) => {
                 let r = p.rect.width() / 2.0;
-                painter.circle(p.rect.center(), r, fill(p.color, pad.holds(t)), edge);
+                if p.leap {
+                    let down = pad.holds(t);
+                    let face = if down { LEAP_BLUE_DARK } else { LEAP_BLUE };
+                    painter.circle(p.rect.center(), r, face, Stroke::new(2.5, LEAP_BLUE_DARK));
+                    if !down {
+                        // A shine on the upper half: the button is domed.
+                        painter.circle_filled(p.rect.center() - vec2(0.0, r * 0.3), r * 0.55, Color32::from_white_alpha(28));
+                    }
+                } else {
+                    painter.circle(p.rect.center(), r, fill(p.color, pad.holds(t)), edge);
+                }
                 let size = if p.label.chars().count() > 2 { r * 0.5 } else { r * 0.8 };
                 painter.text(p.rect.center(), egui::Align2::CENTER_CENTER, p.label, egui::FontId::proportional(size), text);
+                if !p.caption.is_empty() {
+                    let at = pos2(p.rect.center().x, p.rect.top() - r * 0.2);
+                    painter.text(at, egui::Align2::CENTER_BOTTOM, p.caption, egui::FontId::proportional(r * 0.55), LEAP_PRINT);
+                }
             }
             Kind::Pill(t) => {
                 let h = p.rect.height();

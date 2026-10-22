@@ -145,6 +145,10 @@ pub struct Settings {
     /// On-screen touch controls: shown when the screen is touched (from
     /// the start on Android), hidden again by any key or controller button.
     pub touch_controls: bool,
+    /// Android: show a small menu button in the top-left corner during games
+    /// instead of swiping from the left edge to open the side menu.
+    #[serde(default)]
+    pub touch_menu_button: bool,
     /// A release the player chose to skip ("v1.2.0"): not announced at
     /// start-up again (Help → Check for updates still shows it).
     pub skipped_update: String,
@@ -218,13 +222,14 @@ impl Default for Settings {
             bios_picked: BTreeMap::new(),
             last_version: String::new(),
             touch_controls: true,
+            touch_menu_button: false,
             skipped_update: String::new(),
             ai_notice_seen: false,
             opened_bios: Vec::new(),
             jit_enabled: true,
             record_encoder: RecordEncoder::H264,
             record_folder: None,
-            close_with_shutdown: true,
+            close_with_shutdown: false,
             favorites: Vec::new(),
             hide_builtin_tabs: BTreeSet::new(),
             folders: Vec::new(),

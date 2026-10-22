@@ -14,6 +14,8 @@ pub enum Pick {
     TwistContent,
     /// A zip of RockIt Twist packages to import.
     TwistZip,
+    /// Output folder for screen recordings.
+    RecordFolder,
 }
 
 impl Pick {
@@ -24,12 +26,13 @@ impl Pick {
             Pick::RomFolder => "Choose your games folder",
             Pick::TwistContent => "Choose RockIt Twist content (a folder laid out like the console's F: drive)",
             Pick::TwistZip => "Import RockIt Twist games (.zip)",
+            Pick::RecordFolder => "Choose recording output folder",
         }
     }
 
     /// Whether a folder is chosen (not a file).
     pub fn is_folder(self) -> bool {
-        matches!(self, Pick::RomFolder | Pick::TwistContent)
+        matches!(self, Pick::RomFolder | Pick::TwistContent | Pick::RecordFolder)
     }
 }
 

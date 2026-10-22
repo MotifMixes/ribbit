@@ -1231,6 +1231,7 @@ impl App {
                 self.quit = true;
                 event_loop.exit();
             }
+            Action::ToggleDrawer => self.ui.drawer = !self.ui.drawer,
             Action::ToggleRecord => self.toggle_record(),
             Action::PickRecordFolder => self.pick(Pick::RecordFolder),
             Action::SetRecordFolder(path) => {
@@ -2106,6 +2107,7 @@ impl App {
                 KeyCode::F1 => return self.ui.show_controls = true,
                 KeyCode::F10 => return self.ui.menu_visible = !self.ui.menu_visible,
                 KeyCode::F11 => return self.toggle_fullscreen(),
+                KeyCode::F8 => return self.toggle_record(),
                 KeyCode::F12 => return self.screenshot(),
                 KeyCode::F7 => return self.toggle_console_view(),
                 KeyCode::F5 => return self.save_state(1),

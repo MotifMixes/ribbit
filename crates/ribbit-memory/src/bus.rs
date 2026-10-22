@@ -281,6 +281,18 @@ impl SystemBus {
         }
     }
 
+    /// Write a byte to RAM, VRAM or on-chip SRAM without side effects;
+    /// returns false if the address is outside writable memory.
+    pub fn poke8(&mut self, addr: u32, value: u8) -> bool {
+        let region = self.decode(addr);
+        match region {
+            Region::Ram(o) => self.ram.get_mut(o).map(|b| *b = value).is_some(),
+            Region::Vram(o) => self.vram.get_mut(o).map(|b| *b = value).is_some(),
+            Region::Sram(o) => self.sram.get_mut(o).map(|b| *b = value).is_some(),
+            _ => false,
+        }
+    }
+
     pub fn vram(&self) -> &[u8] {
         &self.vram
     }

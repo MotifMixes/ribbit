@@ -82,6 +82,8 @@ pub enum Action {
     /// Unfreeze this address.
     CheatUnfreeze(u32),
     Quit,
+    /// Open or close the side drawer (Android library header button).
+    ToggleDrawer,
     /// Star or unstar a game.
     ToggleFavorite(PathBuf),
     /// Toggle visibility of "Internal" (built-in) games for this tab
@@ -189,7 +191,7 @@ pub struct UiState {
     /// The installed update's restart has been asked for.
     restarting: bool,
     /// Android: the side menu is open.
-    drawer: bool,
+    pub drawer: bool,
     /// Android: asking whether to save a state before exiting the game.
     confirm_back: bool,
     /// Help › User Guide.
@@ -379,14 +381,30 @@ fn side_menu(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, inf
     const SWIPE: f32 = 60.0;
     let screen = ctx.content_rect();
     let width = 280.0f32.min(screen.width() * 0.6);
-    let (swipe, back) = ctx.input(|i| {
-        let swipe = i.pointer.press_origin().zip(i.pointer.interact_pos()).map(|(o, p)| (o, p.x - o.x));
-        (swipe, i.key_pressed(egui::Key::BrowserBack))
-    });
-    match swipe {
-        Some((origin, dx)) if !st.drawer && origin.x <= SIDE_MENU_EDGE && dx > SWIPE => st.drawer = true,
-        Some((origin, dx)) if st.drawer && origin.x <= width && dx < -SWIPE => st.drawer = false,
-        _ => {}
+    let back = ctx.input(|i| i.key_pressed(egui::Key::BrowserBack));
+    if settings.touch_menu_button {
+        // Floating ☰ button in the top-left corner opens/closes the menu;
+        // swipe-from-left is disabled to avoid conflicts with the game.
+        if info.running {
+            let btn_size = egui::vec2(40.0, 40.0);
+            let btn_rect = egui::Rect::from_min_size(screen.min + egui::vec2(8.0, 8.0), btn_size);
+            egui::Area::new("side-menu-btn".into()).order(egui::Order::Foreground).fixed_pos(btn_rect.min).show(ctx, |ui| {
+                let resp = ui.allocate_rect(btn_rect, egui::Sense::click());
+                let alpha = if resp.hovered() { 180u8 } else { 110u8 };
+                ui.painter().rect_filled(btn_rect, 8.0, egui::Color32::from_black_alpha(alpha));
+                ui.painter().text(btn_rect.center(), egui::Align2::CENTER_CENTER, "☰", egui::FontId::proportional(22.0), egui::Color32::WHITE);
+                if resp.clicked() {
+                    st.drawer = !st.drawer;
+                }
+            });
+        }
+    } else {
+        let swipe = ctx.input(|i| i.pointer.press_origin().zip(i.pointer.interact_pos()).map(|(o, p)| (o, p.x - o.x)));
+        match swipe {
+            Some((origin, dx)) if !st.drawer && origin.x <= SIDE_MENU_EDGE && dx > SWIPE => st.drawer = true,
+            Some((origin, dx)) if st.drawer && origin.x <= width && dx < -SWIPE => st.drawer = false,
+            _ => {}
+        }
     }
     if back {
         st.drawer = !st.drawer;
@@ -444,37 +462,44 @@ fn open_windows(st: &UiState) -> usize {
 
 /// Before exiting the game (back to the games): save a state first?
 fn back_to_games_question(ctx: &egui::Context, st: &mut UiState, info: &Info, actions: &mut Vec<Action>) {
-    let modal = egui::Modal::new(egui::Id::new("back-to-games")).frame(ai_card_frame()).show(ctx, |ui| {
-        ui.set_width(ctx.content_rect().width().min(440.0) - 64.0);
-        ui.label(egui::RichText::new("Exit the game?").size(20.0).strong().color(egui::Color32::WHITE));
-        ui.add_space(6.0);
+    let dialog_frame = egui::Frame::new()
+        .fill(egui::Color32::from_rgb(22, 26, 24))
+        .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.55)))
+        .corner_radius(16)
+        .inner_margin(egui::Margin::same(20))
+        .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(110) });
+    let modal = egui::Modal::new(egui::Id::new("back-to-games")).frame(dialog_frame).show(ctx, |ui| {
+        ui.set_width(ctx.content_rect().width().min(360.0) - 32.0);
+        ui.label(egui::RichText::new("Exit the game?").size(18.0).strong().color(egui::Color32::WHITE));
+        ui.add_space(4.0);
         let note = match info.slots.first().cloned().flatten() {
             Some(when) => format!("Save a state first to carry on from here later (it replaces the one from {when})."),
             None => "Save a state first to carry on from here later.".to_string(),
         };
-        ui.add(egui::Label::new(egui::RichText::new(note).size(15.0).color(egui::Color32::from_gray(205))).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(note).size(14.0).color(egui::Color32::from_gray(190))).wrap());
         ui.add_space(14.0);
-        let full = ui.available_width();
-        let button = |text: &str, fill: Option<egui::Color32>| {
-            let text = egui::RichText::new(text).size(16.0).color(egui::Color32::WHITE);
-            let b = egui::Button::new(text).corner_radius(10).min_size(egui::vec2(full, 44.0));
-            match fill {
-                Some(f) => b.fill(f),
-                None => b,
+        // Full-width buttons, their labels centred.
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            let button = |text: &str, fill: egui::Color32, stroke: egui::Stroke| {
+                let text = egui::RichText::new(text).size(16.0).strong().color(egui::Color32::WHITE);
+                egui::Button::new(text).corner_radius(10).min_size(egui::vec2(0.0, 44.0)).fill(fill).stroke(stroke)
+            };
+            let none = egui::Stroke::NONE;
+            if ui.add(button("Save and exit", ACCENT, none)).clicked() {
+                actions.push(Action::SaveState(1));
+                actions.push(Action::CloseCartridge);
+                st.confirm_back = false;
             }
-        };
-        if ui.add(button("💾  Save and exit", Some(ACCENT))).clicked() {
-            actions.push(Action::SaveState(1));
-            actions.push(Action::CloseCartridge);
-            st.confirm_back = false;
-        }
-        if ui.add(button("Exit without saving", None)).clicked() {
-            actions.push(Action::CloseCartridge);
-            st.confirm_back = false;
-        }
-        if ui.add(button("Cancel", None).frame(false)).clicked() {
-            st.confirm_back = false;
-        }
+            if ui.add(button("Exit without saving", egui::Color32::from_gray(58), none)).clicked() {
+                actions.push(Action::CloseCartridge);
+                st.confirm_back = false;
+            }
+            let quiet = egui::Stroke::new(1.0, egui::Color32::from_gray(70));
+            if ui.add(button("Cancel", egui::Color32::TRANSPARENT, quiet)).clicked() {
+                st.confirm_back = false;
+            }
+        });
     });
     if modal.should_close() {
         st.confirm_back = false;
@@ -584,6 +609,10 @@ fn side_menu_items(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings,
         settings.touch_controls = !settings.touch_controls;
         actions.push(Action::SettingsChanged);
     }
+    if drawer_row(ui, "☰", "Menu button", "Corner button instead of swipe", Some(settings.touch_menu_button), true) {
+        settings.touch_menu_button = !settings.touch_menu_button;
+        actions.push(Action::SettingsChanged);
+    }
     drawer_section(ui, "All settings");
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
     ui.vertical(|ui| menus(ui, st, settings, info, actions, true));
@@ -640,6 +669,7 @@ fn console_tabs(
     library: &Library,
     tab: &mut Option<Family>,
     favorites_only: &mut bool,
+    open_folder: &mut Option<usize>,
     actions: &mut Vec<Action>,
 ) {
     let count = |f: Option<Family>| library.games.iter().filter(|g| f.is_none_or(|f| f.lists(g.family))).count();
@@ -656,6 +686,31 @@ fn console_tabs(
     let top = ui.cursor().min.y;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(26.0, 6.0);
+        // ★ Favorites tab first (only when there are any).
+        if fav_count > 0 {
+            let selected = *favorites_only;
+            let font = egui::FontId::proportional(16.0);
+            let name_g = ui.painter().layout_no_wrap("★ Favorites".to_string(), font, egui::Color32::WHITE);
+            let count_g = ui.painter().layout_no_wrap(fav_count.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+            let size = egui::vec2(name_g.size().x + 6.0 + count_g.size().x, 34.0);
+            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let fg = if selected { STAR_YELLOW } else if resp.hovered() { egui::Color32::from_gray(240) } else { egui::Color32::from_gray(165) };
+            let p = ui.painter();
+            let y = rect.top() + 4.0;
+            p.galley(egui::pos2(rect.left(), y), name_g.clone(), fg);
+            let count_pos = egui::pos2(rect.left() + name_g.size().x + 6.0, y + name_g.size().y - count_g.size().y - 1.0);
+            p.galley(count_pos, count_g, fg.gamma_multiply(0.7));
+            if selected {
+                let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom());
+                p.rect_filled(bar, 2.0, STAR_YELLOW);
+            }
+            if resp.clicked() {
+                *favorites_only = true;
+                *tab = None;
+                if open_folder.is_some() { actions.push(Action::CloseLibraryFolder); }
+            }
+        }
         // Regular family tabs (None = All games).
         for choice in std::iter::once(None).chain(families.into_iter().map(Some)) {
             let selected = !*favorites_only && *tab == choice;
@@ -680,6 +735,7 @@ fn console_tabs(
             if resp.clicked() {
                 *favorites_only = false;
                 *tab = choice;
+                if open_folder.is_some() { actions.push(Action::CloseLibraryFolder); }
                 let console = library.selected_console(&settings.library_console);
                 if let Some(f) = choice
                     && !f.runs_on(console)
@@ -687,30 +743,6 @@ fn console_tabs(
                 {
                     actions.push(Action::SetLibraryConsole(f.console()));
                 }
-            }
-        }
-        // ★ Favorites tab (only when there are any).
-        if fav_count > 0 {
-            let selected = *favorites_only;
-            let font = egui::FontId::proportional(16.0);
-            let name_g = ui.painter().layout_no_wrap("★ Favorites".to_string(), font, egui::Color32::WHITE);
-            let count_g = ui.painter().layout_no_wrap(fav_count.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
-            let size = egui::vec2(name_g.size().x + 6.0 + count_g.size().x, 34.0);
-            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-            let fg = if selected { ACCENT } else if resp.hovered() { egui::Color32::from_gray(240) } else { egui::Color32::from_gray(165) };
-            let p = ui.painter();
-            let y = rect.top() + 4.0;
-            p.galley(egui::pos2(rect.left(), y), name_g.clone(), fg);
-            let count_pos = egui::pos2(rect.left() + name_g.size().x + 6.0, y + name_g.size().y - count_g.size().y - 1.0);
-            p.galley(count_pos, count_g, fg.gamma_multiply(0.7));
-            if selected {
-                let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom());
-                p.rect_filled(bar, 2.0, ACCENT);
-            }
-            if resp.clicked() {
-                *favorites_only = true;
-                *tab = None;
             }
         }
     });
@@ -751,7 +783,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         });
         sub_menu(ui, "Games Folders", |ui| {
             for f in settings.rom_folders.clone() {
-                let b = egui::Button::new(format!("✕  {}", f.display()));
+                let b = egui::Button::new(format!("x  {}", f.display()));
                 if ui.add(b).on_hover_text("Stop looking in this folder").clicked() {
                     actions.push(Action::RemoveRomFolder(f));
                     ui.close();
@@ -832,47 +864,6 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 ui.close();
             }
         });
-        ui.separator();
-        if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
-            actions.push(Action::Screenshot);
-            ui.close();
-        }
-        // Screen recording.
-        {
-            let label = match &info.recording {
-                Some(secs) => {
-                    let m = secs / 60;
-                    let s = secs % 60;
-                    egui::RichText::new(format!("⏹  Stop recording  ({m}:{s:02})"))
-                        .color(egui::Color32::from_rgb(220, 60, 60))
-                }
-                None => egui::RichText::new("⏺  Record…"),
-            };
-            if info.encoding {
-                ui.add_enabled(false, egui::Button::new("⏳  Encoding…"));
-            } else if ui.add_enabled(info.running || info.recording.is_some(), egui::Button::new(label)).clicked() {
-                actions.push(Action::ToggleRecord);
-                ui.close();
-            }
-            sub_menu(ui, "Recording settings", |ui| {
-                ui.label(egui::RichText::new("Encoder").strong());
-                for enc in [RecordEncoder::H264, RecordEncoder::H265, RecordEncoder::Vp9, RecordEncoder::Lossless] {
-                    if ui.radio_value(&mut settings.record_encoder, enc, enc.label()).clicked() {
-                        actions.push(Action::SettingsChanged);
-                    }
-                }
-                ui.separator();
-                let folder_label = settings.record_folder
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "recordings/ (default)".to_string());
-                if ui.button(format!("Output: {folder_label}…")).clicked() {
-                    actions.push(Action::PickRecordFolder);
-                    ui.close();
-                }
-            });
-        }
         if ui.checkbox(&mut settings.discord_presence, "Show my game on Discord").changed() {
             actions.push(Action::SettingsChanged);
         }
@@ -1018,13 +1009,24 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             }
         });
     });
-    top_menu(ui, rows, "🔍", "Cheats", |ui| {
-        if ui.add_enabled(info.running, egui::Button::new("Memory Search…")).clicked() {
-            st.show_cheat = true;
-            ui.close();
+    top_menu(ui, rows, "⌨", "Input", |ui| {
+        if item(ui, "Key bindings…", "") {
+            st.show_bindings = true;
         }
-        if !info.running {
-            ui.label(egui::RichText::new("Start a game to use cheats").weak());
+        if ui
+            .checkbox(&mut settings.touch_controls, "Touch controls")
+            .on_hover_text("On-screen buttons, shown when the screen is touched; a key or controller button hides them.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
+        ui.separator();
+        if ui
+            .checkbox(&mut settings.zippity_on_home, "Zippity: stand on the home spot (Shift)")
+            .on_hover_text("Both footprints of the mat's orange home spot stay pressed. Mickey Says and other games wait for the player to stand there.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
         }
     });
     top_menu(ui, rows, "🖥", "Video", |ui| {
@@ -1127,6 +1129,46 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 actions.push(Action::SettingsChanged);
             }
         });
+        ui.separator();
+        if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
+            actions.push(Action::Screenshot);
+            ui.close();
+        }
+        {
+            let label = match &info.recording {
+                Some(secs) => {
+                    let m = secs / 60;
+                    let s = secs % 60;
+                    egui::RichText::new(format!("⏹  Stop recording  ({m}:{s:02})"))
+                        .color(egui::Color32::from_rgb(220, 60, 60))
+                }
+                None => egui::RichText::new("⏺  Record…").into(),
+            };
+            if info.encoding {
+                ui.add_enabled(false, egui::Button::new("⏳  Encoding…"));
+            } else if ui.add_enabled(info.running || info.recording.is_some(), egui::Button::new(label).shortcut_text("F8")).clicked() {
+                actions.push(Action::ToggleRecord);
+                ui.close();
+            }
+            sub_menu(ui, "Recording settings", |ui| {
+                ui.label(egui::RichText::new("Encoder").strong());
+                for enc in [RecordEncoder::H264, RecordEncoder::H265, RecordEncoder::Vp9, RecordEncoder::Lossless] {
+                    if ui.radio_value(&mut settings.record_encoder, enc, enc.label()).clicked() {
+                        actions.push(Action::SettingsChanged);
+                    }
+                }
+                ui.separator();
+                let folder_label = settings.record_folder
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "recordings/ (default)".to_string());
+                if ui.button(format!("Output: {folder_label}…")).clicked() {
+                    actions.push(Action::PickRecordFolder);
+                    ui.close();
+                }
+            });
+        }
     });
     top_menu(ui, rows, "🔊", "Audio", |ui| {
         if ui.checkbox(&mut settings.muted, "Mute").changed() {
@@ -1163,24 +1205,10 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 .weak(),
         );
     });
-    top_menu(ui, rows, "⌨", "Input", |ui| {
-        if item(ui, "Key bindings…", "") {
-            st.show_bindings = true;
-        }
-        if ui
-            .checkbox(&mut settings.touch_controls, "Touch controls")
-            .on_hover_text("On-screen buttons, shown when the screen is touched; a key or controller button hides them.")
-            .changed()
-        {
-            actions.push(Action::SettingsChanged);
-        }
-        ui.separator();
-        if ui
-            .checkbox(&mut settings.zippity_on_home, "Zippity: stand on the home spot (Shift)")
-            .on_hover_text("Both footprints of the mat's orange home spot stay pressed. Mickey Says and other games wait for the player to stand there.")
-            .changed()
-        {
-            actions.push(Action::SettingsChanged);
+    top_menu(ui, rows, "🔍", "Cheats", |ui| {
+        if ui.add_enabled(info.running, egui::Button::new("Memory Search…")).clicked() {
+            st.show_cheat = true;
+            ui.close();
         }
     });
     top_menu(ui, rows, "❓", "Help", |ui| {
@@ -1614,6 +1642,7 @@ const CARD_GAP: f32 = 22.0;
 /// Ribbit's green (the frog), for play buttons and highlights.
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(46, 170, 82);
 const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(64, 196, 104);
+const STAR_YELLOW: egui::Color32 = egui::Color32::from_rgb(255, 210, 50);
 
 /// The game library: art and info for every game in the ROM folders;
 /// clicking a game plays it.
@@ -1637,7 +1666,7 @@ fn library_screen(
     backdrop(ui);
     // A phone: tighter margins, smaller cards, no "last played" banner.
     let phone = cfg!(target_os = "android");
-    let margin = if phone { egui::Margin::symmetric(14, 10) } else { egui::Margin::symmetric(28, 20) };
+    let margin = if phone { egui::Margin::symmetric(14, 10) } else { egui::Margin { left: 28, right: 0, top: 20, bottom: 20 } };
     let (card_width, card_gap) = if phone { (150.0, 12.0) } else { (CARD_WIDTH, CARD_GAP) };
     egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
         // On a phone the header scrolls away with the games (it would take
@@ -1649,15 +1678,10 @@ fn library_screen(
             empty_library(ui, settings, actions);
             return;
         }
-        // Non-floating bar: reserves its own column so it never covers the
-        // game cards. Fixed bar_width so it stays the same size on hover.
-        {
-            let sc = &mut ui.style_mut().spacing.scroll;
-            sc.floating = false;
-            sc.bar_width = 8.0;
-        }
+        ui.style_mut().spacing.scroll.floating = false;
         let out = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
             if phone {
                 pull_to_refresh_hint(ui, *pull);
@@ -1679,7 +1703,7 @@ fn library_screen(
                 hero(ui, game, actions);
                 ui.add_space(28.0);
             }
-            console_tabs(ui, settings, library, tab, favorites_only, actions);
+            console_tabs(ui, settings, library, tab, favorites_only, open_folder, actions);
             ui.add_space(14.0);
             let query = search.trim().to_lowercase();
             let matches = |g: &crate::library::Game| {
@@ -1691,6 +1715,8 @@ fn library_screen(
                 if !matches(g) { return false; }
                 if *favorites_only && !settings.favorites.contains(&g.path) { return false; }
                 if g.tags.contains(&"Internal") && settings.hide_builtin_tabs.contains(tab_name) { return false; }
+                // Hide games that belong to a folder from the main list (show them inside the folder).
+                if open_folder.is_none() && !*favorites_only && settings.folders.iter().any(|f| f.games.contains(&g.path)) { return false; }
                 true
             }).collect();
             let heading = if *favorites_only {
@@ -1723,8 +1749,8 @@ fn library_screen(
                     });
                     if tab_has_builtins && !*favorites_only {
                         let hidden = settings.hide_builtin_tabs.contains(tab_name);
-                        let label = if hidden { "Built-in: hidden" } else { "Built-in: shown" };
-                        if ui.add(egui::Button::new(egui::RichText::new(label).size(11.0)).frame(true)).clicked() {
+                        let mut shown = !hidden;
+                        if ui.checkbox(&mut shown, egui::RichText::new("Built-in").size(11.0)).changed() {
                             actions.push(Action::ToggleBuiltinGames(*tab));
                         }
                     }
@@ -1736,67 +1762,112 @@ fn library_screen(
                 let avail = ui.available_width();
                 let fcols = (((avail + card_gap) / (card_width + card_gap)).floor() as usize).max(1);
                 let fc_w = ((avail - card_gap * (fcols - 1) as f32) / fcols as f32).floor().min(card_width * 1.4);
-                let folders_snapshot: Vec<(usize, String)> = settings.folders.iter().enumerate().map(|(i, f)| (i, f.name.clone())).collect();
-                for row in folders_snapshot.chunks(fcols) {
+                // Only show folder cards that have at least one game visible on the current tab.
+                let visible_folders: Vec<(usize, String, usize)> = settings.folders.iter().enumerate()
+                    .filter_map(|(i, f)| {
+                        let count = f.games.iter()
+                            .filter(|p| library.games.iter().any(|g| &g.path == *p && tab.is_none_or(|t| t.lists(g.family))))
+                            .count();
+                        if count > 0 { Some((i, f.name.clone(), count)) } else { None }
+                    })
+                    .collect();
+                for row in visible_folders.chunks(fcols) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = card_gap;
-                        for &(idx, ref name) in row {
+                        for &(idx, ref name, game_count) in row {
                             let art_paths: Vec<std::path::PathBuf> = settings.folders[idx].games.iter().take(4).cloned().collect();
                             let art_games: Vec<&crate::library::Game> = art_paths.iter()
                                 .filter_map(|p| library.games.iter().find(|g| &g.path == p))
                                 .collect();
-                            folder_card(ui, idx, name, &art_games, fc_w, actions);
+                            folder_card(ui, idx, name, game_count, &art_games, fc_w, actions);
                         }
                     });
                     ui.add_space(card_gap);
                 }
                 ui.add_space(4.0);
             }
-            // "← Back" breadcrumb when inside an open folder.
-            if let Some(folder_idx) = open_folder {
-                if let Some(folder) = settings.folders.get(*folder_idx) {
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new("← Back").frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            actions.push(Action::CloseLibraryFolder);
-                        }
-                        ui.label(egui::RichText::new(&folder.name).size(14.0).strong());
-                    });
-                    ui.add_space(8.0);
-                }
-            }
-            if shown_games.is_empty() && !query.is_empty() {
+            if shown_games.is_empty() && !query.is_empty() && open_folder.is_none() {
                 ui.add_space(30.0);
                 ui.vertical_centered(|ui| {
                     ui.label(egui::RichText::new(format!("No games match \"{}\"", search.trim())).size(16.0).weak());
                 });
             }
-            // When in an open folder, filter to just that folder's games.
-            let folder_games: Option<Vec<&crate::library::Game>> = open_folder.and_then(|idx| {
-                settings.folders.get(idx).map(|f| {
-                    shown_games.iter().copied().filter(|g| f.games.contains(&g.path)).collect()
-                })
-            });
-            let display_games = folder_games.as_deref().unwrap_or(shown_games.as_slice());
-            let avail = ui.available_width();
-            let cols = (((avail + card_gap) / (card_width + card_gap)).floor() as usize).max(1);
-            let card_w = ((avail - card_gap * (cols - 1) as f32) / cols as f32).floor().min(card_width * 1.4);
             let shown = since.elapsed().as_secs_f32();
-            for (r, row) in display_games.chunks(cols).enumerate() {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = card_gap;
-                    for (c, game) in row.iter().enumerate() {
-                        // Each card grows in a moment after the one before.
-                        let n = (r * cols + c).min(CARD_STAGGER_MAX);
-                        let t = ((shown - CARD_STAGGER * n as f32) / CARD_GROW).clamp(0.0, 1.0);
-                        if t < 1.0 {
-                            ui.ctx().request_repaint();
+            if let Some(folder_idx) = open_folder {
+                if let Some(folder) = settings.folders.get(*folder_idx) {
+                    let folder_games: Vec<&crate::library::Game> = shown_games.iter().copied()
+                        .filter(|g| folder.games.contains(&g.path))
+                        .collect();
+                    let visible_count = folder_games.len();
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(15, 32, 18))
+                        .stroke(egui::Stroke::new(1.5, ACCENT.gamma_multiply(0.5)))
+                        .corner_radius(12)
+                        .inner_margin(egui::Margin::same(14))
+                        .show(ui, |ui| {
+                            // Header row: back button + folder name.
+                            ui.horizontal(|ui| {
+                                let back = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("< Back")
+                                            .size(13.0)
+                                            .color(egui::Color32::WHITE)
+                                            .strong()
+                                    )
+                                    .fill(ACCENT)
+                                    .corner_radius(6.0)
+                                ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if back.clicked() { actions.push(Action::CloseLibraryFolder); }
+                                ui.label(
+                                    egui::RichText::new(format!("{}  ({})", folder.name, visible_count))
+                                        .size(14.0)
+                                        .strong()
+                                        .color(egui::Color32::WHITE)
+                                );
+                            });
+                            ui.add_space(10.0);
+                            if folder_games.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(20.0);
+                                    ui.label(egui::RichText::new("No games here yet").weak().size(15.0));
+                                });
+                            } else {
+                                let avail = ui.available_width();
+                                let cols = (((avail + card_gap) / (card_width + card_gap)).floor() as usize).max(1);
+                                let card_w = ((avail - card_gap * (cols - 1) as f32) / cols as f32).floor().min(card_width * 1.4);
+                                for (r, row) in folder_games.chunks(cols).enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = card_gap;
+                                        for (c, game) in row.iter().enumerate() {
+                                            let n = (r * cols + c).min(CARD_STAGGER_MAX);
+                                            let t = ((shown - CARD_STAGGER * n as f32) / CARD_GROW).clamp(0.0, 1.0);
+                                            if t < 1.0 { ui.ctx().request_repaint(); }
+                                            let is_fav = settings.favorites.contains(&game.path);
+                                            game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, true, &settings.folders, actions);
+                                        }
+                                    });
+                                    ui.add_space(card_gap);
+                                }
+                            }
+                        });
+                }
+            } else {
+                let avail = ui.available_width();
+                let cols = (((avail + card_gap) / (card_width + card_gap)).floor() as usize).max(1);
+                let card_w = ((avail - card_gap * (cols - 1) as f32) / cols as f32).floor().min(card_width * 1.4);
+                for (r, row) in shown_games.chunks(cols).enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = card_gap;
+                        for (c, game) in row.iter().enumerate() {
+                            let n = (r * cols + c).min(CARD_STAGGER_MAX);
+                            let t = ((shown - CARD_STAGGER * n as f32) / CARD_GROW).clamp(0.0, 1.0);
+                            if t < 1.0 { ui.ctx().request_repaint(); }
+                            let is_fav = settings.favorites.contains(&game.path);
+                            game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, false, &settings.folders, actions);
                         }
-                        let is_fav = settings.favorites.contains(&game.path);
-                        let in_folder = open_folder.and_then(|i| settings.folders.get(i)).map_or(false, |f| f.games.contains(&game.path));
-                        game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, in_folder, actions);
-                    }
-                });
-                ui.add_space(card_gap);
+                    });
+                    ui.add_space(card_gap);
+                }
             }
         });
         if phone {
@@ -1968,6 +2039,13 @@ fn phone_library_header(ui: &mut egui::Ui, settings: &Settings, library: &Librar
                 .clicked()
             {
                 actions.push(Action::RescanLibrary);
+            }
+            // Hamburger: opens the side menu.
+            if ui
+                .add(egui::Button::new(egui::RichText::new("☰").size(20.0)).corner_radius(8).min_size(egui::vec2(44.0, 40.0)))
+                .clicked()
+            {
+                actions.push(Action::ToggleDrawer);
             }
         });
     });
@@ -2375,14 +2453,18 @@ const CARD_GROW: f32 = 0.28;
 const CARD_STAGGER_MAX: usize = 12;
 
 /// A folder tile: 2×2 art thumbnails, folder name, open/delete.
-fn folder_card(ui: &mut egui::Ui, idx: usize, name: &str, art_games: &[&crate::library::Game], w: f32, actions: &mut Vec<Action>) {
+fn folder_card(ui: &mut egui::Ui, idx: usize, name: &str, game_count: usize, art_games: &[&crate::library::Game], w: f32, actions: &mut Vec<Action>) {
     let pad = 10.0;
     let inner_w = w - 2.0 * pad;
     let label_h = 32.0;
     let h = pad + inner_w + 8.0 + label_h + pad;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let drag_over = response.dnd_hover_payload::<std::path::PathBuf>().is_some();
+    if let Some(payload) = response.dnd_release_payload::<std::path::PathBuf>() {
+        actions.push(Action::AddToFolder { folder: idx, game: (*payload).clone() });
+    }
     let resp = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let lift = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let lift = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || drag_over, 0.12);
     let card = rect.translate(egui::vec2(0.0, -4.0 * lift));
     let p = ui.painter();
     let shadow = egui::epaint::Shadow {
@@ -2393,7 +2475,12 @@ fn folder_card(ui: &mut egui::Ui, idx: usize, name: &str, art_games: &[&crate::l
     };
     p.add(shadow.as_shape(card, 14));
     p.rect_filled(card, 14, egui::Color32::from_rgb(28, 34, 28).lerp_to_gamma(egui::Color32::from_rgb(36, 44, 36), lift));
-    p.rect_stroke(card, 14, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(18 + (20.0 * lift) as u8)), egui::StrokeKind::Inside);
+    let border_color = if drag_over {
+        ACCENT.gamma_multiply(0.9)
+    } else {
+        egui::Color32::from_white_alpha(18 + (20.0 * lift) as u8)
+    };
+    p.rect_stroke(card, 14, egui::Stroke::new(if drag_over { 2.0 } else { 1.0 }, border_color), egui::StrokeKind::Inside);
     // 2×2 thumbnail grid inside the art area.
     let art_area = egui::Rect::from_min_size(card.min + egui::vec2(pad, pad), egui::vec2(inner_w, inner_w));
     let half = (inner_w - 4.0) / 2.0;
@@ -2410,9 +2497,10 @@ fn folder_card(ui: &mut egui::Ui, idx: usize, name: &str, art_games: &[&crate::l
             ui.painter().rect_filled(*quad, 8, egui::Color32::from_white_alpha(8));
         }
     }
-    // Folder name.
+    // Folder name + game count.
     let name_pos = egui::pos2(card.min.x + pad, art_area.max.y + 8.0);
-    let mut job = egui::text::LayoutJob::simple(name.to_string(), egui::FontId::proportional(14.0), egui::Color32::WHITE, inner_w - 24.0);
+    let label = format!("{name} ({game_count})");
+    let mut job = egui::text::LayoutJob::simple(label, egui::FontId::proportional(14.0), egui::Color32::WHITE, inner_w - 24.0);
     job.wrap.max_rows = 1;
     let name_g = ui.painter().layout_job(job);
     ui.painter().galley(name_pos, name_g, egui::Color32::WHITE);
@@ -2447,7 +2535,7 @@ fn folder_card(ui: &mut egui::Ui, idx: usize, name: &str, art_games: &[&crate::l
 }
 
 /// `appear`: 0 to 1 as the card grows in (smaller and transparent at 0).
-fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, is_fav: bool, in_folder: bool, actions: &mut Vec<Action>) {
+fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, is_fav: bool, in_folder: bool, folders: &[crate::settings::LibraryFolder], actions: &mut Vec<Action>) {
     let pad = 10.0;
     let inner_w = w - 2.0 * pad;
     let (name, region) = split_region(&game.title);
@@ -2465,7 +2553,8 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
     );
     let sub_h = sub.size().y;
     let h = pad + inner_w + 12.0 + two_lines + 6.0 + sub_h.max(18.0) + pad;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
+    response.dnd_set_drag_payload(game.path.clone());
     let lift = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.12);
     let opacity = ui.opacity();
     ui.multiply_opacity(appear);
@@ -2490,33 +2579,51 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.painter().rect_filled(art, 10, egui::Color32::from_black_alpha((70.0 * lift) as u8));
         paint_play(ui.painter(), art.center(), 30.0, lift);
     }
-    // Star button — top-right corner of the art area.
-    let star_size = 22.0;
+    // Star button — top-right corner of the art area. Always shown as ☆
+    // (dim) or ★ (accent); check the cursor/click position against the star
+    // rect to avoid using ui.interact on a sub-rect of the card.
+    let star_size = 28.0;
     let star_rect = egui::Rect::from_min_size(
         egui::pos2(art.max.x - star_size - 4.0, art.min.y + 4.0),
         egui::vec2(star_size, star_size),
     );
-    let star_id = response.id.with("star");
-    let star_resp = ui.interact(star_rect, star_id, egui::Sense::click());
-    let star_hovered = star_resp.hovered();
+    let star_hovered = response.hovered() && response.hover_pos().map_or(false, |p| star_rect.contains(p));
+    let star_clicked = response.clicked() && response.interact_pointer_pos().map_or(false, |p| star_rect.contains(p));
     let star_char = if is_fav { "★" } else { "☆" };
     let star_color = if is_fav {
-        ACCENT
+        STAR_YELLOW
     } else if star_hovered {
-        egui::Color32::from_white_alpha(180)
+        egui::Color32::from_white_alpha(210)
     } else {
-        egui::Color32::from_white_alpha(0)
+        egui::Color32::from_white_alpha(55)
     };
-    if is_fav || star_hovered {
-        ui.painter().text(
-            star_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            star_char,
-            egui::FontId::proportional(16.0),
-            star_color,
-        );
+    // Dark outline for cartoony look: draw slightly larger in near-black first.
+    let star_font = egui::FontId::proportional(22.0);
+    let outline_color = egui::Color32::from_black_alpha(160);
+    for dx in [-1.0_f32, 1.0] {
+        for dy in [-1.0_f32, 1.0] {
+            ui.painter().text(
+                star_rect.center() + egui::vec2(dx, dy),
+                egui::Align2::CENTER_CENTER,
+                star_char,
+                star_font.clone(),
+                outline_color,
+            );
+        }
     }
-    if star_resp.clicked() {
+    if is_fav {
+        // Gradient: bright yellow top half, warm amber bottom half.
+        let top_color = if star_hovered { egui::Color32::from_rgb(255, 248, 160) } else { egui::Color32::from_rgb(255, 235, 100) };
+        let bot_color = if star_hovered { egui::Color32::from_rgb(255, 175, 30) } else { egui::Color32::from_rgb(220, 140, 10) };
+        let mid_y = star_rect.center().y;
+        let top_clip = egui::Rect::from_min_max(star_rect.min - egui::vec2(4.0, 4.0), egui::pos2(star_rect.max.x + 4.0, mid_y));
+        let bot_clip = egui::Rect::from_min_max(egui::pos2(star_rect.min.x - 4.0, mid_y), star_rect.max + egui::vec2(4.0, 4.0));
+        ui.painter().with_clip_rect(top_clip).text(star_rect.center(), egui::Align2::CENTER_CENTER, star_char, star_font.clone(), top_color);
+        ui.painter().with_clip_rect(bot_clip).text(star_rect.center(), egui::Align2::CENTER_CENTER, star_char, star_font, bot_color);
+    } else {
+        ui.painter().text(star_rect.center(), egui::Align2::CENTER_CENTER, star_char, star_font, star_color);
+    }
+    if star_clicked {
         actions.push(Action::ToggleFavorite(game.path.clone()));
     }
     let p = ui.painter();
@@ -2555,12 +2662,13 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         });
         ui.label(egui::RichText::new("Click to play · right-click for more").weak());
     });
-    if response.clicked() {
+    let game_clicked = response.clicked() && !response.interact_pointer_pos().map_or(false, |p| star_rect.contains(p));
+    if game_clicked {
         actions.push(Action::PlayFromLibrary(game.path.clone()));
     }
     let game_path = game.path.clone();
     response.context_menu(|ui| {
-        if ui.button("▶ Play").clicked() {
+        if ui.button("Play").clicked() {
             actions.push(Action::PlayFromLibrary(game_path.clone()));
             ui.close();
         }
@@ -2569,7 +2677,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
             ui.close();
         }
         ui.separator();
-        let fav_label = if is_fav { "✕ Remove from favorites" } else { "★ Add to favorites" };
+        let fav_label = if is_fav { "☆ Remove from favorites" } else { "★ Add to favorites" };
         if ui.button(fav_label).clicked() {
             actions.push(Action::ToggleFavorite(game_path.clone()));
             ui.close();
@@ -2579,6 +2687,23 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
                 actions.push(Action::RemoveFromFolder { folder: usize::MAX, game: game_path.clone() });
                 ui.close();
             }
+        }
+        ui.separator();
+        if ui.button("New folder").clicked() {
+            actions.push(Action::CreateFolder(vec![game_path.clone()]));
+            ui.close();
+        }
+        if !folders.is_empty() {
+            sub_menu(ui, "Add to folder", |ui| {
+                for (i, f) in folders.iter().enumerate() {
+                    if f.games.contains(&game_path) {
+                        ui.add_enabled(false, egui::Button::new(format!("+ {}", f.name)));
+                    } else if ui.button(&f.name).clicked() {
+                        actions.push(Action::AddToFolder { folder: i, game: game_path.clone() });
+                        ui.close();
+                    }
+                }
+            });
         }
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a

@@ -56,6 +56,9 @@ struct Shared {
     /// keep the UI waiting for tens of milliseconds (measured up to 43 ms:
     /// dropped clicks, stuttering sound).
     ui_waiting: AtomicUsize,
+    /// Screen recording: i16 audio samples buffered here while recording
+    /// (Some), drained by the UI thread each frame. None = not recording.
+    record_audio: Mutex<Option<Vec<i16>>>,
 }
 
 pub struct Emu {
@@ -73,6 +76,7 @@ impl Emu {
             stats: Mutex::new(Stats::default()),
             quit: AtomicBool::new(false),
             ui_waiting: AtomicUsize::new(0),
+            record_audio: Mutex::new(None),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -102,6 +106,12 @@ impl Emu {
     pub fn set_control(&self, c: Control) {
         let mut g = self.shared.control.lock().unwrap();
         if g.0 != c {
+            // Reset pacing when speed changes so the machine does not stall
+            // waiting for real time to catch up to where it was at the old
+            // speed (symptom: audio stays silent after going back to 1×).
+            if g.0.speed != c.speed {
+                g.1 = true;
+            }
             g.0 = c;
             self.shared.wake.notify_all();
         }
@@ -115,6 +125,27 @@ impl Emu {
 
     pub fn set_audio_sink(&self, sink: Option<AudioSink>) {
         *self.shared.sink.lock().unwrap() = sink;
+    }
+
+    /// Begin buffering audio for screen recording.
+    pub fn start_record_audio(&self) {
+        *self.shared.record_audio.lock().unwrap() = Some(Vec::new());
+    }
+
+    /// Stop buffering and drain any remaining samples.
+    pub fn stop_record_audio(&self, out: &mut Vec<i16>) {
+        if let Some(buf) = self.shared.record_audio.lock().unwrap().take() {
+            out.extend_from_slice(&buf);
+        }
+    }
+
+    /// Drain buffered recording audio into `out` (called each UI frame).
+    pub fn drain_record_audio(&self, out: &mut Vec<i16>) {
+        let mut g = self.shared.record_audio.lock().unwrap();
+        if let Some(buf) = g.as_mut() {
+            out.extend_from_slice(buf);
+            buf.clear();
+        }
     }
 
     pub fn stats(&self) -> Stats {
@@ -216,7 +247,8 @@ fn run(s: &Shared) {
         if control.auto_calibrate {
             calibrate.tick(&mut m);
         }
-        // Sound, at real-time speed only (no pitch-shifted audio).
+        // Sound: push at any speed, subsampling to stay real-time at fast-forward
+        // (pitches the audio up instead of going silent).
         let out = &mut m.io.voices.output;
         audio.resize(out.len(), 0);
         out.pop_into(&mut audio);
@@ -225,17 +257,42 @@ fn run(s: &Shared) {
         let dac = &mut m.io.voices.dac_output;
         dac_audio.resize(dac.len(), 0);
         dac.pop_into(&mut dac_audio);
-        if control.speed == 1.0
-            && !calibrating
+        if !calibrating
             && let Some(sink) = s.sink.lock().unwrap().as_mut()
         {
-            if control.pcm_32k && !dac_audio.is_empty() {
-                if control.pcm_clean {
-                    dac_audio.iter_mut().for_each(|s| *s = clean.push(*s));
+            let use_dac = control.pcm_32k && !dac_audio.is_empty();
+            if control.speed <= 1.0 + f64::EPSILON {
+                // Real-time or slower: push every sample.
+                if use_dac {
+                    if control.pcm_clean {
+                        dac_audio.iter_mut().for_each(|s| *s = clean.push(*s));
+                    }
+                    sink.push_32k(&dac_audio, control.gain);
+                } else {
+                    sink.push(&audio, control.gain);
                 }
-                sink.push_32k(&dac_audio, control.gain);
             } else {
-                sink.push(&audio, control.gain);
+                // Fast-forward: subsample to real-time rate so audio pitches up.
+                let step = control.speed.round() as usize;
+                let src: &[_] = if use_dac { &dac_audio } else { &audio };
+                let sub: Vec<_> = src.iter().copied().step_by(step.max(2)).collect();
+                if use_dac {
+                    sink.push_32k(&sub, control.gain);
+                } else {
+                    sink.push(&sub, control.gain);
+                }
+            }
+        }
+        // Screen recording: duplicate the same samples into the recording
+        // buffer (drained by the UI thread each frame).
+        if control.speed == 1.0 && !calibrating {
+            let mut rec = s.record_audio.lock().unwrap();
+            if let Some(buf) = rec.as_mut() {
+                if control.pcm_32k && !dac_audio.is_empty() {
+                    buf.extend_from_slice(&dac_audio);
+                } else {
+                    buf.extend_from_slice(&audio);
+                }
             }
         }
         // Speed meter.

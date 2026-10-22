@@ -540,6 +540,50 @@ mod tests {
     }
 
     #[test]
+    fn an_adpcm36_loop_wave_loops_to_its_loop_address() {
+        let mut t = Twist::new(&[]);
+        // Wave at halfword 0x01_0010: one frame of negative samples
+        // (residuals 0xE = -2, s = -8192 with filter 0), then the end mark.
+        let wave_at = 0x01_0010usize * 2;
+        t.bus.ram[wave_at..wave_at + 2].copy_from_slice(&0x0000u16.to_le_bytes()); // header: filter 0
+        for i in 1..=8 {
+            t.bus.ram[wave_at + 2 * i..wave_at + 2 * i + 2].copy_from_slice(&0xEEEEu16.to_le_bytes());
+        }
+        t.bus.ram[wave_at + 18..wave_at + 20].copy_from_slice(&0xFFFFu16.to_le_bytes()); // end mark
+        // Loop body at halfword 0x01_2000: one frame of large positive samples
+        // (residuals 0x7 = +7, s = +28672 with filter 0).
+        let loop_at = 0x01_2000usize * 2;
+        t.bus.ram[loop_at..loop_at + 2].copy_from_slice(&0x0000u16.to_le_bytes()); // header: filter 0
+        for i in 1..=8 {
+            t.bus.ram[loop_at + 2 * i..loop_at + 2 * i + 2].copy_from_slice(&0x7777u16.to_le_bytes());
+        }
+        let ch = 0xD040_1000 + 0x40 * 3;
+        // Wave address bits 21-16 = 1 → mode bits 5-0 = 1.
+        // Loop address bits 21-16 = 1 → mode bits 11-6 = 1.
+        // mode 0xA041: ADPCM (bit 15), loop/tone=2 (bits 13-12), mid bits = 1 each.
+        t.bus.write(ch, 0x0010, 4);     // reg 0: wave addr bits 15-0
+        t.bus.write(ch + 4, 0xA041, 4); // reg 1: ADPCM, loop, addr mid bits
+        t.bus.write(ch + 8, 0x2000, 4); // reg 2: loop addr bits 15-0
+        t.bus.write(ch + 0xC, 0x407F, 4); // reg 3: centre, full volume
+        t.bus.write(ch + 0x14, 0x7F, 4); // reg 5: envelope level
+        t.bus.write(ch + 0x34, 0xBE00, 4); // reg 0xD: ADPCM36
+        t.bus.write(0xD040_1800 + 0x40 * 3 + 0x10, 0x8000, 4); // phase: 4 ticks per fetch
+        t.bus.write(0xD040_0E54, 0x8, 4); // manual envelope, ch 3
+        t.bus.write(0xD040_0E04, 0x7F, 4); // main volume
+        t.bus.write(0xD040_0E00, 0x8, 4); // enable ch 3
+        // 200 ms: 112x longer than the ~1.8 ms wave body.
+        t.bus.now = CLOCK / 5;
+        t.bus.tick_sound();
+        let sound = std::mem::take(&mut t.bus.sound);
+        // A tone=2 loop wave never stops.
+        assert_eq!(t.bus.read(0xD040_0E3C, 4) & 8, 8, "still busy: loop never stops");
+        assert_eq!(t.bus.read(0xD040_0E2C, 4) & 8, 0, "not stopped");
+        // Wave body produced negative samples; loop body produced large positive ones.
+        assert!(sound.iter().any(|&s| s < -100), "wave body: negative samples before the loop");
+        assert!(sound.iter().any(|&s| s > 100), "loop body: positive samples after the loop");
+    }
+
+    #[test]
     fn an_adpcm36_wave_ends_at_a_mark_inside_a_frame() {
         let mut t = Twist::new(&[]);
         // A frame's header, two data words and the end mark; then another

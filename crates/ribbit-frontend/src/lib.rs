@@ -6,6 +6,8 @@ pub mod app;
 mod audio_out;
 mod backup;
 mod calibrate;
+mod cheat;
+mod record;
 mod console_view;
 mod device_fonts;
 mod discord;
