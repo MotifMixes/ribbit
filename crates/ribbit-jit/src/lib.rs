@@ -1,8 +1,9 @@
 //! Just-in-time compiler for the ARCtangent-A5 (ARCompact) core in
 //! `ribbit-cpu` (docs/jit-design.md).
 //!
-//! STATUS: phase 1. Blocks of the interpreter's block cache
-//! (`icache::Blocks`) compile to x86-64 once they have run a few times
+//! STATUS: phases 1-3. Blocks of the interpreter's block cache
+//! (`icache::Blocks`) compile to x86-64 or AArch64 (the same code,
+//! function for function: `x64.rs`, `aarch64.rs`) once they have run a few times
 //! (`Jit`, a `BlockRunner` for `Cpu::run_block_with`), with the
 //! interpreter's exact results, cycle timing included: the pipeline
 //! scoreboard runs in the generated code, and the memory system's timing
@@ -19,16 +20,18 @@
 //! states, the debugger and the interpreter always see one state, and
 //! nothing compiled has to be saved.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod exec_mem;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod full;
 #[cfg(target_arch = "x86_64")]
 mod x64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub use full::*;
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod stub;
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub use stub::*;

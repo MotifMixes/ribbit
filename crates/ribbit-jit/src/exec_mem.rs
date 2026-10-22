@@ -129,9 +129,43 @@ impl Arena {
             // SAFETY: those pages are read-write now.
             unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
             sys::protect_rx(pages, to - from)?;
+            sys::flush(at, code.len());
         }
         c.used += need;
         Ok(at)
+    }
+
+    /// Rewrites `bytes` of code at `at` (an address `add` returned, or within
+    /// such code), through the write view or by flipping the page's
+    /// protection; false if `at` is not code held here. No code may be running
+    /// meanwhile (one thread).
+    pub fn patch(&mut self, at: *const u8, bytes: &[u8]) -> bool {
+        let Some(c) = self.chunks.iter_mut().find(|c| {
+            let start = c.exec as usize;
+            (start..start + c.used).contains(&(at as usize)) && at as usize + bytes.len() <= start + c.used
+        }) else {
+            return false;
+        };
+        let off = at as usize - c.exec as usize;
+        if c.write != c.exec {
+            // SAFETY: within the chunk's write view (checked above).
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), c.write.add(off), bytes.len()) };
+        } else {
+            let page = page_size();
+            let (from, to) = (off / page * page, (off + bytes.len()).div_ceil(page) * page);
+            // SAFETY: within the chunk (its size is a multiple of the page size).
+            let pages = unsafe { c.exec.add(from) };
+            if sys::protect_rw(pages, to - from).is_err() {
+                return false;
+            }
+            // SAFETY: those pages are read-write now.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), c.exec.add(off), bytes.len()) };
+            if sys::protect_rx(pages, to - from).is_err() {
+                return false;
+            }
+        }
+        sys::flush(at, bytes.len());
+        true
     }
 
     /// Bytes of code held.
@@ -307,6 +341,10 @@ mod sys {
     /// read-write view). None elsewhere or if refused.
     #[cfg(target_os = "linux")]
     pub fn map_dual(size: usize) -> Option<(*mut u8, *mut u8)> {
+        // Profiling: anonymous mappings, which perf names from its map file.
+        if crate::full::perf_map_on() {
+            return None;
+        }
         // SAFETY: a fresh memfd; each mapping is checked; the descriptor is
         // closed once mapped (the mappings keep the memory).
         unsafe {
@@ -350,7 +388,15 @@ mod sys {
     }
 
     /// x86-64 keeps instruction fetches coherent with stores.
+    #[cfg(target_arch = "x86_64")]
     pub fn flush(_: *const u8, _: usize) {}
+
+    /// AArch64 requires explicit icache invalidation after writing code.
+    #[cfg(target_arch = "aarch64")]
+    pub fn flush(ptr: *const u8, len: usize) {
+        // SAFETY: ptr..ptr+len is executable memory we just wrote.
+        unsafe { dynasmrt::cache_control::synchronize_icache(std::slice::from_raw_parts(ptr, len)) }
+    }
 }
 
 #[cfg(not(any(windows, unix)))]

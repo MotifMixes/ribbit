@@ -267,6 +267,11 @@ pub enum Fast {
     Jl { s: u8 },
     /// JL.D [s]: BLINK = the address after the delay slot.
     JlD { s: u8 },
+    /// BBIT0/1 b,c (bit-test branch; target in `Hot`): branch if bit at
+    /// position (c & 31) in register b is 0 (`bit1=false`) or 1 (`bit1=true`).
+    Bbit { bit1: bool, b: u8, c: u8 },
+    /// BBIT0/1 with an immediate bit position (0-31).
+    BbitI { bit1: bool, b: u8, v: u8 },
 }
 
 impl Fast {
@@ -486,6 +491,14 @@ pub fn fast_form(i: &Instr) -> Fast {
             (Some(b), _, Some(v)) => Some(Fast::Br { cond, b, v }),
             _ => None,
         },
+        Op::Bbit0 | Op::Bbit1 => {
+            let bit1 = i.op == Op::Bbit1;
+            match (reg(i.src1), reg(i.src2), imm(i.src2)) {
+                (Some(b), Some(c), _) => Some(Fast::Bbit { bit1, b, c }),
+                (Some(b), _, Some(v)) => Some(Fast::BbitI { bit1, b, v: (v & 31) as u8 }),
+                _ => None,
+            }
+        }
         Op::B => Some(Fast::B { cc: i.cc }),
         Op::Bl if !i.delay => Some(Fast::Bl { cc: i.cc }),
         Op::Bl => Some(Fast::BlD { cc: i.cc }),

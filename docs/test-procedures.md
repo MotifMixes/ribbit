@@ -191,3 +191,7 @@ cargo check --target aarch64-apple-ios -p ribbit-core
 | 2026-10-13 | same | v1.5 + SpongeBob, `--straps 0x63FFFFFF`, 30 s, default vs `--input-lines 0x48FC1C7F` | default: shutdown write to 0x0180_B000 from 0x4007_0262, black screen; workaround: name-entry screen |
 | 2026-10-13 | same | GUI display modes Sharp / LCD grid (APPDATA scratch folder, window capture) | both render; first LCD build failed shader validation at window open, fixed, now caught by `lcd_shaders_parse_and_validate` |
 | 2026-10-13 | same | `cargo test --workspace`; Clippy host + aarch64-linux-android; fmt | 191 passed; clean; clean |
+| 2026-10-21 | Windows 11, rustc 1.99.0 MSVC | JIT phase 2: `cargo check -p ribbit-cpu -p ribbit-jit` | 0 errors, 0 warnings |
+| 2026-10-21 | same | JIT phase 2: `cargo test -p ribbit-jit --test lockstep` | 4 passed; 0 failed (`Bbit`/`BbitI` fast forms added to required-kinds) |
+| 2026-10-21 | same | JIT phase 2: `RIBBIT_JIT_CHECK=1` bench, BIOS v2.1, 50 M steps | no differences; 50 M steps in 3.83 s (check mode) |
+| 2026-10-21 | same | JIT phase 2: `examples/jitbench.rs` (16-instruction loop, one P-core) | `Cpu::step` 49 M inst/s; `run_block` 199 M inst/s; JIT 290 M inst/s (1.5× `run_block`) |

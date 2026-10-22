@@ -6,8 +6,8 @@
 //! | Host | Holds |
 //! |---|---|
 //! | `r12` | the `JitCtx` |
-//! | `rbx` | `&regs[0]` (guest rN at `[rbx + 4*N]`) |
-//! | `r13` | `&status32` |
+//! | `rbx` | `&regs[0]` (guest rN at `[rbx + 4*N]`; STATUS32 and `ready_max`, fields of the same `Cpu`, at fixed offsets) |
+//! | `r13` | `&ready[0]` (the scoreboard) |
 //! | `rbp` | the cycle count (`now`: the start of the instruction running) |
 //! | `r14d` | a taken branch's target while its delay slot runs |
 //! | `r15d` | 1 if that branch was taken, 0 if not |
@@ -46,34 +46,31 @@ const FROM: i32 = offset_of!(JitCtx, from) as i32;
 const DELAY_PENDING: i32 = offset_of!(JitCtx, delay_pending) as i32;
 const DELAY_TARGET: i32 = offset_of!(JitCtx, delay_target) as i32;
 const REGS: i32 = offset_of!(JitCtx, regs) as i32;
-const STATUS32: i32 = offset_of!(JitCtx, status32) as i32;
 const READY: i32 = offset_of!(JitCtx, ready) as i32;
-const READY_MAX: i32 = offset_of!(JitCtx, ready_max) as i32;
-const LOAD_LATENCY: i32 = offset_of!(JitCtx, load_latency) as i32;
 const NOW: i32 = offset_of!(JitCtx, now) as i32;
 const END: i32 = offset_of!(JitCtx, end) as i32;
 
 const FENCE: i32 = offset_of!(JitCtx, fence) as i32;
 const DISPATCH: i32 = offset_of!(JitCtx, dispatch) as i32;
-const TIMING_ON: i32 = offset_of!(JitCtx, timing_on) as i32;
-const ARMED: i32 = offset_of!(JitCtx, armed) as i32;
-const STALL: i32 = offset_of!(JitCtx, stall) as i32;
+const DIRTY4: i32 = offset_of!(JitCtx, dirty4) as i32;
 const CODE_TAGS: i32 = offset_of!(JitCtx, code_tags) as i32;
 const DATA_TAGS: i32 = offset_of!(JitCtx, data_tags) as i32;
-const EXIT_FLAG: i32 = offset_of!(JitCtx, exit_flag) as i32;
 const REGIONS: i32 = offset_of!(JitCtx, regions) as i32;
 const REGION_SIZE: i32 = std::mem::size_of::<crate::CtxRegion>() as i32;
 const R_BASE: i32 = offset_of!(crate::CtxRegion, base) as i32;
 const R_LIMIT: i32 = offset_of!(crate::CtxRegion, limit) as i32;
 const R_PTR: i32 = offset_of!(crate::CtxRegion, ptr) as i32;
 const R_WRITABLE: i32 = offset_of!(crate::CtxRegion, writable) as i32;
-const IFETCH: i32 = offset_of!(JitCtx, ifetch) as i32;
-const SLOW_READ8: i32 = offset_of!(JitCtx, slow_read8) as i32;
-const SLOW_READ16: i32 = offset_of!(JitCtx, slow_read16) as i32;
-const SLOW_READ32: i32 = offset_of!(JitCtx, slow_read32) as i32;
-const SLOW_WRITE8: i32 = offset_of!(JitCtx, slow_write8) as i32;
-const SLOW_WRITE16: i32 = offset_of!(JitCtx, slow_write16) as i32;
-const SLOW_WRITE32: i32 = offset_of!(JitCtx, slow_write32) as i32;
+const TIMED_READ8: i32 = offset_of!(JitCtx, timed_read8) as i32;
+const TIMED_READ16: i32 = offset_of!(JitCtx, timed_read16) as i32;
+const TIMED_READ32: i32 = offset_of!(JitCtx, timed_read32) as i32;
+const TIMED_WRITE8: i32 = offset_of!(JitCtx, timed_write8) as i32;
+const TIMED_WRITE16: i32 = offset_of!(JitCtx, timed_write16) as i32;
+const TIMED_WRITE32: i32 = offset_of!(JitCtx, timed_write32) as i32;
+/// `Cpu::status32` and `Cpu::ready_max` from `rbx` (`&Cpu::regs[0]`): the
+/// context's pointers are always into one `Cpu` (`JitCtx::new`).
+const ST: i32 = offset_of!(ribbit_cpu::Cpu, status32) as i32 - offset_of!(ribbit_cpu::Cpu, regs) as i32;
+const RMAX: i32 = offset_of!(ribbit_cpu::Cpu, ready_max) as i32 - offset_of!(ribbit_cpu::Cpu, regs) as i32;
 /// Cache tag bits (`ribbit_memory::JitView`).
 const TAG_VALID: u32 = 1 << 31;
 const TAG_DIRTY: u32 = 1 << 30;
@@ -81,6 +78,7 @@ const CACHE_SETS: u32 = 512;
 const WATCH: i32 = offset_of!(JitCtx, watch) as i32;
 const WATCH_DATA: i32 = offset_of!(JitCtx, watch_data) as i32;
 const LINK: i32 = offset_of!(JitCtx, link) as i32;
+const PATCH: i32 = offset_of!(JitCtx, patch) as i32;
 const FB_BLOCK: i32 = offset_of!(JitCtx, fb_block) as i32;
 const FB_INDEX: i32 = offset_of!(JitCtx, fb_index) as i32;
 
@@ -223,6 +221,7 @@ pub(crate) fn generic_ok(i: &Instr) -> bool {
         Op::Cmp | Op::Rcmp | Op::Tst | Op::Btst => srcs,
         Op::Asl | Op::Asr | Op::Lsr | Op::Ror | Op::Rrc | Op::Rlc => srcs,
         Op::Sexb | Op::Sexw | Op::Extb | Op::Extw | Op::Not | Op::Neg | Op::Swap | Op::Abs | Op::Norm => srcs,
+        Op::Max | Op::Min | Op::Normw => srcs,
         // A zero-overhead loop's set-up (`Gen::lp`).
         Op::Lp => true,
         Op::Ld | Op::St => {
@@ -247,6 +246,8 @@ fn is_branch(f: Fast) -> bool {
         f,
         Fast::Br { .. }
             | Fast::BrR { .. }
+            | Fast::Bbit { .. }
+            | Fast::BbitI { .. }
             | Fast::B { .. }
             | Fast::Bl { .. }
             | Fast::BlD { .. }
@@ -310,6 +311,48 @@ struct Gen {
     inline: bool,
     /// The instruction being emitted (for the slow helpers' `at`).
     pc: u32,
+    /// Research (RIBBIT_JIT_PERFMAP): where each kind of code starts.
+    tags: Vec<(u32, u8)>,
+    /// The instruction being emitted, counted from the block's first (0).
+    seq: u32,
+    /// The block's loads so far: (`seq`, destination register).
+    loads: Vec<(u32, u8)>,
+    /// `CpuConfig::load_latency` (the code is dropped if it changes).
+    latency: u32,
+    /// Memory timing is on (`JitView::timing`; the code is dropped if it
+    /// changes): the inline code times fetches and data accesses.
+    timing: bool,
+    /// The batch fence can stop a link (`JitCtx::fence`; else it is
+    /// `u32::MAX` and no block reaches it).
+    fence_check: bool,
+    /// The last `stall` is known to be zero (rax not set: `cost` adds nothing).
+    stall_zero: bool,
+}
+
+/// The displacement of the direct jump whose 32-bit displacement is at `at`
+/// (see `Gen::flow`) pointed at `target`, or None if out of reach.
+pub(crate) fn link_patch(at: u64, target: u64) -> Option<[u8; 4]> {
+    let rel = (target as i64).wrapping_sub(at as i64 + 4);
+    i32::try_from(rel).ok().map(i32::to_le_bytes)
+}
+
+/// What a stretch of generated code does (`Emitted::tags`, for profiles).
+pub(crate) mod tag {
+    pub const ENTRY: u8 = 0;
+    pub const BODY: u8 = 1;
+    pub const COST: u8 = 2;
+    pub const LOOP_CHECK: u8 = 3;
+    pub const BUDGET: u8 = 4;
+    pub const BUS_CHECK: u8 = 5;
+    pub const PREP: u8 = 6;
+    pub const STALL: u8 = 7;
+    pub const REGION: u8 = 8;
+    pub const MEM: u8 = 9;
+    pub const FLOW: u8 = 10;
+    pub const WATCH: u8 = 11;
+    pub const STUB: u8 = 12;
+    pub const LOOP_STUB: u8 = 13;
+    pub const BRANCH: u8 = 14;
 }
 
 /// Generated code.
@@ -320,18 +363,40 @@ pub(crate) struct Emitted {
     /// Offset of the entry for a jump from another block (after the
     /// prologue: the registers are set up already).
     pub chain: usize,
+    /// (offset, `tag`) where each kind of code starts.
+    pub tags: Vec<(u32, u8)>,
 }
 
-/// Generates the code for `items` (block `id`, link slots at `links`), or
-/// None if the first instruction cannot be compiled.
-pub(crate) fn emit(items: &[Item], mmid_low: bool, id: u32, links: *mut crate::Link, links_cap: usize, inline: bool) -> Option<Emitted> {
+/// Generates the code for `items` (block `id`, link slots at `links`; loads
+/// arrive `latency` cycles after they issue), or None if the first
+/// instruction cannot be compiled.
+pub(crate) fn emit(items: &[Item], id: u32, links: *mut crate::Link, links_cap: usize, o: &crate::full::Opts) -> Option<Emitted> {
     let first = items.first()?;
     if !compilable(first) || matches!(first.hot.fast, Fast::BlD { .. } | Fast::JlD { .. }) && items.len() < 2 {
         return None;
     }
     let mut ops = Asm::new(0);
     let epilogue = ops.new_dynamic_label();
-    let mut g = Gen { ops, epilogue, loops: Vec::new(), stubs: Vec::new(), mmid_low, id, links, links_cap, links_used: 0, inline, pc: 0 };
+    let mut g = Gen {
+        ops,
+        epilogue,
+        loops: Vec::new(),
+        stubs: Vec::new(),
+        mmid_low: o.mmid_low,
+        id,
+        links,
+        links_cap,
+        links_used: 0,
+        inline: o.inline,
+        pc: 0,
+        tags: Vec::new(),
+        seq: 0,
+        loads: Vec::new(),
+        latency: o.latency.min(u32::MAX as u64) as u32,
+        timing: o.timing,
+        fence_check: o.fence_check,
+        stall_zero: false,
+    };
     g.prologue();
     let chain = g.ops.offset().0;
     let mut k = 0;
@@ -346,6 +411,7 @@ pub(crate) fn emit(items: &[Item], mmid_low: bool, id: u32, links: *mut crate::L
             g.fallback(it.hot.addr, k as u32, items[k - 1].hot.addr);
             break k;
         }
+        g.seq = k as u32;
         if is_branch(it.hot.fast) {
             break g.branch(items, k);
         }
@@ -358,13 +424,22 @@ pub(crate) fn emit(items: &[Item], mmid_low: bool, id: u32, links: *mut crate::L
         k += 1;
     };
     g.epilogue();
-    let ops = g.ops;
+    let (ops, tags) = (g.ops, g.tags);
     let code = ops.finalize().ok()?;
-    Some(Emitted { code, compiled, chain })
+    Some(Emitted { code, compiled, chain, tags })
 }
 
 impl Gen {
+    fn tag(&mut self, t: u8) {
+        let at = self.ops.offset().0 as u32;
+        match self.tags.last_mut() {
+            Some(last) if last.0 == at => last.1 = t,
+            _ => self.tags.push((at, t)),
+        }
+    }
+
     fn prologue(&mut self) {
+        self.tag(tag::ENTRY);
         // Six pushes and 8 bytes after the return address leave rsp 16-byte
         // aligned for the helper calls.
         dynasm!(self.ops
@@ -378,13 +453,17 @@ impl Gen {
             ; sub rsp, 8
             ; mov r12, rdi
             ; mov rbx, QWORD [r12 + REGS]
-            ; mov r13, QWORD [r12 + STATUS32]
+            ; mov r13, QWORD [r12 + READY]
             ; mov rbp, QWORD [r12 + NOW]
+            // The instruction's slow-path stall (bit 63: the bus asked for
+            // an exit), zero between instructions (`stall_inline`).
+            ; mov QWORD [rsp], 0
         );
     }
 
     fn epilogue(&mut self) {
         let epilogue = self.epilogue;
+        self.tag(tag::ENTRY);
         dynasm!(self.ops
             ; .arch x64
             ; =>epilogue
@@ -403,6 +482,7 @@ impl Gen {
             if let Some(l) = self.loops.pop() {
                 // The interpreter's `loop_end_check`: LP_COUNT -= 1; back to
                 // LP_START unless it was 1.
+                self.tag(tag::LOOP_STUB);
                 dynasm!(self.ops
                     ; .arch x64
                     ; =>l.label
@@ -419,6 +499,7 @@ impl Gen {
                 }
                 self.flow(Pc::R14, l.executed, l.from);
             } else if let Some(s) = self.stubs.pop() {
+                self.tag(tag::STUB);
                 dynasm!(self.ops ; .arch x64 ; =>s.label);
                 if s.delay {
                     dynasm!(self.ops
@@ -475,6 +556,7 @@ impl Gen {
     /// after an instruction).
     fn budget_check(&mut self, pc: Pc, executed: u32, from: u32, delay: bool) {
         let stub = self.stub(EXIT_BUDGET, pc, executed, from, delay);
+        self.tag(tag::BUDGET);
         dynasm!(self.ops
             ; .arch x64
             ; cmp rbp, QWORD [r12 + END]
@@ -489,6 +571,7 @@ impl Gen {
     fn after_sequential(&mut self, next: u32, executed: u32, from: u32, mem: bool) {
         let (label, stay) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         self.loops.push(LoopStub { label, stay, executed, from, mem });
+        self.tag(tag::LOOP_CHECK);
         dynasm!(self.ops
             ; .arch x64
             ; cmp DWORD [r12 + LP_END], next as i32
@@ -496,6 +579,7 @@ impl Gen {
             ; =>stay
         );
         if mem {
+            self.tag(tag::BUS_CHECK);
             let stub = self.stub(EXIT_BUS, Pc::Const(next), executed, from, false);
             dynasm!(self.ops ; .arch x64 ; test r8d, r8d ; jnz =>stub);
         }
@@ -508,6 +592,7 @@ impl Gen {
     /// then the budget; then the block linked there runs next (`crate::Link`,
     /// filled by `Jit` on an earlier exit from here), else the code returns.
     fn flow(&mut self, target: Pc, executed: u32, from: u32) {
+        self.tag(tag::FLOW);
         match target {
             Pc::Const(t) => {
                 if t <= from {
@@ -522,6 +607,7 @@ impl Gen {
             }
         }
         self.budget_check(target, executed, from, false);
+        self.tag(tag::FLOW);
         if self.links_used == self.links_cap {
             self.exit(EXIT_FLOW, target, executed, from);
             return;
@@ -530,6 +616,33 @@ impl Gen {
         let link = unsafe { self.links.add(self.links_used) } as i64;
         self.links_used += 1;
         let miss = self.ops.new_dynamic_label();
+        if let (Pc::Const(_), false) = (target, self.fence_check)
+            && self.inline
+        {
+            // A jump the `Jit` points at the next block once it is known
+            // (`JitCtx::patch`); until then (and if it is out of reach) it
+            // falls through to the link slot.
+            let rel = self.ops.new_dynamic_label();
+            dynasm!(self.ops
+                ; .arch x64
+                ; add DWORD [r12 + EXECUTED], executed as i32
+                ; .u8 0xE9
+                ; =>rel
+                ; .u32 0
+                ; mov rax, QWORD link
+                ; mov rdx, QWORD [rax + 8]
+                ; test rdx, rdx
+                ; jz =>miss
+                ; jmp rdx
+                ; =>miss
+                ; sub DWORD [r12 + EXECUTED], executed as i32
+                ; mov QWORD [r12 + LINK], rax
+                ; lea rcx, [=>rel]
+                ; mov QWORD [r12 + PATCH], rcx
+            );
+            self.exit(EXIT_FLOW, target, executed, from);
+            return;
+        }
         dynasm!(self.ops ; .arch x64 ; mov rax, QWORD link);
         if let Pc::R14 = target {
             // A computed target: this exit's last one, else the shared
@@ -546,9 +659,12 @@ impl Gen {
                 ; add rcx, QWORD [r12 + DISPATCH]
                 ; cmp r14d, DWORD [rcx]
                 ; jne =>miss
-                ; mov edx, DWORD [rcx + 4]
-                ; cmp edx, DWORD [r12 + FENCE]
-                ; jae =>miss
+            );
+            if self.fence_check {
+                dynasm!(self.ops ; .arch x64 ; mov edx, DWORD [rcx + 4] ; cmp edx, DWORD [r12 + FENCE] ; jae =>miss);
+            }
+            dynasm!(self.ops
+                ; .arch x64
                 ; mov rdx, QWORD [rcx + 8]
                 ; test rdx, rdx
                 ; jz =>miss
@@ -557,11 +673,11 @@ impl Gen {
                 ; =>cached
             );
         }
+        if self.fence_check {
+            dynasm!(self.ops ; .arch x64 ; mov ecx, DWORD [rax + 4] ; cmp ecx, DWORD [r12 + FENCE] ; jae =>miss);
+        }
         dynasm!(self.ops
             ; .arch x64
-            ; mov ecx, DWORD [rax + 4]
-            ; cmp ecx, DWORD [r12 + FENCE]
-            ; jae =>miss
             ; mov rdx, QWORD [rax + 8]
             ; test rdx, rdx
             ; jz =>miss
@@ -569,6 +685,7 @@ impl Gen {
             ; jmp rdx
             ; =>miss
             ; mov QWORD [r12 + LINK], rax
+            ; mov QWORD [r12 + PATCH], 0
         );
         self.exit(EXIT_FLOW, target, executed, from);
     }
@@ -577,6 +694,7 @@ impl Gen {
     /// it accepts.
     fn watch(&mut self, target: Pc, executed: u32, from: u32) {
         let stub = self.stub(EXIT_BACKWARD, target, executed, from, false);
+        self.tag(tag::WATCH);
         dynasm!(self.ops ; .arch x64 ; mov rdi, QWORD [r12 + WATCH_DATA]);
         match target {
             Pc::Const(t) => dynasm!(self.ops ; .arch x64 ; mov esi, t as i32),
@@ -589,6 +707,7 @@ impl Gen {
             ; test eax, eax
             ; jnz =>stub
         );
+        self.tag(tag::FLOW);
     }
 
     /// A non-branch instruction with its timing, as `Cpu::batch_one` runs
@@ -604,6 +723,7 @@ impl Gen {
         let h = it.hot;
         self.pc = h.addr;
         let mem = it.mem();
+        self.tag(tag::PREP);
         if mem {
             if self.inline {
                 self.prep_inline(&h, it.fetch);
@@ -615,6 +735,7 @@ impl Gen {
             // (`at`; only seen by a recording bus when it touches no device).
             self.prep(&h, it.fetch);
         }
+        self.tag(tag::BODY);
         match it.general() {
             Some(i) => self.generic(i),
             None => self.body(&h),
@@ -638,6 +759,8 @@ impl Gen {
 
     /// `rax` = the instruction's memory stall (after `prep` and the body).
     fn stall(&mut self, h: &Hot, fetch: bool, mem: bool) {
+        self.tag(tag::STALL);
+        self.stall_zero = false;
         if self.inline {
             return self.stall_inline(h, fetch, mem);
         }
@@ -662,30 +785,47 @@ impl Gen {
                 ; call QWORD [r12 + FETCH_TAKE]
             );
         } else {
-            dynasm!(self.ops ; .arch x64 ; xor eax, eax);
+            self.stall_zero = true;
         }
     }
 
     /// `Cpu::pipeline_cost` with the stall in `rax`: waits for registers
     /// read whose loads have not arrived, records a load's arrival, and
     /// advances `rbp` by 1 + wait + stall + `extra` (the taken-branch costs).
+    /// Which registers' arrival times can delay it are known here: a load
+    /// at instruction `j` arrives at most `latency - 1` cycles after its
+    /// own end, and each instruction takes at least one cycle, so the
+    /// instruction `k` waits for it only if `k - j < latency`. Loads from
+    /// before the block (`j <= -1`) matter only to the first `latency - 1`
+    /// instructions, which check every register they read; the others look
+    /// only at the registers loaded by the block's last `latency - 1`
+    /// instructions (usually none: no code at all).
     fn cost(&mut self, h: &Hot, extra: u64) {
-        let reads: Vec<i32> = h.reads.iter().filter(|&&r| r < 64).map(|&r| 8 * r as i32).collect();
-        if let Some((&first, rest)) = reads.split_first() {
+        self.tag(tag::COST);
+        let mut regs: Vec<u8> = h.reads.iter().copied().filter(|&r| r < 64).collect();
+        regs.sort_unstable();
+        regs.dedup();
+        let (seq, latency) = (self.seq, self.latency);
+        let early = seq.saturating_add(1) < latency;
+        if !early {
+            regs.retain(|&r| self.loads.iter().any(|&(j, d)| d == r && seq - j < latency));
+        }
+        if let Some((&first, rest)) = regs.split_first() {
             let done = self.ops.new_dynamic_label();
-            dynasm!(self.ops
-                ; .arch x64
-                ; xor ecx, ecx
-                ; mov rdx, QWORD [r12 + READY_MAX]
-                ; cmp QWORD [rdx], rbp
-                ; jbe =>done
-                ; mov rdx, QWORD [r12 + READY]
-                ; mov rcx, QWORD [rdx + first]
-            );
-            for &d in rest {
+            if early {
+                // Nothing pending at all: no wait.
                 dynasm!(self.ops
                     ; .arch x64
-                    ; mov rsi, QWORD [rdx + d]
+                    ; xor ecx, ecx
+                    ; cmp QWORD [rbx + RMAX], rbp
+                    ; jbe =>done
+                );
+            }
+            dynasm!(self.ops ; .arch x64 ; mov rcx, QWORD [r13 + 8 * first as i32]);
+            for &r in rest {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov rsi, QWORD [r13 + 8 * r as i32]
                     ; cmp rcx, rsi
                     ; cmovb rcx, rsi
                 );
@@ -698,58 +838,60 @@ impl Gen {
                 ; xor ecx, ecx
                 ; =>done
             );
-        } else {
-            dynasm!(self.ops ; .arch x64 ; xor ecx, ecx);
         }
+        let wait_zero = regs.is_empty();
+        let stall_zero = self.stall_zero;
         if h.load_dst != NO_LOAD {
             let d = 8 * h.load_dst as i32;
             let keep = self.ops.new_dynamic_label();
+            // rsi = now + wait + stall + latency.
+            match (wait_zero, stall_zero) {
+                (true, true) => dynasm!(self.ops ; .arch x64 ; lea rsi, [rbp + latency as i32]),
+                (true, false) => dynasm!(self.ops ; .arch x64 ; lea rsi, [rbp + rax + latency as i32]),
+                (false, true) => dynasm!(self.ops ; .arch x64 ; lea rsi, [rbp + rcx + latency as i32]),
+                (false, false) => dynasm!(self.ops ; .arch x64 ; lea rsi, [rbp + rcx + latency as i32] ; add rsi, rax),
+            }
             dynasm!(self.ops
                 ; .arch x64
-                ; lea rsi, [rbp + rcx]
-                ; add rsi, rax
-                ; add rsi, QWORD [r12 + LOAD_LATENCY]
-                ; mov rdx, QWORD [r12 + READY]
-                ; mov QWORD [rdx + d], rsi
-                ; mov rdx, QWORD [r12 + READY_MAX]
-                ; cmp QWORD [rdx], rsi
+                ; mov QWORD [r13 + d], rsi
+                ; cmp QWORD [rbx + RMAX], rsi
                 ; jae =>keep
-                ; mov QWORD [rdx], rsi
+                ; mov QWORD [rbx + RMAX], rsi
                 ; =>keep
             );
+            self.loads.push((seq, h.load_dst));
         }
-        dynasm!(self.ops
-            ; .arch x64
-            ; add rbp, rax
-            ; lea rbp, [rbp + rcx + (1 + extra) as i32]
-        );
+        let base = (1 + extra) as i32;
+        match (wait_zero, stall_zero) {
+            (true, true) => dynasm!(self.ops ; .arch x64 ; add rbp, base),
+            (true, false) => dynasm!(self.ops ; .arch x64 ; lea rbp, [rbp + rax + base]),
+            (false, true) => dynasm!(self.ops ; .arch x64 ; lea rbp, [rbp + rcx + base]),
+            (false, false) => dynasm!(self.ops ; .arch x64 ; add rbp, rax ; lea rbp, [rbp + rcx + base]),
+        }
     }
 
-    /// `prep` done in place (`ribbit_memory::JitView`): the fetch's
-    /// code-cache lookup (the bus's `instruction` on a miss), then armed. No
-    /// `at`: the slow access helpers stamp the bus themselves.
+    /// `prep` done in place (`ribbit_memory::JitView`) for a memory
+    /// instruction: the fetch's code-cache lookup when it is timed in full.
+    /// Nothing is armed: hits change no timing state (`MemTiming`), so only
+    /// the slow paths arm and take the stall, each adding it to `[rsp]`:
+    /// here a code-cache miss (the bus's `instruction` + `take_stall`), and
+    /// the data access's helper (`timed_read*`/`timed_write*`).
     fn prep_inline(&mut self, h: &Hot, fetch: bool) {
-        let done = self.ops.new_dynamic_label();
-        dynasm!(self.ops ; .arch x64 ; cmp DWORD [r12 + TIMING_ON], 0 ; je =>done);
-        if fetch {
-            let (hit, miss) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
-            self.code_lookup(h, hit, miss);
-            let len = h.next.wrapping_sub(h.addr);
-            dynasm!(self.ops
-                ; .arch x64
-                ; =>miss
-                ; mov rdi, QWORD [r12 + BUS]
-                ; mov esi, h.addr as i32
-                ; mov edx, len as i32
-                ; call QWORD [r12 + IFETCH]
-                ; =>hit
-            );
+        if !fetch || !self.timing {
+            return;
         }
+        let (hit, miss) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+        self.code_lookup(h, hit, miss);
+        let len = h.next.wrapping_sub(h.addr);
         dynasm!(self.ops
             ; .arch x64
-            ; mov rcx, QWORD [r12 + ARMED]
-            ; mov BYTE [rcx], 1
-            ; =>done
+            ; =>miss
+            ; mov rdi, QWORD [r12 + BUS]
+            ; mov esi, h.addr as i32
+            ; mov edx, len as i32
+            ; call QWORD [r12 + FETCH_TAKE]
+            ; add QWORD [rsp], rax
+            ; =>hit
         );
     }
 
@@ -783,36 +925,37 @@ impl Gen {
     /// memory instruction, the code-cache lookup for one with its fetch
     /// timed in full (the bus's `instruction` + `take_stall` on a miss).
     fn stall_inline(&mut self, h: &Hot, fetch: bool, mem: bool) {
-        let done = self.ops.new_dynamic_label();
-        dynasm!(self.ops ; .arch x64 ; xor eax, eax ; cmp DWORD [r12 + TIMING_ON], 0 ; je =>done);
         if mem {
+            // What the slow paths added (`prep_inline`); the exit request
+            // can only come from one of them (a batch starts with it clear,
+            // and only bus accesses set it).
             dynasm!(self.ops
                 ; .arch x64
-                ; mov rcx, QWORD [r12 + STALL]
-                ; mov rax, QWORD [rcx]
-                ; mov QWORD [rcx], 0
-                ; mov rcx, QWORD [r12 + ARMED]
-                ; mov BYTE [rcx], 0
-                ; =>done
-                ; mov rcx, QWORD [r12 + EXIT_FLAG]
-                ; movzx r8d, BYTE [rcx]
+                ; mov rax, QWORD [rsp]
+                ; mov QWORD [rsp], 0
+                ; mov r8, rax
+                ; shr r8, 63
+                ; btr rax, 63
             );
-        } else if fetch {
-            let miss = self.ops.new_dynamic_label();
-            self.code_lookup(h, done, miss);
-            let len = h.next.wrapping_sub(h.addr);
-            dynasm!(self.ops
-                ; .arch x64
-                ; =>miss
-                ; mov rdi, QWORD [r12 + BUS]
-                ; mov esi, h.addr as i32
-                ; mov edx, len as i32
-                ; call QWORD [r12 + FETCH_TAKE]
-                ; =>done
-            );
-        } else {
-            dynasm!(self.ops ; .arch x64 ; =>done);
+            return;
         }
+        if !(fetch && self.timing) {
+            self.stall_zero = true;
+            return;
+        }
+        let (done, miss) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+        dynasm!(self.ops ; .arch x64 ; xor eax, eax);
+        self.code_lookup(h, done, miss);
+        let len = h.next.wrapping_sub(h.addr);
+        dynasm!(self.ops
+            ; .arch x64
+            ; =>miss
+            ; mov rdi, QWORD [r12 + BUS]
+            ; mov esi, h.addr as i32
+            ; mov edx, len as i32
+            ; call QWORD [r12 + FETCH_TAKE]
+            ; =>done
+        );
     }
 
     /// Finds the plain-memory region (`ribbit_memory::JitRegion`) holding
@@ -823,6 +966,7 @@ impl Gen {
     fn region_lookup(&mut self, width: u32, write: bool, slow: DynamicLabel) {
         let mask = !(width - 1);
         let found = self.ops.new_dynamic_label();
+        self.tag(tag::REGION);
         dynasm!(self.ops ; .arch x64 ; mov eax, esi ; and eax, mask as i32);
         for i in 0..3 {
             let at = REGIONS + i * REGION_SIZE;
@@ -845,49 +989,61 @@ impl Gen {
                 ; =>next
             );
         }
-        // The data cache (`MemTiming::data`), on the unaligned address.
+        // The data cache (`MemTiming::data`), on the unaligned address: the
+        // set's four ways compared at once (which way holds a line varies
+        // from access to access, so a branch per way mispredicts), each
+        // with its dirty bit set on both sides, so it is ignored.
         let done = self.ops.new_dynamic_label();
+        dynasm!(self.ops ; .arch x64 ; jmp =>slow ; =>found);
+        if !self.timing {
+            dynasm!(self.ops ; .arch x64 ; =>done);
+            return;
+        }
         dynasm!(self.ops
             ; .arch x64
-            ; jmp =>slow
-            ; =>found
-            ; cmp DWORD [r12 + TIMING_ON], 0
-            ; je =>done
             ; mov r9d, esi
             ; shr r9d, 4
             ; mov r10d, r9d
             ; and r10d, (CACHE_SETS - 1) as i32
             ; shl r10d, 4
-            ; or r9d, TAG_VALID as i32
+            ; or r9d, (TAG_VALID | TAG_DIRTY) as i32
             ; mov rcx, QWORD [r12 + DATA_TAGS]
             ; add rcx, r10
+            ; movd xmm0, r9d
+            ; pshufd xmm0, xmm0, 0
+            ; movdqu xmm2, [r12 + DIRTY4]
+            ; movdqu xmm1, [rcx]
+            ; por xmm1, xmm2
+            ; pcmpeqd xmm1, xmm0
+            ; movmskps r10d, xmm1
+            ; test r10d, r10d
+            ; jz =>slow
         );
-        for w in 0..4i32 {
-            let miss_way = self.ops.new_dynamic_label();
+        if write {
+            // Stored only when not dirty yet (usually it is): a narrow store
+            // into the set would stall the next lookup's 16-byte load of it
+            // (no store forwarding from a smaller store).
             dynasm!(self.ops
                 ; .arch x64
-                ; mov r10d, DWORD [rcx + 4 * w]
-                ; and r10d, !TAG_DIRTY as i32
-                ; cmp r10d, r9d
-                ; jne =>miss_way
+                ; bsf r10d, r10d
+                ; bt DWORD [rcx + r10 * 4], 30
+                ; jc =>done
+                ; or DWORD [rcx + r10 * 4], TAG_DIRTY as i32
             );
-            if write {
-                dynasm!(self.ops ; .arch x64 ; or DWORD [rcx + 4 * w], TAG_DIRTY as i32);
-            }
-            dynasm!(self.ops ; .arch x64 ; jmp =>done ; =>miss_way);
         }
-        dynasm!(self.ops ; .arch x64 ; jmp =>slow ; =>done);
+        dynasm!(self.ops ; .arch x64 ; =>done);
     }
 
     /// `eax` = the load at `esi` (`load` done in place where it can be).
     fn load_inline(&mut self, kind: LdKind) {
         let (slow, done) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         let (width, helper) = match kind {
-            LdKind::Word => (4, SLOW_READ32),
-            LdKind::Half | LdKind::HalfSigned => (2, SLOW_READ16),
-            LdKind::Byte | LdKind::ByteSigned => (1, SLOW_READ8),
+            LdKind::Word => (4, TIMED_READ32),
+            LdKind::Half | LdKind::HalfSigned => (2, TIMED_READ16),
+            LdKind::Byte | LdKind::ByteSigned => (1, TIMED_READ8),
         };
         self.region_lookup(width, false, slow);
+        self.tag(tag::MEM);
         match width {
             4 => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [r11]),
             2 => dynasm!(self.ops ; .arch x64 ; movzx eax, WORD [r11]),
@@ -901,6 +1057,7 @@ impl Gen {
             ; mov rdi, QWORD [r12 + BUS]
             ; mov rdx, rbp
             ; mov ecx, pc as i32
+            ; lea r8, [rsp]
             ; call QWORD [r12 + helper]
             ; =>done
         );
@@ -909,17 +1066,19 @@ impl Gen {
             LdKind::ByteSigned => dynasm!(self.ops ; .arch x64 ; movsx eax, al),
             _ => {}
         }
+        self.tag(tag::BODY);
     }
 
     /// The store of `edx` at `esi` (`store` done in place where it can be).
     fn store_inline(&mut self, size: Size) {
         let (slow, done) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         let (width, helper) = match size {
-            Size::Word => (4, SLOW_WRITE32),
-            Size::Half => (2, SLOW_WRITE16),
-            Size::Byte => (1, SLOW_WRITE8),
+            Size::Word => (4, TIMED_WRITE32),
+            Size::Half => (2, TIMED_WRITE16),
+            Size::Byte => (1, TIMED_WRITE8),
         };
         self.region_lookup(width, true, slow);
+        self.tag(tag::MEM);
         match width {
             4 => dynasm!(self.ops ; .arch x64 ; mov DWORD [r11], edx),
             2 => dynasm!(self.ops ; .arch x64 ; mov WORD [r11], dx),
@@ -933,9 +1092,11 @@ impl Gen {
             ; mov rdi, QWORD [r12 + BUS]
             ; mov rcx, rbp
             ; mov r8d, pc as i32
+            ; lea r9, [rsp]
             ; call QWORD [r12 + helper]
             ; =>done
         );
+        self.tag(tag::BODY);
     }
 
     /// Jumps to `skip` unless condition `cc` holds.
@@ -946,7 +1107,7 @@ impl Gen {
         let table = cond_table(cc);
         dynasm!(self.ops
             ; .arch x64
-            ; mov eax, DWORD [r13]
+            ; mov eax, DWORD [rbx + ST]
             ; shr eax, 8
             ; and eax, 15
             ; mov ecx, table as i32
@@ -993,7 +1154,7 @@ impl Gen {
         };
         dynasm!(self.ops
             ; .arch x64
-            ; mov edx, DWORD [r13]
+            ; mov edx, DWORD [rbx + ST]
             ; and edx, !mask as i32
             ; movzx r10d, r10b
             ; shl r10d, Z_BIT
@@ -1018,12 +1179,12 @@ impl Gen {
                 ; or edx, r8d
             );
         }
-        dynasm!(self.ops ; .arch x64 ; mov DWORD [r13], edx);
+        dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + ST], edx);
     }
 
     /// Host CF = the guest's C flag.
     fn load_carry(&mut self) {
-        dynasm!(self.ops ; .arch x64 ; bt DWORD [r13], C_BIT);
+        dynasm!(self.ops ; .arch x64 ; bt DWORD [rbx + ST], C_BIT);
     }
 
     /// `eax = b`, `ecx = c` (a register or an immediate).
@@ -1356,6 +1517,68 @@ impl Gen {
                     self.merge_flags(writes);
                 }
             }
+            Op::Max | Op::Min => {
+                // MAX d,b,c = max(b,c) signed; MIN d,b,c = min(b,c) signed.
+                // With .F: Z/N/V from b-c (like CMP), C = whether c was selected.
+                self.gread(b, 0);  // eax = b
+                self.gread(c, 1);  // ecx = c
+                if f {
+                    // Compute b-c for Z/N/V flags (edx = b-c; eax, ecx unchanged).
+                    dynasm!(self.ops ; .arch x64 ; mov edx, eax ; sub edx, ecx);
+                    // Capture V, Z, N from b-c; C = take_c (whether c was chosen).
+                    // setle: ZF || SF!=OF, which is (b <= c signed) = take_c for MAX.
+                    // setge: ZF || SF==OF, which is (b >= c signed) = take_c for MIN.
+                    dynasm!(self.ops ; .arch x64 ; seto r8b ; setz r10b ; sets r11b);
+                    if i.op == Op::Max {
+                        dynasm!(self.ops ; .arch x64 ; setle r9b);   // C = (b <= c signed)
+                        dynasm!(self.ops ; .arch x64 ; cmovl eax, ecx); // result = c if b < c
+                    } else {
+                        dynasm!(self.ops ; .arch x64 ; setge r9b);   // C = (b >= c signed)
+                        dynasm!(self.ops ; .arch x64 ; cmovg eax, ecx); // result = c if b > c
+                    }
+                    self.gwrite(d);
+                    self.merge_flags(Writes::All);
+                } else {
+                    if i.op == Op::Max {
+                        dynasm!(self.ops ; .arch x64 ; cmp eax, ecx ; cmovl eax, ecx);
+                    } else {
+                        dynasm!(self.ops ; .arch x64 ; cmp eax, ecx ; cmovg eax, ecx);
+                    }
+                    self.gwrite(d);
+                }
+            }
+            Op::Normw => {
+                // norm16(c): 15 for the all-zeros/all-ones 16-bit value; otherwise
+                // 14 - BSR(sign-flip when negative) of the lower 16 bits.
+                // Flags: Z/N from sign-extended lower 16 bits.
+                self.gread(c, 0);  // eax = c
+                let (done, done_15) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsx eax, ax          // eax = sign-extended lower 16 bits
+                    ; mov esi, eax           // save for flags
+                    ; test eax, eax
+                    ; jz =>done_15
+                    ; cmp eax, -1
+                    ; je =>done_15
+                    ; mov edx, eax
+                    ; sar edx, 31            // sign mask: 0 for positive, -1 for negative
+                    ; xor edx, eax           // flip bits if negative; upper bits -> 0
+                    ; bsr edx, edx           // BSR of sign-flipped value
+                    ; mov eax, 14
+                    ; sub eax, edx           // 14 - BSR = norm16 result
+                    ; jmp =>done
+                    ; =>done_15
+                    ; mov eax, 15
+                    ; =>done
+                );
+                self.gwrite(d);
+                if i.set_flags {
+                    dynasm!(self.ops ; .arch x64 ; test esi, esi);
+                    self.flags(Writes::Zn);
+                    self.merge_flags(Writes::Zn);
+                }
+            }
             Op::Norm => {
                 // `norm32`: 31 for 0 and all ones, else the leading sign
                 // bits less one; Z/N describe the source (with .F, short or not).
@@ -1645,6 +1868,8 @@ impl Gen {
             Fast::General
             | Fast::Br { .. }
             | Fast::BrR { .. }
+            | Fast::Bbit { .. }
+            | Fast::BbitI { .. }
             | Fast::B { .. }
             | Fast::Bl { .. }
             | Fast::BlD { .. }
@@ -1703,6 +1928,7 @@ impl Gen {
         let it = items[k];
         let h = it.hot;
         self.pc = h.addr;
+        self.tag(tag::BRANCH);
         let executed = k as u32 + 1;
         let prev = if k > 0 { items[k - 1].hot.addr } else { h.addr };
         // The delay slot, when it can run here: compiled, and not itself a
@@ -1740,6 +1966,36 @@ impl Gen {
                 self.br_skip(cond, decided);
                 dynasm!(self.ops ; .arch x64 ; mov r15d, 1 ; =>decided ; mov r14d, h.target as i32);
             }
+            Fast::Bbit { bit1, b, c } => {
+                // BT eax, ecx sets CF = bit at position (ecx mod 32) in eax.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; xor r15d, r15d
+                    ; mov eax, DWORD [rbx + r(b)]
+                    ; mov ecx, DWORD [rbx + r(c)]
+                    ; bt eax, ecx
+                );
+                if bit1 {
+                    dynasm!(self.ops ; .arch x64 ; jnc =>decided);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; jc =>decided);
+                }
+                dynasm!(self.ops ; .arch x64 ; mov r15d, 1 ; =>decided ; mov r14d, h.target as i32);
+            }
+            Fast::BbitI { bit1, b, v } => {
+                // BT [mem], imm8 sets CF = bit at position imm8 in the memory dword.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; xor r15d, r15d
+                    ; bt DWORD [rbx + r(b)], v as i8
+                );
+                if bit1 {
+                    dynasm!(self.ops ; .arch x64 ; jnc =>decided);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; jc =>decided);
+                }
+                dynasm!(self.ops ; .arch x64 ; mov r15d, 1 ; =>decided ; mov r14d, h.target as i32);
+            }
             Fast::J { s } | Fast::Jl { s } | Fast::JlD { s } => dynasm!(self.ops
                 ; .arch x64
                 ; mov r15d, 1
@@ -1759,11 +2015,12 @@ impl Gen {
             _ => unreachable!(),
         }
         let target = match h.fast {
-            Fast::B { .. } | Fast::Bl { .. } | Fast::BlD { .. } | Fast::Br { .. } | Fast::BrR { .. } => Pc::Const(h.target),
+            Fast::B { .. } | Fast::Bl { .. } | Fast::BlD { .. } | Fast::Br { .. } | Fast::BrR { .. } | Fast::Bbit { .. } | Fast::BbitI { .. } => Pc::Const(h.target),
             _ => Pc::R14,
         };
         // Its fetch timing (a branch touches no data memory).
         self.stall(&h, it.fetch, false);
+        self.tag(tag::BRANCH);
         let not_taken = self.ops.new_dynamic_label();
         dynasm!(self.ops ; .arch x64 ; test r15d, r15d ; jz =>not_taken);
         // Taken: +1 when the delay slot is killed, +1 for a taken BRcc.
@@ -1795,11 +2052,13 @@ impl Gen {
             return k + 1;
         };
         dynasm!(self.ops ; .arch x64 ; =>slot_label);
+        self.seq = k as u32 + 1;
         self.instr(&slot);
         // After the slot: the taken branch's target, or on in sequence.
         let s = slot.hot;
         let mem = slot.mem();
         let sequential = self.ops.new_dynamic_label();
+        self.tag(tag::BRANCH);
         dynasm!(self.ops ; .arch x64 ; test r15d, r15d ; jz =>sequential);
         if mem {
             let stub = self.stub(EXIT_BUS, target, executed + 1, s.addr, false);

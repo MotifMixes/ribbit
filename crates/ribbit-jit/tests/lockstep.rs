@@ -9,7 +9,7 @@
 //! slot, all of data memory, the cycle count and the pipeline scoreboard
 //! (the test bus has no memory stalls).
 
-#![cfg(target_arch = "x86_64")]
+#![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
 use ribbit_cpu::decode::decode_with;
 use ribbit_cpu::disasm::disassemble;
@@ -145,7 +145,7 @@ fn kind_of(f: Fast) -> String {
 fn is_branch(f: Fast) -> bool {
     matches!(
         f,
-        Fast::Br { .. } | Fast::BrR { .. } | Fast::B { .. } | Fast::Bl { .. } | Fast::BlD { .. } | Fast::J { .. } | Fast::Jcc { .. } | Fast::Jl { .. } | Fast::JlD { .. }
+        Fast::Br { .. } | Fast::BrR { .. } | Fast::Bbit { .. } | Fast::BbitI { .. } | Fast::B { .. } | Fast::Bl { .. } | Fast::BlD { .. } | Fast::J { .. } | Fast::Jcc { .. } | Fast::Jl { .. } | Fast::JlD { .. }
     )
 }
 
@@ -254,8 +254,8 @@ fn every_fast_form_matches_the_interpreter_alone() {
         }
     }
     for k in [
-        "Mov", "MovI", "Ld", "LdR", "LdX", "St", "StX", "Push", "Pop", "Br", "BrR", "B", "Bl", "BlD", "J", "Jcc", "Cmp", "CmpI", "Rot", "Mul64", "Mul64I", "Jl",
-        "JlD",
+        "Mov", "MovI", "Ld", "LdR", "LdX", "St", "StX", "Push", "Pop", "Br", "BrR", "Bbit", "BbitI", "B", "Bl", "BlD", "J", "Jcc", "Cmp", "CmpI", "Rot", "Mul64",
+        "Mul64I", "Jl", "JlD",
     ] {
         assert!(kinds.keys().any(|n| n == k || n.starts_with(&format!("{k}:"))), "no {k} generated; kinds: {kinds:?}");
     }

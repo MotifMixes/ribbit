@@ -215,9 +215,10 @@ stub with the same API, `src/stub.rs`). Built (all VERIFIED by the checks below)
   returning to Rust; computed jumps also look in a shared table (`DISPATCH_SIZE` slots by address).
 * **More than the fast forms.** Instructions with no fast form compile from their full decode when their shape is
   `Cpu::execute`'s ALU part, a compare, a bit operation (BSET/BCLR/BXOR/BMSK/BTST), a single-operand operation,
-  NORM, a load/store with any base (jump tables), LPcc, under any condition, with r57-r60, PCL and limm operands
-  (`x64::generic_ok`). Left to the interpreter: LR/SR/FLAG and the rest of `stop`, BRcc with a constant first
-  operand, BBIT, MAX/MIN, NORMW, the DSP/XY instructions.
+  NORM, MAX, MIN, NORMW, a load/store with any base (jump tables), LPcc, under any condition, with r57-r60, PCL
+  and limm operands (`x64::generic_ok`). BBIT0/BBIT1 have fast forms with x86 `BT`+`Jcc` (`Fast::Bbit`/`BbitI`).
+  Left to the interpreter: LR/SR/FLAG and the rest of `stop`, BRcc with a constant first operand, the DSP/XY
+  instructions.
 * **Code memory.** Mapped twice where the system allows (Windows: a section, two views; Linux: a memfd, two
   mappings), so no page is ever writable and executable and a compile needs no system call; elsewhere the pages
   written are flipped RW and back to RX.
@@ -235,5 +236,67 @@ Speed (belt benchmark, one i9-13900K P-core, interleaved runs, same session): in
 203-208%, worst 250 ms window 181-195%; JIT average 283-286%, worst 235-243% (about 1.38x and 1.27x). Linux (WSL):
 198% / 263% average. Compiling 7.6k blocks takes ~60 ms of code generation and ~18 ms of first-touch page faults.
 
+Phase 2 (2026-10-21): MAX/MIN, NORMW added to `generic_ok`; BBIT0/BBIT1 fast forms (`Fast::Bbit`/`BbitI`) using
+x86 `BT`+`Jcc`. Verification: all 4 lockstep tests pass; `RIBBIT_JIT_CHECK=1` on 50 M BIOS steps — no differences.
+`examples/jitbench.rs` (16-instruction loop, one P-core): `Cpu::step` 49 M inst/s, `run_block` 199 M inst/s,
+JIT 290 M inst/s (1.5× `run_block`). Belt benchmark needs the belt save state (`RIBBIT_STATE`); to be re-measured.
+
 Left: generated-code quality (flags computed only when read, registers cached in host registers, shared exit
-stubs: blocks average ~4.8 KB of code), the remaining fallbacks above, aarch64 (phase 3).
+stubs: blocks average ~4.8 KB of code), BRcc with constant first operand, DSP/XY instructions, aarch64 (phase 3).
+
+## 14. Generated-code cost (2026-10-22)
+
+Measured first: a player's i3-1315U laptop lagged in Animal Genius's globe menu on 1.3.0 (the game never idles
+there). On one i9 P-core that scene ran at worst 186-192% with the JIT and 155-165% without, so the JIT bought
+only ~1.2x. `RIBBIT_JIT_PERFMAP=1` (Linux; research) maps code anonymously, names each block in
+`/tmp/perf-PID.map`, and writes which kind of code starts where (`x64::tag`) and the code bytes, so a `perf`
+profile can be summed by kind and by instruction. Only ~5% of the time was the guest's own operations; the rest
+was timing bookkeeping: region search + data-cache ways 24%, scoreboard 12%, arming/taking the stall 16%.
+
+Changes, all exact (same digests JIT on/off; check mode and lockstep tests pass):
+
+* **Stall on slow paths only.** A cache hit changes no `MemTiming` state, so inline code no longer arms the
+  timing before a memory instruction nor takes the stall after it. Each slow path does: a code-cache miss
+  (`fetch_take`), and the data access's `timed_read*`/`timed_write*` helpers (`instruction_same_line` to arm,
+  `at`, the access, `take_stall`, `block_exit` in bit 63), adding into a stack slot (`[rsp]`) that the
+  instruction's end reads and clears. The exit request can only come from such a helper: a batch starts with
+  `sync_needed` clear and only bus accesses set it (`watch` does not).
+* **Static scoreboard.** A load at instruction `j` arrives at most `latency - 1` cycles after its own end and every
+  instruction takes at least one cycle, so instruction `k` can wait for it only if `k - j < latency`. The first
+  `latency - 1` instructions of a block check every register they read (loads from before the block); later
+  ones only the registers loaded by the block's last `latency - 1` instructions: usually no code at all.
+  `load_latency` is compiled in (the code is dropped if it changes).
+* **Fewer pointer loads.** STATUS32 and `ready_max` are read at fixed offsets from `rbx` (`&Cpu::regs`); `r13`
+  holds `&ready[0]`.
+* **Data-cache ways at once** (SSE2: broadcast, OR the dirty bit on both sides, `pcmpeqd`, `movmskps`); the dirty
+  bit is stored only when not yet set (a narrow store stalls the next 16-byte load of the set).
+* **Compiled-in settings.** Memory timing on/off and whether links check the fence (it is `u32::MAX` once the first
+  cartridge instruction ran); the code is dropped when either changes the wrong way.
+* **Patched links.** A constant-target exit has a 5-byte `jmp` that falls through to its link slot until the
+  `Jit` points it at the next block (`JitCtx::patch`, `Arena::patch` through the write view).
+* Cycle updates skip the wait or the stall where they are statically zero.
+
+Speed (one i9-13900K P-core at high priority; another process loaded the machine): Animal Genius globe, worst
+250 ms window / average: before 186-192% / 239-254%; after ~415-426% / 448-463% (interpreter alone ~200% /
+232%). Wormhole `bench.rs`, 2 billion steps with batches (`RIBBIT_NO_TAIL=1`): 2.19x -> 3.72x real time (interpreter
+1.74x), digest `63e5fcb972577c07` unchanged. Digests also unchanged JIT on/off over scripted play of Sonic X, Pet
+Pals, Ratatouille and Cars 2 on the US v2.1 BIOS, Sonic X and Pet Pals on Leapster 2 0.6, Wormhole on L-MAX 2.2.
+The aarch64 emitter is unchanged (it keeps the old helpers and context fields).
+
+## 15. AArch64 (phase 3, 2026-10-22)
+
+`aarch64.rs` is a translation of `x64.rs` function for function (the earlier agent-written AArch64 file failed the
+lockstep tests: flags overwrote results, post-increment addressing was unfinished). Same design and the section-14
+speed-ups; the register map is in its header. AArch64 notes: the four data-cache ways are compared with a `ccmp`
+chain (no NEON needed); NZCV.C is loaded with `cmp w, #1` (C set exactly for a 1) for ADC/SBC (SBC takes the
+inverted carry); subtraction C is AArch64's inverted; patched links are a `b` (±128 MB, else the link slot);
+LP_END and the budget are cached in x27/x28 (an LP writes both copies); x18 is never used (the platform register on
+Apple systems and Android). Android has no memfd dual mapping here (`target_os = "android"`): pages are flipped.
+
+Verification without an ARM machine: `aarch64-unknown-linux-musl` built with `rust-lld` and run under user-mode QEMU
+in WSL (the `qemu-user-static` package unpacked, no root). The lockstep tests pass (tests/lockstep.rs now runs on
+both architectures); digests JIT on vs off are identical on the Animal Genius globe state, Sonic X (US v2.1), Pet
+Pals (Leapster 2 0.6) and Wormhole (L-MAX 2.2); check mode replayed ~105 M compiled runs with no difference. Not
+measured: speed on a real phone or Apple silicon Mac (the x86-64 Android emulator translates ARM code and runs it at
+12-61% of real time, so it says nothing about speed). Exec memory on macOS is RW then RX by `mprotect` (the app is
+ad-hoc signed without the hardened runtime); if a mapping is refused, blocks stay interpreted.

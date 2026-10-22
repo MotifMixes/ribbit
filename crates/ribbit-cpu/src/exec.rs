@@ -572,6 +572,18 @@ impl Cpu {
                     return Flow::Jump(hot.target);
                 }
             }
+            Fast::Bbit { bit1, b, c } => {
+                let set = (self.regs[r(b)] >> (self.regs[r(c)] & 31)) & 1 != 0;
+                if set == bit1 {
+                    return Flow::Jump(hot.target);
+                }
+            }
+            Fast::BbitI { bit1, b, v } => {
+                let set = (self.regs[r(b)] >> v) & 1 != 0;
+                if set == bit1 {
+                    return Flow::Jump(hot.target);
+                }
+            }
             Fast::B { cc } => {
                 if self.cond(cc) {
                     return Flow::Jump(hot.target);
