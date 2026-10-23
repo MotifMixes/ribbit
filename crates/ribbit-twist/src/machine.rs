@@ -1240,6 +1240,10 @@ impl Bus {
                         // Go on with the queued buffer (and start it again
                         // only when the driver queues another).
                         let next = (self.latch(base + 4), self.latch(base + 12));
+                        if self.dma_log.len() < 100_000 {
+                            // Research: a chained buffer (control bit 31 marks it).
+                            self.dma_log.push((self.now, ch as u32, ctrl | 0x8000_0000, next.0, self.latch(base + 8), next.1 * 2));
+                        }
                         self.io.insert(base + 12, 0);
                         Some(next)
                     } else {

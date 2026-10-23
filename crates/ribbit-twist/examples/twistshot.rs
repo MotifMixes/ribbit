@@ -208,7 +208,7 @@ fn main() {
         for ((ch, ctrl, src, bytes), n) in seen.iter().take(60) {
             println!("mem dma ch{ch} ctrl {ctrl:04X} src {src:08X} bytes {bytes:X}: {n} times");
         }
-        for (when, ch, ctrl, src, dst, bytes) in t.bus.dma_log.iter().filter(|e| e.4 & 0xFFFF_FF00 == 0xC00D_0000).take(12) {
+        for (when, ch, ctrl, src, dst, bytes) in t.bus.dma_log.iter().filter(|e| e.4 & 0xFFFF_FF00 == 0xC00D_0000 && std::env::var("TWIST_DMAFROM").map_or(true, |f| e.0 as f64 / machine::CLOCK as f64 >= f.parse::<f64>().unwrap())).take(40) {
             println!("dma {:.4}s ch{ch} ctrl {ctrl:04X} {src:08X} -> {dst:08X} logged bytes {bytes:X}", *when as f64 / machine::CLOCK as f64);
         }
     }
@@ -269,7 +269,16 @@ fn main() {
         if let Some(b) = &burst {
             flush(b);
         }
+        // Values written, per pc (up to 8 different).
+        let mut vals: std::collections::BTreeMap<u32, std::collections::BTreeSet<u32>> = Default::default();
+        for &(_, pc, _, v) in &t.bus.ram_writes {
+            let e = vals.entry(pc).or_default();
+            if e.len() < 8 {
+                e.insert(v);
+            }
+        }
         for (pc, (n, a, b, lo, hi)) in by {
+            println!("  values from {pc:08X}: {:X?}", vals.get(&pc));
             println!("ram write pc {pc:08X}: {n} writes {:.3}-{:.3}s, {lo:08X}-{hi:08X}", a as f64 / c, b as f64 / c);
         }
     }

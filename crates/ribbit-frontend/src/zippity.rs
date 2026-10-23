@@ -331,24 +331,63 @@ fn run(s: &Shared) {
 }
 
 /// Stereo at a sound unit's rate to mono at the output queue's rate
-/// (`OUT_HZ`): linear interpolation between box-averaged input samples.
-/// Also the RockIt Twist's.
+/// (`OUT_HZ`): low-passed below the output's half rate first (a windowed
+/// sinc), then linearly interpolated. Also the RockIt Twist's. Without the
+/// filter, sound above 16 kHz (MP3s have plenty) folded back as hiss.
 pub(crate) struct Resampler {
     /// Input samples per output sample.
     step: f64,
     /// Position of the next output sample, in input samples.
     pos: f64,
     prev: f32,
+    /// The low-pass filter's taps (empty when the input is not faster than
+    /// the output), and the last input samples it needs.
+    taps: Vec<f32>,
+    history: Vec<f32>,
 }
+
+/// The filter: passes up to `PASS_HZ`, its Blackman window's transition
+/// reaching about 17 kHz with `TAPS` taps at 72 kHz.
+const TAPS: usize = 95;
+const PASS_HZ: f64 = 13_000.0;
 
 impl Resampler {
     pub(crate) fn new(from_hz: f64) -> Self {
-        Self { step: from_hz / OUT_HZ, pos: 0.0, prev: 0.0 }
+        let taps = if from_hz > OUT_HZ * 1.1 {
+            let fc = PASS_HZ / from_hz;
+            let mid = (TAPS - 1) as f64 / 2.0;
+            let mut t: Vec<f64> = (0..TAPS)
+                .map(|i| {
+                    let x = i as f64 - mid;
+                    let sinc = if x == 0.0 { 2.0 * fc } else { (2.0 * std::f64::consts::PI * fc * x).sin() / (std::f64::consts::PI * x) };
+                    let w = 2.0 * std::f64::consts::PI * i as f64 / (TAPS - 1) as f64;
+                    sinc * (0.42 - 0.5 * w.cos() + 0.08 * (2.0 * w).cos())
+                })
+                .collect();
+            let sum: f64 = t.iter().sum();
+            t.iter_mut().for_each(|v| *v /= sum);
+            t.into_iter().map(|v| v as f32).collect()
+        } else {
+            Vec::new()
+        };
+        let history = vec![0.0; taps.len().saturating_sub(1)];
+        Self { step: from_hz / OUT_HZ, pos: 0.0, prev: 0.0, taps, history }
     }
 
     pub(crate) fn push(&mut self, stereo: &[i16], out: &mut Vec<i16>) {
         let step = self.step;
-        let mono: Vec<f32> = stereo.as_chunks::<2>().0.iter().map(|p| (p[0] as f32 + p[1] as f32) / 2.0).collect();
+        let mut mono: Vec<f32> = stereo.as_chunks::<2>().0.iter().map(|p| (p[0] as f32 + p[1] as f32) / 2.0).collect();
+        if !self.taps.is_empty() {
+            // The filter runs over the kept history and the new samples (a
+            // fixed delay of half the taps, the same for everything).
+            let keep = self.history.len();
+            let mut all = std::mem::take(&mut self.history);
+            all.extend_from_slice(&mono);
+            for (i, m) in mono.iter_mut().enumerate() {
+                *m = all[i..i + self.taps.len()].iter().zip(&self.taps).map(|(a, b)| a * b).sum();
+            }
+            self.history = all.split_off(all.len() - keep);
+        }
         let n = mono.len() as f64;
         while self.pos < n {
             let i = self.pos.floor() as usize;
@@ -417,6 +456,31 @@ mod tests {
         let after = std::fs::read(&out).unwrap();
         assert_eq!(after.len(), before.len());
         assert!(!after.windows(7).any(|w| w == b"MATTHEW"));
+    }
+
+    /// A tone above the output's half rate is filtered out instead of
+    /// folding back as an audible one; a tone well below passes.
+    #[test]
+    fn resampler_filters_what_would_fold_back() {
+        let rate = ribbit_twist::sound::OUTPUT_RATE;
+        let level = |hz: f64| {
+            let mut r = Resampler::new(rate);
+            let input: Vec<i16> = (0..rate as usize)
+                .flat_map(|i| {
+                    let v = (10000.0 * (2.0 * std::f64::consts::PI * hz * i as f64 / rate).sin()) as i16;
+                    [v, v]
+                })
+                .collect();
+            let mut out = Vec::new();
+            for chunk in input.chunks(2 * 720) {
+                r.push(chunk, &mut out);
+            }
+            let tail = &out[out.len() / 2..];
+            (tail.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / tail.len() as f64).sqrt()
+        };
+        let (low, high) = (level(1000.0), level(20000.0));
+        assert!(low > 6500.0, "1 kHz passes: {low}");
+        assert!(high < 100.0, "20 kHz (it would fold to 12 kHz) is gone: {high}");
     }
 
     #[test]
