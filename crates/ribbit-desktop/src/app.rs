@@ -22,6 +22,8 @@ fn main() {
             }
         }));
     }
+    #[cfg(windows)]
+    log_native_crashes(log.clone());
     remove_old_programs();
     // WSL's Wayland server drops the window's connection after a moment
     // (its X11 server works): use X11 there unless RIBBIT_WAYLAND is set.
@@ -74,6 +76,78 @@ fn failed(msg: &str, log: &Path) {
     }
     #[cfg(windows)]
     message_box(&msg);
+}
+
+/// A crash outside Rust (an access violation in a graphics driver, say) ends
+/// the process without a panic, so the log just stops (a player's 1.4.3 log
+/// ended after "audio output open"). This logs the exception and the DLL it
+/// happened in, then lets Windows end the process as before.
+#[cfg(windows)]
+fn log_native_crashes(log: std::path::PathBuf) {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct ExceptionRecord {
+        code: u32,
+        flags: u32,
+        next: *mut ExceptionRecord,
+        address: *mut c_void,
+    }
+    #[repr(C)]
+    struct ExceptionPointers {
+        record: *mut ExceptionRecord,
+        context: *mut c_void,
+    }
+    type Filter = unsafe extern "system" fn(*const ExceptionPointers) -> i32;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetUnhandledExceptionFilter(filter: Option<Filter>) -> Option<Filter>;
+        fn GetModuleHandleExW(flags: u32, address: *const c_void, module: *mut *mut c_void) -> i32;
+        fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, size: u32) -> u32;
+    }
+    const FROM_ADDRESS: u32 = 0x4;
+    const UNCHANGED_REFCOUNT: u32 = 0x2;
+    const CONTINUE_SEARCH: i32 = 0;
+    static LOG: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+    unsafe extern "system" fn filter(info: *const ExceptionPointers) -> i32 {
+        // SAFETY: Windows passes valid exception pointers to the filter.
+        let Some(record) = (unsafe { info.as_ref() }).and_then(|i| unsafe { i.record.as_ref() }) else {
+            return CONTINUE_SEARCH;
+        };
+        let mut module = std::ptr::null_mut();
+        let mut name = [0u16; 260];
+        // SAFETY: `module` and `name` are valid for the calls' writes.
+        let len = unsafe {
+            if GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, record.address, &mut module) == 0 {
+                0
+            } else {
+                GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32)
+            }
+        };
+        let place = match len {
+            0 => "an unknown module".to_string(),
+            n => format!(
+                "{} + {:#x}",
+                String::from_utf16_lossy(&name[..n as usize]),
+                record.address as usize - module as usize
+            ),
+        };
+        let msg = format!(
+            "Ribbit crashed: exception {:#010x} at {:#x} in {place} (thread {:?})",
+            record.code,
+            record.address as usize,
+            std::thread::current().name().unwrap_or("unnamed"),
+        );
+        tracing::error!("{msg}");
+        if let Some(dir) = LOG.get().and_then(|l| l.parent()) {
+            let _ = std::fs::write(dir.join("last-error.txt"), &msg);
+        }
+        CONTINUE_SEARCH
+    }
+
+    let _ = LOG.set(log);
+    // SAFETY: `filter` has the signature Windows expects and lives forever.
+    unsafe { SetUnhandledExceptionFilter(Some(filter)) };
 }
 
 #[cfg(windows)]

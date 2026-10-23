@@ -127,8 +127,9 @@ const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 /// positional): 2 = UART transmit timing (divisor, busy) and CPU pipeline
 /// timing (pending load, config flag); 3 = memory timing (caches, register
 /// ready times, load latency); 4 = GPIO output latches, Leapster 2 flash;
-/// 5 = Leapster 2 on-chip RAM and SD slot; 6 = dual-MAC accumulators, PCM DMA.
-pub const STATE_VERSION: u32 = 6;
+/// 5 = Leapster 2 on-chip RAM and SD slot; 6 = dual-MAC accumulators, PCM DMA;
+/// 7 = paused voices.
+pub const STATE_VERSION: u32 = 7;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {

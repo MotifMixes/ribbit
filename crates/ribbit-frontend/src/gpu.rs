@@ -252,8 +252,20 @@ impl Gpu {
     /// DirectX 12 nor a recent enough OpenGL. Some Linux setups (virtual machines, WSL, old drivers)
     /// offer a Vulkan device that says it can present to the window and
     /// then fails when the window is set up; that is tried and caught here.
+    ///
+    /// A graphics driver that crashes the process while the card is tried
+    /// cannot be caught (a player's PC closed Ribbit at random starts, the
+    /// window black, the log ending before any GPU line; drawing in software
+    /// always started). So on Windows the tries are steps - every backend
+    /// (which loads Vulkan and any overlay layers installed with it), DX12 on
+    /// the card, OpenGL on the card, software - and `guard` (a file in the
+    /// data folder) holds the Ribbit version and the step to start from.
+    /// Before a step, the file says to start after it: a crash in that step
+    /// is skipped at the next start. A step that works is written back, so
+    /// later starts begin there. An update starts from the first step again.
     fn connect(
         window: &Arc<Window>,
+        guard: Option<&std::path::Path>,
     ) -> Result<Connection> {
         // WSL's Vulkan driver cannot keep a window going (it fails a few
         // frames in), so OpenGL comes first there.
@@ -264,6 +276,15 @@ impl Gpu {
         let mut tried = Vec::new();
         let mut last = anyhow::anyhow!("no GPU backend available");
         let software = cfg!(windows).then_some((wgpu::Backends::DX12, true));
+        let guard = guard.filter(|_| software.is_some());
+        let version = env!("CARGO_PKG_VERSION");
+        let start = guard
+            .and_then(|g| std::fs::read_to_string(g).ok())
+            .and_then(|t| {
+                let (v, step) = t.trim().split_once(' ')?;
+                (v == version).then(|| step.parse::<usize>().ok()).flatten()
+            })
+            .unwrap_or(0);
         // RIBBIT_SOFTWARE_GPU: straight to the software renderer (a GPU
         // driver that draws wrongly or crashes).
         let hardware = if std::env::var_os("RIBBIT_SOFTWARE_GPU").is_some() && software.is_some() {
@@ -275,16 +296,42 @@ impl Gpu {
                  (remove the variable to use the graphics card)"
             );
             vec![]
+        } else if software.is_some() {
+            vec![(first, false), (wgpu::Backends::DX12, false), (wgpu::Backends::GL, false)]
         } else {
             vec![(first, false), (wgpu::Backends::GL, false)]
         };
-        for (backends, software) in hardware.into_iter().chain(software) {
+        let steps: Vec<_> = hardware.into_iter().chain(software).collect();
+        let guard = guard.filter(|_| steps.len() > 1);
+        let start = start.min(steps.len() - 1);
+        if start > 0 {
+            tracing::warn!(
+                "an earlier start ended while setting up the graphics card (its driver crashed?): starting \
+                 from GPU {:?} (delete {} to try every way again; an update does too)",
+                steps[start],
+                guard.map_or_else(Default::default, |g| g.display().to_string())
+            );
+        }
+        let note = |step: usize| {
+            if let Some(g) = guard {
+                let _ = std::fs::write(g, format!("{version} {step}"));
+            }
+        };
+        for (i, &(backends, software)) in steps.iter().enumerate().skip(start) {
             if tried.contains(&(backends, software)) {
                 continue;
             }
             tried.push((backends, software));
+            note(i + 1);
+            // Said before each try: a driver that crashes the process here
+            // leaves this as the log's last line.
+            tracing::info!("setting up the window with GPU ({backends:?}, software: {software})");
             match Self::connect_with(window, backends, software) {
                 Ok(c) => {
+                    match guard {
+                        Some(g) if i == 0 => drop(std::fs::remove_file(g)),
+                        _ => note(i),
+                    }
                     if software {
                         tracing::warn!("no GPU can draw the window: drawing in software (WARP)");
                     }
@@ -295,6 +342,9 @@ impl Gpu {
                     last = e;
                 }
             }
+        }
+        if let Some(g) = guard {
+            let _ = std::fs::remove_file(g);
         }
         Err(last.context(format!("no GPU can draw to the window (tried {tried:?})")))
     }
@@ -362,8 +412,9 @@ impl Gpu {
         Ok((instance, surface, adapter, device, queue, config))
     }
 
-    pub fn new(window: Arc<Window>) -> Result<Self> {
-        let (instance, surface, adapter, device, queue, config) = Self::connect(&window)?;
+    /// `guard`: see `connect` (None: no crash fallback).
+    pub fn new(window: Arc<Window>, guard: Option<&std::path::Path>) -> Result<Self> {
+        let (instance, surface, adapter, device, queue, config) = Self::connect(&window, guard)?;
         let info = adapter.get_info();
         tracing::info!(target: "ribbit::perf", adapter = %info.name, backend = ?info.backend, driver = %info.driver_info,
             present = ?config.present_mode, "graphics");

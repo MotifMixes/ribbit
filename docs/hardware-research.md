@@ -693,6 +693,11 @@ not established, there is no sound, and touch is the unverified MAME model.
   0x0180_20E0/E4), 256 start-up samples skipped, 0x0FC0 terminator; status 0x0180_2078 (voice 0 in bit 7); 8 kHz
   sample clock in emulated time; mixed samples kept in a ring buffer (no host output yet). VERIFIED-FW: the
   registers the BIOSes write (voice 6 start/end/volume at boot) fall exactly in MAME's map.
+* Voice commands (2026-10-23, VERIFIED-FW, US v2.1): the command byte's high bits are 0x80 start, 0x40 stop,
+  0x20 pause, 0x08 resume (LFC pause 0x4002_F660 `{PauseLFC%d}` writes 0x27 only while 0x0180_2078 shows voice 7;
+  resume 0x4002_F6C4 writes 0x0F; stop 0x4002_F740 writes 0x47). MAME stops the voice on everything but start.
+  Top-Secret Personal Beeswax pauses Junie B.'s speech at a comma while it turns the page and resumes it; as a stop
+  that lost the rest of the sentence. Paused voices keep their place and their status bit (HYPOTHESIS).
 * Result: the cut-scene completes; SpongeBob reaches its main menu (SpongeBob, Gary, the pineapple, four activity
   bubbles) and tapping the Krabby Patty bubble loads that activity's level picker. Both BIOSes play a start-up
   sound on voice 6.

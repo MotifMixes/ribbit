@@ -15,6 +15,7 @@
 //! | Voices 0-4 | pitched A-law; address = (start & 0xFFFF_0000) \| u16(position); position starts at start's low half and advances by pitch / 0x8000 per sample; at end (end >> 16) it loops to the loop point (end & 0xFFFF) or stops if end - loop < 2; between samples, linear interpolation (EVIDENCE: a hardware recording of SpongeBob's "Super Sudsy Scrubber Zone", 36 s aligned with renders, matches the linearly interpolated render's spectrum better than the stepped one: 0.244 vs 0.173 at 2-3.9 kHz; MAME takes the earlier sample) |
 //! | Voices 5-6 | raw A-law at 8 kHz from start to end (absolute addresses) |
 //! | Voice 7 | LFC speech: 16-bit mode word (0-2 = Level4/6/8), records of control + optional reflection-coefficient word + excitation of the previous record, 192 samples each; 256 start-up samples discarded; control 0x0FC0 ends the stream |
+//! | Commands (0x0180_2070, bits 7-3) | 0x80 start, 0x40 stop, 0x20 pause, 0x08 resume (VERIFIED-FW, below); 0x10 and any other value stop, as in MAME |
 //! | 0x0180_2078 | playing voices: voice 0 in bit 7, voices 1-7 in bits 0-6 ("not sure why it's out of place" - MAME) |
 //! | Sample clock | 8 kHz (MAME's legacy mix rate) |
 //! | A-law | standard G.711 (`ribbit_audio::alaw_to_linear`); MAME's table is the same curve at half amplitude and opposite sign |
@@ -45,7 +46,20 @@
 //! samples (for hosts that only take 8 kHz); otherwise the 8 kHz mix as
 //! before, which the host raises to 32 kHz with the same interpolator.
 //!
-//! Not modelled: analog output, the other 0x0180_4000 registers.
+//! Pause and resume, VERIFIED-FW (US v2.1; MAME stops the voice on every
+//! command but start): the BIOS's LFC pause (0x4002_F660, log `{PauseLFC%d}`)
+//! writes 0x27 only while 0x0180_2078 says voice 7 plays; its resume
+//! (0x4002_F6C4) copies 0x0180_4204 to 0x0180_41C0 and writes 0x0F; its stop
+//! (0x4002_F740) writes 0x47. The routines for the other voices write
+//! voice | 0x20 (0x4002_F5EC) and voice | 0x08 (0x4002_F634). Top-Secret Personal
+//! Beeswax pauses the speech at commas (page turns) and resumes it; stopping
+//! there lost the rest of the sentence (a player's report). Paused voices hold
+//! their place and stay set in 0x0180_2078 (HYPOTHESIS: the pause routine only
+//! pauses a playing voice and the resume routine does not check it).
+//!
+//! Not modelled: analog output, the other 0x0180_4000 registers (0x41A4 +
+//! 4 x voice is written with the volume at start and restored from 0x41E8 +
+//! 4 x voice on resume; their effect is UNKNOWN).
 
 use ribbit_memory::Bus;
 
@@ -59,6 +73,8 @@ pub const PCM_HZ: u64 = 32_000;
 /// Interrupt flag bit of PCM channel 0 (channel 1 is the next bit).
 pub const PCM_FLAG_SHIFT: u32 = 20;
 pub const START_COMMAND: u8 = 0x10;
+pub const PAUSE_COMMAND: u8 = 0x04;
+pub const RESUME_COMMAND: u8 = 0x01;
 
 const LFC_FRAME: usize = 192;
 const LFC_SKIP: u32 = 256;
@@ -102,6 +118,9 @@ pub struct VoiceEngine {
     pub volume: [u16; 8],
     pub pitch: [u16; 5],
     pub triggered: [bool; 8],
+    /// Paused voices keep their place (and their status bit) until resumed.
+    #[serde(default)]
+    pub paused: [bool; 8],
     dx: [f32; 8],
     index: [f32; 8],
     pub codebook_page: u32,
@@ -138,6 +157,7 @@ impl Default for VoiceEngine {
             volume: [0; 8],
             pitch: [0; 5],
             triggered: [false; 8],
+            paused: [false; 8],
             dx: [0.0; 8],
             index: [0.0; 8],
             codebook_page: 0,
@@ -223,12 +243,24 @@ impl VoiceEngine {
     /// A voice command (0x0180_2070): command = byte >> 3, voice = byte & 7.
     pub fn command(&mut self, command: u8, voice: u8) {
         let v = voice as usize & 7;
-        if command != START_COMMAND {
-            self.triggered[v] = false;
-            if v == 7 {
-                self.lfc_start_pending = false;
+        match command {
+            START_COMMAND => self.paused[v] = false,
+            PAUSE_COMMAND => {
+                self.paused[v] = true;
+                return;
             }
-            return;
+            RESUME_COMMAND => {
+                self.paused[v] = false;
+                return;
+            }
+            _ => {
+                self.triggered[v] = false;
+                self.paused[v] = false;
+                if v == 7 {
+                    self.lfc_start_pending = false;
+                }
+                return;
+            }
         }
         match v {
             0..=4 => {
@@ -366,7 +398,7 @@ impl VoiceEngine {
     fn sample(&mut self, bus: &mut impl Bus) -> i16 {
         let mut mix = 0.0f64;
         for v in 0..7 {
-            if !self.triggered[v] {
+            if !self.triggered[v] || self.paused[v] {
                 continue;
             }
             let start = self.start[v];
@@ -409,7 +441,7 @@ impl VoiceEngine {
                 self.triggered[v] = false;
             }
         }
-        while self.triggered[7] {
+        while self.triggered[7] && !self.paused[7] {
             if self.lfc.position == LFC_FRAME && !self.lfc_frame(bus) {
                 self.triggered[7] = false;
                 break;
@@ -727,8 +759,35 @@ mod tests {
         assert_eq!(e.status(), 1 << 7, "voice 0 in bit 7");
         e.advance(HZ, HZ, &mut mem); // 1 s: loops, keeps playing
         assert!(e.triggered[0]);
-        e.command(0x01, 0);
+        e.command(0x08, 0); // byte 0x40, the BIOS's stop
         assert_eq!(e.status(), 0);
+    }
+
+    #[test]
+    fn paused_voice_holds_its_place_and_resumes() {
+        // Beeswax's speech: pause (byte 0x27) at a comma, resume (0x0F).
+        let mut e = VoiceEngine::default();
+        let mut mem = Mem(vec![0xD5; 0x2000]);
+        e.start[5] = 0x1000;
+        e.end[5] = 0x1000 + 80;
+        e.volume[5] = 0x4000;
+        e.command(START_COMMAND, 5);
+        e.advance(HZ / 200, HZ, &mut mem); // 40 samples
+        e.command(PAUSE_COMMAND, 5);
+        e.advance(HZ, HZ, &mut mem);
+        assert!(e.triggered[5], "a paused voice does not run out");
+        assert_eq!(e.status(), 1 << 4, "and still reads as playing");
+        e.command(RESUME_COMMAND, 5);
+        e.advance(HZ / 200 - 1, HZ, &mut mem);
+        assert!(e.triggered[5], "the other 40 samples are still to come");
+        e.advance(HZ / 200, HZ, &mut mem);
+        assert!(!e.triggered[5]);
+        e.command(START_COMMAND, 5);
+        e.command(PAUSE_COMMAND, 5);
+        e.command(0x08, 5);
+        assert_eq!(e.status(), 0, "stop ends a paused voice");
+        e.command(START_COMMAND, 5);
+        assert!(!e.paused[5], "start plays at once");
     }
 
     #[test]

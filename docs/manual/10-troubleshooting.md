@@ -8,11 +8,19 @@ Please send the log with a bug report.
 
 ## The window stays white or black, or the picture is wrong
 
-Ribbit draws with your graphics card. When the card can't draw Ribbit's window, Ribbit on Windows draws in software instead. If the picture is wrong or Ribbit crashes in the graphics driver, make it draw in software anyway:
+Ribbit draws with your graphics card. When the card can't draw Ribbit's window, Ribbit on Windows draws in software instead.
+
+If Ribbit closes by itself while it starts (the window black), start it again: on Windows it remembers that start and tries the graphics card another way (DirectX 12, then OpenGL, then software), and keeps the way that works. Delete `gpu-setup-crashed.txt` in the data folder to make it try every way again; an update does too.
+
+If the picture is wrong, or Ribbit still crashes in the graphics driver, make it draw in software anyway:
 
 1. Close Ribbit (from Task Manager if it doesn't close).
 2. In the Ribbit folder, click File Explorer's address bar, type `cmd` and press `Enter`.
 3. Type `set RIBBIT_SOFTWARE_GPU=1` and press `Enter`, then `Ribbit.exe` and `Enter`.
+
+This lasts only for Ribbit started from that window: started any other way (a double-click, a shortcut), Ribbit
+uses the graphics card again and may crash again. If Ribbit crashes in the graphics driver, `ribbit.log` ends with
+"setting up the window with GPU" or a line "Ribbit crashed: exception ... in" naming the driver's file.
 
 Updating your graphics driver often helps too.
 

@@ -35,6 +35,8 @@ const FIT_TRIES: u8 = 6;
 /// button) at any display scaling, so logical, not physical, pixels.
 const MIN_WINDOW: winit::dpi::LogicalSize<f64> = winit::dpi::LogicalSize::new(460.0, 360.0);
 const REWIND_KEEP: usize = 60;
+/// In the data folder: how far the last starts got setting up the graphics card (see `Gpu::connect`).
+const GPU_GUARD: &str = "gpu-setup-crashed.txt";
 
 /// How Ribbit was started (command line / config file overrides).
 #[derive(Debug, Clone, Default)]
@@ -2658,7 +2660,7 @@ impl ApplicationHandler for App {
             use winit::platform::windows::WindowAttributesExtWindows as _;
             attrs.with_taskbar_icon(crate::icon::taskbar_icon())
         };
-        match event_loop.create_window(attrs).context("creating window").and_then(|w| Gpu::new(Arc::new(w))) {
+        match event_loop.create_window(attrs).context("creating window").and_then(|w| Gpu::new(Arc::new(w), Some(&self.opts.data_dir.join(GPU_GUARD)))) {
             Ok(gpu) => {
                 self.fit_window = FIT_TRIES;
                 let state = egui_winit::State::new(
