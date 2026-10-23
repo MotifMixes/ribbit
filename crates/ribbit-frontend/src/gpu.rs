@@ -267,6 +267,13 @@ impl Gpu {
         // RIBBIT_SOFTWARE_GPU: straight to the software renderer (a GPU
         // driver that draws wrongly or crashes).
         let hardware = if std::env::var_os("RIBBIT_SOFTWARE_GPU").is_some() && software.is_some() {
+            // Said in the log: software drawing is slow in a big window (a
+            // player's "slowdown" that went away in a small window was this,
+            // the variable set long before as the guide's workaround).
+            tracing::warn!(
+                "RIBBIT_SOFTWARE_GPU is set: drawing in software, which slows the picture in a large window \
+                 (remove the variable to use the graphics card)"
+            );
             vec![]
         } else {
             vec![(first, false), (wgpu::Backends::GL, false)]

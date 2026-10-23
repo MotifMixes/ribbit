@@ -16,6 +16,11 @@ Ribbit draws with your graphics card. When the card can't draw Ribbit's window, 
 
 Updating your graphics driver often helps too.
 
+Drawing in software is slow in a large window: the game runs at full speed, but the picture moves in jerks (fewer
+than 20 frames a second when maximised; much better in a small window). So use it only while you need it. If you
+set `RIBBIT_SOFTWARE_GPU` for good (in the System settings' environment variables or in a shortcut), remove it once
+your graphics driver is fixed. `ribbit.log` says "drawing in software" when Ribbit does.
+
 ## The game turns itself off
 
 - The **Universal v1.5** BIOS turns off after start-up unless **Emulation › Advanced (experimental) › MAME power-line workaround** is on.
