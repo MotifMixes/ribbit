@@ -189,6 +189,8 @@ fn run(s: &Shared) {
     let mut audio = Vec::new();
     let mut dac_audio = Vec::new();
     let mut clean = ribbit_audio::LowPass32k::new();
+    // The recording's copy of 8 kHz sound, raised to 32 kHz as the speaker's.
+    let mut record_up = ribbit_audio::Upsample4x::default();
     let mut last_chunk = Instant::now();
     let mut calibrate = crate::calibrate::AutoCalibrate::new();
     while !s.quit.load(Ordering::Relaxed) {
@@ -283,15 +285,18 @@ fn run(s: &Shared) {
                 }
             }
         }
-        // Screen recording: duplicate the same samples into the recording
-        // buffer (drained by the UI thread each frame).
+        // Screen recording: the same sound as the speaker's, always at 32 kHz
+        // (`record::AUDIO_RATE`; drained by the UI thread each frame). The
+        // 8 kHz sound is raised to 32 kHz as for the speaker: written as it
+        // was, it played back four times too fast whenever the PCM stream
+        // was not playing (always, on the original Leapster).
         if control.speed == 1.0 && !calibrating {
             let mut rec = s.record_audio.lock().unwrap();
             if let Some(buf) = rec.as_mut() {
                 if control.pcm_32k && !dac_audio.is_empty() {
                     buf.extend_from_slice(&dac_audio);
                 } else {
-                    buf.extend_from_slice(&audio);
+                    buf.extend(audio.iter().flat_map(|&v| record_up.push(v)));
                 }
             }
         }

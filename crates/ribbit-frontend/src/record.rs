@@ -2,8 +2,9 @@
 //! then encoded by FFmpeg after the recording stops (so the capture is fast
 //! and the output has no real-time stutters regardless of PC load).
 //!
-//! The game is 160×160 pixels at whatever frame rate the UI runs (typically
-//! 60 fps), with 8 kHz mono audio (Leapster) or 32 kHz mono audio (L2 PCM).
+//! The game is 160×160 pixels; frames are written at `FPS` by the sound's
+//! clock (`frames_due`), whatever rate the window redraws at, with the
+//! speaker's 32 kHz mono sound (`AUDIO_RATE`).
 //! FFmpeg scales the picture 2× to 320×320 (nearest-neighbour) so the output
 //! is watchable without further scaling.
 
@@ -13,10 +14,14 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Approximate capture frame rate passed to FFmpeg; matches the typical
-/// display refresh rate. Audio samples are written at their own rate, so
-/// they and the video stay in sync regardless of the actual UI tick rate.
+/// The recording's frame rate. Frames are written to match the sound
+/// recorded so far (`frames_due`), not one per window redraw: on a 144 Hz
+/// screen that was 144 frames a second played as 60, the sound running
+/// ahead of the picture.
 pub const FPS: u32 = 60;
+
+/// The recording's sound: the speaker's 32 kHz (8 kHz sound raised to it).
+pub const AUDIO_RATE: u32 = ribbit_audio::DAC_RATE_HZ;
 
 pub struct Recorder {
     video: BufWriter<File>,
@@ -25,7 +30,7 @@ pub struct Recorder {
     pub frames: u64,
     /// Number of audio samples written so far.
     pub audio_samples: u64,
-    /// Audio sample rate the emulator produces (8000 or 32000 Hz).
+    /// Audio sample rate (`AUDIO_RATE`).
     pub audio_rate: u32,
     video_path: PathBuf,
     audio_path: PathBuf,
@@ -35,9 +40,10 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Start a new recording. `audio_rate` is 8000 or 32000. Returns the
-    /// recorder and the output path (written after `finish`).
-    pub fn start(dir: &Path, audio_rate: u32, encoder: RecordEncoder) -> std::io::Result<Self> {
+    /// Start a new recording. Returns the recorder and the output path
+    /// (written after `finish`).
+    pub fn start(dir: &Path, encoder: RecordEncoder) -> std::io::Result<Self> {
+        let audio_rate = AUDIO_RATE;
         std::fs::create_dir_all(dir)?;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -68,6 +74,13 @@ impl Recorder {
         self.video.write_all(bytes)?;
         self.frames += 1;
         Ok(())
+    }
+
+    /// Video frames still to write for the sound recorded so far (the
+    /// picture follows the sound: frames are repeated or skipped as the
+    /// window redraws faster or slower than `FPS`).
+    pub fn frames_due(&self) -> u64 {
+        (self.audio_samples * FPS as u64 / self.audio_rate as u64).saturating_sub(self.frames)
     }
 
     /// Write raw PCM samples (i16, little-endian, mono).
@@ -174,4 +187,29 @@ impl RecordEncoder {
 pub fn ffmpeg_available() -> bool {
     let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
     std::process::Command::new(exe).arg("-version").output().is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_follow_the_sound_not_the_redraws() {
+        let dir = std::env::temp_dir().join(format!("ribbit-rec-test-{}", std::process::id()));
+        let mut rec = Recorder::start(&dir, RecordEncoder::Lossless).unwrap();
+        let frame = vec![0u32; 160 * 160];
+        // A 144 Hz window: 144 redraws in one second of sound, 60 frames.
+        for _ in 0..144 {
+            rec.add_audio(&vec![0; AUDIO_RATE as usize / 144]).unwrap();
+            for _ in 0..rec.frames_due() {
+                rec.add_frame(&frame).unwrap();
+            }
+        }
+        assert!((59..=60).contains(&rec.frames), "{} frames", rec.frames);
+        // A slow redraw (a quarter second of sound at once): frames repeated.
+        rec.add_audio(&vec![0; AUDIO_RATE as usize / 4]).unwrap();
+        assert_eq!(rec.frames_due(), (rec.audio_samples * FPS as u64 / AUDIO_RATE as u64) - rec.frames);
+        drop(rec);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

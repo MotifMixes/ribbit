@@ -1821,6 +1821,9 @@ impl App {
                 let mut remaining = Vec::new();
                 s.emu.stop_record_audio(&mut remaining);
                 let _ = rec.add_audio(&remaining);
+                for _ in 0..rec.frames_due() {
+                    let _ = rec.add_frame(&self.frame[..]);
+                }
             }
             let encoder = self.settings.record_encoder;
             match rec.finish(encoder) {
@@ -1834,14 +1837,9 @@ impl App {
         } else {
             // Start.
             let Some(s) = &self.session else { return };
-            let audio_rate = if self.settings.pcm_rate == crate::audio_out::PcmRate::Original32k {
-                ribbit_audio::DAC_RATE_HZ
-            } else {
-                8000
-            };
             let dir = self.settings.record_folder.clone()
                 .unwrap_or_else(|| self.opts.data_dir.join("recordings"));
-            match crate::record::Recorder::start(&dir, audio_rate, self.settings.record_encoder) {
+            match crate::record::Recorder::start(&dir, self.settings.record_encoder) {
                 Ok(rec) => {
                     self.ui.toast(format!("Recording to {}…", rec.output_path.display()));
                     s.emu.start_record_audio();
@@ -2323,10 +2321,12 @@ impl App {
             };
             // Screen recording: capture this frame and any buffered audio.
             if let Some(rec) = &mut self.recording {
-                let _ = rec.add_frame(&self.frame[..]);
                 s.emu.drain_record_audio(&mut self.rec_audio);
                 let _ = rec.add_audio(&self.rec_audio);
                 self.rec_audio.clear();
+                for _ in 0..rec.frames_due() {
+                    let _ = rec.add_frame(&self.frame[..]);
+                }
                 // Apply cheat freezes while recording so they show in the video.
             }
             // Automatic calibration is hidden: black instead of its targets.
@@ -2858,6 +2858,13 @@ fn explain_load_error(e: &anyhow::Error) -> (String, String) {
             format!(
                 "\"{}\" isn't a console BIOS dump Ribbit can use. Choose another one with File → Open BIOS….",
                 file_name(path)
+            ),
+        ),
+        LoadError::BiosIo { path, .. } => (
+            "Couldn't read the BIOS".to_string(),
+            format!(
+                "The BIOS this console uses, \"{}\", couldn't be opened. It may have been moved, renamed or deleted.                  Choose it again with File → Open BIOS…, or pick another console.",
+                path.display()
             ),
         ),
         LoadError::Io { path, .. } => (
