@@ -146,6 +146,20 @@ struct Queue {
     playing: bool,
     /// Times the queue ran dry while playing.
     underruns: u64,
+    /// Times samples were dropped because the queue was full (the sound
+    /// skips: the emulator ran ahead of the device, e.g. catching up).
+    overflows: u64,
+}
+
+impl Queue {
+    /// Drops the oldest samples beyond `MAX_QUEUE`.
+    fn trim(&mut self) {
+        if self.samples.len() > MAX_QUEUE {
+            self.overflows += 1;
+            let extra = self.samples.len() - MAX_QUEUE;
+            self.samples.drain(..extra);
+        }
+    }
 }
 
 pub struct AudioOut {
@@ -168,18 +182,14 @@ impl AudioSink {
         for &s in samples {
             q.samples.extend(self.upsample.push(s).map(|v| (v as f32 * gain) as i16));
         }
-        while q.samples.len() > MAX_QUEUE {
-            q.samples.pop_front();
-        }
+        q.trim();
     }
 
     /// Queues 32 kHz samples as they are (the PCM DAC stream).
     pub fn push_32k(&mut self, samples: &[i16], gain: f32) {
         let mut q = self.queue.lock().unwrap();
         q.samples.extend(samples.iter().map(|&s| (s as f32 * gain) as i16));
-        while q.samples.len() > MAX_QUEUE {
-            q.samples.pop_front();
-        }
+        q.trim();
     }
 }
 
@@ -200,9 +210,11 @@ impl AudioOut {
         AudioSink { queue: self.queue.clone(), upsample: Default::default() }
     }
 
-    /// Times playback ran out of samples (each is an audible gap).
-    pub fn underruns(&self) -> u64 {
-        self.queue.lock().unwrap().underruns
+    /// Times playback ran out of samples (each is an audible gap), and
+    /// times queued samples were dropped (each an audible skip).
+    pub fn glitches(&self) -> (u64, u64) {
+        let q = self.queue.lock().unwrap();
+        (q.underruns, q.overflows)
     }
 
     /// Samples waiting and whether the device is playing them (for the log).
@@ -322,35 +334,60 @@ where
     let mut level = 0.0f32;
     let mut rate = RateControl::new();
     let mut remaster = Remaster::new(config.sample_rate as f32);
+    // This callback's source samples, taken out of the queue at its start.
+    let mut taken: Vec<i16> = Vec::new();
     let stream = device.build_output_stream(
         *config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             let mode = enhance.load(Ordering::Relaxed);
-            let mut q = queue.lock().unwrap();
-            if !q.playing && q.samples.len() >= START {
-                q.playing = true;
-                rate.reset(q.samples.len());
-            }
             let frames = data.len() / channels.max(1);
-            let step = step * rate.factor(q.samples.len(), frames as f64 * step / SOURCE_HZ);
-            for frame in data.chunks_mut(channels) {
+            // The queue is locked only to take this callback's samples:
+            // the emulation thread pushes to it, and a callback preempted
+            // while holding it (a busy system) would hold that thread up.
+            let playing = {
+                let mut q = queue.lock().unwrap();
+                if !q.playing && q.samples.len() >= START {
+                    q.playing = true;
+                    rate.reset(q.samples.len());
+                }
+                let step = step * rate.factor(q.samples.len(), frames as f64 * step / SOURCE_HZ);
+                taken.clear();
                 if q.playing {
+                    // How many the resampler will step over in `frames`.
+                    let (mut f, mut need) = (frac, 0usize);
+                    for _ in 0..frames {
+                        f += step;
+                        need += f as usize;
+                        f -= f.floor();
+                    }
+                    let n = need.min(q.samples.len());
+                    taken.extend(q.samples.drain(..n));
+                    if n < need {
+                        // Dry: hold the last value, fade out, refill.
+                        q.playing = false;
+                        q.underruns += 1;
+                    }
+                }
+                (q.playing || !taken.is_empty(), step)
+            };
+            let (mut playing, step) = playing;
+            let mut source = taken.iter();
+            for frame in data.chunks_mut(channels) {
+                if playing {
                     frac += step;
                     while frac >= 1.0 {
                         frac -= 1.0;
                         prev = next;
-                        match q.samples.pop_front() {
-                            Some(s) => next = s as f32 / 32768.0,
+                        match source.next() {
+                            Some(&s) => next = s as f32 / 32768.0,
                             None => {
-                                // Dry: hold the last value, fade out, refill.
-                                q.playing = false;
-                                q.underruns += 1;
+                                playing = false;
                                 break;
                             }
                         }
                     }
                 }
-                level = if q.playing { (level + 1.0 / FADE).min(1.0) } else { (level - 1.0 / FADE).max(0.0) };
+                level = if playing { (level + 1.0 / FADE).min(1.0) } else { (level - 1.0 / FADE).max(0.0) };
                 let v = (prev + (next - prev) * frac as f32) * level;
                 let (l, r) = remaster.run(v, mode);
                 let (l, r) = (l.clamp(-1.0, 1.0), r.clamp(-1.0, 1.0));

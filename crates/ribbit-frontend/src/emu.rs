@@ -192,6 +192,13 @@ fn run(s: &Shared) {
     // The recording's copy of 8 kHz sound, raised to 32 kHz as the speaker's.
     let mut record_up = ribbit_audio::Upsample4x::default();
     let mut last_chunk = Instant::now();
+    // The JIT's state is logged once, after this long running (for reports
+    // of slowness: whether code is compiled, or everything interpreted).
+    let mut jit_report = Some(Duration::from_secs(10));
+    // Every 10 s of running, for the log: the slowest and average second,
+    // and how often (and how long at most) the thread was held up.
+    let mut diag = (0u32, f64::MAX, 0.0f64, 0u32, Duration::ZERO);
+    let mut running_for = Duration::ZERO;
     let mut calibrate = crate::calibrate::AutoCalibrate::new();
     while !s.quit.load(Ordering::Relaxed) {
         let control = {
@@ -238,9 +245,20 @@ fn run(s: &Shared) {
         let gap = now.duration_since(last_chunk);
         if gap > Duration::from_millis(12) {
             tracing::debug!(target: "ribbit::emu", gap_ms = gap.as_secs_f64() * 1e3, "emulation thread stalled");
+            diag.3 += 1;
+            diag.4 = diag.4.max(gap);
         }
         let r = m.run_cycles(cycles, &none);
+        running_for += last_chunk.elapsed().min(Duration::from_millis(50));
         last_chunk = Instant::now();
+        if jit_report.is_some_and(|after| running_for >= after) {
+            jit_report = None;
+            match &m.jit {
+                Some(j) => tracing::info!(target: "ribbit::jit", compiled = j.stats.compiled, runs = j.stats.runs,
+                    interpreted = j.stats.interpreted, memory_error = j.memory_error.as_deref().unwrap_or("none"), "JIT"),
+                None => tracing::info!(target: "ribbit::jit", "JIT off (interpreter only)"),
+            }
+        }
         if r.stop != StopReason::StepLimit {
             tracing::warn!(target: "ribbit::boot", ?r, "emulation stopped");
             s.stats.lock().unwrap().stopped = Some(format!("{:?}", r.stop));
@@ -259,6 +277,13 @@ fn run(s: &Shared) {
         let dac = &mut m.io.voices.dac_output;
         dac_audio.resize(dac.len(), 0);
         dac.pop_into(&mut dac_audio);
+        // The machine is free again before the sound goes out: the output
+        // queue's lock is shared with the device's callback, and a callback
+        // held up by a busy system must not hold up the window too (which
+        // waits for the machine), as a chain of waits up to a second long
+        // on a four-core PC showed.
+        let cycles = m.cpu.cycles;
+        drop(m);
         if !calibrating
             && let Some(sink) = s.sink.lock().unwrap().as_mut()
         {
@@ -301,12 +326,20 @@ fn run(s: &Shared) {
             }
         }
         // Speed meter.
-        let cycles = m.cpu.cycles;
-        drop(m);
         let (t0, c0) = *meter.get_or_insert((now, cycles));
         let elapsed = now.duration_since(t0).as_secs_f64();
         if elapsed >= 1.0 {
-            s.stats.lock().unwrap().speed_percent = 100.0 * cycles.saturating_sub(c0) as f64 / (elapsed * hz);
+            let speed = 100.0 * cycles.saturating_sub(c0) as f64 / (elapsed * hz);
+            tracing::debug!(target: "ribbit::emu::speed", speed, "speed (last second)");
+            if control.speed == 1.0 {
+                diag = (diag.0 + 1, diag.1.min(speed), diag.2 + speed, diag.3, diag.4);
+                if diag.0 >= 10 {
+                    tracing::info!(target: "ribbit::perf", slowest_second = diag.1.round(), average = (diag.2 / diag.0 as f64).round(),
+                        stalls = diag.3, longest_stall_ms = (diag.4.as_secs_f64() * 1e3).round(), "emulation speed % (last 10 s)");
+                    diag = (0, f64::MAX, 0.0, 0, Duration::ZERO);
+                }
+            }
+            s.stats.lock().unwrap().speed_percent = speed;
             meter = Some((now, cycles));
         }
     }
