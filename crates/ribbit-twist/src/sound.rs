@@ -16,7 +16,7 @@
 //! bit 15 ADPCM, 14 16-bit samples, 13-12 the tone mode (1 one shot, 2
 //! loop: Audio_isWaveLoopEnable reads bit 13), as on the Zippity.
 
-use crate::machine::{Bus, CLOCK};
+use crate::machine::{Bus, CLOCK, DAC_HZ};
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct Voice {
@@ -58,6 +58,11 @@ pub struct Voice {
 pub const SPU_CLOCK: u64 = 288_000;
 /// The output rate, SPU_CLOCK / 4.
 pub const OUTPUT_RATE: f64 = SPU_CLOCK as f64 / 4.0;
+/// The DAC's level against the sound unit's: a quarter, so a full-scale MP3
+/// comes out near full scale after the app raises the sound unit's quiet mix
+/// four times (ribbit-frontend twist.rs `LOUDNESS`). The real balance is
+/// UNVERIFIED.
+const DAC_LEVEL: f32 = 0.25;
 
 /// ADPCM36's predictors, (c0, c1) in 64ths of the last two samples, by
 /// header bits 8-4: the first five are Sony XA's; all fitted from the
@@ -491,6 +496,15 @@ impl Bus {
 
     /// Runs the sound unit up to now: one output sample (into `sound`) each
     /// CLOCK / OUTPUT_RATE cycles.
+    /// The DAC's output at time `at`, at the sound unit's rate: its last two
+    /// samples interpolated (a sample late), at `DAC_LEVEL`.
+    fn dac_sample(&self, at: u64) -> (i32, i32) {
+        let period = (CLOCK / DAC_HZ) as f32;
+        let f = (at.saturating_sub(self.dac_at) as f32 / period).min(1.0);
+        let mix = |a: i16, b: i16| ((a as f32 + (b as f32 - a as f32) * f) * DAC_LEVEL) as i32;
+        (mix(self.dac_prev.0, self.dac_hold.0), mix(self.dac_prev.1, self.dac_hold.1))
+    }
+
     pub(crate) fn tick_sound(&mut self) {
         // Called every few hundred cycles, a sample every few thousand.
         if self.now < self.sound_next {
@@ -501,10 +515,16 @@ impl Bus {
         while self.sound_made < due {
             self.sound_made += 1;
             self.beat_tick();
-            let (l, r) = self.spu_mix();
-            // The DAC is left out of the speaker: the start-up logo's audio
-            // path is not right yet (one buffer of undecoded data reaches it,
-            // a burst of loud noise), and nothing else uses it.
+            let (mut l, mut r) = self.spu_mix();
+            // The DAC (MP3s: the Music station, the start-up logo), mixed in
+            // while it plays.
+            // This output sample's own time (`now` is the tick's).
+            let at = (self.sound_made as u128 * CLOCK as u128 / (SPU_CLOCK / 4) as u128) as u64;
+            if at < self.dac_hold_until {
+                let (dl, dr) = self.dac_sample(at);
+                l += dl;
+                r += dr;
+            }
             if self.sound.len() < 1 << 24 {
                 self.sound.extend_from_slice(&[l.clamp(-32768, 32767) as i16, r.clamp(-32768, 32767) as i16]);
             }
@@ -515,6 +535,31 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use crate::machine::{CLOCK, Twist};
+
+    /// The DAC's samples (MP3s) reach the speaker, mixed with the sound
+    /// unit. Ribbit 1.4.2 decoded MP3s but left the DAC out of the mix.
+    #[test]
+    fn dac_samples_reach_the_speaker() {
+        let mut t = Twist::new(&[]);
+        // 64 stereo samples of 16000 (left) and -16000 (right) at 0x1000.
+        for i in 0..64 {
+            t.bus.ram[0x1000 + 4 * i..0x1000 + 4 * i + 2].copy_from_slice(&16000i16.to_le_bytes());
+            t.bus.ram[0x1000 + 4 * i + 2..0x1000 + 4 * i + 4].copy_from_slice(&(-16000i16).to_le_bytes());
+        }
+        // DMA channel 0 to the DAC: 128 16-bit units.
+        t.bus.write(0xD030_0004, 0x1000, 4);
+        t.bus.write(0xD030_0008, 0xC00D_0004, 4);
+        t.bus.write(0xD030_000C, 128, 4);
+        t.bus.write(0xD030_0000, 0x1001, 4);
+        while t.bus.now < CLOCK / 1000 {
+            t.bus.now += 256;
+            t.bus.tick();
+        }
+        let sound = std::mem::take(&mut t.bus.sound);
+        let (l, r): (Vec<i16>, Vec<i16>) = sound.chunks(2).map(|p| (p[0], p[1])).unzip();
+        assert!(l.iter().any(|&v| v == 4000), "left at a quarter: {:?}", &l[..20]);
+        assert!(r.iter().any(|&v| v == -4000), "right at a quarter");
+    }
 
     #[test]
     fn an_adpcm_one_shot_plays_from_its_16_bit_address_and_stops() {

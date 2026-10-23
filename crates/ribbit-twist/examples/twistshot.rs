@@ -10,6 +10,7 @@
 //!   TWIST_SPRITES=1                              the sprite list beside each shot (.txt)
 //!   TWIST_FRAME=1                                the video chip's frame too (.frame.png, unturned)
 //!   TWIST_WAV=file                               what the DAC played
+//!   TWIST_SPEAKER=file                           what the speaker played (sound unit + DAC)
 //!   TWIST_DMALOG=1                               DMA transfers (DAC, memory to memory)
 //!   TWIST_RAMWATCH=lo-hi                         who wrote that RAM (hex), with write bursts
 //!   TWIST_IOWATCH=lo-hi[@seconds]                writes to those registers (hex; TWIST_IOALL=1: all of them)
@@ -172,6 +173,31 @@ fn main() {
         }
         std::fs::write(&path, w).unwrap();
         println!("wrote {} stereo samples to {path}", a.len() / 2);
+    }
+    // TWIST_SPEAKER=file: what the speaker plays (the sound unit with the
+    // DAC; stereo, 16-bit, at the sound unit's rate, before the app's
+    // loudness and resampling).
+    if let Ok(path) = std::env::var("TWIST_SPEAKER") {
+        let a = &t.bus.sound;
+        let rate = ribbit_twist::sound::OUTPUT_RATE as u32;
+        let mut w = Vec::with_capacity(44 + a.len() * 2);
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&(36 + a.len() as u32 * 2).to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&2u16.to_le_bytes());
+        w.extend_from_slice(&rate.to_le_bytes());
+        w.extend_from_slice(&(rate * 4).to_le_bytes());
+        w.extend_from_slice(&4u16.to_le_bytes());
+        w.extend_from_slice(&16u16.to_le_bytes());
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&(a.len() as u32 * 2).to_le_bytes());
+        for s in a {
+            w.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(&path, w).unwrap();
+        println!("wrote {} speaker samples to {path}", a.len() / 2);
     }
     if std::env::var("TWIST_DMALOG").is_ok() {
         // Memory to memory, with the "stays put" bit.

@@ -102,9 +102,14 @@ pub struct Bus {
     /// Samples written to the DAC (both channels interleaved as written).
     #[serde(skip)]
     pub audio: Vec<i16>,
-    /// The DAC's latest sample (left, right), heard until the time held
-    /// (`sound::tick_sound` adds it to the sound unit's output).
+    /// The DAC's latest sample (left, right), the one before it, and when
+    /// the latest came; heard until `dac_hold_until` (`sound::tick_sound`
+    /// adds it to the sound unit's output).
     pub(crate) dac_hold: (i16, i16),
+    #[serde(default)]
+    pub(crate) dac_prev: (i16, i16),
+    #[serde(default)]
+    pub(crate) dac_at: u64,
     pub(crate) dac_hold_until: u64,
     /// The sound unit (`sound`): its channels, stop flags (+0xE2C, +0xEAC),
     /// beat counter, and its output, stereo at `sound::OUTPUT_RATE`, made
@@ -469,6 +474,8 @@ impl Bus {
             dac_last: [0; 2],
             audio: Vec::new(),
             dac_hold: (0, 0),
+            dac_prev: (0, 0),
+            dac_at: 0,
             dac_hold_until: 0,
             voices: [crate::sound::Voice::default(); 32],
             spu_stopped: [0; 2],
@@ -1198,11 +1205,12 @@ impl Bus {
         // DMA into the DAC: one 32-bit unit per sample period.
         let due = (self.now - self.dma_paced_last) / per_sample;
         if due > 0 {
+            let first = self.dma_paced_last + per_sample;
             self.dma_paced_last += due * per_sample;
             for ch in 0..4 {
                 let Some((mut src, mut left)) = self.dma_paced[ch] else { continue };
                 let base = 0xD030_0000 + 0x40 * ch as u32;
-                for _ in 0..due {
+                for k in 0..due {
                     if left == 0 {
                         break;
                     }
@@ -1211,8 +1219,12 @@ impl Bus {
                         self.audio.push(v as i16);
                         self.audio.push((v >> 16) as i16);
                     }
+                    self.dac_prev = self.dac_hold;
                     self.dac_hold = (v as i16, (v >> 16) as i16);
-                    self.dac_hold_until = self.now + 2 * per_sample;
+                    // When this sample was due (not this tick's time: ticks
+                    // come every 256 cycles, a twentieth of a sample).
+                    self.dac_at = first + k * per_sample;
+                    self.dac_hold_until = self.dac_at + 2 * per_sample;
                     src = src.wrapping_add(4);
                     // The count is in 16-bit units, two to a stereo sample
                     // (EVIDENCE: the MP3 driver's buffers are 0x900 units,

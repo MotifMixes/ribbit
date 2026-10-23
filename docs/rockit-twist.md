@@ -506,6 +506,13 @@ overlapped the left channel's output. The mono logo came through fine.
 
 The remaining difference is rounding: the real unit is fixed point, and its exact arithmetic is UNKNOWN.
 
+**To the speaker (fixed in 1.4.3).** 1.4.2 decoded MP3s but still left the DAC out of the speaker mix, an old
+stand-in from when only noise reached it, so nothing was heard. Now the DAC is mixed into the sound unit's
+output (`sound::tick_sound`): its samples are interpolated at their own times, at a quarter level (`DAC_LEVEL`) so
+that after the app's fourfold loudness a full-scale MP3 comes out near full scale. The balance between the DAC and
+the sound unit on a real unit is UNVERIFIED. Checked through the speaker: the song's samples come out at 0.250,
+33.8 dB above the rest (the rest being interpolation error, measured at the DAC's true rate of 240 MHz / 5442).
+
 Tools: `examples/twistshot.rs` (TWIST_KEYS, TWIST_WAV, TWIST_MP3 job log). The route to the first song: Profiles at
 ~22 s; Left 24, Enter 26, Left 28.5, Enter 29.5 (Stations), Right x5 from 33 s, Enter 43, Enter 48. "Al Can"
 starts at ~54 s.
