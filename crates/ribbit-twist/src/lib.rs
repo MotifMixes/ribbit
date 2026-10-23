@@ -24,6 +24,7 @@ pub mod fat;
 pub mod image;
 pub mod input;
 pub mod machine;
+pub mod mp3acc;
 pub mod mpeg4;
 mod mpeg4_tables;
 pub mod package;

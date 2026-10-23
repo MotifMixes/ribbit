@@ -50,6 +50,16 @@ pub struct Bus {
     /// Reads of I/O words nothing models: (count, first pc).
     #[serde(skip)]
     pub unmodelled: BTreeMap<u32, (u64, u32)>,
+    /// Research: the MP3 accelerator's jobs (0xD0A00000; docs/rockit-twist.md
+    /// "MP3"), when they started: (time, kind 'A' or 'B', registers +0..+0x4C,
+    /// and for the first jobs the memory at each address register).
+    #[serde(skip)]
+    pub mp3_jobs: Vec<Mp3Job>,
+    #[serde(skip)]
+    pub mp3_log: bool,
+    /// Research: keep job memory only from this time (cycles).
+    #[serde(skip)]
+    pub mp3_log_from: u64,
     /// Text written to the UART.
     #[serde(skip)]
     pub uart: Vec<u8>,
@@ -435,6 +445,9 @@ impl Bus {
             iram: vec![0; IRAM_SIZE],
             io: HashMap::default(),
             unmodelled: BTreeMap::new(),
+            mp3_jobs: Vec::new(),
+            mp3_log: false,
+            mp3_log_from: 0,
             uart: Vec::new(),
             now: 0,
             watch: None,
@@ -597,8 +610,52 @@ impl Bus {
         self.io.insert(a, v);
     }
 
+    /// Research: notes an MP3 accelerator job (`mp3_jobs`).
+    fn note_mp3_job(&mut self, kind: char) {
+        if !self.mp3_log || self.mp3_jobs.len() >= 20_000 || self.now < self.mp3_log_from {
+            return;
+        }
+        let regs: [u32; 20] = std::array::from_fn(|i| self.latch(0xD0A0_0000 + 4 * i as u32));
+        // The address registers hold low and high halves.
+        let mut memory = Vec::new();
+        if self.mp3_jobs.len() < 400 && self.now >= self.mp3_log_from {
+            for pair in [(0x10, 0x14), (0x18, 0x1C), (0x20, 0x24), (0x28, 0x2C), (0x30, 0x34), (0x38, 0x3C), (0x40, 0x44), (0x48, 0x4C)] {
+                let a = (regs[pair.0 / 4] & 0xFFFF) | (regs[pair.1 / 4] & 0xFFFF) << 16;
+                let bytes: Vec<u8> = (0..0x1200u32).map(|i| self.peek_byte(a.wrapping_add(i))).collect();
+                memory.push((a, bytes));
+            }
+        }
+        self.mp3_jobs.push(Mp3Job { time: self.now, kind, regs, memory });
+    }
+
+    fn peek_byte(&self, a: u32) -> u8 {
+        self.ram.get(a as usize).copied().unwrap_or(0)
+    }
+
     /// Timers, DMA, the interrupt controller and the sound unit.
     fn device_write(&mut self, w: u32, now: u32, written: u32, old: u32) {
+        // The MP3 accelerator (mp3acc.rs): +0 bit 0 starts job A, a write
+        // to +4 job B. Both finish at once: bits 0 and 1 (busy, which the
+        // driver waits on at 0x3715C) read clear.
+        if w == 0xD0A0_0000 && now & 1 != 0 && old & 1 == 0 {
+            self.note_mp3_job('A');
+            self.mp3_job_a();
+            self.io.insert(w, now & !3);
+            return;
+        }
+        if w == 0xD0A0_0004 && now != 0 {
+            self.note_mp3_job('B');
+            self.mp3_job_b();
+            // Research: what the job wrote.
+            if self.mp3_log && self.now >= self.mp3_log_from && self.mp3_jobs.len() <= 400 {
+                let out = (self.latch(0xD0A0_0048) & 0xFFFF) | (self.latch(0xD0A0_004C) & 0xFFFF) << 16;
+                let bytes: Vec<u8> = (0..2304u32).map(|i| self.peek_byte(out.wrapping_add(i))).collect();
+                if let Some(j) = self.mp3_jobs.last_mut() {
+                    j.memory.push((out, bytes));
+                }
+            }
+            return;
+        }
         if (crate::udc::BASE..crate::udc::BASE + 0x200).contains(&w) {
             self.udc_write(w, now, written, old);
             return;
@@ -647,7 +704,7 @@ impl Bus {
                         now,
                         self.latch(w + 4),
                         self.latch(w + 8),
-                        self.latch(w + 12) * 4,
+                        self.latch(w + 12) * 2,
                     ));
                 }
                 self.io.insert(w, (now & !1) | 2);
@@ -1157,7 +1214,11 @@ impl Bus {
                     self.dac_hold = (v as i16, (v >> 16) as i16);
                     self.dac_hold_until = self.now + 2 * per_sample;
                     src = src.wrapping_add(4);
-                    left -= 1;
+                    // The count is in 16-bit units, two to a stereo sample
+                    // (EVIDENCE: the MP3 driver's buffers are 0x900 units,
+                    // 0x1200 bytes of samples each, 0x1220 apart; read as 32
+                    // bits a unit, every buffer ran on into the next).
+                    left = left.saturating_sub(2);
                 }
                 if left == 0 {
                     self.dma_status |= 1 << ch;
@@ -1409,6 +1470,16 @@ pub struct Twist {
     pub counts: HashMap<u32, u64>,
     #[serde(skip)]
     pub count_from: u64,
+}
+
+/// A job given to the MP3 accelerator (research, `Bus::mp3_jobs`).
+#[derive(Clone, Debug)]
+pub struct Mp3Job {
+    pub time: u64,
+    pub kind: char,
+    pub regs: [u32; 20],
+    /// (address, 0x1200 bytes from it) for each address register pair.
+    pub memory: Vec<(u32, Vec<u8>)>,
 }
 
 pub const HOT_WINDOW: u64 = 500_000;

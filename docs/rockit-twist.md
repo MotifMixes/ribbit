@@ -118,7 +118,7 @@ example's source).
 
 **How far it gets (VERIFIED by running it).** The real chain runs: the Bootloader (1.0.48.0) identifies the board,
 reads the eMMC's boot header and partition table, checks and loads partition 1 (the System, Base 1.0.50.0) to
-address 0 and jumps to it. The System mounts F:, plays the start-up logo (its own software MP3 decoder feeds the
+address 0 and jumps to it. The System mounts F:, plays the start-up logo (its own MP3 decoder, with the accelerator at 0xD0A00000, feeds the
 DAC; the video frames go to the hardware MPEG-4 decoder, not emulated, so the logo is a red screen), then looks for
 the menu, `f:\Applications\Bundle\main.bin` (0x215F0). The factory volume's `Applications` folder is empty, so
 it shows "Device Error. Please connect your device to LeapFrog Connect." (0x330B4 -> 0x32E70 with 1; the screens
@@ -183,7 +183,7 @@ Devices found and modelled, each from the firmware's own use (addresses VERIFIED
 | Interrupt controller | 0xD0100000 | +0x28 pending IRQ number, +0x2C FIQ, +0x30 mask (bit 32-n), +0x38 bit 0 disable — as the Zippity's | modelled |
 | SD/MMC hosts | 0xC00A0000 (eMMC), 0xC00B0000 (SD slot) | +0x00 TX data, +0x04 RX data, +0x08 command (bits 5-0 index, 7 start, 12 response, 13 no CRC; 0x40 power-up clocks, 0x800 init clocks), +0x0C argument, +0x10 response (one word per read), +0x14 status (0 busy, 2 complete, 4/5/9 errors, 6 response ready, 7 data ready; write 1s to clear), +0x18 clock divider/bus width/block length | modelled with a JEDEC eMMC card (`sd.rs`) |
 | DMA | 0xD0300000 + 0x40 n | +0 control (0 start, 7 fixed source, 13-12 unit, 10 continue with the queued buffer), +4/+8/+C source/destination/count, 0x1FC done flags (IRQ 24) | modelled; DAC transfers paced |
-| Audio DAC | 0xC00D0000 + 0x20 c | +0 control (bit 14 IRQ), +4 sample, +8 status (bit 15 full); IRQ 31/30; fed by DMA with the System's MP3 output (start-up logo, Music station) | modelled; units are 16-bit (see "MP3"), not 32-bit as modelled |
+| Audio DAC | 0xC00D0000 + 0x20 c | +0 control (bit 14 IRQ), +4 sample, +8 status (bit 15 full); IRQ 31/30; fed by DMA with the System's MP3 output (start-up logo, Music station) | modelled; 16-bit units (see "MP3") |
 | Sound unit (SPU) | 0xD0400000 | 32 channels, the Zippity's unit with 16-bit registers and ADPCM36 (see "Sound") | modelled (`sound.rs`) |
 | MPEG-4 decoder | 0xD0C00000 | +0xC0C compressed frame (VOP start code), +0xC08 RGB565 output, +0xC04 the reference frame's output, +0xA0 bit 4 start, +0xD0/+0xD4 IRQ enable/status (bit 2 done, bit 4 failed; IRQ 26) | decodes (`mpeg4.rs`, see "Video playback") |
 | Timebase | 0xC0040000 | +0x50 control, +0x54/+0x58 status/enable; bit 8 tick (IRQ 1) drives the firmware's time-outs (0x5014) | ticks at 1024 Hz (ASSUMED) |
@@ -266,6 +266,27 @@ menu waited:
   tiles. VERIFIED with Nom-Nom's level menu: plane 0 holds its title picture, 320 x 240 in ARGB 8:8:8:8, behind a
   half-dark quad; the planes are laid out as the player sees the screen (landscape), so they are turned into the
   frame as it is drawn. Only register mode, unturned and unzoomed, is drawn yet.
+
+* Frames and buffers (VERIFIED from the System's code, 2026-10-23):
+  * Starting a frame: the frame update (0xE594) copies the sprite list by video DMA and the tables by the CPU,
+    waits for the DMA, then writes 1 to 0x1F0 if a buffer is set at 0x1E8. 0x1F0 is very likely the start bit.
+  * Triple buffering: the frame interrupt's handler (0xBFA0) counts each frame end, then moves 0x1E8 on to the
+    next of three buffers, skipping the one being shown. 0xC23C puts the finished buffer at 0x33C and streams it
+    to the panel (0x140 = 0x20D3) on the next tearing pulse. Games use the same code (buffers 0x8E7100,
+    0x97D100, 0x932100 in Albert's Escape).
+  * Pacing: Albert's Escape starts a frame every 20 ms exactly (50 fps). On the 60 Hz panel every sixth refresh
+    repeats a frame, as on a real unit if its panel runs at 60 Hz.
+  * What Ribbit does: it draws at each tearing pulse and raises 0x18C then (ASSUMED). Drawing at the 0x1F0
+    write instead, with the frame end following it, was tried. The frames sent to the panel came out the same
+    (none out of order in 4,521), so the simpler model stays.
+* Panel set-up (the System, VERIFIED by logging it): 01; B1 00 1F; B4 80 00; B6 0A 42 27 04; 36 40; B7 ...; BA, BB,
+  CD, E8, E9, EA, F2, F5; E4/E5 (gamma); BC; 3A 05; 2A/2B; 11; 29; 35 00; 2C. B1 is a frame-rate setting on
+  panels with this command set; 00 1F gives about 61 Hz on the ILI9341 family (the controller is UNKNOWN).
+* Sprite colour modes, from PPU_setSpriteColorMode (0x104C8). Modes 0-2 set the depth (2, 4 or 6 bits). The rest
+  set depth 3 plus a palette nibble: 3 nibble 0 (8 bits), 4 nibble F, 5 nibble 1, 6 nibble 3, 7 and 9 nibble 5,
+  8 nibble 7, 10 nibble 9, 11 nibble B. Albert's Escape draws its crystal in mode 11: as ARGB 4:4:4:4 it is a
+  clean picture with a transparent surround, and as RGB 5:6:5 or ARGB 1:5:5:5 it is noise (VERIFIED). Modes 4
+  and 10 are still drawn as ARGB 4:4:4:4 (UNVERIFIED); modes 5, 6 and 8 are not decoded.
 
 Not decoded yet: the planes' bitmap and attribute-map modes, their rotation and zoom (0x340-0x35C), windows,
 mosaic, and the 2D engine at 0xD0C00000 beyond answering its jobs.
@@ -451,25 +472,40 @@ Windows timings are noisy (pin to a P-core); for a profile, build in WSL with de
 (see "Sound"); stopped channels now fade instead of clicking; the register map's hasher and per-instruction checks
 made cheaper (about 7% in heavy stretches).
 
-## MP3: a decoder accelerator at 0xD0A00000 (found 2026-10-23, NOT modelled)
+## MP3: a decoder accelerator at 0xD0A00000 (found 2026-10-23, modelled in `mp3acc.rs`)
 
-Music-station songs (bundled or installed with LeapFrog Connect) and the start-up logo's sound are silent in Ribbit:
-the DAC receives only zeros (VERIFIED: the logo's 1.16 M samples are all 0 but a 2,289-sample burst; the
-decoder's output buffers 0x753020, 0x754240... stay 0). The cause, VERIFIED by running the decode call
-(0x33790, from the task `LibMp3DecodeTask`, entry 0x2CFEC) in Ribbit and in Unicorn from the same state: the
-software decoder hands stages to hardware at 0xD0A00000, which Ribbit does not emulate.
+Music-station songs and the start-up logo's sound were silent: the System's software MP3 decoder (the task
+`LibMp3DecodeTask`, decode call 0x33790) hands two stages to hardware at 0xD0A00000, and the DAC got only zeros
+(VERIFIED by running the decode call in Ribbit and in Unicorn from the same state). Ribbit now does both jobs at
+once when started, and the busy bits read clear.
 
-* 0x3715C waits for +0 bit 1 (busy) to clear, flushes the cache over its buffers (0xAFC), then starts a job.
-* 0x37DA8: +0 = 0; five addresses written as low/high halfwords to +0x28/+0x2C ... +0x48/+0x4C; then +4 =
-  0x45 (9 when its first argument is 3). Called with 0x12 and the frame's buffers and the PCM output position
-  (the likely synthesis stage, writing 16-bit samples).
-* 0x37E40: +0 mode bits (bit 4; bits 3-2 from an argument 1-3), three addresses at +0x10 ... +0x24, then +0 |= 1.
-* The DAC's DMA counts 16-bit units (the driver flushes `count * 2` bytes; buffers 0x900 units, 0x1220 apart);
-  Ribbit's paced DMA reads 32 bits a unit (twice the data). The driver queues a silence buffer (0x75C120) when the
-  decoder has nothing, which is all the time now (decoding stalls after ~9 frames, waiting on the accelerator).
+* **Job A, the IMDCT** (0x37E40 starts it: +0 mode, then +0 |= 1). Mode bit 0 start; bits 3-2 the block type; bit
+  4 a mixed block. +0x10/+0x14 the input: 576 signed 16-bit lines, Q15, equal to minimp3's values after the alias
+  reduction x 32768 (VERIFIED against a reference decode). +0x18/+0x1C the channel's overlap buffer (0x480 bytes).
+  +0x20/+0x24 the output: 576 16-bit values (VERIFIED as the size: a stereo stream's two outputs are 0x480 bytes
+  apart). The scale is ASSUMED to be Q13, which gives 2 bits of headroom.
+* **Job B, the polyphase synthesis** (0x37DA8: +0 = 0, five addresses as low/high halves at +0x28 ... +0x4C, then
+  +4 = 0x45, or 9 for mono). +0x28 the left job-A output, +0x30 its filter state, +0x38 the right output, +0x40 its
+  state, +0x48 the PCM out (1152 interleaved 16-bit samples).
+* The overlap and filter state are kept as 32-bit floats inside the buffers the driver gives. They fit, so they
+  live in emulated memory and in save states. The real format is UNKNOWN; only the accelerator reads them.
+* The DAC's DMA counts 16-bit units (the driver flushes `count * 2` bytes).
 
-Next: what each job computes (likely IMDCT/windowing and polyphase synthesis, fixed point): compare the job's
-inputs with a reference decoder's intermediate values for the same frame (Al_Can.mp3), then model it; fix the
-DMA unit size. Tools: the boot test's research hooks (keys, screenshots, DAC capture, snapshot at an address),
-scratch Unicorn harness; route to the Music station: Right 20 s, Enter 23, Left 25, Enter 26.5, Enter 32, Right
-x5 from 40 s, Enter 55 (the first song plays from ~57 s).
+Results:
+
+| Clip | Where the PCM was taken | SNR vs. minimp3 |
+|---|---|---|
+| Start-up logo (mono) | emulated DAC | 44.5 dB |
+| Al_Can.mp3 (stereo, 320 kbps) | emulated DAC | 48.0 dB per channel |
+
+The ignored test `mp3acc::matches_a_reference` checks the stages offline (RIBBIT_MP3_DUMP / RIBBIT_MP3_PCM, from a
+patched minimp3 build) at 48-49 dB.
+
+The first model kept job A's output as 32-bit floats. That garbled stereo songs, because the right channel's input
+overlapped the left channel's output. The mono logo came through fine.
+
+The remaining difference is rounding: the real unit is fixed point, and its exact arithmetic is UNKNOWN.
+
+Tools: `examples/twistshot.rs` (TWIST_KEYS, TWIST_WAV, TWIST_MP3 job log). The route to the first song: Profiles at
+~22 s; Left 24, Enter 26, Left 28.5, Enter 29.5 (Stations), Right x5 from 33 s, Enter 43, Enter 48. "Al Can"
+starts at ~54 s.

@@ -150,8 +150,8 @@ Ribbit will not decrypt them. See [rockit-twist.md](rockit-twist.md).
 | Menu (profiles, stations) | Built-in | **Playable** | played 2026-10-17 | Profiles and progress are saved |
 | Nom-Nom (Arcade) | Built-in | **Playable** | played 2026-10-17 | Title screen, level menu, gameplay, sound |
 | Sneak Peeks (videos) | Built-in | **Playable** | played 2026-10-17 | MPEG-4 videos and the start-up logo play |
-| Music station | Built-in | Untested | | |
-| Albert's Escape | Built-in | Boots | 2026-10-17 | Starts; not played through |
+| Music station | Built-in | **Works** | 2026-10-23 | MP3 songs play (stereo checked against a reference decoder); the start-up logo's sound too |
+| Albert's Escape | Built-in | **Works** | 2026-10-23 | Played in level 1; a player finds Albert's movement and some colours off (not found yet) |
 | Portrait-mode Arcade game | Built-in | Boots | 2026-10-17 | Starts in portrait; not played through |
 | Banzai Beans: Showdown | Game pack | Untested | | |
 | Banzai Beans Pet | Game pack | Untested | | |
