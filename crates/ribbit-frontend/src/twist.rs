@@ -453,6 +453,7 @@ impl Machine {
         let thread = std::thread::Builder::new()
             .name("rockit-twist".into())
             .spawn(move || {
+                crate::perf::raise_thread_priority();
                 if let Err(e) = Self::run(&packages, content.as_deref(), save.as_deref(), usb, &s) {
                     *s.error.lock().unwrap() = Some(format!("{e:#}"));
                 }

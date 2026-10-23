@@ -16,7 +16,7 @@ use ribbit_memory::known::Hardware;
 use ribbit_video::{HEIGHT, WIDTH};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent};
@@ -138,7 +138,9 @@ pub struct App {
     modifiers: ModifiersState,
     speed_percent: f64,
     /// For the periodic audio-gap log line.
-    audio_log: (Instant, u64),
+    audio_log: (Instant, (u64, u64)),
+    /// Window frame statistics for the log (`FrameDiag`).
+    frame_diag: FrameDiag,
     audio: Option<AudioOut>,
     #[cfg(not(target_os = "android"))]
     pads: Option<crate::gamepad::Gamepads>,
@@ -271,7 +273,8 @@ impl App {
             rewinding: false,
             modifiers: ModifiersState::empty(),
             speed_percent: 100.0,
-            audio_log: (Instant::now(), 0),
+            audio_log: (Instant::now(), (0, 0)),
+            frame_diag: FrameDiag::default(),
             audio: AudioOut::open(),
             #[cfg(not(target_os = "android"))]
             pads: crate::gamepad::Gamepads::open(),
@@ -1857,15 +1860,18 @@ impl App {
     }
 
     /// Logs (every 5 s) how often the sound ran out.
-    fn log_underruns(audio: Option<&AudioOut>, log: &mut (Instant, u64), speed_percent: f64) {
+    fn log_underruns(audio: Option<&AudioOut>, log: &mut (Instant, (u64, u64)), speed_percent: f64) {
         let now = Instant::now();
         let Some(a) = audio else {
             return;
         };
         if now.duration_since(log.0).as_secs() >= 5 {
-            let n = a.underruns();
-            if n > log.1 {
-                tracing::info!(target: "ribbit::audio", gaps = n - log.1, speed = speed_percent, "audio ran dry (last 5 s)");
+            let n = a.glitches();
+            if n.0 > log.1.0 {
+                tracing::info!(target: "ribbit::audio", gaps = n.0 - log.1.0, speed = speed_percent, "audio ran dry (last 5 s)");
+            }
+            if n.1 > log.1.1 {
+                tracing::info!(target: "ribbit::audio", skips = n.1 - log.1.1, speed = speed_percent, "audio queue overflowed, sound skipped (last 5 s)");
             }
             let (queued, playing) = a.queue_state();
             tracing::debug!(target: "ribbit::audio", queued, playing, "audio queue");
@@ -2559,6 +2565,49 @@ impl App {
         let took = frame_start.elapsed();
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
+        }
+        let running = self.session.is_some() || self.zippity.is_some() || self.twist.is_some();
+        self.frame_diag.frame(frame_start, took, running && !self.halted());
+    }
+}
+
+/// The window's frame rate, its longest gap between frames and its own
+/// work per frame, logged every 10 s while a game runs (for reports of
+/// slowness: is the window, or the emulation, falling behind?).
+#[derive(Default)]
+struct FrameDiag {
+    since: Option<Instant>,
+    last: Option<Instant>,
+    frames: u32,
+    longest_gap: Duration,
+    work: Duration,
+    longest_work: Duration,
+}
+
+impl FrameDiag {
+    fn frame(&mut self, start: Instant, work: Duration, running: bool) {
+        if !running {
+            *self = FrameDiag::default();
+            return;
+        }
+        let since = *self.since.get_or_insert(start);
+        if let Some(last) = self.last {
+            self.longest_gap = self.longest_gap.max(start - last);
+        }
+        self.last = Some(start);
+        self.frames += 1;
+        self.work += work;
+        self.longest_work = self.longest_work.max(work);
+        let span = start - since;
+        if span >= Duration::from_secs(10) {
+            let ms = |d: Duration| (d.as_secs_f64() * 1e4).round() / 10.0;
+            tracing::info!(target: "ribbit::perf",
+                fps = (self.frames as f64 / span.as_secs_f64()).round(),
+                longest_gap_ms = ms(self.longest_gap),
+                work_ms = ms(self.work / self.frames.max(1)),
+                longest_work_ms = ms(self.longest_work),
+                "window (last 10 s)");
+            *self = FrameDiag { since: Some(start), last: Some(start), ..Default::default() };
         }
     }
 }

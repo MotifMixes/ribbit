@@ -36,6 +36,7 @@ pub static PROFILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 pub struct Jit {
     pub check: bool,
     pub stats: JitStats,
+    pub memory_error: Option<String>,
 }
 
 impl Jit {

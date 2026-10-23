@@ -871,6 +871,10 @@ pub struct Jit {
     pub stats: JitStats,
     /// The bus's plain memory by page (`JitCtx::pages`).
     pages: Pages,
+    /// Why code could not be mapped executable, the first time it failed
+    /// (security software or a system policy refusing it): everything is
+    /// interpreted then, much slower; frontends log it.
+    pub memory_error: Option<String>,
     /// `CpuConfig::load_latency` the code was compiled for.
     latency: u64,
     /// Memory timing on (`JitView::timing`) when the code was compiled.
@@ -890,6 +894,7 @@ impl Default for Jit {
             check: false,
             stats: JitStats::default(),
             pages: Pages::default(),
+            memory_error: None,
             latency: u64::MAX,
             timing: false,
             fence: u32::MAX,
@@ -951,8 +956,12 @@ impl Jit {
             return Slot::Never;
         };
         let t1 = std::time::Instant::now();
-        let Ok(ptr) = self.arena.add(&code) else {
-            return Slot::Never;
+        let ptr = match self.arena.add(&code) {
+            Ok(p) => p,
+            Err(e) => {
+                self.memory_error.get_or_insert_with(|| e.to_string());
+                return Slot::Never;
+            }
         };
         perf_map(ptr, code.len(), head.start, &tags);
         self.stats.compile_ns += (t1 - t0).as_nanos() as u64;

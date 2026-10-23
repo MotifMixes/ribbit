@@ -357,6 +357,9 @@ impl Gpu {
 
     pub fn new(window: Arc<Window>) -> Result<Self> {
         let (instance, surface, adapter, device, queue, config) = Self::connect(&window)?;
+        let info = adapter.get_info();
+        tracing::info!(target: "ribbit::perf", adapter = %info.name, backend = ?info.backend, driver = %info.driver_info,
+            present = ?config.present_mode, "graphics");
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lcd"),
