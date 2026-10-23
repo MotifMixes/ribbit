@@ -1383,6 +1383,14 @@ pub struct Twist {
     /// unless asked for).
     #[serde(skip)]
     pub profile: bool,
+    /// Extra cycles the processor takes for every 256 it runs, while the
+    /// emulator cannot run it at full speed (`stall_for`): the sound unit,
+    /// the timers and the panel keep to real time, so the music plays on
+    /// while the processor does heavy work, as on a real unit.
+    #[serde(skip)]
+    pub stall: u32,
+    #[serde(skip)]
+    stall_left: u32,
     /// Research: registers r0-r15 each time execution reaches this address
     /// (at most `BREAKS_MAX`), with the time.
     #[serde(skip)]
@@ -1404,6 +1412,10 @@ pub struct Twist {
 }
 
 pub const HOT_WINDOW: u64 = 500_000;
+/// The most cycles an instruction may take when the emulator falls behind
+/// (`Twist::stall_for`): the interpreter's slowest stretches run about 85
+/// million instructions a second, a little over a third of 240 MHz.
+pub const MAX_CPI: f64 = 4.0;
 
 /// The registers' map hashes their addresses with one multiply (they
 /// are looked up many times per device tick; the standard hasher is
@@ -1562,7 +1574,7 @@ impl Twist {
         bus.ram[..n].copy_from_slice(&code[..n]);
         let mut cpu = Arm::new();
         cpu.reset();
-        Self { cpu, bus, hot: HashMap::new(), clock_fns: Vec::new(), profile: false, break_at: None, breaks: Vec::new(), break_texts: Vec::new(), vblank_wait: None, counts: HashMap::new(), count_from: 0 }
+        Self { cpu, bus, hot: HashMap::new(), clock_fns: Vec::new(), profile: false, stall: 0, stall_left: 0, break_at: None, breaks: Vec::new(), break_texts: Vec::new(), vblank_wait: None, counts: HashMap::new(), count_from: 0 }
     }
 
     /// Runs for `budget` clock cycles (one instruction each). While the
@@ -1582,6 +1594,12 @@ impl Twist {
         while self.bus.now < end {
             if self.bus.now & 0xFF == 0 {
                 self.bus.tick();
+                self.stall_left += self.stall;
+                while self.stall_left >= 256 && self.bus.now + 256 < end {
+                    self.stall_left -= 256;
+                    self.bus.now += 256;
+                    self.bus.tick();
+                }
             }
             if self.bus.lines_dirty {
                 self.bus.lines_dirty = false;
@@ -1647,6 +1665,20 @@ impl Twist {
         Stop::Budget
     }
 
+    /// Sets `stall` from how fast the last `run` went: `budget` cycles in
+    /// `took` seconds of the host's time. The processor gets as slow as
+    /// it must for the emulator to keep up (with some room to spare), up
+    /// to `MAX_CPI` cycles an instruction, and quickens again when it can.
+    /// (One cycle an instruction at 240 MHz is ASSUMED; a real ARM9 takes
+    /// more, waiting on memory.)
+    pub fn stall_for(&mut self, budget: u64, took: f64) {
+        let cpi = 1.0 + self.stall as f64 / 256.0;
+        let speed = budget as f64 / CLOCK as f64 / took.max(1e-6);
+        let want = (cpi * 1.15 / speed).clamp(1.0, MAX_CPI);
+        let cpi = if want > cpi { want } else { cpi * 0.75 + want * 0.25 };
+        self.stall = ((cpi - 1.0) * 256.0) as u32;
+    }
+
     /// The addresses run most at the end of the last `run`.
     pub fn hottest(&self, n: usize) -> Vec<(u32, u64)> {
         let mut v: Vec<_> = self.hot.iter().map(|(&a, &c)| (a, c)).collect();
@@ -1659,6 +1691,27 @@ impl Twist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_processor_slows_only_while_the_emulator_falls_behind() {
+        let mut t = Twist::new(&[]);
+        let slice = CLOCK / 120;
+        // Half speed: about 2.3 cycles an instruction at once.
+        t.stall_for(slice, 2.0 / 120.0);
+        assert!((300..400).contains(&t.stall), "stall {}", t.stall);
+        // Far too slow: no more than MAX_CPI.
+        t.stall_for(slice, 1.0);
+        assert_eq!(t.stall, ((MAX_CPI - 1.0) * 256.0) as u32);
+        // Fast again: back to one cycle an instruction.
+        for _ in 0..40 {
+            t.stall_for(slice, 0.1 / 120.0);
+        }
+        assert_eq!(t.stall, 0);
+        // The stall moves time on: devices tick, fewer instructions run.
+        t.stall = 768;
+        t.run(1 << 16);
+        assert_eq!(t.bus.now, 1 << 16);
+    }
 
     fn words(ws: &[u32]) -> Vec<u8> {
         ws.iter().flat_map(|w| w.to_le_bytes()).collect()

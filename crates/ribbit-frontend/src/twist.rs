@@ -563,7 +563,11 @@ impl Machine {
                     }
                 }
             }
+            let ran = Instant::now();
             t.run(slice);
+            // Too heavy to run at full speed: the processor slows, not the
+            // whole console, so the sound plays on without gaps.
+            t.stall_for(slice, ran.elapsed().as_secs_f64());
             if let Some(srv) = &server {
                 Self::run_usb(srv, &mut t, s, &mut trace);
             }

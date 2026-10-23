@@ -183,7 +183,7 @@ Devices found and modelled, each from the firmware's own use (addresses VERIFIED
 | Interrupt controller | 0xD0100000 | +0x28 pending IRQ number, +0x2C FIQ, +0x30 mask (bit 32-n), +0x38 bit 0 disable — as the Zippity's | modelled |
 | SD/MMC hosts | 0xC00A0000 (eMMC), 0xC00B0000 (SD slot) | +0x00 TX data, +0x04 RX data, +0x08 command (bits 5-0 index, 7 start, 12 response, 13 no CRC; 0x40 power-up clocks, 0x800 init clocks), +0x0C argument, +0x10 response (one word per read), +0x14 status (0 busy, 2 complete, 4/5/9 errors, 6 response ready, 7 data ready; write 1s to clear), +0x18 clock divider/bus width/block length | modelled with a JEDEC eMMC card (`sd.rs`) |
 | DMA | 0xD0300000 + 0x40 n | +0 control (0 start, 7 fixed source, 13-12 unit, 10 continue with the queued buffer), +4/+8/+C source/destination/count, 0x1FC done flags (IRQ 24) | modelled; DAC transfers paced |
-| Audio DAC | 0xC00D0000 + 0x20 c | +0 control (bit 14 IRQ), +4 sample, +8 status (bit 15 full); IRQ 31/30; only the start-up logo's MP3 uses it | modelled; sample format NOT yet right |
+| Audio DAC | 0xC00D0000 + 0x20 c | +0 control (bit 14 IRQ), +4 sample, +8 status (bit 15 full); IRQ 31/30; fed by DMA with the System's MP3 output (start-up logo, Music station) | modelled; units are 16-bit (see "MP3"), not 32-bit as modelled |
 | Sound unit (SPU) | 0xD0400000 | 32 channels, the Zippity's unit with 16-bit registers and ADPCM36 (see "Sound") | modelled (`sound.rs`) |
 | MPEG-4 decoder | 0xD0C00000 | +0xC0C compressed frame (VOP start code), +0xC08 RGB565 output, +0xC04 the reference frame's output, +0xA0 bit 4 start, +0xD0/+0xD4 IRQ enable/status (bit 2 done, bit 4 failed; IRQ 26) | decodes (`mpeg4.rs`, see "Video playback") |
 | Timebase | 0xC0040000 | +0x50 control, +0x54/+0x58 status/enable; bit 8 tick (IRQ 1) drives the firmware's time-outs (0x5014) | ticks at 1024 Hz (ASSUMED) |
@@ -313,10 +313,13 @@ the start-up logo's MP3). What differs, all VERIFIED from the System's own code:
   one tiny coefficient) is wrong. The table was fitted from six background-music waves that the packs hold both as
   ADPCM36 and as 16-bit samples (offset binary, format flags 0x3C15): decoding with it matches the 16-bit copies to
   29.9 dB. Its first five pairs are Sony XA's (0, 0), (60, 0), (115, -52), (98, -55), (122, -60).
-* **End mark inside a frame.** A wave ends at a 0xFFFF word wherever it falls, among a frame's data words too:
-  the games' waves end "ff00 ffff ffff" part way through their last frame, the next wave straight after. Read
-  on, that wave's frames come out of step and the predictors overflow: seconds of loud noise in place of a
-  short sound (VERIFIED by decoding a wave held in memory: with the mark obeyed, no sample overflows).
+* **Frame headers end the wave.** A frame's header gives its length and marks the wave's last frame: bit 15
+  set, bit 14 the last frame, bits 13-9 the samples less one (VERIFIED over every wave in the packs: 15.6
+  million frames read 0xBExx-0xBFxx, 32 samples; each wave's last frame alone has bit 14, and its count matches
+  the data before the "ffff ffff" that follows). The wave ends after that frame; a 0xFFFF data word is only
+  samples. (Read on past the last frame, the next wave's frames come out of step and the predictors overflow:
+  the "farts" of 2026-10-17. Ending at any 0xFFFF word instead, the 1.2.0-1.4.0 fix, cut music short: the
+  menu's 27 s song has 24 such words and looped after its first 0.63 s; fixed 2026-10-22.)
 * **Stopping.** A channel that stops (its end, an envelope or ramp reaching 0, or the System clearing its
   enable bit) drops its output over about 1.5 ms instead of at once, which would click (`TAIL_FADE`).
 
@@ -430,9 +433,15 @@ system packages and content.
 emulator averages about 2.4 times real speed, but some half-seconds run at 50-75% (seen at 16, 28, 32, 36, 40 and
 61 s of the scripted run). That is real firmware work (FAT code at 0x46300-0x47A00 while files are listed, deleted
 and written; 2424 sector writes at 15.5 s), not a wait we could skip; the interpreter runs 60-85 M instructions/s
-there. The sound queue holds 0.1 s, so it runs dry. Two ways on:
-1. A larger sound queue for the RockIt Twist (0.3-0.5 s): quick, but the sound would trail the picture by as much.
-2. A faster interpreter (aim: twice as fast; a decoded-instruction cache): no delay, a bigger job.
+there. The sound queue holds 0.1 s, so it runs dry.
+
+**Done 2026-10-22: the processor slows, not the console** (`Twist::stall_for`). Measured on the start-up (an i9):
+from 13.5 to 18 s the System runs flat out, 240 M instructions per emulated second, which the interpreter does at
+85-107 M a second; the console fell up to 0.79 s behind. Now, while the emulator cannot keep up, each instruction
+takes up to `MAX_CPI` (4) cycles: the sound unit, timers and panel keep to real time and the music plays on, as
+on a real unit, whose sound unit plays by itself. Worst lag on the same start-up: 12 ms. One cycle an instruction
+was ASSUMED anyway (a real ARM9 waits on memory). A faster interpreter (or an ARM JIT) is still the way to make
+slower PCs keep up below 4 cycles an instruction.
 
 Tools for it: `twistrun` with `RIBBIT_SPEED=1` (or `all`) prints the slow half-seconds; `RIBBIT_SAVE_STATE` /
 `RIBBIT_LOAD_STATE` time one stretch again and again; `examples/cpubench.rs` measures the bare interpreter.
@@ -441,3 +450,26 @@ Windows timings are noisy (pin to a P-core); for a profile, build in WSL with de
 **Fixed that day:** the "farts": ADPCM36 waves ending part way through a frame were read on into the next wave
 (see "Sound"); stopped channels now fade instead of clicking; the register map's hasher and per-instruction checks
 made cheaper (about 7% in heavy stretches).
+
+## MP3: a decoder accelerator at 0xD0A00000 (found 2026-10-23, NOT modelled)
+
+Music-station songs (bundled or installed with LeapFrog Connect) and the start-up logo's sound are silent in Ribbit:
+the DAC receives only zeros (VERIFIED: the logo's 1.16 M samples are all 0 but a 2,289-sample burst; the
+decoder's output buffers 0x753020, 0x754240... stay 0). The cause, VERIFIED by running the decode call
+(0x33790, from the task `LibMp3DecodeTask`, entry 0x2CFEC) in Ribbit and in Unicorn from the same state: the
+software decoder hands stages to hardware at 0xD0A00000, which Ribbit does not emulate.
+
+* 0x3715C waits for +0 bit 1 (busy) to clear, flushes the cache over its buffers (0xAFC), then starts a job.
+* 0x37DA8: +0 = 0; five addresses written as low/high halfwords to +0x28/+0x2C ... +0x48/+0x4C; then +4 =
+  0x45 (9 when its first argument is 3). Called with 0x12 and the frame's buffers and the PCM output position
+  (the likely synthesis stage, writing 16-bit samples).
+* 0x37E40: +0 mode bits (bit 4; bits 3-2 from an argument 1-3), three addresses at +0x10 ... +0x24, then +0 |= 1.
+* The DAC's DMA counts 16-bit units (the driver flushes `count * 2` bytes; buffers 0x900 units, 0x1220 apart);
+  Ribbit's paced DMA reads 32 bits a unit (twice the data). The driver queues a silence buffer (0x75C120) when the
+  decoder has nothing, which is all the time now (decoding stalls after ~9 frames, waiting on the accelerator).
+
+Next: what each job computes (likely IMDCT/windowing and polyphase synthesis, fixed point): compare the job's
+inputs with a reference decoder's intermediate values for the same frame (Al_Can.mp3), then model it; fix the
+DMA unit size. Tools: the boot test's research hooks (keys, screenshots, DAC capture, snapshot at an address),
+scratch Unicorn harness; route to the Music station: Right 20 s, Enter 23, Left 25, Enter 26.5, Enter 32, Right
+x5 from 40 s, Enter 55 (the first song plays from ~57 s).

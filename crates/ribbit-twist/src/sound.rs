@@ -27,11 +27,14 @@ pub struct Voice {
     shift: u32,
     signal: i32,
     step: i32,
-    /// ADPCM36: the sample before `signal`, the frame's header, and its
-    /// data words still to come.
+    /// ADPCM36: the sample before `signal`, the frame's header, its data
+    /// words still to come, and where the last of them ends (`shift`; 0:
+    /// a whole word).
     signal2: i32,
     header: u32,
     frame_left: u32,
+    #[serde(default)]
+    last_shift: u32,
     accum: u64,
     sample: i32,
     /// The sample before, for interpolating between the two.
@@ -234,35 +237,40 @@ impl Bus {
         vo.addr = loop_addr;
         vo.shift = 0;
         vo.frame_left = 0;
+        vo.header = 0;
         Some(vo.sample)
     }
 
     /// ADPCM36 (channel register 13 bit 15; the System sets 0xBE00 for its
-    /// "SPF2" waves of formats 4-6): frames of a header word and 8 data
-    /// words, 32 4-bit residuals, low nibble first. Header bits 3-0 shift
+    /// "SPF2" waves of formats 4-6): frames of a header word and up to 8
+    /// data words, 4-bit residuals, low nibble first. Header bits 3-0 shift
     /// the residual (n << 12 >> shift), bits 8-4 pick the predictor
-    /// (`ADPCM36_FILTERS`). VERIFIED against the games' own music, which
+    /// (`ADPCM36_FILTERS`), bits 13-9 are the frame's samples less one and
+    /// bit 14 marks the wave's last frame (VERIFIED over every wave in the
+    /// packs: 15.6 million frames read 0xBExx-0xBFxx, 32 samples, and each
+    /// wave's last frame alone has bit 14, its count matching the data
+    /// before the "ffff ffff" that follows). So the wave ends after that
+    /// frame: 0xFFFF data words are only samples (the menu's music has 24,
+    /// the first 0.6 s in). VERIFIED against the games' own music, which
     /// some packs hold both this way and as 16-bit samples (29 dB).
     fn adpcm36_fetch(&mut self, ch: usize, tone: u32) -> Option<i32> {
         if self.voices[ch].frame_left == 0 {
+            if self.voices[ch].header & 0x4000 != 0 {
+                return self.spu_wave_end(ch, tone);
+            }
             let header = self.spu_word(self.voices[ch].addr);
             if header == 0xFFFF {
                 return self.spu_wave_end(ch, tone);
             }
+            let samples = (header >> 9 & 31) + 1;
             let vo = &mut self.voices[ch];
             vo.header = header;
             vo.addr += 1;
-            vo.frame_left = 8;
+            vo.frame_left = samples.div_ceil(4);
+            vo.last_shift = samples % 4 * 4;
             vo.shift = 0;
         }
         let word = self.spu_word(self.voices[ch].addr);
-        // The end mark ends a wave in the middle of a frame too (VERIFIED:
-        // the cartridge games' waves end "ff00 ffff ffff" part way through their last
-        // frame, the next wave straight after; read on, that wave's frames
-        // come out of step and overflow, seconds of loud noise).
-        if word == 0xFFFF {
-            return self.spu_wave_end(ch, tone);
-        }
         let vo = &mut self.voices[ch];
         let n = (((word >> vo.shift) & 15) as i32) << 28 >> 28;
         let (c0, c1) = ADPCM36_FILTERS[(vo.header >> 4 & 31) as usize];
@@ -270,7 +278,7 @@ impl Bus {
         let s = s.clamp(-32768, 32767);
         (vo.signal2, vo.signal) = (vo.signal, s);
         vo.shift += 4;
-        if vo.shift == 16 {
+        if vo.shift == 16 || (vo.frame_left == 1 && vo.shift == vo.last_shift) {
             vo.shift = 0;
             vo.addr += 1;
             vo.frame_left -= 1;
@@ -545,7 +553,8 @@ mod tests {
         // Wave at halfword 0x01_0010: one frame of negative samples
         // (residuals 0xE = -2, s = -8192 with filter 0), then the end mark.
         let wave_at = 0x01_0010usize * 2;
-        t.bus.ram[wave_at..wave_at + 2].copy_from_slice(&0x0000u16.to_le_bytes()); // header: filter 0
+        // Header: the last frame, 32 samples, filter 0.
+        t.bus.ram[wave_at..wave_at + 2].copy_from_slice(&0xFE00u16.to_le_bytes());
         for i in 1..=8 {
             t.bus.ram[wave_at + 2 * i..wave_at + 2 * i + 2].copy_from_slice(&0xEEEEu16.to_le_bytes());
         }
@@ -553,7 +562,7 @@ mod tests {
         // Loop body at halfword 0x01_2000: one frame of large positive samples
         // (residuals 0x7 = +7, s = +28672 with filter 0).
         let loop_at = 0x01_2000usize * 2;
-        t.bus.ram[loop_at..loop_at + 2].copy_from_slice(&0x0000u16.to_le_bytes()); // header: filter 0
+        t.bus.ram[loop_at..loop_at + 2].copy_from_slice(&0xFE00u16.to_le_bytes());
         for i in 1..=8 {
             t.bus.ram[loop_at + 2 * i..loop_at + 2 * i + 2].copy_from_slice(&0x7777u16.to_le_bytes());
         }
@@ -583,14 +592,11 @@ mod tests {
         assert!(sound.iter().any(|&s| s > 100), "loop body: positive samples after the loop");
     }
 
-    #[test]
-    fn an_adpcm36_wave_ends_at_a_mark_inside_a_frame() {
+    /// Plays ADPCM36 words from halfword 0x1_0010 as a one-shot and
+    /// returns the output and whether the channel is still busy after 5 ms.
+    fn play_adpcm36(words: &[u16]) -> (Vec<i16>, bool) {
         let mut t = Twist::new(&[]);
-        // A frame's header, two data words and the end mark; then another
-        // wave's loud words, which must not play.
         let at = 0x1_0010 * 2;
-        let mut words = vec![0x0000u16, 0x1111, 0x1111, 0xFFFF];
-        words.extend([0x7777; 14]);
         for (i, w) in words.iter().enumerate() {
             t.bus.ram[at + 2 * i..at + 2 * i + 2].copy_from_slice(&w.to_le_bytes());
         }
@@ -606,8 +612,31 @@ mod tests {
         t.bus.write(0xD040_0E00, 0x8, 4);
         t.bus.now = CLOCK / 200;
         t.bus.tick_sound();
-        assert_eq!(t.bus.read(0xD040_0E3C, 4) & 8, 0, "ended at the mark");
-        let peak = t.bus.sound.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        let busy = t.bus.read(0xD040_0E3C, 4) & 8 != 0;
+        (std::mem::take(&mut t.bus.sound), busy)
+    }
+
+    #[test]
+    fn an_adpcm36_wave_ends_after_its_last_frame() {
+        // As the packs' waves end: a last frame (bit 14) of 8 samples, two
+        // data words, "ffff ffff", then another wave's loud words, which
+        // must not play.
+        let mut words = vec![0xCE00u16, 0x1111, 0x1111, 0xFFFF, 0xFFFF];
+        words.extend([0x7777; 14]);
+        let (sound, busy) = play_adpcm36(&words);
+        assert!(!busy, "ended after the last frame");
+        let peak = sound.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
         assert!(peak > 0 && peak < 1000, "only the quiet first wave plays (peak {peak})");
+    }
+
+    #[test]
+    fn an_adpcm36_data_word_of_ffff_is_only_samples() {
+        // The menu's music has 0xFFFF data words from 0.6 s in; the wave
+        // goes on past them to its last frame (loud 7s), and ends there.
+        let mut words = vec![0xBE00u16, 0x0000, 0xFFFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000];
+        words.extend([0xFE00, 0x7777, 0x7777, 0x7777, 0x7777, 0x7777, 0x7777, 0x7777, 0x7777, 0xFFFF, 0xFFFF]);
+        let (sound, busy) = play_adpcm36(&words);
+        assert!(!busy, "ended after the last frame");
+        assert!(sound.iter().any(|&s| s > 1000), "played on into the second frame");
     }
 }
