@@ -300,3 +300,39 @@ Pals (Leapster 2 0.6) and Wormhole (L-MAX 2.2); check mode replayed ~105 M compi
 measured: speed on a real phone or Apple silicon Mac (the x86-64 Android emulator translates ARM code and runs it at
 12-61% of real time, so it says nothing about speed). Exec memory on macOS is RW then RX by `mprotect` (the app is
 ad-hoc signed without the hardened runtime); if a mapping is refused, blocks stay interpreted.
+
+## 16. Battery-speed work (2026-10-22, after 1.4.0)
+
+The player's i3-1315U laptop still lagged in Animal Genius's globe on 1.4.0 (on battery). Measured on one i9 P-core
+(and one E-core, closer to that laptop), the globe state with a 3 s warm-up first: the "worst window" reported
+before was the first quarter-second after loading the state, compile warm-up, not the scene. Profiles: WSL
+`perf` with `RIBBIT_JIT_PERFMAP=1` (that perf has no libelf: its addresses are file offsets, `.text` = offset +
+0x1000; scratch scripts summed by code kind, by `nm` symbol and by source line).
+
+Kept, all exact (digests identical JIT on/off: the globe `8e972e31670a6f07`, and 600 M-step runs of Sonic X and
+Ratatouille on US v2.1, Pet Pals on Leapster 2 0.6, Cosmic Math on Leapster 2 m9, Cars 2 on L-MAX 2.2; Wormhole
+`bench.rs` still `63e5fcb972577c07`; lockstep tests pass):
+
+* **Memory by page** (`full::Pages`, `JitCtx::pages`): the three-region search before each inline access is one
+  load from a table of host pointers by 64 KB page (read table, then write table; 0 = slow path). Pages a region
+  covers only in part stay 0. Rebuilt only when `jit_regions` changes (a probe's write log makes RAM read-only).
+  Globe +9% average.
+* **Idle-probe back-off** (`IDLE_BACKOFF_MAX_SHIFT` 6 -> 10, in ribbit-core): the globe started ~10,000 failing
+  idle probes a second (each runs up to 512 steps with the write log on, so stores take the slow path), 18% of
+  its time (`RIBBIT_IDLE_SKIP=0` was 18% faster, same digest). At 10 doublings (~0.2 s) ~1,500 a second; Wormhole's
+  menus skip 1.5% fewer steps and run a little faster.
+* The batch loop checks a pending delay slot before loading the block's first entry (a cache miss).
+
+Result, steady globe, P-core: average ~465% -> ~570%, worst 250 ms window ~435% -> ~510%. E-core (60 s from the
+state, warm-up included): average 237% -> 305%, worst 199% -> 229%.
+
+Tried and dropped (slower or harmful): the data-cache tags loaded as four 4-byte pieces (store forwarding was not
+the cost); remembering the last read/written line to skip the lookup (-6%: the lookup's cost is waiting for the
+address, not its instructions); shared out-of-line lookup routines (+1.7% P-core, -3.6% E-core); caching
+`watch`'s "no" per exit (no gain on the globe, and Wormhole skipped 30% less: stale answers missed loops turning
+idle).
+
+Where the time goes now (globe): generated code ~69%, of which the data-cache lookup ~23% (waiting on the address,
+which comes from guest registers kept in memory), the per-instruction timing (cost/stall/prep) ~19%; the batch
+loop and the idle detector ~14%. Next big step: guest registers cached in host registers within a block (shorter
+dependency chains through `[rbx + 4n]`), then the per-batch Rust overhead.

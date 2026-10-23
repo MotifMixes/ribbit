@@ -30,6 +30,9 @@ pub enum LoadError {
     // The source error is reported by the error chain, not repeated here.
     #[error("reading {path}")]
     Io { path: PathBuf, source: std::io::Error },
+    /// `Io` for a BIOS (`load_firmware`).
+    #[error("reading the BIOS {path}")]
+    BiosIo { path: PathBuf, source: std::io::Error },
     #[error("{path}")]
     Firmware { path: PathBuf, source: FirmwareError },
     #[error("{path}")]
@@ -46,7 +49,10 @@ pub fn read_image(path: impl AsRef<Path>) -> Result<Vec<u8>, LoadError> {
 }
 
 pub fn load_firmware(path: &Path) -> Result<Firmware, LoadError> {
-    let data = read_image(path)?;
+    let data = read_image(path).map_err(|e| match e {
+        LoadError::Io { path, source } => LoadError::BiosIo { path, source },
+        e => e,
+    })?;
     Firmware::from_bytes(data).map_err(|source| LoadError::Firmware { path: path.into(), source })
 }
 
@@ -172,8 +178,12 @@ const IDLE_PROBE_MAX_STEPS: u64 = 512;
 const IDLE_BACKOFF_STEPS: u64 = 20_000;
 /// A loop head whose probes keep failing (a busy loop, not an idle one) is
 /// left alone for twice as long after each failure, up to this many
-/// doublings (20,000 << 6 = 1.28 M steps, ~13 ms at 96 MHz).
-const IDLE_BACKOFF_MAX_SHIFT: u8 = 6;
+/// doublings (20,000 << 10 = 20 M steps, ~0.2 s at 96 MHz). Speed only (a
+/// skip is exact either way): a busy game has many loop heads, and at 6
+/// doublings Animal Genius's globe started ~10,000 failing probes a second,
+/// 18% of its time; at 10 it starts ~1,500, and Wormhole's menus skip as
+/// much as before (1.5% fewer steps).
+const IDLE_BACKOFF_MAX_SHIFT: u8 = 10;
 
 /// Hashes loop-head addresses (speed only: the default SipHash is costly on
 /// the hot path, and the keys are not attacker-controlled).

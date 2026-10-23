@@ -341,8 +341,9 @@ impl Cpu {
                 && head.last < fence
             {
                 // Only a block's first instruction can be in a delay slot
-                // (a block ends at a branch).
-                if blocks.entries[head.first as usize].hot.branchy && self.delay_target.is_some() {
+                // (a block ends at a branch). (The pending slot first: it is
+                // rare, and the entry is a memory load, often a cache miss.)
+                if self.delay_target.is_some() && blocks.entries[head.first as usize].hot.branchy {
                     out.exit = BlockExit::Slow;
                     break;
                 }

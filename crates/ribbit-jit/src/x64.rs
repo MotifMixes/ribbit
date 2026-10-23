@@ -55,12 +55,9 @@ const DISPATCH: i32 = offset_of!(JitCtx, dispatch) as i32;
 const DIRTY4: i32 = offset_of!(JitCtx, dirty4) as i32;
 const CODE_TAGS: i32 = offset_of!(JitCtx, code_tags) as i32;
 const DATA_TAGS: i32 = offset_of!(JitCtx, data_tags) as i32;
-const REGIONS: i32 = offset_of!(JitCtx, regions) as i32;
-const REGION_SIZE: i32 = std::mem::size_of::<crate::CtxRegion>() as i32;
-const R_BASE: i32 = offset_of!(crate::CtxRegion, base) as i32;
-const R_LIMIT: i32 = offset_of!(crate::CtxRegion, limit) as i32;
-const R_PTR: i32 = offset_of!(crate::CtxRegion, ptr) as i32;
-const R_WRITABLE: i32 = offset_of!(crate::CtxRegion, writable) as i32;
+const PAGES: i32 = offset_of!(JitCtx, pages) as i32;
+/// Where `JitCtx::pages` keeps the write pointers.
+const WRITE_PAGES: i32 = (crate::full::PAGES * 8) as i32;
 const TIMED_READ8: i32 = offset_of!(JitCtx, timed_read8) as i32;
 const TIMED_READ16: i32 = offset_of!(JitCtx, timed_read16) as i32;
 const TIMED_READ32: i32 = offset_of!(JitCtx, timed_read32) as i32;
@@ -958,43 +955,33 @@ impl Gen {
         );
     }
 
-    /// Finds the plain-memory region (`ribbit_memory::JitRegion`) holding
-    /// the access at `esi` (`width` bytes, aligned as the bus aligns it):
-    /// r11 = its byte in the region, then the data-cache lookup (dirtying
-    /// the line for a write); jumps to `slow` when the address is in no
-    /// region, the region is read-only for a write, or the line misses.
+    /// Finds the plain memory holding the access at `esi` (`width` bytes,
+    /// aligned as the bus aligns it) by its page (`JitCtx::pages`): r11 = its
+    /// host byte, then the data-cache lookup (dirtying the line for a write);
+    /// jumps to `slow` when the page is not plain memory (or not writable,
+    /// for a write), or the line misses.
     fn region_lookup(&mut self, width: u32, write: bool, slow: DynamicLabel) {
         let mask = !(width - 1);
-        let found = self.ops.new_dynamic_label();
         self.tag(tag::REGION);
-        dynasm!(self.ops ; .arch x64 ; mov eax, esi ; and eax, mask as i32);
-        for i in 0..3 {
-            let at = REGIONS + i * REGION_SIZE;
-            let next = self.ops.new_dynamic_label();
-            dynasm!(self.ops
-                ; .arch x64
-                ; mov ecx, eax
-                ; sub ecx, DWORD [r12 + at + R_BASE]
-                ; cmp ecx, DWORD [r12 + at + R_LIMIT]
-                ; jae =>next
-            );
-            if write {
-                dynasm!(self.ops ; .arch x64 ; cmp DWORD [r12 + at + R_WRITABLE], 0 ; je =>slow);
-            }
-            dynasm!(self.ops
-                ; .arch x64
-                ; mov r11, QWORD [r12 + at + R_PTR]
-                ; add r11, rcx
-                ; jmp =>found
-                ; =>next
-            );
-        }
+        let table = if write { WRITE_PAGES } else { 0 };
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov eax, esi
+            ; and eax, mask as i32
+            ; mov ecx, eax
+            ; shr ecx, crate::full::PAGE_SHIFT as i8
+            ; mov r11, QWORD [r12 + PAGES]
+            ; mov r11, QWORD [r11 + rcx * 8 + table]
+            ; test r11, r11
+            ; jz =>slow
+            ; movzx ecx, ax
+            ; add r11, rcx
+        );
         // The data cache (`MemTiming::data`), on the unaligned address: the
         // set's four ways compared at once (which way holds a line varies
         // from access to access, so a branch per way mispredicts), each
         // with its dirty bit set on both sides, so it is ignored.
         let done = self.ops.new_dynamic_label();
-        dynasm!(self.ops ; .arch x64 ; jmp =>slow ; =>found);
         if !self.timing {
             dynasm!(self.ops ; .arch x64 ; =>done);
             return;

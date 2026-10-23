@@ -126,6 +126,9 @@ pub struct JitCtx {
     pub data_tags: *mut u32,
     pub exit_flag: *const bool,
     pub regions: [CtxRegion; 3],
+    /// The regions by 64 KB page (`Pages`): `PAGES` host pointers for
+    /// reads, then `PAGES` for writes (0: not plain memory there).
+    pub pages: *const usize,
     /// The bus's `instruction` (a fetch that missed the code cache).
     pub ifetch: FetchFn,
     /// Accesses outside the regions, or missing the data cache: `at`, then
@@ -170,6 +173,73 @@ pub struct CtxRegion {
 
 impl CtxRegion {
     const NONE: CtxRegion = CtxRegion { base: 0, limit: 0, ptr: std::ptr::null_mut(), writable: 0 };
+}
+
+/// Bits of an address below its page (`Pages`).
+pub const PAGE_SHIFT: u32 = 16;
+/// Pages in the 4 GB address space.
+pub const PAGES: usize = 1 << (32 - PAGE_SHIFT);
+
+/// A table with nothing in it (for code run without a view).
+static EMPTY_PAGES: EmptyPages = EmptyPages([0; 2 * PAGES]);
+#[repr(align(64))]
+struct EmptyPages([usize; 2 * PAGES]);
+
+/// The `JitView` regions by page, for compiled code (`JitCtx::pages`): an
+/// access whose page lies wholly inside a region is a plain access to that
+/// page's host memory, found with one load instead of a search. Pages a
+/// region covers only in part (and everything else) stay 0, so those
+/// accesses take the slow path, as accesses outside the regions do.
+pub struct Pages {
+    /// Read pointers, then write pointers (`PAGES` each), as addresses.
+    table: Box<[usize]>,
+    /// The regions the table was built from (base, length, pointer,
+    /// writable).
+    built: [(u32, u32, usize, bool); 3],
+}
+
+impl Default for Pages {
+    fn default() -> Self {
+        Pages { table: vec![0; 2 * PAGES].into_boxed_slice(), built: [(0, 0, 0, false); 3] }
+    }
+}
+
+impl Pages {
+    /// Rebuilt when the regions changed since the last time.
+    pub fn update(&mut self, regions: &[ribbit_memory::JitRegion; 3]) {
+        let now = regions.map(|r| (r.base, r.len, r.ptr as usize, r.writable));
+        if now == self.built {
+            return;
+        }
+        for (base, len, _, _) in self.built {
+            for page in Self::whole_pages(base, len) {
+                self.table[page] = 0;
+                self.table[PAGES + page] = 0;
+            }
+        }
+        for (base, len, ptr, writable) in now {
+            for page in Self::whole_pages(base, len) {
+                let host = ptr + ((page << PAGE_SHIFT) - base as usize);
+                self.table[page] = host;
+                if writable {
+                    self.table[PAGES + page] = host;
+                }
+            }
+        }
+        self.built = now;
+    }
+
+    /// The pages wholly inside `[base, base + len)`.
+    fn whole_pages(base: u32, len: u32) -> std::ops::Range<usize> {
+        let size = 1u64 << PAGE_SHIFT;
+        let first = (base as u64).div_ceil(size);
+        let end = (base as u64 + len as u64) / size;
+        first as usize..end.max(first) as usize
+    }
+
+    pub fn as_ptr(&self) -> *const usize {
+        self.table.as_ptr()
+    }
 }
 
 /// (bus, pc, length).
@@ -395,6 +465,7 @@ impl JitCtx {
             data_tags: std::ptr::null_mut(),
             exit_flag: &NEVER,
             regions: [CtxRegion::NONE; 3],
+            pages: EMPTY_PAGES.0.as_ptr(),
             ifetch: ifetch::<B>,
             slow_read8: slow_read8::<B>,
             slow_read16: slow_read16::<B>,
@@ -798,6 +869,8 @@ pub struct Jit {
     /// panics with both results on any difference.
     pub check: bool,
     pub stats: JitStats,
+    /// The bus's plain memory by page (`JitCtx::pages`).
+    pages: Pages,
     /// `CpuConfig::load_latency` the code was compiled for.
     latency: u64,
     /// Memory timing on (`JitView::timing`) when the code was compiled.
@@ -816,6 +889,7 @@ impl Default for Jit {
             arena: crate::exec_mem::Arena::default(),
             check: false,
             stats: JitStats::default(),
+            pages: Pages::default(),
             latency: u64::MAX,
             timing: false,
             fence: u32::MAX,
@@ -957,6 +1031,8 @@ impl<B: Bus> BlockRunner<B> for Jit {
         let mut ctx = JitCtx::new(cpu, bus, now, end);
         if let Some(v) = &view {
             ctx.set_view(v);
+            self.pages.update(&v.regions);
+            ctx.pages = self.pages.as_ptr();
         }
         ctx.fence = fence;
         // (The table is never reallocated: written through this pointer
@@ -1344,4 +1420,41 @@ fn check_run<B: Bus>(block: &Block, cpu: &mut Cpu, ctx: &mut JitCtx, bus: &mut B
     }
     jit.restore(cpu);
     exit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ribbit_memory::JitRegion;
+
+    #[test]
+    fn pages_cover_only_whole_pages_and_follow_the_regions() {
+        let mut ram = vec![0u8; 0x2_0000];
+        let mut rom = vec![0u8; 0x1_8000];
+        let base = ram.as_mut_ptr() as usize;
+        let mut p = Pages::default();
+        p.update(&[
+            JitRegion { base: 0x3C00_0000, len: 0x2_0000, ptr: ram.as_mut_ptr(), writable: true },
+            // 1.5 pages: only the first is plain memory.
+            JitRegion { base: 0x4000_0000, len: 0x1_8000, ptr: rom.as_mut_ptr(), writable: false },
+            JitRegion::NONE,
+        ]);
+        let page = |a: u32| (a >> PAGE_SHIFT) as usize;
+        assert_eq!(p.table[page(0x3C00_0000)], base);
+        assert_eq!(p.table[page(0x3C01_0000)], base + 0x1_0000);
+        assert_eq!(p.table[PAGES + page(0x3C01_0000)], base + 0x1_0000, "writable");
+        assert_eq!(p.table[page(0x3C02_0000)], 0, "past the end");
+        assert_eq!(p.table[page(0x4000_0000)], rom.as_mut_ptr() as usize);
+        assert_eq!(p.table[PAGES + page(0x4000_0000)], 0, "read-only");
+        assert_eq!(p.table[page(0x4001_0000)], 0, "a page only half inside");
+        // A write log makes RAM read-only to the code: rebuilt.
+        p.update(&[
+            JitRegion { base: 0x3C00_0000, len: 0x2_0000, ptr: ram.as_mut_ptr(), writable: false },
+            JitRegion::NONE,
+            JitRegion::NONE,
+        ]);
+        assert_eq!(p.table[PAGES + page(0x3C00_0000)], 0);
+        assert_eq!(p.table[page(0x3C00_0000)], base);
+        assert_eq!(p.table[page(0x4000_0000)], 0, "the old region is gone");
+    }
 }
