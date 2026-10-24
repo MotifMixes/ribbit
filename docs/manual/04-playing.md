@@ -54,6 +54,12 @@ On a touchscreen (and always on Android), touching the screen shows an on-screen
 - **File › Close Cartridge** goes back to the library.
 - **Turn off when idle** turns the console off after a while with nothing pressed, as the real one does (about 15 minutes; 5 on the Leapster TV). Before it does, a notice counts down the last minute.
 
+## A game's own settings
+
+Some games are best with their own settings: 2nd Grade, say, runs more smoothly with HD vectors on. While the game runs, tick **Emulation › Custom settings for this game**, then change what you like. The changes are for that game only (the Video, Audio and Input menus say "For this game only"): they come back each time it starts, and other games keep your usual settings. Untick it to give the game your usual settings again.
+
+A game can have its own picture (Video menu), sound (Audio menu), speed, controls and start-up options. They are kept with your settings, by the cartridge's file name, so a game keeps them in another folder too. This works for Leapster, Leapster 2 and Leapster TV cartridges.
+
 ## The menu bar
 
 Click a menu to open it; while one is open, point at another and it opens instead.

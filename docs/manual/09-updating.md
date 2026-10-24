@@ -9,7 +9,7 @@ Ribbit checks for a new version when it starts (**Help › Check for updates…*
 
 Your saves and settings stay where they are: they are not in the program's folder. **Skip this version** stops Ribbit announcing that version at start-up; **Later** keeps it for next time.
 
-> **Update now** is offered from version 1.2.3 on, on Windows, macOS and Linux. On Android, and from older versions, the button says **Download** and opens the release page: download the file for your system, close Ribbit, and unzip the new version over your old `Ribbit` folder (on Android, install the new APK over the old one; don't uninstall first, which deletes the app's data).
+> **Update now** is offered from version 1.2.3 on, on Windows, macOS and Linux. On Android, and from older versions, the button says **Download** and opens the release page: download the file for your system, close Ribbit, and unzip the new version over your old `Ribbit` folder (on Android, install the new APK over the old one; don't uninstall first, which deletes the app's data). Under the button, Ribbit says why it can't update itself. Started from inside the zip (Windows opens just `Ribbit.exe` from it, in a temporary folder), it can't: unzip all of it to a folder (right-click the zip, **Extract All…**) and start Ribbit from there.
 
 ## Patch notes
 

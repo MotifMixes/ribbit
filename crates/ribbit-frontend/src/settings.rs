@@ -176,6 +176,9 @@ pub struct Settings {
     pub hide_builtin_tabs: BTreeSet<String>,
     /// User-made folders grouping library games.
     pub folders: Vec<LibraryFolder>,
+    /// Games' own settings (game_settings.rs), by cartridge file name: only
+    /// those that differ from the usual ones.
+    pub game_settings: BTreeMap<String, toml::Table>,
 }
 
 impl Default for Settings {
@@ -233,6 +236,7 @@ impl Default for Settings {
             favorites: Vec::new(),
             hide_builtin_tabs: BTreeSet::new(),
             folders: Vec::new(),
+            game_settings: BTreeMap::new(),
         }
     }
 }

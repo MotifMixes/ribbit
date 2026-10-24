@@ -160,6 +160,9 @@ pub struct App {
     discord: crate::discord::Discord,
     /// Frames left to size the window around the screen (0 = done).
     fit_window: u8,
+    /// The running game's own settings are on: its name and the player's
+    /// usual settings (see game_settings.rs).
+    game_own: Option<(String, Settings)>,
     /// macOS: the open panel showing as a sheet, until it is answered.
     #[cfg(target_os = "macos")]
     sheet: Option<crate::files::SheetPick>,
@@ -288,6 +291,7 @@ impl App {
             lcd_px: (0.0, 0.0, 0.0, 0.0),
             idle_left: None,
             fit_window: 0,
+            game_own: None,
             #[cfg(target_os = "macos")]
             sheet: None,
             native_pick: None,
@@ -323,15 +327,97 @@ impl App {
         self.settings.save_dir.clone().unwrap_or_else(|| self.opts.data_dir.join("saves"))
     }
 
-    fn save_settings(&self) {
-        if let Err(e) = self.settings.save(&self.settings_path) {
+    fn save_settings(&mut self) {
+        if let Err(e) = self.usual_settings().save(&self.settings_path) {
             tracing::warn!(target: "ribbit::settings", "saving settings: {e:#}");
         }
     }
 
+    /// The settings as kept in settings.toml: the player's usual ones, with
+    /// the running game's own (see game_settings.rs) under its name.
+    fn usual_settings(&mut self) -> Settings {
+        Self::usual_of(&mut self.game_own, &mut self.settings)
+    }
+
+    /// `usual_settings` from the two fields (for when the window is borrowed).
+    fn usual_of(game_own: &mut Option<(String, Settings)>, settings: &mut Settings) -> Settings {
+        let Some((key, usual)) = game_own else {
+            return settings.clone();
+        };
+        let (mut back, own) = crate::game_settings::split(usual, settings);
+        back.game_settings.insert(key.clone(), own);
+        settings.game_settings = back.game_settings.clone();
+        *usual = back.clone();
+        back
+    }
+
+    /// A game with its own settings starts: they go on top of the usual ones.
+    fn enter_game_settings(&mut self, cart: Option<&Path>) {
+        let Some(key) = cart.and_then(crate::game_settings::key) else {
+            return;
+        };
+        let Some(own) = self.settings.game_settings.get(&key) else {
+            return;
+        };
+        tracing::info!(target: "ribbit::settings", "{key}: its own settings ({} differ)", own.len());
+        let playing = crate::game_settings::apply(&self.settings, own);
+        let usual = std::mem::replace(&mut self.settings, playing);
+        if usual.window_scale != self.settings.window_scale {
+            self.fit_window = FIT_TRIES;
+        }
+        self.game_own = Some((key, usual));
+    }
+
+    /// The game closes: the usual settings are back (its own are kept).
+    fn leave_game_settings(&mut self) {
+        if self.game_own.is_none() {
+            return;
+        }
+        let usual = self.usual_settings();
+        self.game_own = None;
+        if usual.window_scale != self.settings.window_scale {
+            self.fit_window = FIT_TRIES;
+        }
+        self.settings = usual;
+        self.save_settings();
+    }
+
+    /// "Custom settings for this game" ticked or unticked.
+    fn set_game_settings(&mut self, on: bool) {
+        let Some(key) = self.session.as_ref().and_then(|s| s.cart_path.as_deref()).and_then(crate::game_settings::key) else {
+            return;
+        };
+        if on {
+            if self.game_own.is_none() {
+                self.settings.game_settings.entry(key.clone()).or_default();
+                self.game_own = Some((key, self.settings.clone()));
+                self.ui.toast("Changes to the picture, sound, speed and controls are now for this game only");
+            }
+        } else if self.game_own.is_some() {
+            let hd = self.settings.hd_vectors;
+            self.leave_game_settings();
+            self.settings.game_settings.remove(&key);
+            if hd != self.settings.hd_vectors {
+                self.set_hd(self.settings.hd_vectors);
+            }
+            self.ui.toast("This game uses your usual settings again");
+        }
+        self.save_settings();
+    }
+
     /// Starts (or restarts) the machine with the BIOS and `cart`.
     fn boot(&mut self, cart: Option<PathBuf>) -> Result<()> {
+        let started = self.boot_game(cart);
+        // Not started: the usual settings again.
+        if started.is_err() {
+            self.leave_game_settings();
+        }
+        started
+    }
+
+    fn boot_game(&mut self, cart: Option<PathBuf>) -> Result<()> {
         self.end_session();
+        self.enter_game_settings(cart.as_deref());
         let bios = match self.next_bios.take() {
             Some(b) => b,
             None => self.settings.bios.clone().context("Choose a BIOS first (File → Open BIOS…).")?,
@@ -478,6 +564,7 @@ impl App {
                 tracing::warn!(target: "ribbit::saves", "saving: {e:#}");
             }
         }
+        self.leave_game_settings();
     }
 
     /// Saves everything, once: after an update's restart the new version is
@@ -1207,6 +1294,7 @@ impl App {
                 self.ui.idle_closed = None;
                 self.idle_resume = None;
             }
+            Action::GameSettings(on) => self.set_game_settings(on),
             Action::HdChanged => {
                 self.save_settings();
                 self.set_hd(self.settings.hd_vectors);
@@ -2409,6 +2497,7 @@ impl App {
         let info =
             ui::Info {
                 running: self.session.is_some() || self.zippity.is_some() || self.twist.is_some(),
+                game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 paused: halted,
                 background: !self.paused && halted,
                 idle_left: self.idle_left,
@@ -2457,10 +2546,10 @@ impl App {
                 }
             }
         } else {
-            let open = self.ui.library.tab.map_or("", crate::library::Family::name);
+            let open = self.ui.library.tab.map_or("", crate::library::Family::name).to_string();
             if open != self.settings.library_tab {
-                self.settings.library_tab = open.to_string();
-                if let Err(e) = self.settings.save(&self.settings_path) {
+                self.settings.library_tab = open;
+                if let Err(e) = Self::usual_of(&mut self.game_own, &mut self.settings).save(&self.settings_path) {
                     tracing::warn!(target: "ribbit::settings", "saving settings: {e:#}");
                 }
             }

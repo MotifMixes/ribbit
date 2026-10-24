@@ -15,6 +15,7 @@ mod emu;
 mod files;
 #[cfg(not(target_os = "android"))]
 mod gamepad;
+mod game_settings;
 mod fonts;
 mod gpu;
 mod held;

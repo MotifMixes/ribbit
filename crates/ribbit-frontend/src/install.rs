@@ -4,10 +4,11 @@
 //! Windows and Linux replace the program file: a running program can be
 //! renamed but not overwritten, so it moves aside (`.old`, removed at the
 //! next start) and the new one takes its name. macOS replaces Ribbit.app the
-//! same way. Only a release package installs itself (the app named Ribbit
-//! with the release's licence notices beside it, or inside Ribbit.app); a
-//! build from source, Android, or a folder Ribbit can't write to keep the
-//! release page.
+//! same way. Only a release package installs itself (the program from the
+//! zip or tarball under any name, or Ribbit.app); a build from source
+//! (ribbit-gui), Android, a program run from inside its zip, or a folder
+//! Ribbit can't write to keep the release page, and the updates window says
+//! why.
 
 #[cfg(not(target_os = "android"))]
 use std::io::Read;
@@ -50,26 +51,49 @@ fn package_suffix() -> Option<&'static str> {
     }
 }
 
-/// The running app, when it is a release package that can update itself.
-fn target() -> Option<Target> {
-    package_suffix()?;
-    let exe = std::env::current_exe().ok()?;
+/// The running app, when it is a release package that can update itself;
+/// otherwise why not, said to the player.
+fn target() -> Result<Target, String> {
+    package_suffix().ok_or("there is no package for this system")?;
+    let exe = std::env::current_exe().map_err(|e| format!("Ribbit can't tell where it is ({e})"))?;
     if cfg!(target_os = "macos") {
         // Ribbit.app/Contents/MacOS/ribbit-gui
-        let bundle = exe.ancestors().nth(3)?;
-        return bundle.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Ribbit.app")).then(|| Target::Bundle(bundle.into()));
+        return exe
+            .ancestors()
+            .nth(3)
+            .filter(|b| b.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Ribbit.app")))
+            .map(|b| Target::Bundle(b.into()))
+            .ok_or_else(|| "this copy of Ribbit isn't in Ribbit.app".to_string());
     }
-    let name = if cfg!(windows) { "Ribbit.exe" } else { "ribbit" };
-    let packaged = exe.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name))
-        && exe.with_file_name("THIRD-PARTY-NOTICES.txt").is_file();
-    packaged.then_some(Target::Program(exe))
+    // The packages rename ribbit-gui. Players move or rename the program
+    // (just Ribbit.exe on the desktop, the rest left in the zip), which once
+    // turned in-app updates off without a word.
+    if exe.file_stem().is_some_and(|n| n.eq_ignore_ascii_case("ribbit-gui")) {
+        return Err("this copy of Ribbit was built from source".into());
+    }
+    // Opened from inside the zip, Windows unpacks the program alone into a
+    // temporary folder (Temp1_Ribbit-….zip) and deletes it later; an update
+    // would go there.
+    let temp = std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
+    if exe.canonicalize().unwrap_or_else(|_| exe.clone()).starts_with(&temp) {
+        return Err("Ribbit is running from inside its zip or a temporary folder. Unzip all of it to a folder \
+                    (right-click the zip, Extract All…) and start Ribbit from there"
+            .into());
+    }
+    Ok(Target::Program(exe))
 }
 
-/// The package to download from `release`, when this app can install it.
-pub fn installable(release: &Release) -> Option<Asset> {
+/// The package to download from `release`, or why this app can't install
+/// it.
+pub fn installable(release: &Release) -> Result<Asset, String> {
     target()?;
-    let suffix = package_suffix()?;
-    release.assets.iter().find(|a| a.name.ends_with(suffix)).cloned()
+    let suffix = package_suffix().ok_or("there is no package for this system")?;
+    release
+        .assets
+        .iter()
+        .find(|a| a.name.ends_with(suffix))
+        .cloned()
+        .ok_or_else(|| "this release has no package for this system".into())
 }
 
 /// The download and install, run in the background.
@@ -100,7 +124,7 @@ impl Installer {
                 *state.lock().unwrap() = s;
                 ctx.request_repaint();
             };
-            let result = target().ok_or_else(|| "this copy of Ribbit can't update itself".to_string()).and_then(|t| {
+            let result = target().and_then(|t| {
                 let data = download(&asset, |done| set(State::Downloading { done, total: asset.size }))?;
                 set(State::Installing);
                 install(&t, &data)
@@ -295,20 +319,23 @@ fn replace_bundle(app: &Path, package: &[u8]) -> Result<(), String> {
 pub fn restart() -> std::io::Result<()> {
     match target() {
         // `-n`: a new instance, as this one is still running.
-        Some(Target::Bundle(app)) => std::process::Command::new("/usr/bin/open").arg("-n").arg(app).spawn().map(drop),
-        Some(Target::Program(exe)) => std::process::Command::new(exe).spawn().map(drop),
-        None => Err(std::io::Error::other("this copy of Ribbit can't restart itself")),
+        Ok(Target::Bundle(app)) => std::process::Command::new("/usr/bin/open").arg("-n").arg(app).spawn().map(drop),
+        Ok(Target::Program(exe)) => std::process::Command::new(exe).spawn().map(drop),
+        Err(why) => Err(std::io::Error::other(format!("this copy of Ribbit can't restart itself: {why}"))),
     }
 }
 
 /// Removes what the last update moved aside. The old version may still be
 /// closing for a moment, so this keeps trying for a few seconds in the
-/// background.
+/// background. Also says in the log why Ribbit can't update itself.
 pub fn remove_leftovers() {
     let old = match target() {
-        Some(Target::Program(exe)) => exe.with_file_name(format!("{}.old", exe.file_name().unwrap_or_default().to_string_lossy())),
-        Some(Target::Bundle(app)) => app.with_file_name("Ribbit.app.old"),
-        None => return,
+        Ok(Target::Program(exe)) => exe.with_file_name(format!("{}.old", exe.file_name().unwrap_or_default().to_string_lossy())),
+        Ok(Target::Bundle(app)) => app.with_file_name("Ribbit.app.old"),
+        Err(why) => {
+            tracing::info!(target: "ribbit::updates", "updates open the release page: {why}");
+            return;
+        }
     };
     if !old.exists() {
         return;

@@ -37,6 +37,8 @@ pub enum Action {
     DismissIdleBanner,
     /// The HD vectors setting changed (applies to the running game at once).
     HdChanged,
+    /// "Custom settings for this game" ticked or unticked.
+    GameSettings(bool),
     SaveState(u8),
     LoadState(u8),
     AddRomFolder(PathBuf),
@@ -110,6 +112,8 @@ pub const STATE_SLOTS: u8 = 5;
 /// What the UI shows (read-only snapshot).
 pub struct Info {
     pub running: bool,
+    /// A cartridge game is running, and whether its own settings are on.
+    pub game_settings: Option<bool>,
     pub paused: bool,
     pub title: String,
     pub speed: f64,
@@ -882,6 +886,17 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::Reset);
             ui.close();
         }
+        if let Some(mut own) = info.game_settings
+            && ui
+                .checkbox(&mut own, "Custom settings for this game")
+                .on_hover_text(
+                    "While this is on, changes to the picture, sound, speed and controls are for this game only, \
+                     and come back each time it starts. Other games keep your usual settings.",
+                )
+                .changed()
+        {
+            actions.push(Action::GameSettings(own));
+        }
         ui.separator();
         ui.add_enabled_ui(info.running, |ui| {
             sub_menu(ui, "Save State", |ui| {
@@ -1010,6 +1025,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         });
     });
     top_menu(ui, rows, "⌨", "Input", |ui| {
+        game_only_note(ui, info);
         if item(ui, "Key bindings…", "") {
             st.show_bindings = true;
         }
@@ -1030,6 +1046,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         }
     });
     top_menu(ui, rows, "🖥", "Video", |ui| {
+        game_only_note(ui, info);
         if ui
             .checkbox(&mut settings.hd_vectors, "HD vectors (experimental)")
             .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the movies' own coordinates, text from the fonts' own outlines, bitmaps from their own pixels. Art with no vector original shows its pixels (see HD pixel art); never AI-upscaled. Replaces the scaling options below while on. Original Leapster and L-MAX BIOSes, and cartridges with their own Flash player.")
@@ -1171,6 +1188,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         }
     });
     top_menu(ui, rows, "🔊", "Audio", |ui| {
+        game_only_note(ui, info);
         if ui.checkbox(&mut settings.muted, "Mute").changed() {
             actions.push(Action::SettingsChanged);
         }
@@ -1253,6 +1271,14 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
 
 /// A top-level menu: a menu-bar button, or (the side menu) a full-width row
 /// whose menu opens beside it.
+/// Said at the top of the menus a game can have its own settings in.
+fn game_only_note(ui: &mut egui::Ui, info: &Info) {
+    if info.game_settings == Some(true) {
+        ui.label(egui::RichText::new("For this game only").color(ACCENT).small());
+        ui.separator();
+    }
+}
+
 fn top_menu(ui: &mut egui::Ui, rows: bool, icon: &str, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
     if !rows {
         let response = ui.menu_button(label, add_contents).response;
@@ -1416,7 +1442,7 @@ fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings
                                 ui.colored_label(egui::Color32::LIGHT_RED, format!("The update didn't install: {why}."));
                             }
                             ui.horizontal(|ui| {
-                                if let Some(asset) = &package {
+                                if let Ok(asset) = &package {
                                     let text = egui::RichText::new("Update now").color(egui::Color32::WHITE);
                                     if ui
                                         .add(egui::Button::new(text).fill(ACCENT))
@@ -1440,12 +1466,18 @@ fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings
                                     close = true;
                                 }
                             });
-                            if package.is_some() {
-                                let note = "Ribbit restarts by itself when the update is in. A game you're \
-                                            playing closes first; its saves are kept.";
-                                ui.label(egui::RichText::new(note).weak());
-                                if install != Install::Idle && ui.link("Download it from GitHub instead").clicked() {
-                                    ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                            match &package {
+                                Ok(_) => {
+                                    let note = "Ribbit restarts by itself when the update is in. A game you're \
+                                                playing closes first; its saves are kept.";
+                                    ui.label(egui::RichText::new(note).weak());
+                                    if install != Install::Idle && ui.link("Download it from GitHub instead").clicked() {
+                                        ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                                    }
+                                }
+                                // Said, so a player knows why it's the browser.
+                                Err(why) => {
+                                    ui.label(egui::RichText::new(format!("Ribbit can't update itself here: {why}.")).weak());
                                 }
                             }
                         }
