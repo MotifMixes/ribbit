@@ -16,6 +16,8 @@ pub enum Pick {
     TwistZip,
     /// Output folder for screen recordings.
     RecordFolder,
+    /// A virtual LeapPad book (.toml).
+    LeapPadBook,
 }
 
 impl Pick {
@@ -27,6 +29,7 @@ impl Pick {
             Pick::TwistContent => "Choose RockIt Twist content (a folder laid out like the console's F: drive)",
             Pick::TwistZip => "Import RockIt Twist games (.zip)",
             Pick::RecordFolder => "Choose recording output folder",
+            Pick::LeapPadBook => "Open a LeapPad book (.toml)",
         }
     }
 
@@ -61,6 +64,9 @@ pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
     if what == Pick::TwistZip {
         return d.add_filter("Zip archives", &["zip"]).add_filter("All files", &["*"]).pick_file();
     }
+    if what == Pick::LeapPadBook {
+        return d.add_filter("LeapPad books", &["toml"]).add_filter("All files", &["*"]).pick_file();
+    }
     d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"]).add_filter("All files", &["*"]).pick_file()
 }
 
@@ -86,6 +92,8 @@ impl SheetPick {
             Box::pin(d.pick_folder())
         } else if what == Pick::TwistZip {
             Box::pin(d.add_filter("Zip archives", &["zip"]).add_filter("All files", &["*"]).pick_file())
+        } else if what == Pick::LeapPadBook {
+            Box::pin(d.add_filter("LeapPad books", &["toml"]).add_filter("All files", &["*"]).pick_file())
         } else {
             Box::pin(
                 d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"])

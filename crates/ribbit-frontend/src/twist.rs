@@ -1060,7 +1060,7 @@ pub fn overlay(painter: &egui::Painter, screen: egui::Rect, s: &TwistSession) {
     let mut lines: Vec<(String, egui::FontId, egui::Color32)> = vec![
         ("RockIt Twist: system packages not found".into(), font.clone(), egui::Color32::from_rgb(140, 230, 90)),
         (
-            "To start the console, Ribbit needs its Bootloader, Base and Firmware-Bulk packages (.lfp) in a games              folder. Until then, only the controls work here."
+            "To start the console, Ribbit needs its Bootloader, Base and Firmware-Bulk packages (.lfp) in a games folder. Until then, only the controls work here."
                 .into(),
             small.clone(),
             egui::Color32::from_gray(200),

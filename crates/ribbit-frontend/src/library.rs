@@ -142,6 +142,8 @@ pub enum Family {
     Zippity,
     /// A RockIt Twist package (.lfp system package, encrypted .lf3 pack).
     RockItTwist,
+    /// A cartridge of the original LeapPad (1999 book-and-pen pad).
+    LeapPad,
 }
 
 /// Cartridges made for the Leapster 2 alone, by CRC32: the "Leapster 2
@@ -150,8 +152,14 @@ pub enum Family {
 const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 
 impl Family {
-    /// The library tabs, in alphabetical order.
-    pub const ALL: [Family; 4] = [Family::Leapster, Family::Leapster2, Family::RockItTwist, Family::Zippity];
+    /// The library tabs: the game consoles in alphabetical order, then the
+    /// LeapPad (a book reader; Ribbit is a game emulator first).
+    pub const ALL: [Family; 5] = [Family::Leapster, Family::Leapster2, Family::RockItTwist, Family::Zippity, Family::LeapPad];
+
+    /// A book reader's (the library's Books side), not a game console's.
+    pub fn is_book(self) -> bool {
+        self == Family::LeapPad
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -159,16 +167,18 @@ impl Family {
             Family::Leapster2 => "Leapster 2",
             Family::Zippity => "Zippity",
             Family::RockItTwist => "RockIt Twist",
+            Family::LeapPad => "LeapPad",
         }
     }
 
     /// Whether a console of this hardware runs the family's games.
     pub fn runs_on(self, hw: Hardware) -> bool {
         match self {
-            Family::Leapster => !matches!(hw, Hardware::Zippity | Hardware::RockItTwist),
+            Family::Leapster => !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad),
             Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
             Family::RockItTwist => hw == Hardware::RockItTwist,
+            Family::LeapPad => hw == Hardware::LeapPad,
         }
     }
 
@@ -179,6 +189,7 @@ impl Family {
             Family::Leapster2 => Hardware::Leapster2,
             Family::Zippity => Hardware::Zippity,
             Family::RockItTwist => Hardware::RockItTwist,
+            Family::LeapPad => Hardware::LeapPad,
         }
     }
 
@@ -426,6 +437,13 @@ impl Library {
         self.bios_file(hw).map(|b| b.path.as_path())
     }
 
+    /// Whether any console's system files are here (a BIOS or Zippity NAND
+    /// in the games folders, the RockIt Twist's system): the library shows
+    /// then even without a Leapster BIOS.
+    pub fn has_system_files(&self) -> bool {
+        self.twist_ready || CONSOLES.into_iter().any(|hw| self.bios_for(hw).is_some())
+    }
+
     /// Whether this console can start: its BIOS (or the RockIt Twist's
     /// system packages) is here. The Leapster's page always shows: it is
     /// where a BIOS is asked for.
@@ -433,6 +451,9 @@ impl Library {
         match hw {
             Hardware::Leapster => true,
             Hardware::RockItTwist => self.twist_ready,
+            // Its base ROM is kept in the settings (File > Open BIOS); a
+            // book played without one says so.
+            Hardware::LeapPad => true,
             _ => self.bios_for(hw).is_some(),
         }
     }
@@ -444,7 +465,7 @@ impl Library {
     pub fn consoles(&self) -> Vec<Hardware> {
         let have: Vec<Hardware> = CONSOLES
             .into_iter()
-            .filter(|&hw| !matches!(hw, Hardware::Zippity | Hardware::RockItTwist))
+            .filter(|&hw| !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad))
             .filter(|&hw| self.bios_for(hw).is_some())
             .collect();
         if have.is_empty() { vec![Hardware::Leapster] } else { have }
@@ -463,6 +484,7 @@ impl Library {
         match hw {
             Hardware::Zippity => Family::Zippity,
             Hardware::RockItTwist => Family::RockItTwist,
+            Hardware::LeapPad => Family::LeapPad,
             _ => Family::Leapster,
         }
     }
@@ -499,6 +521,10 @@ fn worker(
     let mut seen_games = HashSet::new();
     let mut todo = Vec::new();
     let mut zippity_todo = Vec::new();
+    // Zippity cartridges whose art is made after the scan (it needs a
+    // Zippity system NAND, which may be found later), and the NANDs found.
+    let mut zippity_cart_todo: Vec<(String, PathBuf)> = Vec::new();
+    let mut zippity_nands: Vec<PathBuf> = Vec::new();
     // BIOSes whose built-in games need a picture (key, file).
     let mut builtin_todo: Vec<(String, PathBuf)> = Vec::new();
     // Original Leapster BIOSes found (art is made on one: see below).
@@ -535,6 +561,7 @@ fn worker(
                 continue;
             }
             Some(Found::ZippityNand(mut game)) => {
+                zippity_nands.push(path.clone());
                 let bios = BiosFile { hardware: Hardware::Zippity, path: path.clone(), name: game.title.clone() };
                 if tx.send(Msg::Bios(bios)).is_err() {
                     return;
@@ -554,7 +581,23 @@ fn worker(
                 }
                 continue;
             }
-            Some(Found::Zippity(game) | Found::Twist(game)) => {
+            Some(Found::Zippity(mut game)) => {
+                if !seen_games.insert(game.key.clone()) {
+                    continue;
+                }
+                match load_png(&art_file(art_dir, &game.key)) {
+                    Some(img) => game.art = Art::Image(img),
+                    None => {
+                        game.art = Art::Pending;
+                        zippity_cart_todo.push((game.key.clone(), path.clone()));
+                    }
+                }
+                if tx.send(Msg::Game(game)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Some(Found::Twist(game) | Found::LeapPad(game)) => {
                 if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
                     return;
                 }
@@ -580,6 +623,20 @@ fn worker(
     // The Zippity's built-in games: a picture from the console itself.
     for (key, path) in zippity_todo {
         let image = make_zippity_art(&path);
+        if let Some(img) = &image {
+            let _ = std::fs::create_dir_all(art_dir);
+            if let Err(e) = save_png(&art_file(art_dir, &key), img) {
+                tracing::warn!(target: "ribbit::library", "saving art: {e:#}");
+            }
+        }
+        if tx.send(Msg::Art(key, image.as_ref().map(to_image))).is_err() {
+            return;
+        }
+    }
+    // Zippity cartridges: their title screen, on a Zippity NAND found in the
+    // folders (none: no art).
+    for (key, path) in zippity_cart_todo {
+        let image = zippity_nands.first().and_then(|nand| make_zippity_cart_art(nand, &path));
         if let Some(img) = &image {
             let _ = std::fs::create_dir_all(art_dir);
             if let Err(e) = save_png(&art_file(art_dir, &key), img) {
@@ -680,6 +737,8 @@ enum Found {
     ZippityNand(Game),
     /// A RockIt Twist package (listed; it cannot run).
     Twist(Game),
+    /// A LeapPad book cartridge.
+    LeapPad(Game),
 }
 
 /// Zippity images: the system NAND (with spare area) and cartridges.
@@ -710,6 +769,13 @@ fn classify(path: &Path) -> Option<Found> {
         let id = ribbit_memory::ImageId::of(&data);
         return Some(Found::Zippity(describe_zippity(path, known::lookup(known::ZIPPITY_CARTRIDGES, &id), &id)));
     }
+    // LeapPad images start with the same 8051 boot stub; a base ROM is not
+    // a game (it is opened with File > Open BIOS).
+    match ribbit_leappad::identify(&data) {
+        Some(ribbit_leappad::Image::Cartridge) => return Some(Found::LeapPad(describe_leappad(path, &data))),
+        Some(ribbit_leappad::Image::BaseRom) => return None,
+        None => {}
+    }
     if data.len() > ribbit_memory::map::CART_WINDOW as usize {
         return None;
     }
@@ -726,6 +792,7 @@ pub fn family_of(path: &Path) -> Option<Family> {
         Found::Cart(_) => Some(Family::Leapster),
         Found::Zippity(_) | Found::ZippityNand(_) => Some(Family::Zippity),
         Found::Twist(_) => Some(Family::RockItTwist),
+        Found::LeapPad(_) => Some(Family::LeapPad),
         Found::Bios(..) => None,
     }
 }
@@ -758,6 +825,33 @@ fn read_cartridge(data: Vec<u8>) -> Option<Cartridge> {
     let plausible = data.len().is_power_of_two() && data.len() >= 0x10_0000;
     let cart = Cartridge::from_bytes(data).ok()?;
     (cart.known().is_some() || cart.header().is_ok() || plausible).then_some(cart)
+}
+
+/// A LeapPad cartridge, named from its file: "(LeapPad, 500-11878-B) Level 4 -
+/// At the Shore (USA)" gives the title "Level 4 - At the Shore" and the part
+/// number.
+fn describe_leappad(path: &Path, data: &[u8]) -> Game {
+    let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let (part, rest) = match stem.strip_prefix('(').and_then(|r| r.split_once(") ")) {
+        Some((inside, rest)) => (inside.split_once(", ").map(|(_, p)| p.to_string()), rest.to_string()),
+        None => (None, stem.clone()),
+    };
+    let (title, region) = match rest.rsplit_once(" (") {
+        Some((t, r)) if r.ends_with(')') => (t.to_string(), Some(r.trim_end_matches(')').to_string())),
+        _ => (rest, None),
+    };
+    let id = ribbit_memory::ImageId::of(data);
+    let size = format!("{} MB", id.size.div_ceil(1 << 20));
+    let subtitle = [part.clone(), region, Some(size.clone())].into_iter().flatten().collect::<Vec<_>>().join("  ·  ");
+    let key = format!("{:08x}", id.crc32);
+    let mut details = vec![("System", "LeapPad".to_string())];
+    if let Some(p) = part {
+        details.push(("Part number", p));
+    }
+    details.push(("Size", size));
+    details.push(("CRC32", key.clone()));
+    details.push(("File", path.display().to_string()));
+    Game { path: path.to_path_buf(), family: Family::LeapPad, title, subtitle, details, tags: Vec::new(), key, art: Art::Missing }
 }
 
 fn describe_zippity(path: &Path, known: Option<&ribbit_memory::known::KnownImage>, id: &ribbit_memory::ImageId) -> Game {
@@ -1078,6 +1172,41 @@ fn make_zippity_art(nand: &Path) -> Option<Shot> {
     z.render(&mut frame);
     let x0 = (SCREEN_W - SCREEN_H) / 2;
     let pixels = (0..SCREEN_H).flat_map(|y| frame[y * SCREEN_W + x0..y * SCREEN_W + x0 + SCREEN_H].to_vec()).collect();
+    Some(Shot { size: SCREEN_H, pixels })
+}
+
+/// Art for a Zippity cartridge: the console started with it in the slot, up
+/// to 40 s; the last screen that holds still and is colourful (its title,
+/// after the console's warning and logo), else the most colourful one; the
+/// middle 480x480 of the picture.
+fn make_zippity_cart_art(nand: &Path, cart: &Path) -> Option<Shot> {
+    use ribbit_zippity::{SCREEN_H, SCREEN_W};
+    const FRAMES: usize = 2400;
+    const EVERY: usize = 60;
+    let mut z = ribbit_zippity::Zippity::new(ribbit_core::read_image(nand).ok()?);
+    z.insert_cartridge(ribbit_core::read_image(cart).ok()?);
+    let mut frame = vec![0u32; SCREEN_W * SCREEN_H];
+    let mut last = frame.clone();
+    let (mut latest, mut richest): (Option<Vec<u32>>, Option<(usize, Vec<u32>)>) = (None, None);
+    for i in 1..=FRAMES {
+        z.run_frame();
+        z.take_audio();
+        if i % EVERY != 0 {
+            continue;
+        }
+        z.render(&mut frame);
+        let colours = frame.iter().map(|p| p & 0x00FF_FFFF).collect::<HashSet<_>>().len();
+        if frame == last && colours >= 64 {
+            latest = Some(frame.clone());
+        }
+        if richest.as_ref().is_none_or(|b| colours > b.0) {
+            richest = Some((colours, frame.clone()));
+        }
+        last.copy_from_slice(&frame);
+    }
+    let best = latest.or(richest.filter(|b| b.0 >= 16).map(|b| b.1))?;
+    let x0 = (SCREEN_W - SCREEN_H) / 2;
+    let pixels = (0..SCREEN_H).flat_map(|y| best[y * SCREEN_W + x0..y * SCREEN_W + x0 + SCREEN_H].to_vec()).collect();
     Some(Shot { size: SCREEN_H, pixels })
 }
 

@@ -112,7 +112,7 @@ pub struct Settings {
     /// "Leapster TV", ...; empty: the original Leapster).
     pub library_console: String,
     /// The library page open last ("Leapster", "Zippity", ...; empty: all
-    /// games), where the library opens next time.
+    /// games; "Books": all books), where the library opens next time.
     pub library_tab: String,
     /// Console view for the Leapster handhelds (Leapster, L-MAX, Leapster
     /// 2): the screen inside a drawing of the handheld, with clickable
@@ -134,6 +134,23 @@ pub struct Settings {
     /// The player's RockIt Twist keys: action (`twist::action_name`) to key
     /// name; actions not here keep their default keys.
     pub twist_keys: BTreeMap<String, String>,
+    /// The original LeapPad's base ROM (kept apart from the Leapster's BIOS).
+    pub leappad_bios: Option<PathBuf>,
+    /// The virtual book opened last with each LeapPad cartridge (cartridge
+    /// file -> book file; "" is the pad with no cartridge).
+    pub leappad_books: BTreeMap<String, PathBuf>,
+    /// LeapPad: show the book alone, larger, instead of on the drawn pad.
+    pub leappad_book_only: bool,
+    /// LeapPad: the debug panel (the firmware's log, pen and touch reports).
+    pub leappad_debug: bool,
+    /// LeapPad: play LeapPad Classic cartridges, which the ILA2 base ROM's
+    /// own list refuses (off: as that base does).
+    pub leappad_classic: bool,
+    /// LeapPad: the pen touches GO by itself on the first page once the pad
+    /// has started, and on each page turned to with the arrows.
+    pub leappad_auto_go: bool,
+    /// LeapPad: show the books' words, transcribed on this PC.
+    pub leappad_words: bool,
     /// Ask GitHub for a newer release when Ribbit starts.
     pub check_for_updates: bool,
     /// The BIOS picked in the library for each console other than the
@@ -221,6 +238,13 @@ impl Default for Settings {
             twist_content: None,
             twist_usb: false,
             twist_keys: BTreeMap::new(),
+            leappad_bios: None,
+            leappad_books: BTreeMap::new(),
+            leappad_book_only: false,
+            leappad_debug: false,
+            leappad_classic: true,
+            leappad_auto_go: true,
+            leappad_words: true,
             check_for_updates: true,
             bios_picked: BTreeMap::new(),
             last_version: String::new(),

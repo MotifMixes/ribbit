@@ -202,6 +202,8 @@ pub struct Gpu {
     /// Kept so a new surface can be made for a new window (Android takes
     /// the window away while the app is in the background).
     instance: wgpu::Instance,
+    /// For setting up more windows' surfaces (`tool_surface`).
+    adapter: wgpu::Adapter,
     /// None while detached (`detach`, `reattach`).
     surface: Option<wgpu::Surface<'static>>,
     device: wgpu::Device,
@@ -242,7 +244,8 @@ pub struct Gpu {
 
 /// What `Gpu::connect` sets up: instance, surface, adapter, device, queue
 /// and the surface's configuration.
-type Connection = (wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration);
+type Connection =
+    (wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration);
 
 impl Gpu {
     /// A GPU set up to show pictures in `window`: the platform's usual API
@@ -263,14 +266,12 @@ impl Gpu {
     /// Before a step, the file says to start after it: a crash in that step
     /// is skipped at the next start. A step that works is written back, so
     /// later starts begin there. An update starts from the first step again.
-    fn connect(
-        window: &Arc<Window>,
-        guard: Option<&std::path::Path>,
-    ) -> Result<Connection> {
+    fn connect(window: &Arc<Window>, guard: Option<&std::path::Path>) -> Result<Connection> {
         // WSL's Vulkan driver cannot keep a window going (it fails a few
         // frames in), so OpenGL comes first there.
         let wsl = cfg!(target_os = "linux")
-            && std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|r| r.to_lowercase().contains("microsoft"));
+            && std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                .is_ok_and(|r| r.to_lowercase().contains("microsoft"));
         let usual = if wsl { wgpu::Backends::GL } else { wgpu::Backends::all() };
         let first = wgpu::Backends::from_env().unwrap_or(usual);
         let mut tried = Vec::new();
@@ -350,11 +351,7 @@ impl Gpu {
     }
 
     /// `software`: the backend's software renderer instead of a GPU.
-    fn connect_with(
-        window: &Arc<Window>,
-        backends: wgpu::Backends,
-        software: bool,
-    ) -> Result<Connection> {
+    fn connect_with(window: &Arc<Window>, backends: wgpu::Backends, software: bool) -> Result<Connection> {
         // (OpenGL through EGL needs the display the window is on.)
         let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()));
         desc.backends = backends;
@@ -398,7 +395,10 @@ impl Gpu {
                     view: &view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 ..Default::default()
             }));
@@ -579,6 +579,7 @@ impl Gpu {
         Ok(Self {
             window,
             instance,
+            adapter,
             surface: Some(surface),
             device,
             queue,
@@ -758,7 +759,8 @@ impl Gpu {
             self.hd_texture = Self::hd_texture(&self.device, size);
             self.hd_size = size;
         }
-        let rgba: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]).collect();
+        let rgba: Vec<u8> =
+            pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]).collect();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.hd_texture,
@@ -850,7 +852,14 @@ impl Gpu {
                 up.output().unwrap()
             };
             if self.show_hd {
-                hd_bind_group = Some(Self::hd_group(&self.device, &self.hd_bgl, &self.hd_texture, &self.linear, view, &self.mask_texture));
+                hd_bind_group = Some(Self::hd_group(
+                    &self.device,
+                    &self.hd_bgl,
+                    &self.hd_texture,
+                    &self.linear,
+                    view,
+                    &self.mask_texture,
+                ));
             } else {
                 ai_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("upscaled"),
@@ -864,8 +873,14 @@ impl Gpu {
         }
         if self.show_hd && hd_bind_group.is_none() {
             // The LCD's own pixels are the fallback.
-            hd_bind_group =
-                Some(Self::hd_group(&self.device, &self.hd_bgl, &self.hd_texture, &self.linear, &self.lcd_view, &self.mask_texture));
+            hd_bind_group = Some(Self::hd_group(
+                &self.device,
+                &self.hd_bgl,
+                &self.hd_texture,
+                &self.linear,
+                &self.lcd_view,
+                &self.mask_texture,
+            ));
         }
         {
             let mut pass = encoder
@@ -936,6 +951,107 @@ impl Gpu {
     }
 }
 
+/// Another window drawn on the same GPU (the debugger's pop-out windows,
+/// debugger.rs `Popouts`): only egui, with its own renderer, as each egui
+/// context has its own textures.
+pub struct ToolSurface {
+    pub window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    egui: egui_wgpu::Renderer,
+}
+
+impl Gpu {
+    /// Sets up `window` for drawing. Fails where the backend cannot show
+    /// a second window (some OpenGL drivers); the caller then draws inside
+    /// the main window instead.
+    pub fn tool_surface(&self, window: Arc<Window>) -> Result<ToolSurface> {
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let surface = self.instance.create_surface(window.clone()).context("creating surface")?;
+        let size = window.inner_size();
+        let mut config = surface
+            .get_default_config(&self.adapter, size.width.max(1), size.height.max(1))
+            .context("surface not supported by adapter")?;
+        config.format = self.config.format;
+        // Not waiting for the screen's refresh: two windows each waiting
+        // would slow the main window (and the game's pacing) down.
+        config.present_mode = wgpu::PresentMode::AutoNoVsync;
+        surface.configure(&self.device, &config);
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            anyhow::bail!("second window: {e}");
+        }
+        let egui = egui_wgpu::Renderer::new(&self.device, config.format, egui_wgpu::RendererOptions::default());
+        Ok(ToolSurface { window, surface, config, egui })
+    }
+
+    pub fn resize_tool(&self, t: &mut ToolSurface, size: PhysicalSize<u32>) {
+        if size.width > 0 && size.height > 0 {
+            t.config.width = size.width;
+            t.config.height = size.height;
+            t.surface.configure(&self.device, &t.config);
+        }
+    }
+
+    /// Draws egui's output in a tool window.
+    pub fn render_tool(
+        &self,
+        t: &mut ToolSurface,
+        paint_jobs: &[egui::ClippedPrimitive],
+        textures: &egui::TexturesDelta,
+        pixels_per_point: f32,
+    ) -> Result<()> {
+        for (id, deltas) in &textures.set {
+            for delta in deltas {
+                t.egui.update_texture(&self.device, &self.queue, *id, delta);
+            }
+        }
+        use wgpu::CurrentSurfaceTexture as Cst;
+        let (output, suboptimal) = match t.surface.get_current_texture() {
+            Cst::Success(o) => (o, false),
+            Cst::Suboptimal(o) => (o, true),
+            Cst::Outdated => {
+                t.surface.configure(&self.device, &t.config);
+                return Ok(());
+            }
+            Cst::Timeout | Cst::Occluded => return Ok(()),
+            Cst::Lost => anyhow::bail!("GPU surface lost"),
+            Cst::Validation => anyhow::bail!("GPU validation error acquiring surface texture"),
+        };
+        let view = output.texture.create_view(&Default::default());
+        let screen =
+            egui_wgpu::ScreenDescriptor { size_in_pixels: [t.config.width, t.config.height], pixels_per_point };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let extra = t.egui.update_buffers(&self.device, &self.queue, &mut encoder, paint_jobs, &screen);
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("tool window"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                })
+                .forget_lifetime();
+            t.egui.render(&mut pass, paint_jobs, &screen);
+        }
+        self.queue.submit(extra.into_iter().chain([encoder.finish()]));
+        self.queue.present(output);
+        if suboptimal {
+            t.surface.configure(&self.device, &t.config);
+        }
+        for id in &textures.free {
+            t.egui.free_texture(id);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// wgpu only reports shader errors when the window opens; check here.
@@ -949,7 +1065,8 @@ mod tests {
         for entry in ["fs", "fs_sharp", "fs_lcd", "fs_smooth", "fs_resample"] {
             assert!(module.entry_points.iter().any(|e| e.name == entry), "{entry}");
         }
-        let hd = naga::front::wgsl::parse_str(super::HD_SHADER).unwrap_or_else(|e| panic!("{}", e.emit_to_string(super::HD_SHADER)));
+        let hd = naga::front::wgsl::parse_str(super::HD_SHADER)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(super::HD_SHADER)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
             .validate(&hd)
             .expect("HD shader validates");

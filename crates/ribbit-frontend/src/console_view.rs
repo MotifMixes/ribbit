@@ -152,6 +152,8 @@ pub fn layout_for(hw: Hardware) -> Option<Layout> {
         Hardware::Leapster | Hardware::LeapsterLmax | Hardware::Leapster2 => Some(leapster()),
         // TV consoles: no handheld to draw.
         Hardware::LeapsterTv | Hardware::Zippity => None,
+        // The LeapPad draws itself (leappad.rs).
+        Hardware::LeapPad => None,
     }
 }
 

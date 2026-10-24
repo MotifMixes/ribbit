@@ -16,6 +16,7 @@ ribbit-audio.workspace = true
 ribbit-debug.workspace = true
 ribbit-zippity.workspace = true
 ribbit-twist.workspace = true
+ribbit-leappad.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde.workspace = true
@@ -37,6 +38,10 @@ serde_json = "1"
 egui-winit = "0.36.2"
 rfd = "0.17"
 gilrs = "0.11"
+# The LeapPad's words (speech recognition on this PC; leappad_words.rs).
+ribbit-speech.workspace = true
+rayon = "1"
+crc32fast = "1"
 # The update check (HTTPS to api.github.com).
 ureq = "3"
 

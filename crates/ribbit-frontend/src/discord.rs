@@ -19,8 +19,9 @@ pub enum Presence {
     Off,
     /// In the game library.
     Browsing,
-    /// Playing a game on `system` since `since` (seconds since the Unix epoch).
-    Playing { title: String, system: String, since: u64 },
+    /// Playing a game on `system` since `since` (seconds since the Unix
+    /// epoch); `series`: a LeapPad book's series, shown on its own line.
+    Playing { title: String, system: String, series: Option<String>, since: u64 },
 }
 
 impl Presence {
@@ -28,7 +29,16 @@ impl Presence {
     pub fn playing(title: &str, system: &str, since: u64) -> Self {
         // Just the name: "Game (USA, alt)" -> "Game".
         let name = title.strip_suffix(')').and_then(|t| t.rsplit_once(" (")).map_or(title, |(n, _)| n);
-        Presence::Playing { title: name.to_string(), system: system.to_string(), since }
+        Presence::Playing { title: name.to_string(), system: system.to_string(), series: None, since }
+    }
+
+    /// The same, with the book's series on the second line ("Leap Start Pre
+    /// Reading"), the system then going to the logo's hover text.
+    pub fn with_series(self, series: Option<&str>) -> Self {
+        match self {
+            Presence::Playing { title, system, since, .. } => Presence::Playing { title, system, series: series.map(str::to_string), since },
+            p => p,
+        }
     }
 }
 
@@ -150,12 +160,16 @@ fn activity_json(p: &Presence) -> String {
             r#"{{"details":"Browsing games","assets":{{"large_image":"{LOGO}","large_text":{}}}}}"#,
             json_str(version)
         ),
-        Presence::Playing { title, system, since } => {
+        Presence::Playing { title, system, series, since } => {
+            let (state, hover) = match series {
+                Some(s) => (s.clone(), format!("{system} · {version}")),
+                None => (system.clone(), version.to_string()),
+            };
             format!(
                 r#"{{"details":{},"state":{},"timestamps":{{"start":{since}}},"assets":{{"large_image":"{LOGO}","large_text":{}}}}}"#,
                 json_str(&clip(title, 128)),
-                json_str(&clip(system, 128)),
-                json_str(version)
+                json_str(&clip(&state, 128)),
+                json_str(&clip(&hover, 128))
             )
         }
     }

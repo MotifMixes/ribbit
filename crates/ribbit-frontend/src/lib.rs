@@ -6,6 +6,7 @@ pub mod app;
 mod audio_out;
 mod backup;
 mod calibrate;
+mod debugger;
 mod cheat;
 mod record;
 mod console_view;
@@ -21,6 +22,12 @@ mod gpu;
 mod held;
 mod icon;
 mod install;
+mod leappad;
+#[cfg(not(target_os = "android"))]
+mod leappad_words;
+/// The LeapPad words' helper process (leappad_words.rs).
+#[cfg(not(target_os = "android"))]
+pub use leappad_words::{WORKER_ARG, worker_main};
 mod library;
 mod manual;
 mod perf;

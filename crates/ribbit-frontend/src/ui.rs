@@ -58,6 +58,10 @@ pub enum Action {
     KeepZippitySaves(PathBuf),
     /// Open the RockIt Twist research preview (no package).
     OpenTwist,
+    /// Turn on the original LeapPad with no cartridge (its built-in book).
+    StartLeapPad,
+    /// Open this virtual book on the running LeapPad.
+    OpenLeapPadBook(PathBuf),
     /// Use this folder as the RockIt Twist's storage content (None: none).
     SetTwistContent(Option<PathBuf>),
     SetTwistUsb(bool),
@@ -79,6 +83,8 @@ pub enum Action {
     CheatNextScan,
     /// Reset / clear the cheat search.
     CheatReset,
+    /// The debugger's windows asked for this (debugger.rs).
+    Debug(crate::debugger::Action),
     /// Freeze address at its current value.
     CheatFreeze(u32, u32),
     /// Unfreeze this address.
@@ -114,6 +120,8 @@ pub struct Info {
     pub running: bool,
     /// A cartridge game is running, and whether its own settings are on.
     pub game_settings: Option<bool>,
+    /// The original LeapPad is running.
+    pub leappad: bool,
     pub paused: bool,
     pub title: String,
     pub speed: f64,
@@ -202,6 +210,10 @@ pub struct UiState {
     pub manual: crate::manual::ManualState,
     /// Whether the cheat / memory search panel is open.
     pub show_cheat: bool,
+    /// Debug › Memory viewer and Debugger (debugger.rs), and what they show
+    /// this frame (set by the app).
+    pub debug: crate::debugger::DebugUi,
+    pub debug_snapshot: crate::debugger::Snapshot,
     /// Cheat search: typed value text.
     pub cheat_value_text: String,
     /// Cheat search: comparison operator.
@@ -217,7 +229,10 @@ pub struct UiState {
 /// What the library shows.
 #[derive(Default)]
 pub struct LibraryView {
-    /// The page: None for all games, else the games of one family's console.
+    /// The Books side (book readers: the LeapPad), not the Games side.
+    pub books: bool,
+    /// The page: None for all games (or all books), else the games of one
+    /// family's console.
     pub tab: Option<Family>,
     /// Search text.
     pub search: String,
@@ -307,7 +322,10 @@ pub fn draw(
     let mut area = egui::Rect::NOTHING;
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
         area = ui.max_rect();
-        if !info.running && info.bios_name.is_some() {
+        // The library once any console's system files are known (a player
+        // with only a LeapPad, Zippity or RockIt Twist has no Leapster BIOS).
+        let have_system = info.bios_name.is_some() || settings.leappad_bios.is_some() || library.has_system_files();
+        if !info.running && have_system {
             if was_running || st.library_since.is_none() {
                 st.library_since = Some(Instant::now());
             }
@@ -341,6 +359,7 @@ pub fn draw(
             Pick::TwistContent => Action::SetTwistContent(Some(path)),
             Pick::TwistZip => Action::ImportTwistZip(path),
             Pick::RecordFolder => Action::SetRecordFolder(path),
+            Pick::LeapPadBook => Action::OpenLeapPadBook(path),
         });
     }
     if phone {
@@ -348,6 +367,13 @@ pub fn draw(
     }
     if st.show_cheat {
         cheat_window(&ctx, st, info, actions);
+    }
+    if st.debug.open() && st.debug.in_app {
+        let snap = std::mem::take(&mut st.debug_snapshot);
+        let mut asked = Vec::new();
+        crate::debugger::windows(&ctx, &mut st.debug, &snap, &mut asked);
+        st.debug_snapshot = snap;
+        actions.extend(asked.into_iter().map(Action::Debug));
     }
     // First start (an update from an older version too): the AI note as a
     // pop-up, read once. Android's quick start shows it as its first page.
@@ -666,26 +692,30 @@ fn idle_countdown(ui: &egui::Ui, area: egui::Rect, left: u32) {
 
 /// The library's pages: all games, then each console that is here and has
 /// games (all the Leapster models share one page; the Leapster 2's page has
-/// the games for it alone). The console is chosen in the header's menu.
+/// the games for it alone); on the Books side the same for book readers.
+/// The console is chosen in the header's menu.
+#[allow(clippy::too_many_arguments)]
 fn console_tabs(
     ui: &mut egui::Ui,
     settings: &Settings,
     library: &Library,
+    books: bool,
     tab: &mut Option<Family>,
     favorites_only: &mut bool,
     open_folder: &mut Option<usize>,
     actions: &mut Vec<Action>,
 ) {
-    let count = |f: Option<Family>| library.games.iter().filter(|g| f.is_none_or(|f| f.lists(g.family))).count();
+    let side = |g: &crate::library::Game| g.family.is_book() == books;
+    let count = |f: Option<Family>| library.games.iter().filter(|g| side(g) && f.is_none_or(|f| f.lists(g.family))).count();
     // A page for each console that is here and has games.
     let families: Vec<Family> = Family::ALL
         .into_iter()
-        .filter(|&f| library.has_console(f.console()) && library.games.iter().any(|g| f.lists(g.family)))
+        .filter(|&f| f.is_book() == books && library.has_console(f.console()) && library.games.iter().any(|g| f.lists(g.family)))
         .collect();
     if tab.is_some_and(|t| !families.contains(&t)) {
         *tab = None;
     }
-    let fav_count = settings.favorites.iter().filter(|p| library.games.iter().any(|g| &g.path == *p)).count();
+    let fav_count = settings.favorites.iter().filter(|p| library.games.iter().any(|g| &g.path == *p && side(g))).count();
     // Tabs: a label each over a shared rule; the open one in the accent colour.
     let top = ui.cursor().min.y;
     ui.horizontal_wrapped(|ui| {
@@ -718,7 +748,7 @@ fn console_tabs(
         // Regular family tabs (None = All games).
         for choice in std::iter::once(None).chain(families.into_iter().map(Some)) {
             let selected = !*favorites_only && *tab == choice;
-            let name = choice.map_or("All games", Family::name);
+            let name = choice.map_or(if books { "All books" } else { "All games" }, Family::name);
             let font = egui::FontId::proportional(16.0);
             let name_g = ui.painter().layout_no_wrap(name.to_string(), font.clone(), egui::Color32::WHITE);
             let count_g =
@@ -808,66 +838,6 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         if item(ui, "Open BIOS…", "") {
             actions.push(Action::Pick(Pick::Bios));
         }
-        // The RockIt Twist's own items, in a menu of their own.
-        sub_menu(ui, "RockIt Twist", |ui| {
-            if ui
-                .add(egui::Button::new("Turn on (early emulation)"))
-                .on_hover_text(ribbit_twist::STATUS)
-                .clicked()
-            {
-                actions.push(Action::OpenTwist);
-                ui.close();
-            }
-            if ui
-                .button("Import games (.zip)…")
-                .on_hover_text(
-                    "Unpacks a zip of RockIt Twist package folders (each with its meta.inf) for one region and \
-                     installs them on the emulated console, where its own firmware finds them.",
-                )
-                .clicked()
-            {
-                actions.push(Action::Pick(Pick::TwistZip));
-                ui.close();
-            }
-            let content = settings.twist_content.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-            if ui
-                .button(match &content {
-                    Some(n) => format!("Content: {n}…"),
-                    None => "Content folder…".to_string(),
-                })
-                .on_hover_text(
-                    "A folder written onto the RockIt Twist's internal storage when it starts, laid out like the \
-                     console's F: drive (Applications, Music, Trailers...). For your own programs, or content \
-                     copied from your own console.",
-                )
-                .clicked()
-            {
-                actions.push(Action::Pick(Pick::TwistContent));
-                ui.close();
-            }
-            if content.is_some() && ui.button("Remove content").clicked() {
-                actions.push(Action::SetTwistContent(None));
-                ui.close();
-            }
-            let usb = settings.twist_usb;
-            if ui
-                .button(if usb {
-                    // Green while plugged in, red while not.
-                    egui::RichText::new("🔌  Unplug from this PC (USB)").color(egui::Color32::from_rgb(80, 200, 110))
-                } else {
-                    egui::RichText::new("🔌  Plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
-                })
-                .on_hover_text(
-                    "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
-                     so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
-                     usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
-                )
-                .clicked()
-            {
-                actions.push(Action::SetTwistUsb(!usb));
-                ui.close();
-            }
-        });
         if ui.checkbox(&mut settings.discord_presence, "Show my game on Discord").changed() {
             actions.push(Action::SettingsChanged);
         }
@@ -961,7 +931,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         }
         if ui
             .checkbox(&mut settings.close_with_shutdown, "Animate game shutdown")
-            .on_hover_text("When closing a game to return to the library, play the console's own shutdown animation. Each game has its own. Not used if a save state was loaded this session.")
+            .on_hover_text("When closing a game to return to the library, play the console's own shutdown animation (a few seconds). Each game has its own. Not used if a save state was loaded this session, or while the game is paused. Off: back to the library at once.")
             .changed()
         {
             actions.push(Action::SettingsChanged);
@@ -997,12 +967,111 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::SettingsChanged);
         }
         ui.separator();
+        // The original LeapPad's own items.
+        sub_menu(ui, "LeapPad (1999)", |ui| {
+            if ui
+                .button("Turn on (built-in book)")
+                .on_hover_text("The pad with no cartridge. Needs its base ROM: open it with Open BIOS…")
+                .clicked()
+            {
+                actions.push(Action::StartLeapPad);
+                ui.close();
+            }
+            if ui
+                .add_enabled(info.leappad, egui::Button::new("Open book…"))
+                .on_hover_text("A virtual book file (docs/leappad-books.md)")
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::LeapPadBook));
+                ui.close();
+            }
+            ui.checkbox(&mut settings.leappad_words, "Show the books' words").on_hover_text(
+                "Cartridges hold no text: Ribbit finds a book's printed words by listening to its spots on this PC (a speech model, downloaded once), in the background, the page you are on first. Off: the word boxes stay empty. From the next book opened.",
+            );
+            ui.checkbox(&mut settings.leappad_auto_go, "Touch GO automatically").on_hover_text(
+                "On a real LeapPad the child touches the green GO circle after opening the book and after each page turn, so the pad knows the page. With this on, Ribbit's pen does it: on the first page once the pad has started, and whenever the page arrows turn the page.",
+            );
+            if ui
+                .checkbox(&mut settings.leappad_classic, "Play LeapPad Classic cartridges")
+                .on_hover_text(
+                    "The first LeapPad books (1999-2001) bring their own software. The 2 MB Full Base ROM lets them \
+                     in by itself. The 1 MB ILA2 base ROM's own list lets none in (\"LeapPad Classic not supported \
+                     on this base\"); on it Ribbit lets them in. Off: refused, as by the ILA2 base (original). From \
+                     the next start of the pad.",
+                )
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+            ui.label(egui::RichText::new("Open a LeapPad cartridge with Open Cartridge…").weak());
+        });
+        // The RockIt Twist's own items, in a menu of their own.
+        sub_menu(ui, "RockIt Twist", |ui| {
+            if ui
+                .add(egui::Button::new("Turn on (early emulation)"))
+                .on_hover_text(ribbit_twist::STATUS)
+                .clicked()
+            {
+                actions.push(Action::OpenTwist);
+                ui.close();
+            }
+            if ui
+                .button("Import games (.zip)…")
+                .on_hover_text(
+                    "Unpacks a zip of RockIt Twist package folders (each with its meta.inf) for one region and \
+                     installs them on the emulated console, where its own firmware finds them.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::TwistZip));
+                ui.close();
+            }
+            let content = settings.twist_content.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+            if ui
+                .button(match &content {
+                    Some(n) => format!("Content: {n}…"),
+                    None => "Content folder…".to_string(),
+                })
+                .on_hover_text(
+                    "A folder written onto the RockIt Twist's internal storage when it starts, laid out like the \
+                     console's F: drive (Applications, Music, Trailers...). For your own programs, or content \
+                     copied from your own console.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::TwistContent));
+                ui.close();
+            }
+            if content.is_some() && ui.button("Remove content").clicked() {
+                actions.push(Action::SetTwistContent(None));
+                ui.close();
+            }
+            let usb = settings.twist_usb;
+            if ui
+                .button(if usb {
+                    // Green while plugged in, red while not.
+                    egui::RichText::new("🔌  Unplug from this PC (USB)").color(egui::Color32::from_rgb(80, 200, 110))
+                } else {
+                    egui::RichText::new("🔌  Plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
+                })
+                .on_hover_text(
+                    "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
+                     so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
+                     usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
+                )
+                .clicked()
+            {
+                actions.push(Action::SetTwistUsb(!usb));
+                ui.close();
+            }
+        });
+        ui.separator();
         sub_menu(ui, "Advanced (experimental)", |ui| {
             ui.label(egui::RichText::new("Unverified guesses. Apply at the next start.").weak());
             if ui
                 .checkbox(&mut settings.mame_gpio_lines, "MAME power-line workaround")
                 .on_hover_text(
-                    "Reads every unidentified GPIO line as 1, as MAME does. The v1.5 (Universal) BIOS otherwise                          sees a shutdown request on line 11 and turns itself off. Not known to match hardware.",
+                    "Reads every unidentified GPIO line as 1, as MAME does. The v1.5 (Universal) BIOS otherwise sees a shutdown request on line 11 and turns itself off. Not known to match hardware.",
                 )
                 .changed()
             {
@@ -1226,6 +1295,24 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
     top_menu(ui, rows, "🔍", "Cheats", |ui| {
         if ui.add_enabled(info.running, egui::Button::new("Memory Search…")).clicked() {
             st.show_cheat = true;
+            ui.close();
+        }
+    });
+    top_menu(ui, rows, "🐞", "Debug", |ui| {
+        if ui
+            .add_enabled(info.running, egui::Button::new("Memory viewer…"))
+            .on_hover_text("Scroll through the console's memory and change bytes, like a hex editor")
+            .clicked()
+        {
+            st.debug.show_memory = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(info.running, egui::Button::new("Debugger…"))
+            .on_hover_text("The CPU's registers and code; pause, step and breakpoints")
+            .clicked()
+        {
+            st.debug.show_cpu = true;
             ui.close();
         }
     });
@@ -1687,7 +1774,16 @@ fn library_screen(
     since: Instant,
     actions: &mut Vec<Action>,
 ) {
-    let LibraryView { tab, search, pull, pull_armed, favorites_only, open_folder } = view;
+    let LibraryView { books, tab, search, pull, pull_armed, favorites_only, open_folder } = view;
+    // The Books side only when there are books; only it when there is
+    // nothing else.
+    let has_books = library.games.iter().any(|g| g.family.is_book());
+    let has_games = library.games.iter().any(|g| !g.family.is_book());
+    if !has_books {
+        *books = false;
+    } else if !has_games {
+        *books = true;
+    }
     let ctx = ui.ctx().clone();
     for g in &mut library.games {
         if let Art::Image(img) = &g.art {
@@ -1703,8 +1799,10 @@ fn library_screen(
     egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
         // On a phone the header scrolls away with the games (it would take
         // half of a landscape screen).
-        if !phone || library.games.is_empty() {
-            library_header(ui, settings, library, *tab, actions);
+        if (!phone || library.games.is_empty())
+            && let Some(b) = library_header(ui, settings, library, *tab, (*books, has_books && has_games), actions)
+        {
+            switch_side(b, books, tab, favorites_only, open_folder, actions);
         }
         if library.games.is_empty() && !library.scanning {
             empty_library(ui, settings, actions);
@@ -1717,7 +1815,9 @@ fn library_screen(
             .show(ui, |ui| {
             if phone {
                 pull_to_refresh_hint(ui, *pull);
-                library_header(ui, settings, library, *tab, actions);
+                if let Some(b) = library_header(ui, settings, library, *tab, (*books, has_books && has_games), actions) {
+                    switch_side(b, books, tab, favorites_only, open_folder, actions);
+                }
             }
             if settings.rom_folders.is_empty() {
                 // Only recent games so far: ask for the folder with the rest.
@@ -1731,11 +1831,12 @@ fn library_screen(
                 ui.add_space(14.0);
             }
             let last = settings.recent_carts.first().filter(|_| search.is_empty());
-            if let Some(game) = last.and_then(|p| library.games.iter().find(|g| &g.path == p)).filter(|_| !phone) {
+            let on_side = |g: &&crate::library::Game| g.family.is_book() == *books;
+            if let Some(game) = last.and_then(|p| library.games.iter().find(|g| &g.path == p)).filter(on_side).filter(|_| !phone) {
                 hero(ui, game, actions);
                 ui.add_space(28.0);
             }
-            console_tabs(ui, settings, library, tab, favorites_only, open_folder, actions);
+            console_tabs(ui, settings, library, *books, tab, favorites_only, open_folder, actions);
             ui.add_space(14.0);
             let query = search.trim().to_lowercase();
             let matches = |g: &crate::library::Game| {
@@ -1743,6 +1844,7 @@ fn library_screen(
             };
             let tab_name = tab.map_or("all", |f| f.name());
             let shown_games: Vec<&crate::library::Game> = library.games.iter().filter(|g| {
+                if g.family.is_book() != *books { return false; }
                 if !tab.is_none_or(|f| f.lists(g.family)) { return false; }
                 if !matches(g) { return false; }
                 if *favorites_only && !settings.favorites.contains(&g.path) { return false; }
@@ -1755,6 +1857,7 @@ fn library_screen(
                 "FAVORITES".to_string()
             } else {
                 match tab {
+                    None if *books => "ALL BOOKS".to_string(),
                     None => "ALL GAMES".to_string(),
                     Some(f) => f.name().to_uppercase(),
                 }
@@ -1768,7 +1871,7 @@ fn library_screen(
                         search.clear();
                     }
                     let field = egui::TextEdit::singleline(search)
-                        .hint_text("🔍  Search games")
+                        .hint_text(if *books { "🔍  Search books" } else { "🔍  Search games" })
                         .desired_width(if phone { 180.0 } else { 240.0 })
                         .margin(egui::vec2(10.0, 6.0));
                     let resp = ui.add(field);
@@ -1777,7 +1880,7 @@ fn library_screen(
                     }
                     // Built-in toggle: only when the current tab has Internal games.
                     let tab_has_builtins = library.games.iter().any(|g| {
-                        g.tags.contains(&"Internal") && tab.is_none_or(|f| f.lists(g.family))
+                        g.tags.contains(&"Internal") && g.family.is_book() == *books && tab.is_none_or(|f| f.lists(g.family))
                     });
                     if tab_has_builtins && !*favorites_only {
                         let hidden = settings.hide_builtin_tabs.contains(tab_name);
@@ -1798,7 +1901,9 @@ fn library_screen(
                 let visible_folders: Vec<(usize, String, usize)> = settings.folders.iter().enumerate()
                     .filter_map(|(i, f)| {
                         let count = f.games.iter()
-                            .filter(|p| library.games.iter().any(|g| &g.path == *p && tab.is_none_or(|t| t.lists(g.family))))
+                            .filter(|p| {
+                                library.games.iter().any(|g| &g.path == *p && g.family.is_book() == *books && tab.is_none_or(|t| t.lists(g.family)))
+                            })
                             .count();
                         if count > 0 { Some((i, f.name.clone(), count)) } else { None }
                     })
@@ -1969,11 +2074,60 @@ fn backdrop(ui: &egui::Ui) {
     ui.painter().add(mesh);
 }
 
-fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
+/// Turns to the library's Games or Books side, on its first page.
+fn switch_side(to_books: bool, books: &mut bool, tab: &mut Option<Family>, favorites_only: &mut bool, open_folder: &Option<usize>, actions: &mut Vec<Action>) {
+    *books = to_books;
+    *tab = None;
+    *favorites_only = false;
+    if open_folder.is_some() {
+        actions.push(Action::CloseLibraryFolder);
+    }
+}
+
+/// The library's title: "Games", or the Games | Books switch when there
+/// are both (`side`: on the Books side, whether to offer the switch).
+/// Returns the side clicked.
+fn shelf_title(ui: &mut egui::Ui, size: f32, side: (bool, bool)) -> Option<bool> {
+    let (books, offer) = side;
+    if !offer {
+        ui.label(egui::RichText::new("Games").size(size).family(crate::fonts::title()).color(egui::Color32::WHITE));
+        return None;
+    }
+    let mut clicked = None;
+    for (name, is_books) in [("Games", false), ("Books", true)] {
+        let on = books == is_books;
+        // One size for both (only the colour says which is open): the
+        // title keeps its width, and the buttons beside it stay put.
+        let text = egui::RichText::new(name).size(size).family(crate::fonts::title());
+        let r = ui
+            .add(egui::Label::new(text.color(if on { egui::Color32::WHITE } else { egui::Color32::from_gray(120) })).sense(egui::Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if r.clicked() && !on {
+            clicked = Some(is_books);
+        }
+        if !is_books {
+            ui.label(egui::RichText::new("|").size(size * 0.7).color(egui::Color32::from_gray(80)));
+        }
+    }
+    clicked
+}
+
+fn library_header(
+    ui: &mut egui::Ui,
+    settings: &Settings,
+    library: &Library,
+    tab: Option<Family>,
+    side: (bool, bool),
+    actions: &mut Vec<Action>,
+) -> Option<bool> {
+    // All books: the header's buttons are the book reader's (the LeapPad,
+    // the only one).
+    let tab = tab.or(side.0.then_some(Family::LeapPad));
     let phone = cfg!(target_os = "android");
     if phone {
-        return phone_library_header(ui, settings, library, tab, actions);
+        return phone_library_header(ui, settings, library, tab, side, actions);
     }
+    let mut switch_to = None;
     let header_id = egui::Id::new("library header controls width");
     let mut wrapped = true;
     ui.horizontal(|ui| {
@@ -1985,7 +2139,7 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         });
         ui.add(egui::Image::new((frog.id(), egui::vec2(42.0, 42.0))));
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Games").size(34.0).family(crate::fonts::title()).color(egui::Color32::WHITE));
+        switch_to = shelf_title(ui, 34.0, side);
         // The buttons beside the title when they fit (their width from the
         // last frame), else on a row of their own under it.
         if ui.available_width() >= ui.ctx().data(|d| d.get_temp::<f32>(header_id).unwrap_or(0.0)) {
@@ -2009,6 +2163,7 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         });
     }
     ui.add_space(10.0);
+    switch_to
 }
 
 /// The library header's buttons, right-aligned: the console and its BIOS,
@@ -2017,6 +2172,9 @@ fn library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
 fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>, width_id: egui::Id) {
     let inner = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
+        // Clear of the window's edge (the library has no right margin, for
+        // its scroll bar), lined up with the cards' right side.
+        ui.add_space(20.0);
         if ui
             .add(egui::Button::new(egui::RichText::new("⟳").size(16.0)).corner_radius(8).min_size(egui::vec2(36.0, 32.0)))
             .on_hover_text("Look for new games in your folders")
@@ -2033,7 +2191,7 @@ fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, ta
         turn_on_button(ui, settings, library, tab, actions);
         // Zippity and RockIt Twist games play on their own console: no
         // choice to make on their pages.
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad)) {
             // (Right to left: the BIOS button shows to the right of the
             // console menu.)
             bios_picker(ui, settings, library, actions);
@@ -2041,13 +2199,28 @@ fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, ta
         }
         ui.min_rect().width()
     });
-    // Room to spare from the title, too.
-    ui.ctx().data_mut(|d| d.insert_temp(width_id, inner.inner + 24.0));
+    // Room to spare from the title, too. The widest they have been: the
+    // Books side has no console or BIOS menu, and its narrower buttons
+    // fitting beside the title where the Games side's don't moved them
+    // between rows when switching.
+    let width = inner.inner + 24.0;
+    ui.ctx().data_mut(|d| {
+        let widest = d.get_temp::<f32>(width_id).unwrap_or(0.0).max(width);
+        d.insert_temp(width_id, widest);
+    });
 }
 
 /// The library's header on a phone: the title and progress, then the
 /// console and BIOS on a row of their own (adding games is in the side menu).
-fn phone_library_header(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
+fn phone_library_header(
+    ui: &mut egui::Ui,
+    settings: &Settings,
+    library: &Library,
+    tab: Option<Family>,
+    side: (bool, bool),
+    actions: &mut Vec<Action>,
+) -> Option<bool> {
+    let mut switch_to = None;
     ui.horizontal(|ui| {
         let frog = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("frog icon"))).unwrap_or_else(|| {
             let img = egui::ColorImage::from_rgba_unmultiplied([256, 256], &crate::icon::frog_glyph_rgba(256));
@@ -2056,7 +2229,7 @@ fn phone_library_header(ui: &mut egui::Ui, settings: &Settings, library: &Librar
             tex
         });
         ui.add(egui::Image::new((frog.id(), egui::vec2(30.0, 30.0))));
-        ui.label(egui::RichText::new("Games").size(26.0).family(crate::fonts::title()).color(egui::Color32::WHITE));
+        switch_to = shelf_title(ui, 26.0, side);
         let pending = library.games.iter().filter(|g| matches!(g.art, Art::Pending)).count();
         if library.scanning {
             ui.spinner();
@@ -2084,13 +2257,14 @@ fn phone_library_header(ui: &mut egui::Ui, settings: &Settings, library: &Librar
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad)) {
             console_picker(ui, settings, library, tab, actions);
             bios_picker(ui, settings, library, actions);
         }
         turn_on_button(ui, settings, library, tab, actions);
     });
     ui.add_space(8.0);
+    switch_to
 }
 
 /// The console Leapster games play on (from the library and Open Cartridge): only
@@ -2202,6 +2376,13 @@ fn games_folder_button(ui: &mut egui::Ui, settings: &Settings, actions: &mut Vec
 /// and menu (the Leapster 2's main menu, the Zippity's built-in games, the
 /// RockIt Twist's menu). On the Leapster page, the console chosen there.
 fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
+    // The LeapPad's page: the pad alone runs its built-in book.
+    if tab == Some(Family::LeapPad) {
+        if settings.leappad_bios.is_some() && power_button(ui, "Turn on the LeapPad without a cartridge (its built-in book)") {
+            actions.push(Action::StartLeapPad);
+        }
+        return;
+    }
     let console = match tab {
         Some(Family::Zippity) => Hardware::Zippity,
         Some(Family::RockItTwist) => Hardware::RockItTwist,
@@ -2213,9 +2394,15 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     if !can || !tab.is_none_or(|f| f.runs_on(console)) {
         return;
     }
-    // A power button, the size of the rescan button. The symbol is drawn:
-    // the fonts may not have it.
-    let r = ui.add(egui::Button::new("").corner_radius(8).min_size(egui::vec2(36.0, 32.0))).on_hover_text("Boot without cartridge");
+    if power_button(ui, "Boot without cartridge") {
+        actions.push(if console == Hardware::RockItTwist { Action::OpenTwist } else { Action::StartSystem(console) });
+    }
+}
+
+/// A power button, the size of the rescan button; whether it was clicked.
+fn power_button(ui: &mut egui::Ui, hover: &str) -> bool {
+    // The symbol is drawn: the fonts may not have it.
+    let r = ui.add(egui::Button::new("").corner_radius(8).min_size(egui::vec2(36.0, 32.0))).on_hover_text(hover);
     let color = ui.style().interact(&r).fg_stroke.color;
     let stroke = egui::Stroke::new(2.2, color);
     let c = r.rect.center() + egui::vec2(0.0, 1.0);
@@ -2230,9 +2417,7 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         .collect();
     ui.painter().add(egui::Shape::line(ring, stroke));
     ui.painter().line_segment([c + egui::vec2(0.0, -radius - 2.0), c + egui::vec2(0.0, -2.0)], stroke);
-    if r.clicked() {
-        actions.push(if console == Hardware::RockItTwist { Action::OpenTwist } else { Action::StartSystem(console) });
-    }
+    r.clicked()
 }
 
 /// A green button: at least `min`, else its text plus padding. Drawn here so
@@ -2405,6 +2590,8 @@ fn paint_art(ui: &egui::Ui, game: &crate::library::Game, rect: egui::Rect, radiu
         Art::Texture(t) => {
             egui::Image::new((t.id(), rect.size())).corner_radius(radius).paint_at(ui, rect);
         }
+        _ if game.family == crate::library::Family::LeapPad => paint_book_cover(p, rect, radius, &game.title),
+        _ if game.family == crate::library::Family::RockItTwist => paint_twist_card(p, rect, radius, &game.title),
         other => {
             p.rect_filled(rect, radius, egui::Color32::from_rgb(24, 30, 27));
             let note = if matches!(other, Art::Pending) { "Getting title screen…" } else { "🎮" };
@@ -2412,6 +2599,100 @@ fn paint_art(ui: &egui::Ui, game: &crate::library::Game, rect: egui::Rect, radiu
             p.text(rect.center(), egui::Align2::CENTER_CENTER, note, font, egui::Color32::from_gray(120));
         }
     }
+}
+
+/// A LeapPad book's card (the cartridge has no picture of its own): a
+/// cover in a colour of its own, a ring binding down the left, the series as
+/// a tag, the book's name, and a pen-and-page mark.
+fn paint_book_cover(p: &egui::Painter, rect: egui::Rect, radius: u8, title: &str) {
+    const COVERS: [(u8, u8, u8); 8] =
+        [(40, 150, 150), (220, 120, 70), (90, 140, 210), (150, 100, 190), (70, 160, 90), (210, 90, 120), (200, 160, 50), (60, 120, 160)];
+    let (series, name) = crate::leappad::book_series(title);
+    let hash = card_hash(title);
+    let (r, g, b) = COVERS[hash as usize % COVERS.len()];
+    let cover = egui::Color32::from_rgb(r, g, b);
+    p.rect_filled(rect, radius, cover);
+    // A lighter band at the top, as on the books' covers.
+    let band = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), rect.height() * 0.22));
+    p.rect_filled(band, egui::CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 }, egui::Color32::from_white_alpha(40));
+    // The binding.
+    let spine = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * 0.09, rect.height()));
+    p.rect_filled(spine, egui::CornerRadius { nw: radius, sw: radius, ne: 0, se: 0 }, egui::Color32::from_black_alpha(50));
+    let rings = 7;
+    for i in 0..rings {
+        let y = rect.top() + rect.height() * (i as f32 + 0.5) / rings as f32;
+        p.circle_stroke(egui::pos2(spine.right(), y), rect.width() * 0.025, egui::Stroke::new(1.5, egui::Color32::from_gray(225)));
+    }
+    let left = spine.right() + rect.width() * 0.07;
+    let width = rect.right() - left - rect.width() * 0.06;
+    let size = rect.height() / 10.0;
+    if let Some(series) = series {
+        let galley = p.layout(series.to_uppercase(), egui::FontId::proportional(size * 0.55), egui::Color32::WHITE, width);
+        p.galley(egui::pos2(left, band.center().y - galley.size().y / 2.0), galley, egui::Color32::WHITE);
+    }
+    let name = name.rsplit_once(" (").map_or(name.as_str(), |(n, _)| n).to_string();
+    let galley = p.layout(name, egui::FontId::new(size, crate::fonts::title()), egui::Color32::WHITE, width);
+    let top = band.bottom() + rect.height() * 0.08;
+    p.galley(egui::pos2(left, top), galley, egui::Color32::WHITE);
+    // The pen and page, bottom right.
+    let page = egui::Rect::from_center_size(rect.right_bottom() - egui::vec2(rect.width() * 0.2, rect.height() * 0.15), egui::vec2(rect.width() * 0.18, rect.height() * 0.14));
+    p.rect_filled(page, 3.0, egui::Color32::from_rgb(255, 250, 236));
+    for k in 0..3 {
+        let y = page.top() + page.height() * (0.3 + 0.2 * k as f32);
+        p.line_segment([egui::pos2(page.left() + page.width() * 0.15, y), egui::pos2(page.right() - page.width() * 0.15, y)], egui::Stroke::new(1.5, cover));
+    }
+    let tip = page.left_top() + egui::vec2(page.width() * 0.35, page.height() * 0.55);
+    let end = tip + egui::vec2(page.width() * 0.75, -page.height() * 0.95);
+    p.line_segment([tip, end], egui::Stroke::new(rect.width() * 0.035, egui::Color32::from_rgb(40, 90, 200)));
+    p.circle_filled(tip, rect.width() * 0.012, egui::Color32::from_gray(40));
+}
+
+/// A name's hash, to pick a card's colour.
+fn card_hash(name: &str) -> u32 {
+    let mut h = name.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    // A finishing mix, as FNV's low bits alone repeat across similar names.
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846C_A68B);
+    h ^ (h >> 16)
+}
+
+/// A RockIt Twist package's card (game packs are encrypted, so there is no
+/// picture to take): a colour of its own, a drawing of a twistable handheld,
+/// and the game's name.
+fn paint_twist_card(p: &egui::Painter, rect: egui::Rect, radius: u8, title: &str) {
+    const COLOURS: [(u8, u8, u8); 6] = [(225, 70, 110), (60, 170, 220), (240, 160, 40), (120, 90, 210), (40, 180, 120), (230, 100, 50)];
+    let hash = card_hash(title);
+    let (r, g, b) = COLOURS[hash as usize % COLOURS.len()];
+    let colour = egui::Color32::from_rgb(r, g, b);
+    p.rect_filled(rect, radius, egui::Color32::from_rgb(28, 30, 40));
+    let glow = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, rect.height() * 0.08), rect.size() * 0.8);
+    p.rect_filled(glow, rect.width() * 0.4, colour.gamma_multiply(0.25));
+    // The handheld: a rounded body with a screen in its middle and two
+    // ridged grips that twist.
+    let body = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, rect.height() * 0.1), egui::vec2(rect.width() * 0.72, rect.height() * 0.3));
+    p.rect_filled(body, body.height() * 0.5, colour);
+    let screen = egui::Rect::from_center_size(body.center(), egui::vec2(body.width() * 0.42, body.height() * 0.62));
+    p.rect_filled(screen, 4.0, egui::Color32::from_rgb(20, 24, 30));
+    p.rect_filled(screen.shrink(screen.height() * 0.12), 2.0, colour.gamma_multiply(0.45));
+    for side in [-1.0f32, 1.0] {
+        let x = body.center().x + side * body.width() * 0.36;
+        for k in 0..4 {
+            let dx = side * k as f32 * body.width() * 0.025;
+            p.line_segment(
+                [egui::pos2(x + dx, body.top() + body.height() * 0.2), egui::pos2(x + dx, body.bottom() - body.height() * 0.2)],
+                egui::Stroke::new(2.0, egui::Color32::from_black_alpha(70)),
+            );
+        }
+    }
+    let width = rect.width() * 0.84;
+    let tag = p.layout("ROCKIT TWIST".into(), egui::FontId::proportional(rect.height() * 0.05), colour, width);
+    p.galley(egui::pos2(rect.center().x - tag.size().x / 2.0, rect.top() + rect.height() * 0.07), tag, colour);
+    let name = title.rsplit_once(" (").map_or(title, |(n, _)| n).to_string();
+    let galley = p.layout(name, egui::FontId::new(rect.height() / 11.0, crate::fonts::title()), egui::Color32::WHITE, width);
+    let top = body.bottom() + rect.height() * 0.08;
+    p.galley(egui::pos2(rect.center().x - galley.size().x / 2.0, top), galley, egui::Color32::WHITE);
 }
 
 /// A round green play button.
@@ -2740,7 +3021,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a
         // Zippity's or RockIt Twist's belongs to the whole console.
-        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist);
+        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad);
         let delete = ui
             .add_enabled(
                 own_save,

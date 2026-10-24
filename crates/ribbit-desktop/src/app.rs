@@ -4,6 +4,12 @@
 use std::path::Path;
 
 fn main() {
+    // The LeapPad words' helper process: Ribbit started again to transcribe
+    // a book in the background (no window, no log of its own).
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == ribbit_frontend::WORKER_ARG) {
+        std::process::exit(ribbit_frontend::worker_main(&args[2..]));
+    }
     let data_dir = ribbit_frontend::default_data_dir();
     // Nobody sees this program's stderr: the log goes to a file as well, for
     // players to send when something goes wrong.

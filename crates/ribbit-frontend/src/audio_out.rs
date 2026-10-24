@@ -149,6 +149,9 @@ struct Queue {
     /// Times samples were dropped because the queue was full (the sound
     /// skips: the emulator ran ahead of the device, e.g. catching up).
     overflows: u64,
+    /// The longest time between two device callbacks since last asked (a
+    /// starved output thread shows here).
+    longest_gap: std::time::Duration,
 }
 
 impl Queue {
@@ -215,6 +218,11 @@ impl AudioOut {
     pub fn glitches(&self) -> (u64, u64) {
         let q = self.queue.lock().unwrap();
         (q.underruns, q.overflows)
+    }
+
+    /// The longest time between device callbacks since the last call.
+    pub fn take_longest_gap(&self) -> std::time::Duration {
+        std::mem::take(&mut self.queue.lock().unwrap().longest_gap)
     }
 
     /// Samples waiting and whether the device is playing them (for the log).
@@ -336,6 +344,7 @@ where
     let mut remaster = Remaster::new(config.sample_rate as f32);
     // This callback's source samples, taken out of the queue at its start.
     let mut taken: Vec<i16> = Vec::new();
+    let mut last_callback: Option<std::time::Instant> = None;
     let stream = device.build_output_stream(
         *config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
@@ -344,8 +353,14 @@ where
             // The queue is locked only to take this callback's samples:
             // the emulation thread pushes to it, and a callback preempted
             // while holding it (a busy system) would hold that thread up.
+            let now = std::time::Instant::now();
+            let gap = last_callback.map(|t| now - t);
+            last_callback = Some(now);
             let playing = {
                 let mut q = queue.lock().unwrap();
+                if let Some(g) = gap {
+                    q.longest_gap = q.longest_gap.max(g);
+                }
                 if !q.playing && q.samples.len() >= START {
                     q.playing = true;
                     rate.reset(q.samples.len());

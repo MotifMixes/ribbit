@@ -40,6 +40,8 @@ pub struct Stats {
     pub speed_percent: f64,
     /// Set when the machine stopped on its own (CPU error or halt).
     pub stopped: Option<String>,
+    /// Set when it paused at a breakpoint (the debugger's), at this address.
+    pub breakpoint: Option<u32>,
 }
 
 struct Shared {
@@ -59,6 +61,8 @@ struct Shared {
     /// Screen recording: i16 audio samples buffered here while recording
     /// (Some), drained by the UI thread each frame. None = not recording.
     record_audio: Mutex<Option<Vec<i16>>>,
+    /// The debugger's breakpoints (debugger.rs).
+    breakpoints: Mutex<Breakpoints>,
 }
 
 pub struct Emu {
@@ -77,6 +81,7 @@ impl Emu {
             quit: AtomicBool::new(false),
             ui_waiting: AtomicUsize::new(0),
             record_audio: Mutex::new(None),
+            breakpoints: Mutex::new(Breakpoints::default()),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -87,6 +92,16 @@ impl Emu {
             })
             .expect("spawning the emulation thread");
         Self { shared, thread: Some(thread) }
+    }
+
+    /// The debugger's breakpoints, which pause the emulation when reached.
+    pub fn set_breakpoints(&self, b: Breakpoints) {
+        *self.shared.breakpoints.lock().unwrap() = b;
+    }
+
+    /// The breakpoint the emulation paused at (once: it is cleared).
+    pub fn take_breakpoint(&self) -> Option<u32> {
+        self.shared.stats.lock().unwrap().breakpoint.take()
     }
 
     /// The machine, for the UI thread (held briefly: the emulation thread
@@ -185,7 +200,6 @@ impl Drop for Emu {
 fn run(s: &Shared) {
     let mut pace: Option<(Instant, u64)> = None;
     let mut meter: Option<(Instant, u64)> = None;
-    let none = Breakpoints::default();
     let mut audio = Vec::new();
     let mut dac_audio = Vec::new();
     let mut clean = ribbit_audio::LowPass32k::new();
@@ -248,7 +262,8 @@ fn run(s: &Shared) {
             diag.3 += 1;
             diag.4 = diag.4.max(gap);
         }
-        let r = m.run_cycles(cycles, &none);
+        let breakpoints = s.breakpoints.lock().unwrap().clone();
+        let r = m.run_cycles(cycles, &breakpoints);
         running_for += last_chunk.elapsed().min(Duration::from_millis(50));
         last_chunk = Instant::now();
         if jit_report.is_some_and(|after| running_for >= after) {
@@ -259,7 +274,10 @@ fn run(s: &Shared) {
                 None => tracing::info!(target: "ribbit::jit", "JIT off (interpreter only)"),
             }
         }
-        if r.stop != StopReason::StepLimit {
+        if let StopReason::Breakpoint { pc } = r.stop {
+            s.stats.lock().unwrap().breakpoint = Some(pc);
+            s.control.lock().unwrap().0.running = false;
+        } else if r.stop != StopReason::StepLimit {
             tracing::warn!(target: "ribbit::boot", ?r, "emulation stopped");
             s.stats.lock().unwrap().stopped = Some(format!("{:?}", r.stop));
             s.control.lock().unwrap().0.running = false;

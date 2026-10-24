@@ -156,6 +156,11 @@ fn parse_range(s: &str) -> Result<(u32, u32), String> {
 }
 
 fn main() -> ExitCode {
+    // The LeapPad words' helper process (see app.rs).
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == ribbit_frontend::WORKER_ARG) {
+        return ExitCode::from(ribbit_frontend::worker_main(&args[2..]) as u8);
+    }
     match real_main() {
         Ok(code) => code,
         Err(err) => {

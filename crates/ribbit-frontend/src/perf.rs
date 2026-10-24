@@ -125,3 +125,37 @@ mod tests {
         assert_eq!(ids.len(), n);
     }
 }
+
+/// The logical CPUs Ribbit may run on: its affinity (Windows'
+/// available_parallelism counts every CPU in the PC, even when the process
+/// is limited to fewer; Linux's already counts the affinity).
+#[cfg(windows)]
+pub fn usable_cpus() -> usize {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+    let (mut process, mut system) = (0usize, 0usize);
+    // SAFETY: a plain Win32 call on this process's pseudo-handle, writing two
+    // local integers.
+    let ok = unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) } != 0;
+    let all = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if ok && process != 0 { (process.count_ones() as usize).min(all) } else { all }
+}
+
+#[cfg(not(windows))]
+pub fn usable_cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Idle priority for the calling thread: background work (the LeapPad's
+/// words) that must never slow the emulation, its sound or the window. Not
+/// "below normal": Ribbit's process runs above normal, so that still came
+/// before other programs and, on a 4-thread PC, made the LeapPad's sound
+/// click; idle only takes time nothing else wants.
+#[cfg(windows)]
+pub fn idle_priority() {
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_IDLE};
+    // SAFETY: a plain Win32 call on this thread's pseudo-handle.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE) };
+}
+
+#[cfg(not(windows))]
+pub fn idle_priority() {}

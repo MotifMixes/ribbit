@@ -115,6 +115,8 @@ pub struct App {
     twist_import: Option<std::thread::JoinHandle<anyhow::Result<crate::twist::Imported>>>,
     /// A RockIt Twist session (early emulation), instead of the others.
     twist: Option<crate::twist::TwistSession>,
+    /// An original LeapPad being played.
+    leappad: Option<crate::leappad::LeapPadSession>,
     /// The console view's pointer state (controls held by the mouse).
     console_view: ConsoleView,
     /// Leapster/Zippity buttons held by each input source.
@@ -128,6 +130,13 @@ pub struct App {
     ui: UiState,
     frame: Box<[u32; WIDTH * HEIGHT]>,
     paused: bool,
+    /// The debugger's breakpoints (code addresses), for whichever console runs.
+    debug_breakpoints: Vec<u32>,
+    /// The debugger's own windows (debugger.rs).
+    popouts: crate::debugger::Popouts,
+    /// Ribbit's window has the keyboard. With the debugger's windows', it
+    /// decides whether the game is in the background (`about_to_wait`).
+    main_focused: bool,
     /// The BIOS for the next boot instead of the chosen one (a console page
     /// in the library); used once.
     next_bios: Option<PathBuf>,
@@ -238,7 +247,12 @@ impl App {
         crate::install::remove_leftovers();
         crate::twist::set_bindings(&settings.twist_keys);
         if let Some(f) = &opts.firmware {
-            settings.bios = Some(f.clone());
+            // A LeapPad base ROM is the LeapPad's; the Leapster's BIOS stays.
+            if std::fs::read(f).is_ok_and(|d| ribbit_leappad::identify(&d) == Some(ribbit_leappad::Image::BaseRom)) {
+                settings.leappad_bios = Some(f.clone());
+            } else {
+                settings.bios = Some(f.clone());
+            }
         }
         let mut app = Self {
             opts,
@@ -250,27 +264,19 @@ impl App {
             zippity_cleaning: None,
             twist_import: None,
             twist: None,
+            leappad: None,
             console_view: ConsoleView::default(),
             held: Held::default(),
             wheel_px: 0.0,
             gpu: None,
-            egui_ctx: {
-                let ctx = egui::Context::default();
-                crate::fonts::install(&ctx);
-                // Buttons keep their size when pointed at or pressed (egui
-                // grows them a pixel, so their text jumped).
-                ctx.all_styles_mut(|s| {
-                    let w = &mut s.visuals.widgets;
-                    for state in [&mut w.hovered, &mut w.active, &mut w.open] {
-                        state.expansion = 0.0;
-                    }
-                });
-                ctx
-            },
+            egui_ctx: egui_context(),
             egui_state: None,
             ui: UiState::new(),
             frame: Box::new([0; WIDTH * HEIGHT]),
             paused: false,
+            debug_breakpoints: Vec::new(),
+            popouts: Default::default(),
+            main_focused: true,
             next_bios: None,
             background: false,
             flashing: false,
@@ -319,6 +325,14 @@ impl App {
                 app.open_cart(cart)
             }
             None => app.rescan_library(),
+        }
+        // RIBBIT_DEBUG_WINDOWS: the debugger's windows open at start (for
+        // checking them).
+        // Android's app has one window: the debugger is drawn inside it.
+        app.ui.debug.in_app = cfg!(target_os = "android");
+        if std::env::var_os("RIBBIT_DEBUG_WINDOWS").is_some() {
+            app.ui.debug.show_memory = true;
+            app.ui.debug.show_cpu = true;
         }
         app
     }
@@ -553,18 +567,27 @@ impl App {
         if self.twist.take().is_some() {
             self.fit_window = FIT_TRIES;
         }
+        if let Some(lp) = self.leappad.take() {
+            lp.stop();
+        }
         if let Some(z) = self.zippity.take() {
             z.stop();
             // Back to the Leapster's square screen.
             self.fit_window = FIT_TRIES;
         }
         if let Some(s) = self.session.take() {
+            // How long closing takes, for "the library takes a while to
+            // come back" reports.
+            let t = Instant::now();
             let mut machine = s.emu.stop();
+            let stopped = t.elapsed();
             if let Err(e) = s.saves.flush(&mut machine) {
                 tracing::warn!(target: "ribbit::saves", "saving: {e:#}");
             }
+            tracing::info!(target: "ribbit", stop_ms = stopped.as_millis() as u64, saves_ms = (t.elapsed() - stopped).as_millis() as u64, "game closed");
         }
         self.leave_game_settings();
+        self.update_title();
     }
 
     /// Saves everything, once: after an update's restart the new version is
@@ -578,6 +601,13 @@ impl App {
     }
 
     fn set_bios(&mut self, path: PathBuf) {
+        // A LeapPad base ROM: kept as the LeapPad's; the Leapster's BIOS stays.
+        if std::fs::read(&path).is_ok_and(|d| ribbit_leappad::identify(&d) == Some(ribbit_leappad::Image::BaseRom)) {
+            self.settings.leappad_bios = Some(path);
+            self.save_settings();
+            self.ui.toast("BIOS: LeapPad base ROM");
+            return;
+        }
         // A Zippity's system NAND (as dropping it on the window takes it):
         // kept with the BIOSes opened, as the Zippity's; the Leapster's BIOS
         // stays as it is.
@@ -675,6 +705,15 @@ impl App {
     /// Plays a game on the console chosen in the library's console menu
     /// (unless a BIOS was given on the command line).
     fn open_cart(&mut self, path: PathBuf) {
+        // A LeapPad cartridge (or its base ROM): the LeapPad.
+        match std::fs::read(&path).ok().and_then(|d| ribbit_leappad::identify(&d)) {
+            Some(ribbit_leappad::Image::Cartridge) => return self.start_leappad(Some(path)),
+            Some(ribbit_leappad::Image::BaseRom) => {
+                self.set_bios(path);
+                return self.start_leappad(None);
+            }
+            None => {}
+        }
         // A console's built-in games: the Zippity's NAND, or a Leapster
         // BIOS's own games (that BIOS with no cartridge in).
         let internal = self.library.games.iter().find(|g| g.path == path && g.tags.contains(&"Internal"));
@@ -859,6 +898,82 @@ impl App {
     /// Opens a RockIt Twist session (`package`: the package chosen in the
     /// library, if any): the console starts from its system packages when
     /// they are found, otherwise only its controls work.
+    /// Plays the original LeapPad: its base ROM (`leappad_bios`) with a
+    /// cartridge, or none (its built-in book).
+    fn start_leappad(&mut self, cart: Option<PathBuf>) {
+        let Some(bios) = self.settings.leappad_bios.clone() else {
+            return self.ui.problem(
+                "No LeapPad base ROM",
+                "The LeapPad needs the system software from your own pad (a dump of its base ROM). The 2 MB \
+                 \"Canada Full Base ROM\" plays every book; the 1 MB \"ILA2 Universal Base ROM\" lacks sounds some \
+                 older books use. Open it with File > Open BIOS…, then the cartridge again.",
+                "",
+            );
+        };
+        self.end_session();
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::leappad::LeapPadSession::start(&bios, cart.as_deref(), &self.save_dir(), sink, self.settings.leappad_classic) {
+            Ok(mut lp) => {
+                if let Some(c) = &cart {
+                    self.settings.recent_carts.retain(|p| p != c);
+                    self.settings.recent_carts.insert(0, c.clone());
+                    self.settings.recent_carts.truncate(crate::settings::MAX_RECENT);
+                }
+                // The book opened with this cartridge last time, or one next to it.
+                let key = lp.book_key();
+                let near = cart.as_ref().map(|c| c.with_extension("toml")).filter(|p| p.is_file());
+                if let Some(b) = self.settings.leappad_books.get(&key).cloned().filter(|p| p.is_file()).or(near) {
+                    let problems = lp.open_book(ribbit_leappad::book::Book::load(&b));
+                    if problems.iter().any(|p| p.error) {
+                        self.ui.toast(format!("The book {} has errors", b.display()));
+                    }
+                }
+                // Otherwise the book drawn from the cartridge's own layout.
+                if lp.book.is_none() {
+                    lp.open_cartridge_book();
+                }
+                lp.auto_go = self.settings.leappad_auto_go;
+                if lp.auto_go {
+                    lp.go_first_page();
+                }
+                // Its pages' words: kept from before, or made on this PC.
+                lp.start_words(&self.opts.data_dir, self.settings.leappad_words);
+                self.ui.toast(format!("LeapPad: {}", lp.title));
+                if lp.repaired {
+                    self.ui.toast("This cartridge file is damaged (its checksum is wrong), so a real LeapPad would refuse it. Ribbit plays it anyway; a few sounds may be wrong.");
+                }
+                self.leappad = Some(lp);
+                self.update_title();
+                self.save_settings();
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't start the LeapPad",
+                "The base ROM or the cartridge could not be used.",
+                format!("{e:#}"),
+            ),
+        }
+    }
+
+    /// Opens a virtual book on the running LeapPad (None: Ribbit's test book).
+    fn open_leappad_book(&mut self, path: Option<PathBuf>) {
+        let Some(lp) = &mut self.leappad else { return };
+        let loaded = match &path {
+            Some(p) => ribbit_leappad::book::Book::load(p),
+            None => ribbit_leappad::book::Book::parse(crate::leappad::TEST_BOOK, Path::new(".")),
+        };
+        let problems = lp.open_book(loaded);
+        let errors: Vec<String> = problems.iter().filter(|p| p.error).map(|p| p.message.clone()).collect();
+        if !errors.is_empty() {
+            return self.ui.problem("This book can't be opened", "The book file has mistakes:", errors.join("\n"));
+        }
+        if let Some(p) = path {
+            self.settings.leappad_books.insert(lp.book_key(), p);
+            self.save_settings();
+        }
+        let notes = problems.len();
+        self.ui.toast(if notes > 0 { format!("Book opened ({notes} notes in the debug panel)") } else { "Book opened".to_string() });
+    }
+
     fn start_twist(&mut self, package: Option<PathBuf>) {
         self.end_session();
         let session = crate::twist::TwistSession::start(
@@ -1123,6 +1238,7 @@ impl App {
             Pick::TwistContent => self.settings.twist_content.clone(),
             Pick::TwistZip => None,
             Pick::RecordFolder => self.settings.record_folder.clone(),
+            Pick::LeapPadBook => self.leappad.as_ref().and_then(|l| l.cart.clone()),
         };
         #[cfg(target_os = "macos")]
         if self.sheet.is_none()
@@ -1170,6 +1286,7 @@ impl App {
                 self.settings.record_folder = Some(path);
                 self.save_settings();
             }
+            Pick::LeapPadBook => self.open_leappad_book(Some(path)),
         }
     }
 
@@ -1185,6 +1302,105 @@ impl App {
         }
     }
 
+    /// The debugger (debugger.rs), each frame: a breakpoint reached pauses
+    /// the game and shows the code; the open windows get what they show.
+    fn poll_debugger(&mut self) {
+        let hit = self
+            .session
+            .as_ref()
+            .and_then(|s| s.emu.take_breakpoint())
+            .or_else(|| self.leappad.as_ref().and_then(|l| l.take_breakpoint().map(u32::from)));
+        if let Some(pc) = hit {
+            self.paused = true;
+            self.ui.debug.code_at = None;
+            self.ui.debug.show_cpu = true;
+            self.ui.toast(format!("Breakpoint at {pc:08X}"));
+        }
+        if !self.ui.debug.open() {
+            return;
+        }
+        self.sync_breakpoints(false);
+        let (paused, bps) = (self.paused, self.debug_breakpoints.clone());
+        self.ui.debug_snapshot = if let Some(s) = &self.session {
+            let m = s.emu.lock();
+            crate::debugger::leapster_snapshot(&m, &mut self.ui.debug, &bps, paused)
+        } else if let Some(l) = &self.leappad {
+            l.debug_snapshot(&mut self.ui.debug, &bps, paused)
+        } else {
+            let system = if self.zippity.is_some() { "Zippity" } else if self.twist.is_some() { "RockIt Twist" } else { "no game" };
+            crate::debugger::Snapshot { system: system.into(), ..Default::default() }
+        };
+    }
+
+    /// Gives the running console the debugger's breakpoints (`resume`: run
+    /// past the one it stopped at).
+    fn sync_breakpoints(&self, resume: bool) {
+        if let Some(s) = &self.session {
+            let mut b = ribbit_debug::Breakpoints::default();
+            self.debug_breakpoints.iter().for_each(|&a| b.add(a));
+            s.emu.set_breakpoints(b);
+        } else if let Some(l) = &self.leappad {
+            l.set_breakpoints(&self.debug_breakpoints, resume);
+        }
+    }
+
+    /// An event for one of the debugger's own windows: drawn from the
+    /// snapshot the main window's frame took (`poll_debugger`).
+    fn popout_event(&mut self, w: crate::debugger::Which, event: WindowEvent) {
+        let Some(gpu) = &self.gpu else { return };
+        let mut actions = Vec::new();
+        if matches!(event, WindowEvent::RedrawRequested) {
+            let snap = std::mem::take(&mut self.ui.debug_snapshot);
+            if let Err(e) = self.popouts.draw(w, gpu, &mut self.ui.debug, &snap, &mut actions) {
+                tracing::warn!(target: "ribbit", "drawing the debugger: {e:#}");
+            }
+            self.ui.debug_snapshot = snap;
+        } else {
+            self.popouts.event(w, &event, gpu, &mut self.ui.debug);
+        }
+        for a in actions {
+            self.apply_debug(a);
+        }
+    }
+
+    fn apply_debug(&mut self, a: crate::debugger::Action) {
+        use crate::debugger::Action as D;
+        match a {
+            D::Poke(addr, v) => {
+                if let Some(s) = &self.session {
+                    s.emu.lock().bus.poke8(addr, v);
+                } else if let Some(l) = &self.leappad {
+                    l.debug_poke(addr, v);
+                }
+            }
+            D::Pause => self.paused = true,
+            D::Continue => {
+                self.sync_breakpoints(true);
+                self.paused = false;
+            }
+            D::Step => {
+                if let Some(s) = &self.session {
+                    s.emu.lock().run(1, &ribbit_debug::Breakpoints::default());
+                } else if let Some(l) = &self.leappad {
+                    l.debug_step();
+                }
+                self.ui.debug.code_at = None;
+            }
+            D::AddBreakpoint(addr) => {
+                if !self.debug_breakpoints.contains(&addr) {
+                    self.debug_breakpoints.push(addr);
+                    self.debug_breakpoints.sort_unstable();
+                }
+                self.sync_breakpoints(false);
+            }
+            D::RemoveBreakpoint(addr) => {
+                self.debug_breakpoints.retain(|&b| b != addr);
+                self.sync_breakpoints(false);
+            }
+        }
+        self.update_title();
+    }
+
     fn update_title(&self) {
         if let Some(g) = &self.gpu {
             let title = self
@@ -1192,6 +1408,7 @@ impl App {
                 .as_ref()
                 .map(|s| &s.title)
                 .or(self.zippity.as_ref().map(|z| &z.title))
+                .or(self.leappad.as_ref().map(|l| &l.title))
                 .or(self.twist.as_ref().map(|t| &t.title));
             let t = match title {
                 Some(t) if self.paused => format!("{APP_NAME} - {t} (paused)"),
@@ -1216,9 +1433,12 @@ impl App {
             Action::SetBios(p) => self.set_bios(p),
             Action::StartSystem(hw) => self.start_system(hw),
             Action::CloseCartridge => {
+                // Not while paused: the animation can't play, and closing
+                // waited out its full 3 s for nothing.
                 let can_animate = self.settings.close_with_shutdown
                     && !self.closing_animation
-                    && self.session.as_ref().map_or(false, |s| !s.loaded_save_state);
+                    && !self.halted()
+                    && self.session.as_ref().is_some_and(|s| !s.loaded_save_state);
                 if can_animate {
                     self.start_closing_animation();
                 } else if !self.closing_animation {
@@ -1255,6 +1475,8 @@ impl App {
                 self.save_settings();
             }
             Action::OpenTwist => self.start_twist(None),
+            Action::StartLeapPad => self.start_leappad(None),
+            Action::OpenLeapPadBook(path) => self.open_leappad_book(Some(path)),
             Action::SetTwistContent(path) => self.set_twist_content(path),
             Action::SetTwistUsb(on) => {
                 self.settings.twist_usb = on;
@@ -1344,6 +1566,7 @@ impl App {
                 self.cheat.next_scan(&m);
             }
             Action::CheatReset => self.cheat.reset(),
+            Action::Debug(a) => self.apply_debug(a),
             Action::CheatFreeze(addr, val) => {
                 let label = format!("0x{addr:08x}");
                 self.cheat.add_freeze(addr, val, label);
@@ -1957,11 +2180,13 @@ impl App {
         };
         if now.duration_since(log.0).as_secs() >= 5 {
             let n = a.glitches();
+            // The longest wait between the device's callbacks.
+            let callback_ms = a.take_longest_gap().as_millis() as u64;
             if n.0 > log.1.0 {
-                tracing::info!(target: "ribbit::audio", gaps = n.0 - log.1.0, speed = speed_percent, "audio ran dry (last 5 s)");
+                tracing::info!(target: "ribbit::audio", gaps = n.0 - log.1.0, speed = speed_percent, callback_ms, "audio ran dry (last 5 s)");
             }
             if n.1 > log.1.1 {
-                tracing::info!(target: "ribbit::audio", skips = n.1 - log.1.1, speed = speed_percent, "audio queue overflowed, sound skipped (last 5 s)");
+                tracing::info!(target: "ribbit::audio", skips = n.1 - log.1.1, speed = speed_percent, callback_ms, "audio queue overflowed, sound skipped (last 5 s)");
             }
             let (queued, playing) = a.queue_state();
             tracing::debug!(target: "ribbit::audio", queued, playing, "audio queue");
@@ -2017,6 +2242,12 @@ impl App {
                 }
             }
             self.speed_percent = t.machine.as_ref().map_or(0.0, |m| m.speed_percent());
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
+        if let Some(lp) = &self.leappad {
+            lp.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+            self.speed_percent = lp.speed() as f64;
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
@@ -2478,6 +2709,7 @@ impl App {
             None
         };
         let touch_pads = self.touch_pads();
+        self.poll_debugger();
         let (Some(gpu), Some(state)) = (&mut self.gpu, &mut self.egui_state) else {
             return;
         };
@@ -2496,8 +2728,9 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some() || self.zippity.is_some() || self.twist.is_some(),
+                running: self.session.is_some() || self.zippity.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
+                leappad: self.leappad.is_some(),
                 paused: halted,
                 background: !self.paused && halted,
                 idle_left: self.idle_left,
@@ -2509,6 +2742,7 @@ impl App {
                     .map(|s| s.title.clone())
                     .or(self.zippity.as_ref().map(|z| z.title.clone()))
                     .or(self.twist.as_ref().map(|t| t.title.clone()))
+                    .or(self.leappad.as_ref().map(|l| l.title.clone()))
                     .unwrap_or_default(),
                 speed: self.speed_percent,
                 bios_name: self.settings.bios.as_ref().map(|p| {
@@ -2543,10 +2777,17 @@ impl App {
                 let last = crate::library::Family::ALL.into_iter().find(|f| f.name() == self.settings.library_tab);
                 if self.ui.library.tab.is_none() {
                     self.ui.library.tab = last;
+                    // ("Books": all books.)
+                    self.ui.library.books = last.map_or(self.settings.library_tab == "Books", |f| f.is_book());
                 }
             }
         } else {
-            let open = self.ui.library.tab.map_or("", crate::library::Family::name).to_string();
+            let open = match self.ui.library.tab {
+                Some(f) => f.name(),
+                None if self.ui.library.books => "Books",
+                None => "",
+            }
+            .to_string();
             if open != self.settings.library_tab {
                 self.settings.library_tab = open;
                 if let Err(e) = Self::usual_of(&mut self.game_own, &mut self.settings).save(&self.settings_path) {
@@ -2557,15 +2798,18 @@ impl App {
         self.discord.set(match &self.session {
             _ if !self.settings.discord_presence => crate::discord::Presence::Off,
             Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
-            None => match (&self.zippity, &self.twist) {
-                (Some(z), _) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
-                (None, Some(t)) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
-                (None, None) => crate::discord::Presence::Browsing,
+            None => match (&self.zippity, &self.twist, &self.leappad) {
+                (Some(z), _, _) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
+                (None, Some(t), _) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
+                (None, None, Some(l)) => crate::discord::Presence::playing(&l.title, "LeapPad", l.started).with_series(l.series.as_deref()),
+                (None, None, None) => crate::discord::Presence::Browsing,
             },
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
         let touch_pad = &self.touch_pad;
         let (view, held, twist) = (&mut self.console_view, &self.held, self.twist.as_ref());
+        let leappad = &mut self.leappad;
+        let mut leappad_events = Vec::new();
         // Where the screen is inside the console view (None: the plain view).
         let mut screen = None;
         let mut view_events = Vec::new();
@@ -2608,6 +2852,11 @@ impl App {
             if let (true, Some(pads)) = (info.running, &touch_pads) {
                 crate::touch_pad::paint(ui.painter(), pads, touch_pad);
             }
+            if let Some(lp) = leappad.as_mut() {
+                lp.set_paused(info.paused);
+                lp.auto_go = settings.leappad_auto_go;
+                leappad_events = crate::leappad::show(ui, area, lp, info.paused, &mut settings.leappad_book_only, &mut settings.leappad_debug);
+            }
         });
         self.touch_area = area;
         state.handle_platform_output(&gpu.window, out.platform_output);
@@ -2648,6 +2897,32 @@ impl App {
             return;
         }
         self.apply_view_events(view_events);
+        for e in leappad_events {
+            match e {
+                crate::leappad::Event::PickBook => self.pick(Pick::LeapPadBook),
+                crate::leappad::Event::TestBook => self.open_leappad_book(None),
+                crate::leappad::Event::CartridgeBook => {
+                    if let Some(lp) = &mut self.leappad {
+                        if lp.open_cartridge_book() {
+                            lp.start_words(&self.opts.data_dir, self.settings.leappad_words);
+                            self.settings.leappad_books.remove(&lp.book_key());
+                            self.save_settings();
+                            self.ui.toast("Book drawn from the cartridge's layout");
+                        } else {
+                            let note = lp.layout_note.clone().unwrap_or_default();
+                            self.ui.toast(format!("Couldn't draw this cartridge's book: {note}"));
+                        }
+                    }
+                }
+                crate::leappad::Event::CloseBook => {
+                    if let Some(lp) = &mut self.leappad {
+                        lp.close_book();
+                        self.settings.leappad_books.remove(&lp.book_key());
+                        self.save_settings();
+                    }
+                }
+            }
+        }
         for a in actions {
             self.act(a, event_loop);
         }
@@ -2701,6 +2976,22 @@ impl FrameDiag {
             *self = FrameDiag { since: Some(start), last: Some(start), ..Default::default() };
         }
     }
+}
+
+/// An egui context with Ribbit's fonts and look (the main window's, and
+/// the debugger's own windows').
+pub(crate) fn egui_context() -> egui::Context {
+    let ctx = egui::Context::default();
+    crate::fonts::install(&ctx);
+    // Buttons keep their size when pointed at or pressed (egui grows them a
+    // pixel, so their text jumped).
+    ctx.all_styles_mut(|s| {
+        let w = &mut s.visuals.widgets;
+        for state in [&mut w.hovered, &mut w.active, &mut w.open] {
+            state.expansion = 0.0;
+        }
+    });
+    ctx
 }
 
 impl ApplicationHandler for App {
@@ -2787,7 +3078,11 @@ impl ApplicationHandler for App {
         self.egui_state = None;
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(w) = self.popouts.which(id) {
+            self.popout_event(w, event);
+            return;
+        }
         // (`ui_at` decides whether a press belongs to the UI or the stylus.)
         let consumed = match (&mut self.egui_state, &self.gpu) {
             (Some(st), Some(g)) => st.on_window_event(&g.window, &event).consumed,
@@ -2801,7 +3096,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
-            WindowEvent::Focused(f) => self.focus_changed(f),
+            // Settled in `about_to_wait`: focus moving to the debugger's
+            // window is not going to the background.
+            WindowEvent::Focused(f) => self.main_focused = f,
             WindowEvent::DroppedFile(path) => self.open_dropped(path),
             WindowEvent::KeyboardInput { event: KeyEvent { physical_key, state, repeat: false, .. }, .. } => {
                 if consumed && self.egui_ctx.egui_wants_keyboard_input() {
@@ -2867,8 +3164,26 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "macos")]
         self.poll_sheet();
         self.poll_native_pick();
+        // No BIOS chosen yet but one in the games folders (a player who only
+        // added a folder): it is the BIOS, and the scan runs again to make
+        // the title screens with it.
+        if self.settings.bios.is_none()
+            && !self.library.scanning
+            && let Some(bios) = self.library.bios_for(ribbit_memory::known::Hardware::Leapster).map(Path::to_path_buf)
+        {
+            tracing::info!(target: "ribbit::library", bios = %bios.display(), "using the BIOS found in the games folders");
+            self.settings.bios = Some(bios);
+            self.save_settings();
+            self.rescan_library();
+        }
+        let focused = self.main_focused || self.popouts.focused;
+        if focused == self.background {
+            self.focus_changed(focused);
+        }
         if let Some(g) = &self.gpu {
             g.window.request_redraw();
+            self.popouts.sync(event_loop, g, &mut self.ui.debug, &self.ui.debug_snapshot.system);
+            self.popouts.request_redraws();
         }
     }
 
@@ -2957,7 +3272,7 @@ mod tests {
 }
 
 /// What the Zippity cleaning failure means for the user's file.
-const TWIST_IMPORT_FAILED: &str = "Nothing changed on the emulated RockIt Twist. The zip should hold RockIt Twist      package folders, each with its meta.inf, as they are installed on the console.";
+const TWIST_IMPORT_FAILED: &str = "Nothing changed on the emulated RockIt Twist. The zip should hold RockIt Twist package folders, each with its meta.inf, as they are installed on the console.";
 
 const CLEAN_FAILED: &str = "The players are still there. Nothing was lost: the dump is either unchanged or \
                             kept beside it as a .with-saves.bak file.";
@@ -3003,7 +3318,7 @@ fn explain_load_error(e: &anyhow::Error) -> (String, String) {
         LoadError::BiosIo { path, .. } => (
             "Couldn't read the BIOS".to_string(),
             format!(
-                "The BIOS this console uses, \"{}\", couldn't be opened. It may have been moved, renamed or deleted.                  Choose it again with File → Open BIOS…, or pick another console.",
+                "The BIOS this console uses, \"{}\", couldn't be opened. It may have been moved, renamed or deleted. Choose it again with File → Open BIOS…, or pick another console.",
                 path.display()
             ),
         ),
