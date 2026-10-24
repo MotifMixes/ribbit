@@ -943,6 +943,7 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
             egui::UiBuilder::new().max_rect(words_row.shrink2(egui::vec2(10.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         // Spinning while the words load or the model downloads.
+        #[cfg(not(target_os = "android"))]
         if lp.words_job.is_some() || lp.words_download.is_some() {
             row.spinner();
         }
