@@ -399,7 +399,7 @@ LeapFrog Connect 2 (4.6.5) accepts the emulated console (serial "RIBBIT000000000
   (`Type` Application, Music, Video or Trailer), as installed on a console. Ribbit unpacks one region's packages
   (the system packages' region, else en-us) into its data folder laid out like F: (`ribbit_twist::content`), then
   uses that as the content folder below. It does not decrypt anything.
-* **Content folder** (File → RockIt Twist content folder…): a folder on the computer laid out like the console's
+* **Content folder** (Emulation → RockIt Twist → Content folder…): a folder on the computer laid out like the console's
   F: drive (`Applications\Bundle\main.bin`, `Music\Bundle`, `Trailers\Bundle`...). Its files are written onto
   the emulated storage at power-on (`fat::add_host_folder`, a FAT32 writer: long names, both FATs, the factory
   volume's free space), so the firmware finds them as LeapFrog Connect's installs. For your own programs (see

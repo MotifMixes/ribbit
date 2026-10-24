@@ -1,6 +1,6 @@
 # The game library
 
-Once a BIOS is chosen, Ribbit opens on your games: a card for each one, with its title screen.
+Once Ribbit has a console's system files (a BIOS you opened, or one in your games folder), it opens on your games: a card for each one, with its title screen.
 
 ![The library while Ribbit gets the games' title screens (each card shows its game's title screen once it has it)](images/library.png)
 
@@ -15,6 +15,7 @@ While Ribbit works through new games, the line under the heading says how many t
 
 ## Choosing and starting
 
+- **Games | Books** at the top switches between the game consoles and the LeapPad's books (shown when you have books). Each side has its own tabs and favorites.
 - The tabs above the cards (**All games**, **Leapster**, **Zippity**…) show one console's games.
 - Type in **Search games** to narrow the list by title.
 - Click a card to play. The game you played last also shows large at the top.

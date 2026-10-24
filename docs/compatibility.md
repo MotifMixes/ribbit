@@ -1,7 +1,7 @@
 # Compatibility
 
 How far each game gets in Ribbit, for every console it emulates. Update this file whenever a game is tested.
-Last updated 2026-10-17 (Ribbit 1.2.1).
+Last updated 2026-10-24 (Ribbit 1.5.0).
 
 ## Consoles at a glance
 
@@ -12,6 +12,7 @@ Last updated 2026-10-17 (Ribbit 1.2.1).
 | Leapster TV | 2005 | Experimental | SpongeBob reaches its intro | [Leapster TV](#leapster-tv-experimental) |
 | Leapster 2 | 2008 | Experimental | Every tested game shows the same screens as on the original; touch works | [Leapster 2 and L-MAX](#leapster-2-and-l-max-experimental) |
 | Zippity | 2009 | Working | Built-in Mickey Says **Playable**; two cartridges reach their game menus | [Zippity](#zippity) |
+| LeapPad (original book-and-pen pad) | 1999 | Early emulation, with sound | Books drawn from their cartridges; every spot answers; At the Shore's words filled in | [LeapPad](#leappad-early-emulation) |
 | RockIt Twist | 2019 | Early emulation | Built-in Nom-Nom **Playable**, videos play | [RockIt Twist](#rockit-twist-early-emulation) |
 
 You need your own console's firmware (BIOS or system dump) and your own game dumps for every console. None are
@@ -142,7 +143,7 @@ System dump: US system NAND (CRC32 16248b63). Controls are the dance mat, bopper
 
 System packages: Bootloader, Base and Firmware-Bulk (`.lfp`). Without installed content the firmware shows its own
 "Device Error" screen, which is correct: a real unit shows it too until LeapFrog Connect installs the menu. Games
-run only from **unpacked** content (File → Import RockIt Twist games). Encrypted `.lf3` game packs are not run, and
+run only from **unpacked** content (Emulation → RockIt Twist → Import games). Encrypted `.lf3` game packs are not run, and
 Ribbit will not decrypt them. See [rockit-twist.md](rockit-twist.md).
 
 | Game | Kind | Status | Checked | Notes |
@@ -168,3 +169,22 @@ Ribbit will not decrypt them. See [rockit-twist.md](rockit-twist.md).
 | Any `.lf3` pack | Encrypted pack | Nothing | | Encrypted; not supported by design |
 
 Some games draw a small box at the top of the screen that a real unit probably does not show (cause unknown).
+
+## LeapPad (early emulation)
+
+Base ROMs: 152-10620 "2MB Canada Full Base ROM" (best: accepts every cartridge and holds the shared sounds the older books use) or 155-00450 "LeapPad ILA2 Universal Base ROM" (MAME's `leappad`). Sound plays (music, effects, speech); the power-on
+tune's notes, timing and loudness match a recording of a real pad. For cartridges with the "Prebuilt TnT" app Ribbit draws the book's spots,
+GO tabs, stop sign and sentence buttons from the cartridge itself (no page pictures), and does the same for LeapPad Classic cartridges.
+The printed words are filled in on the player's PC by listening to the spots (speech recognition; nothing transcribed ships with Ribbit).
+Details: [leappad.md](leappad.md), books: [leappad-books.md](leappad-books.md).
+
+| Cartridge | Part | Status | Notes |
+|---|---|---|---|
+| Tutter's Tiny Trip | 500-00406 | **Menus** | The base checks it ("Cart OK") and runs its kernel and app. Pen touches reach its software at the right place (24 targets, worst error 0.63%); a GO touch changes its view. Start-up music, announcement and idle music play; the ON/OFF switch powers it down after its sound. Its book is drawn from the cartridge: all 914 spots on 12 spreads answer where drawn. |
+| Bounce, Tigger, Bounce; Finding Nemo; Disney Princess Stories | 500-00652, 500-01148, 500-00730 | **Menus** | Book drawn from the cartridge; the spots of the spreads tried (1-4) answer where drawn. Not otherwise played. |
+| The Messy Mystery; Cars; Leap's Pond (Mind Station) | 500-01022-B, 500-11374, 540-00166 | Untested | The layout reads (Cars: GO tabs only). |
+| The pad alone (built-in book) | — | **Menus** | Runs its built-in "TnT" app. |
+| LeapPad Classic: Leap's Friends From A to Z, Once Upon A Time, The Bike Race, At the Shore, On the Train to Maine, At the Art Mart, Squire Hare and Sir Turtle | 500-00263 (= 00973-B), 00803, 11874, 11878-B, 11882, 11885, 11887 | **Menus** | At the Shore: every sentence's words heard right. Run their own kernel and app (Emulation > LeapPad (1999) > "Play LeapPad Classic cartridges", on by default). Book drawn from the cartridge; every spot of every spread answers where drawn, in all three reading modes (00803: one spot silent). 00263, 11874 and 11878-B use sounds of the 2 MB Full Base ROM; with the ILA2 base those sounds are silent. With the Canada Full Base, 00263, 11878-B and Tutter's Tiny Trip were also touched in full (all answer). |
+| The Birthday Surprise; Leap's Pond Premier Issue | 500-00367, 500-00394 | Untested | LeapPad Classic. Their start-up music never ends, so they never take touches (cause unknown). Book drawn from the cartridge. |
+| Tad Goes Shopping | 500-00104 | Bad dump | The known dump lost address line A8 (half of every 512 bytes repeats); Ribbit says so instead of starting it. A good dump is needed. |
+

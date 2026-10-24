@@ -109,6 +109,13 @@ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
+----------------------------------------------------------------------------
+Whisper tiny.en (speech recognition model; not included: downloaded from
+Hugging Face when asked, to fill in a LeapPad book's words)
+https://github.com/openai/whisper, https://huggingface.co/openai/whisper-tiny.en
+----------------------------------------------------------------------------
+MIT License. Copyright (c) 2022 OpenAI.
+
 Rust crates used by Ribbit carry their own licences (MIT and/or Apache-2.0
 for most); see each crate's metadata.
 

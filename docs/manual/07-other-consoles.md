@@ -29,12 +29,12 @@ The Zippity is LeapFrog's TV console with a dance mat and a bopper. It needs a d
 
 The RockIt Twist needs its system packages and its games, decrypted and unpacked from your own packs:
 
-1. **File › Import RockIt Twist games (.zip)…** installs a zip of package folders (each with its `meta.inf`) on the emulated console.
-2. **File › RockIt Twist (early emulation)** turns it on: its own menu shows the games.
+1. **Emulation › RockIt Twist › Import games (.zip)…** installs a zip of package folders (each with its `meta.inf`) on the emulated console.
+2. **Emulation › RockIt Twist › Turn on (early emulation)** turns it on: its own menu shows the games.
 
 > Ribbit does not decrypt LeapFrog's `.lf3` packs and includes no tools for it. An `.lf3` file opened as it is will not run.
 
-The menu, the built-in games, the videos and the sound work; the console keeps its profiles and progress in the save folder. **File › RockIt Twist content folder…** adds a folder to the console's storage (for your own programs or content), and **Plug the RockIt Twist into this PC (USB)** offers it to LeapFrog Connect through USB/IP.
+The menu, the built-in games, the videos and the sound work; the console keeps its profiles and progress in the save folder. **Emulation › RockIt Twist › Content folder…** adds a folder to the console's storage (for your own programs or content), and **Plug into this PC (USB)** in the same menu offers it to LeapFrog Connect through USB/IP.
 
 | RockIt Twist | Keys |
 |---|---|
@@ -46,3 +46,18 @@ The menu, the built-in games, the videos and the sound work; the console keeps i
 | Slider | `Page Up` / `Page Down`, mouse wheel |
 | Check mark | `Enter` |
 | Home / Hint | `Home` / `Shift` or `Tab` |
+
+## LeapPad (early emulation)
+
+The original LeapPad (1999) is a book-and-pen pad: the child touches the printed page with the pen and the cartridge talks. Ribbit needs the pad's **base ROM** from your own LeapPad: open it with **File › Open BIOS…** (Ribbit keeps it as the LeapPad's; your Leapster BIOS stays). The 2 MB "Full Base" ROM works best.
+
+- Your book cartridges are on the library's **Books** side. Click one to open it; **Emulation › LeapPad (1999) › Turn on (built-in book)** starts the pad with no cartridge.
+- Cartridges hold no page pictures, so Ribbit draws each page from the cartridge itself: the spots it answers, its GO circle, its stop sign and its sentence buttons. Click anywhere on the page with the mouse (the pen).
+- **◀ ▶** in the bar turn the page. A real pad needs a touch on the green **GO** after every page turn; with **Touch GO automatically** (on) Ribbit's pen does it for you.
+- **ON/OFF** is the pad's switch.
+
+### The books' words
+
+Cartridges hold sound, not text. With **Show the books' words** (on), Ribbit fills in each page's printed words by listening to its spots in the background, the page you are on first (about 10 seconds a page on a fast PC). It needs a speech model (OpenAI's Whisper, about 150 MB): click **Get it** in the bar once. The words are kept, so each book is only done once. Nothing leaves your PC except the model's download. Not on Android yet.
+
+The LeapPad is early emulation: see the [compatibility list](https://github.com/MotifMixes/ribbit/blob/main/docs/compatibility.md) for the books that have been tried.

@@ -73,3 +73,12 @@ Click a menu to open it; while one is open, point at another and it opens instea
 ## The stylus and calibration
 
 Leapster games that use the stylus take the mouse (or a finger). **Emulation › Touchscreen (experimental)** must be on. When a game asks you to calibrate the screen, **Calibrate automatically** presses the targets for you; **Skip calibration at boot** uses the saved calibration instead.
+
+## The debugger
+
+The **Debug** menu has two tools for looking inside a running game. Each opens in a window of its own beside Ribbit's (inside it on Android); the game keeps running while you use them.
+
+- **Memory viewer…** shows the console's memory sixteen bytes a line. Choose an area (RAM, VRAM, the BIOS, the cartridge…), type an address in **Go to**, or scroll. Click a byte and type two hex digits to change it; the arrow keys move along.
+- **Debugger…** shows the CPU's registers and the code at the program counter. **Pause**, **Step** (one instruction) and **Continue**. Click a line of code to put a breakpoint on it (●) or take it off, or type an address in **Breakpoint at**; the game pauses when it gets there.
+
+Pause, step and breakpoints work for the Leapster consoles and the LeapPad; the Zippity and RockIt Twist show their windows without them for now.

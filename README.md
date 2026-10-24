@@ -3,7 +3,7 @@
 # Ribbit
 
 An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leapster (the main target), the
-Leapster L-MAX, Leapster TV and Leapster 2, the Zippity and the RockIt Twist. Written in Rust, for **Windows, macOS,
+Leapster L-MAX, Leapster TV and Leapster 2, the Zippity, the RockIt Twist and the original LeapPad. Written in Rust, for **Windows, macOS,
 Linux and Android** (the Android app is new and has not been tested on real devices yet).
 
 ## Download and play
@@ -58,8 +58,8 @@ Linux.
 > labelled with how sure it is (VERIFIED, EVIDENCE, HYPOTHESIS, UNKNOWN) and where it comes from, and the tests are
 > there to check the behaviour.
 >
-> Ribbit is not affiliated with or endorsed by LeapFrog Enterprises. LeapFrog, Leapster, Zippity and RockIt Twist
-> are their trademarks.
+> Ribbit is not affiliated with or endorsed by LeapFrog Enterprises. LeapFrog, Leapster, LeapPad, Zippity and
+> RockIt Twist are their trademarks.
 
 ## You need your own dumps
 
@@ -71,7 +71,7 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 > **RockIt Twist games must be decrypted before Ribbit can play them.** LeapFrog's `.lf3` game packs are
 > encrypted, and Ribbit does not decrypt them and includes no tools for it. It plays only packs that are already
 > decrypted and unpacked: package folders with their `meta.inf`, laid out as they are installed on a console.
-> Import a zip of them with File → Import RockIt Twist games. An `.lf3` file opened as it is will not run.
+> Import a zip of them with Emulation → RockIt Twist → Import games. An `.lf3` file opened as it is will not run.
 
 ## Features
 
@@ -85,10 +85,18 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 * **Zippity** (ARM9 TV console): system menu, built-in games and cartridges, dance mat and bopper controls, sound.
 * **RockIt Twist** (early): the real bootloader and firmware, menu, built-in games, MPEG-4 videos, sound, dials,
   spinner and slider, saves.
+* **LeapPad** (1999 book-and-pen pad, early): the real base ROM and book cartridges, including the first "Classic"
+  books. Cartridges hold no page pictures, so Ribbit draws each page from the cartridge's own touch layout (its spots,
+  GO circle, stop sign and sentence buttons); click with the mouse as the pen. Its music and speech match a recording
+  of a real pad. The printed words are filled in on your own PC by listening to the spots (a speech model downloaded
+  once); no book text comes with Ribbit.
 
 **App**
 
-* Game library with a tab per console, title cards and drag-and-drop.
+* Game library with a tab per console, title cards and drag-and-drop; **Games | Books** switches to the LeapPad's
+  books.
+* **Debugger**: a memory viewer that edits like a hex editor, and a CPU window with registers, code, pause, step and
+  breakpoints (Leapster consoles and the LeapPad), each in a window of its own.
 * Battery saves (cartridge and system EEPROM, Zippity NAND, RockIt Twist storage) kept automatically.
 * Save states (5 slots), rewind, fast-forward, pause, screenshots.
 * Keyboard, mouse (as the stylus) and game controllers (XInput and others), all remappable.
@@ -154,6 +162,14 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 * A small box appears at the top of the screen in some games.
 * Loudness and sprite rotation direction not checked against a real unit.
 * No LeapFrog Connect (USB) yet; USB/IP is a work in progress.
+
+**LeapPad**
+
+* Early: books show their spots and words, not their printed pictures (cartridges don't hold them).
+* The words come from speech recognition and can be wrong; not on Android yet.
+* The books' question and game modes are not checked yet. Two older Classic books (The Birthday Surprise, Leap's
+  Pond Premier Issue) never get past their start-up music.
+* The known dump of Tad Goes Shopping is bad (Ribbit says so).
 
 **General**
 
@@ -240,6 +256,8 @@ All keys can be changed in Input → Key bindings…. Zippity and RockIt Twist c
   confidence labels
 * [Zippity](docs/zippity.md) and [RockIt Twist](docs/rockit-twist.md): research, formats, controls and status
 * [RockIt Twist USB](docs/rockit-twist-usb.md): the USB controller and LeapFrog Connect protocol
+* [LeapPad](docs/leappad.md) and [LeapPad books](docs/leappad-books.md): research, the sound and pen, the books
+  drawn from cartridges
 * [Architecture](docs/architecture.md): crate layout, frontend choice, licensing notes
 * [Accuracy matrix](docs/accuracy-matrix.md): what Ribbit implements and how it is tested
 * [Open questions](docs/open-questions.md): unknowns and experiments to settle them
