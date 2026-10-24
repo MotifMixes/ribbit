@@ -22,6 +22,9 @@ pub enum Hardware {
     /// system-on-chip (part UNKNOWN), firmware from VTech. NOT EMULATED: a
     /// research preview (crates/ribbit-twist, docs/rockit-twist.md).
     RockItTwist,
+    /// The original LeapFrog LeapPad (1999 book-and-pen pad): an 8051 base
+    /// and a book cartridge; no screen (crates/ribbit-leappad).
+    LeapPad,
 }
 
 impl Hardware {
@@ -34,6 +37,7 @@ impl Hardware {
             Hardware::Leapster2 => "Leapster 2",
             Hardware::Zippity => "Zippity",
             Hardware::RockItTwist => "RockIt Twist",
+            Hardware::LeapPad => "LeapPad",
         }
     }
 }

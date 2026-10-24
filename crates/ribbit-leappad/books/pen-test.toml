@@ -1,0 +1,246 @@
+# Ribbit's pen test book: an original test fixture, not a LeapFrog book.
+#
+# Each spread has a grid of numbered targets on both pages and a GO spot. Touching a target puts the
+# emulated pen there; the cartridge's own software decides what happens, and its debug log shows where it
+# felt the touch, which `tests/books.rs` compares with the target. Coordinates are the cartridge's page
+# units (docs/leappad-books.md).
+format = 1
+title = "Ribbit Pen Test Book"
+
+[[spread]]
+name = "Grid A"
+# A test GO spot near the top-left corner of the left page, where Tutter's Tiny Trip reacts with a
+# page-pointer touch (docs/leappad.md, "Pen position").
+go = { page = "left", x = 100, y = 100 }
+
+  [[spread.region]]
+  name = "Grid A 1"
+  page = "left"
+  rect = [155, 235, 347, 444]
+
+  [[spread.region]]
+  name = "Grid A 2"
+  page = "left"
+  rect = [377, 235, 568, 444]
+
+  [[spread.region]]
+  name = "Grid A 3"
+  page = "left"
+  rect = [598, 235, 790, 444]
+
+  [[spread.region]]
+  name = "Grid A 4"
+  page = "left"
+  rect = [155, 474, 347, 682]
+
+  [[spread.region]]
+  name = "Grid A 5"
+  page = "left"
+  rect = [377, 474, 568, 682]
+
+  [[spread.region]]
+  name = "Grid A 6"
+  page = "left"
+  rect = [598, 474, 790, 682]
+
+  [[spread.region]]
+  name = "Grid A 7"
+  page = "left"
+  rect = [155, 712, 347, 921]
+
+  [[spread.region]]
+  name = "Grid A 8"
+  page = "left"
+  rect = [377, 712, 568, 921]
+
+  [[spread.region]]
+  name = "Grid A 9"
+  page = "left"
+  rect = [598, 712, 790, 921]
+
+  [[spread.region]]
+  name = "Grid A 10"
+  page = "left"
+  rect = [155, 951, 347, 1160]
+
+  [[spread.region]]
+  name = "Grid A 11"
+  page = "left"
+  rect = [377, 951, 568, 1160]
+
+  [[spread.region]]
+  name = "Grid A 12"
+  page = "left"
+  rect = [598, 951, 790, 1160]
+
+  [[spread.region]]
+  name = "Grid A 13"
+  page = "right"
+  rect = [155, 235, 347, 444]
+
+  [[spread.region]]
+  name = "Grid A 14"
+  page = "right"
+  rect = [377, 235, 568, 444]
+
+  [[spread.region]]
+  name = "Grid A 15"
+  page = "right"
+  rect = [598, 235, 790, 444]
+
+  [[spread.region]]
+  name = "Grid A 16"
+  page = "right"
+  rect = [155, 474, 347, 682]
+
+  [[spread.region]]
+  name = "Grid A 17"
+  page = "right"
+  rect = [377, 474, 568, 682]
+
+  [[spread.region]]
+  name = "Grid A 18"
+  page = "right"
+  rect = [598, 474, 790, 682]
+
+  [[spread.region]]
+  name = "Grid A 19"
+  page = "right"
+  rect = [155, 712, 347, 921]
+
+  [[spread.region]]
+  name = "Grid A 20"
+  page = "right"
+  rect = [377, 712, 568, 921]
+
+  [[spread.region]]
+  name = "Grid A 21"
+  page = "right"
+  rect = [598, 712, 790, 921]
+
+  [[spread.region]]
+  name = "Grid A 22"
+  page = "right"
+  rect = [155, 951, 347, 1160]
+
+  [[spread.region]]
+  name = "Grid A 23"
+  page = "right"
+  rect = [377, 951, 568, 1160]
+
+  [[spread.region]]
+  name = "Grid A 24"
+  page = "right"
+  rect = [598, 951, 790, 1160]
+
+[[spread]]
+name = "Grid B"
+# A test GO spot near the top-left corner of the left page, where Tutter's Tiny Trip reacts with a
+# page-pointer touch (docs/leappad.md, "Pen position").
+go = { page = "left", x = 100, y = 100 }
+
+  [[spread.region]]
+  name = "Grid B 1"
+  page = "left"
+  rect = [155, 235, 458, 523]
+
+  [[spread.region]]
+  name = "Grid B 2"
+  page = "left"
+  rect = [488, 235, 790, 523]
+
+  [[spread.region]]
+  name = "Grid B 3"
+  page = "left"
+  rect = [155, 553, 458, 842]
+
+  [[spread.region]]
+  name = "Grid B 4"
+  page = "left"
+  rect = [488, 553, 790, 842]
+
+  [[spread.region]]
+  name = "Grid B 5"
+  page = "left"
+  rect = [155, 872, 458, 1160]
+
+  [[spread.region]]
+  name = "Grid B 6"
+  page = "left"
+  rect = [488, 872, 790, 1160]
+
+  [[spread.region]]
+  name = "Grid B 7"
+  page = "right"
+  rect = [155, 235, 458, 523]
+
+  [[spread.region]]
+  name = "Grid B 8"
+  page = "right"
+  rect = [488, 235, 790, 523]
+
+  [[spread.region]]
+  name = "Grid B 9"
+  page = "right"
+  rect = [155, 553, 458, 842]
+
+  [[spread.region]]
+  name = "Grid B 10"
+  page = "right"
+  rect = [488, 553, 790, 842]
+
+  [[spread.region]]
+  name = "Grid B 11"
+  page = "right"
+  rect = [155, 872, 458, 1160]
+
+  [[spread.region]]
+  name = "Grid B 12"
+  page = "right"
+  rect = [488, 872, 790, 1160]
+
+[[spread]]
+name = "Corners"
+# A test GO spot near the top-left corner of the left page, where Tutter's Tiny Trip reacts with a
+# page-pointer touch (docs/leappad.md, "Pen position").
+go = { page = "left", x = 100, y = 100 }
+
+  [[spread.region]]
+  name = "Corners 1"
+  page = "left"
+  rect = [155, 235, 458, 682]
+
+  [[spread.region]]
+  name = "Corners 2"
+  page = "left"
+  rect = [488, 235, 790, 682]
+
+  [[spread.region]]
+  name = "Corners 3"
+  page = "left"
+  rect = [155, 712, 458, 1160]
+
+  [[spread.region]]
+  name = "Corners 4"
+  page = "left"
+  rect = [488, 712, 790, 1160]
+
+  [[spread.region]]
+  name = "Corners 5"
+  page = "right"
+  rect = [155, 235, 458, 682]
+
+  [[spread.region]]
+  name = "Corners 6"
+  page = "right"
+  rect = [488, 235, 790, 682]
+
+  [[spread.region]]
+  name = "Corners 7"
+  page = "right"
+  rect = [155, 712, 458, 1160]
+
+  [[spread.region]]
+  name = "Corners 8"
+  page = "right"
+  rect = [488, 712, 790, 1160]

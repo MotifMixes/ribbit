@@ -24,3 +24,9 @@ zippity/
 /leapfrog-rockit-twist-apps/
 # Flash files extracted from cartridges.
 *.swf
+
+# LeapPad cartridge dumps (copyrighted; kept out of the repository).
+/LeapPad_Reading_System_Archive/
+# Local Claude Code settings and Python caches.
+/.claude/
+__pycache__/

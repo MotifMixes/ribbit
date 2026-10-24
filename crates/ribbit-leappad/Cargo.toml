@@ -1,0 +1,14 @@
+[package]
+name = "ribbit-leappad"
+description = "LeapFrog LeapPad (1999 book-and-stylus system, 8051-based) machine model and virtual books"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ribbit-audio.workspace = true
+ribbit-core.workspace = true
+ribbit-memory.workspace = true
+serde.workspace = true
+toml.workspace = true

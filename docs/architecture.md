@@ -33,6 +33,9 @@ crates/
   ribbit-zippity/          LeapFrog Zippity machine (GeneralPlus GPL32300A)
   ribbit-twist/            LeapFrog RockIt Twist research: controls, package/firmware formats, boot probe
                            (NOT an emulator yet; docs/rockit-twist.md)
+  ribbit-leappad/          Original LeapPad (1999 book-and-pen toy): 8051 core, bank windows, pen sensor, sound
+                           (the Leapster voice engine from ribbit-core), books drawn from the cartridge's touch
+                           layout; early (docs/leappad.md)
   ribbit-frontend/         UI shared by desktop and Android; console_view.rs draws each console's handheld
                            (layouts as data) around the screen: presentation only, never in a core
   ribbit-desktop/          `ribbit` binary: CLI + headless runner + winit/wgpu window

@@ -1,0 +1,18 @@
+[package]
+name = "ribbit-speech"
+description = "Speech recognition (Whisper, on the CPU) for transcribing what a LeapPad book's spots say"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+serde_json = "1"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+
+[dev-dependencies]
+ribbit-leappad.workspace = true

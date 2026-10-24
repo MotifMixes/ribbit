@@ -240,6 +240,15 @@ impl VoiceEngine {
         true
     }
 
+    /// Sets a pitched voice's pitch (0x8000 = one sample a step), at once if
+    /// it is playing (the LeapPad's bends; the Leapster's go through `write`).
+    pub fn write_pitch(&mut self, v: usize, pitch: u16) {
+        self.pitch[v] = pitch;
+        if self.triggered[v] {
+            self.dx[v] = pitch as f32 / 32768.0;
+        }
+    }
+
     /// A voice command (0x0180_2070): command = byte >> 3, voice = byte & 7.
     pub fn command(&mut self, command: u8, voice: u8) {
         let v = voice as usize & 7;

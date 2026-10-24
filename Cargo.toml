@@ -7,6 +7,8 @@ members = [
     "crates/ribbit-arm",
     "crates/ribbit-zippity",
     "crates/ribbit-twist",
+    "crates/ribbit-leappad",
+    "crates/ribbit-speech",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
@@ -23,6 +25,7 @@ default-members = [
     "crates/ribbit-arm",
     "crates/ribbit-zippity",
     "crates/ribbit-twist",
+    "crates/ribbit-leappad",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
@@ -48,6 +51,8 @@ ribbit-jit = { path = "crates/ribbit-jit" }
 ribbit-arm = { path = "crates/ribbit-arm" }
 ribbit-zippity = { path = "crates/ribbit-zippity" }
 ribbit-twist = { path = "crates/ribbit-twist" }
+ribbit-leappad = { path = "crates/ribbit-leappad" }
+ribbit-speech = { path = "crates/ribbit-speech" }
 ribbit-memory = { path = "crates/ribbit-memory" }
 ribbit-video = { path = "crates/ribbit-video" }
 ribbit-audio = { path = "crates/ribbit-audio" }
