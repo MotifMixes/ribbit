@@ -228,6 +228,11 @@ impl CheatSearch {
         }
     }
 
+    /// The value at `addr` now, at the search's size.
+    pub fn current(&self, m: &Machine, addr: u32) -> Option<u32> {
+        Self::read(m, addr, self.ty)
+    }
+
     /// Writes `value` to `addr` once (the game carries on from it).
     pub fn set_once(&self, m: &mut Machine, addr: u32, value: u32) {
         Self::write(m, addr, value, self.ty);
@@ -274,6 +279,61 @@ mod set_tests {
         assert_eq!(parse_number("lots"), None);
         assert_eq!(ValueType::U8.max(), 255);
         assert_eq!(ValueType::U16.max(), 65535);
+    }
+
+    /// Set and Freeze on a real game:
+    /// `RIBBIT_BIOS=<BIOS> RIBBIT_CART=<cartridge> cargo test -p ribbit-frontend --release -- --ignored set_and_freeze`.
+    /// Bytes the game leaves alone keep a Set value; a byte the game keeps
+    /// changing stays at a frozen value.
+    #[test]
+    #[ignore]
+    fn set_and_freeze_work_on_a_running_game() {
+        use ribbit_debug::Breakpoints;
+        let bios = std::env::var("RIBBIT_BIOS").expect("RIBBIT_BIOS");
+        let cart = std::env::var("RIBBIT_CART").expect("RIBBIT_CART");
+        let fw = ribbit_core::load_firmware(std::path::Path::new(&bios)).expect("BIOS");
+        let cart = ribbit_core::load_cartridge(std::path::Path::new(&cart)).expect("cartridge");
+        let mut m = Machine::new(fw, Some(cart));
+        m.reset();
+        let second = m.clock.cpu_hz as u64;
+        let run = |m: &mut Machine, secs: f64| m.run_cycles((second as f64 * secs) as u64, &Breakpoints::default());
+        run(&mut m, 8.0);
+        // Bytes that hold still for two seconds, and bytes that keep changing.
+        let mut still = CheatSearch { op: SearchOp::Unchanged, ..Default::default() };
+        still.first_scan(&m);
+        let mut moving = CheatSearch { op: SearchOp::Unchanged, ..Default::default() };
+        moving.first_scan(&m);
+        for _ in 0..4 {
+            run(&mut m, 0.5);
+            still.next_scan(&m);
+        }
+        let before: Vec<(u32, u32)> = moving.candidates.iter().map(|c| (c.addr, c.prev)).collect();
+        run(&mut m, 0.5);
+        let changing: Vec<u32> = before.iter().filter(|(a, v)| moving.current(&m, *a) != Some(*v)).map(|(a, _)| *a).collect();
+        eprintln!("{} bytes held still, {} changed", still.candidates.len(), changing.len());
+        // Set: 50 still bytes take new values, and keep them.
+        let picked: Vec<(u32, u32)> = still.candidates.iter().step_by((still.candidates.len() / 50).max(1)).take(50).map(|c| (c.addr, c.prev ^ 0x5A)).collect();
+        for &(a, v) in &picked {
+            still.set_once(&mut m, a, v);
+        }
+        for &(a, v) in &picked {
+            assert_eq!(still.current(&m, a), Some(v), "Set wrote {a:#x}");
+        }
+        run(&mut m, 2.0);
+        let kept = picked.iter().filter(|&&(a, v)| still.current(&m, a) == Some(v)).count();
+        eprintln!("Set: {kept} of {} kept their new value after 2 s", picked.len());
+        assert!(kept * 10 >= picked.len() * 8, "Set values kept: {kept} of {}", picked.len());
+        // Freeze: a byte the game changes stays at the frozen value.
+        let a = *changing.first().expect("a byte the game changes");
+        let mut f = CheatSearch::default();
+        f.add_freeze(a, 0x42, "test");
+        let mut held = 0;
+        for _ in 0..60 {
+            run(&mut m, 1.0 / 60.0);
+            f.apply_freezes(&mut m);
+            held += usize::from(f.current(&m, a) == Some(0x42));
+        }
+        assert_eq!(held, 60, "frozen {a:#x} held every frame");
     }
 
     #[test]

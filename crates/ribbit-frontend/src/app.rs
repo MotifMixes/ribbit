@@ -2764,8 +2764,15 @@ impl App {
                 recording: self.recording.as_ref().map(|r| r.started.elapsed().as_secs()),
                 encoding: self.encoding.as_ref().is_some_and(|t| !t.is_finished()),
                 cheat_candidates: {
+                    // The values now (while the window is open), so a Set,
+                    // or the game changing one, shows at once; the scan's
+                    // values otherwise.
                     let all = &self.cheat.candidates;
-                    all.iter().take(200).map(|c| (c.addr, c.prev)).collect()
+                    let m = self.ui.show_cheat.then(|| self.session.as_ref().map(|s| s.emu.lock())).flatten();
+                    all.iter()
+                        .take(200)
+                        .map(|c| (c.addr, m.as_ref().and_then(|m| self.cheat.current(m, c.addr)).unwrap_or(c.prev)))
+                        .collect()
                 },
                 cheat_has_scan: self.cheat.has_scan,
                 cheat_freezes: self.cheat.freezes.iter()
