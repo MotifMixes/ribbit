@@ -1568,10 +1568,17 @@ impl App {
             Action::CheatReset => self.cheat.reset(),
             Action::Debug(a) => self.apply_debug(a),
             Action::CheatFreeze(addr, val) => {
+                self.sync_cheat_from_ui();
                 let label = format!("0x{addr:08x}");
                 self.cheat.add_freeze(addr, val, label);
             }
             Action::CheatUnfreeze(addr) => self.cheat.remove_freeze(addr),
+            Action::CheatSet(addr, val) => {
+                self.sync_cheat_from_ui();
+                if let Some(s) = &self.session {
+                    self.cheat.set_once(&mut s.emu.lock(), addr, val);
+                }
+            }
             Action::ToggleFavorite(path) => {
                 if let Some(i) = self.settings.favorites.iter().position(|p| p == &path) {
                     self.settings.favorites.remove(i);

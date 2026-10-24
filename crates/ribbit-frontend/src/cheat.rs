@@ -59,6 +59,15 @@ impl ValueType {
         }
     }
 
+    /// The largest value that fits.
+    pub fn max(self) -> u32 {
+        match self {
+            ValueType::U8 => u8::MAX as u32,
+            ValueType::U16 => u16::MAX as u32,
+            ValueType::U32 => u32::MAX,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ValueType::U8 => "1 byte",
@@ -136,12 +145,7 @@ impl CheatSearch {
 
     /// Parse `value_text` as a u32 (decimal or `0x`-prefixed hex). None if unparseable.
     fn parse_value(&self) -> Option<u32> {
-        let s = self.value_text.trim();
-        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            u32::from_str_radix(hex, 16).ok()
-        } else {
-            s.parse::<u32>().ok().or_else(|| s.parse::<i32>().ok().map(|v| v as u32))
-        }
+        parse_number(&self.value_text)
     }
 
     /// First scan: search all of RAM for addresses matching `op` / `value`.
@@ -211,12 +215,22 @@ impl CheatSearch {
         }
     }
 
-    /// Freeze `addr` at `value`.
+    /// Freeze `addr` at `value` (an address already frozen takes the new
+    /// value).
     pub fn add_freeze(&mut self, addr: u32, value: u32, label: impl Into<String>) {
         let ty = self.ty;
-        if !self.freezes.iter().any(|f| f.addr == addr) {
-            self.freezes.push(Freeze { addr, value, ty, label: label.into() });
+        match self.freezes.iter_mut().find(|f| f.addr == addr) {
+            Some(f) => {
+                f.value = value;
+                f.ty = ty;
+            }
+            None => self.freezes.push(Freeze { addr, value, ty, label: label.into() }),
         }
+    }
+
+    /// Writes `value` to `addr` once (the game carries on from it).
+    pub fn set_once(&self, m: &mut Machine, addr: u32, value: u32) {
+        Self::write(m, addr, value, self.ty);
     }
 
     /// Remove the freeze at `addr`.
@@ -235,5 +249,39 @@ impl CheatSearch {
     pub fn reset(&mut self) {
         self.candidates.clear();
         self.has_scan = false;
+    }
+}
+
+/// A number as typed: decimal (negative too) or `0x`-prefixed hex.
+pub fn parse_number(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u32>().ok().or_else(|| s.parse::<i32>().ok().map(|v| v as u32))
+    }
+}
+
+#[cfg(test)]
+mod set_tests {
+    use super::*;
+
+    #[test]
+    fn numbers_are_read_as_typed() {
+        assert_eq!(parse_number("99"), Some(99));
+        assert_eq!(parse_number(" 0x63 "), Some(0x63));
+        assert_eq!(parse_number("-1"), Some(u32::MAX));
+        assert_eq!(parse_number("lots"), None);
+        assert_eq!(ValueType::U8.max(), 255);
+        assert_eq!(ValueType::U16.max(), 65535);
+    }
+
+    #[test]
+    fn freezing_a_frozen_address_takes_the_new_value() {
+        let mut c = CheatSearch::default();
+        c.add_freeze(0x1000, 3, "a");
+        c.add_freeze(0x1000, 99, "a");
+        assert_eq!(c.freezes.len(), 1);
+        assert_eq!(c.freezes[0].value, 99);
     }
 }

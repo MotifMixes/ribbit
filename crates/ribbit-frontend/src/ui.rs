@@ -85,8 +85,10 @@ pub enum Action {
     CheatReset,
     /// The debugger's windows asked for this (debugger.rs).
     Debug(crate::debugger::Action),
-    /// Freeze address at its current value.
+    /// Freeze address at a value.
     CheatFreeze(u32, u32),
+    /// Write a value to an address once.
+    CheatSet(u32, u32),
     /// Unfreeze this address.
     CheatUnfreeze(u32),
     Quit,
@@ -216,6 +218,8 @@ pub struct UiState {
     pub debug_snapshot: crate::debugger::Snapshot,
     /// Cheat search: typed value text.
     pub cheat_value_text: String,
+    /// The value Set and Freeze write (empty: Freeze keeps the current one).
+    pub cheat_new_value: String,
     /// Cheat search: comparison operator.
     pub cheat_op: crate::cheat::SearchOp,
     /// Cheat search: value width.
@@ -3544,14 +3548,46 @@ fn cheat_window(ctx: &egui::Context, st: &mut UiState, info: &Info, actions: &mu
             });
             let n = info.cheat_candidates.len();
             ui.label(format!("{n} candidate{}", if n == 1 { "" } else { "s" }));
+            // The value Set writes once and Freeze holds (empty: Freeze
+            // holds the value the address has now).
+            let new_value = crate::cheat::parse_number(&st.cheat_new_value);
+            let typed = !st.cheat_new_value.trim().is_empty();
+            // Negative numbers count down from the top (-1 is 255 in a byte).
+            let negative = st.cheat_new_value.trim().starts_with('-');
+            let fits = new_value.is_some_and(|v| {
+                v <= st.cheat_ty.max() || (negative && (v as i32 as i64) >= -((st.cheat_ty.max() as i64 + 1) / 2))
+            });
+            ui.horizontal(|ui| {
+                ui.label("New value:");
+                ui.add(egui::TextEdit::singleline(&mut st.cheat_new_value).desired_width(100.0).hint_text("e.g. 99 or 0x63"));
+                if typed && !fits {
+                    let why = if new_value.is_none() { "Not a number".to_string() } else { format!("Too big for {} (largest {})", st.cheat_ty.label(), st.cheat_ty.max()) };
+                    ui.label(egui::RichText::new(why).color(egui::Color32::from_rgb(235, 120, 100)));
+                }
+            });
+            let mask = st.cheat_ty.max();
             // Candidate list.
             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                 for &(addr, val) in &info.cheat_candidates {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{addr:#010x}")).monospace());
                         ui.label(format!("= {val}  (0x{val:x})"));
-                        if ui.small_button("Freeze").clicked() {
-                            actions.push(Action::CheatFreeze(addr, val));
+                        if ui
+                            .add_enabled(fits, egui::Button::new("Set").small())
+                            .on_hover_text("Write the new value here once; the game carries on from it")
+                            .on_disabled_hover_text("Type a new value above first")
+                            .clicked()
+                            && let Some(v) = new_value
+                        {
+                            actions.push(Action::CheatSet(addr, v & mask));
+                        }
+                        let hold = if fits { new_value.map_or(val, |v| v & mask) } else { val };
+                        if ui
+                            .add_enabled(!typed || fits, egui::Button::new("Freeze").small())
+                            .on_hover_text(if typed { "Keep the new value here" } else { "Keep the value it has now" })
+                            .clicked()
+                        {
+                            actions.push(Action::CheatFreeze(addr, hold));
                         }
                     });
                 }
