@@ -934,8 +934,8 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::SettingsChanged);
         }
         if ui
-            .checkbox(&mut settings.close_with_shutdown, "Animate game shutdown")
-            .on_hover_text("When closing a game to return to the library, play the console's own shutdown animation (a few seconds). Each game has its own. Not used if a save state was loaded this session, or while the game is paused. Off: back to the library at once.")
+            .checkbox(&mut settings.close_with_shutdown, "Animate game shutdown (slow, experimental)")
+            .on_hover_text("When closing a game, press the console's power button first, so the game can play its own shutdown animation. Most games take longer than Ribbit waits (it closes after 3 s) and some ignore it, so closing often just pauses for 3 s. Not used if a save state was loaded this session, or while the game is paused. Off: back to the library at once.")
             .changed()
         {
             actions.push(Action::SettingsChanged);

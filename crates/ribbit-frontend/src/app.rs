@@ -238,6 +238,14 @@ impl App {
         if settings.last_version != crate::backup::VERSION {
             let save_dir = settings.save_dir.clone().unwrap_or_else(|| opts.data_dir.join("saves"));
             crate::backup::before_update(&opts.data_dir, &save_dir, &settings.last_version);
+            // "Animate game shutdown" was on by default before 1.4 and kept
+            // in settings: most games take 6-15 s to answer the power button
+            // (or never do), so closing froze for its 3 s limit. Off once,
+            // on the update to 1.5.1.
+            if older_than(&settings.last_version, (1, 5, 1)) && settings.close_with_shutdown {
+                tracing::info!(target: "ribbit::settings", "Animate game shutdown turned off (closing waited 3 s)");
+                settings.close_with_shutdown = false;
+            }
             settings.last_version = crate::backup::VERSION.to_string();
             if let Err(e) = settings.save(&settings_path) {
                 tracing::warn!(target: "ribbit::settings", "saving settings: {e:#}");
@@ -2992,6 +3000,13 @@ impl FrameDiag {
     }
 }
 
+/// Whether `version` ("1.4.4"; empty: none recorded) is older than `than`.
+fn older_than(version: &str, than: (u32, u32, u32)) -> bool {
+    let mut n = version.split('.').map(|p| p.trim().parse::<u32>().unwrap_or(0));
+    let v = (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0));
+    !version.trim().is_empty() && v < than
+}
+
 /// An egui context with Ribbit's fonts and look (the main window's, and
 /// the debugger's own windows').
 pub(crate) fn egui_context() -> egui::Context {
@@ -3273,6 +3288,15 @@ pub(crate) fn short_name(full: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn versions_compare() {
+        assert!(super::older_than("1.4.4", (1, 5, 1)));
+        assert!(super::older_than("1.5.0", (1, 5, 1)));
+        assert!(!super::older_than("1.5.1", (1, 5, 1)));
+        assert!(!super::older_than("1.10.0", (1, 5, 1)));
+        assert!(!super::older_than("", (1, 5, 1)));
+    }
+
     #[test]
     fn short_names_drop_catalogue_details() {
         assert_eq!(
