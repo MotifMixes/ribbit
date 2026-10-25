@@ -1203,7 +1203,7 @@ pub fn describe_installed(dir: &Path) -> Option<Game> {
         title,
         subtitle,
         details,
-        tags: vec![if bundle { "Internal" } else { "Installed" }],
+        tags: vec![(if bundle { "Internal" } else { "Installed" }).into()],
         key: format!("twist-installed-{id}"),
         art: Art::Missing,
     })
@@ -1277,7 +1277,7 @@ pub fn describe_package(path: &Path) -> Option<Game> {
         title,
         subtitle,
         details,
-        tags: vec![tag],
+        tags: vec![tag.into()],
         key,
         art: Art::Missing,
     })

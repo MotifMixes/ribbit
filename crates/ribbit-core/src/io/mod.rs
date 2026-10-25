@@ -181,8 +181,8 @@ pub struct Peripherals {
     /// Leapster 2: the SD card slot's pins (sd.rs; None on other models).
     #[serde(default)]
     pub sd: Option<sd::SdSlot>,
-    /// Leapster 2: the USB device controller, no host connected (usb.rs).
-    #[serde(default)]
+    /// Leapster 2: the USB controller and the cable (usb.rs).
+    #[serde(default, deserialize_with = "usb::deserialize_any_version")]
     pub usb: Option<usb::UsbDevice>,
     /// Leapster 2 CIP3: NAND flash at 0xE000_0000 (nand.rs).
     #[serde(default)]
@@ -429,7 +429,8 @@ impl Peripherals {
     /// interrupt line: a timer wrap, an ADC conversion or a UART transfer.
     pub fn next_event(&self) -> u64 {
         let timers = self.timers.iter().map(|t| t.ticks_to_wrap()).min().unwrap_or(u64::MAX);
-        timers.min(self.adc.ticks_to_next()).min(self.uart.ticks_to_ready())
+        let usb = self.usb.as_ref().map_or(u64::MAX, |u| u.ticks_to_next());
+        timers.min(self.adc.ticks_to_next()).min(self.uart.ticks_to_ready()).min(usb)
     }
 
     /// Advances all devices by `ticks` peripheral-clock counts.
@@ -438,6 +439,9 @@ impl Peripherals {
             t.advance(ticks, cpu_halted);
         }
         self.uart.advance(ticks);
+        if let Some(u) = &mut self.usb {
+            u.advance(ticks);
+        }
         if let Some(t) = &mut self.touch {
             t.ticks += ticks;
         }
@@ -459,6 +463,7 @@ impl Peripherals {
             | 1 << intc::VOICE_ACK_IRQ_LINE
             | 1 << tv_link::IRQ_LINE
             | 1 << uart::IRQ_LINE
+            | 1 << usb::IRQ_LINE
     }
 
     /// Levels of the lines in `irq_mask` (same values as `irq_outputs`).
@@ -473,6 +478,7 @@ impl Peripherals {
         l |= (self.intc.voice_ack_line() as u32) << intc::VOICE_ACK_IRQ_LINE;
         l |= (self.tv_link.as_ref().is_some_and(|t| t.irq_line()) as u32) << tv_link::IRQ_LINE;
         l |= (self.uart.irq_line() as u32) << uart::IRQ_LINE;
+        l |= (self.usb.as_ref().is_some_and(|u| u.irq_line()) as u32) << usb::IRQ_LINE;
         l
     }
 
@@ -488,6 +494,7 @@ impl Peripherals {
             .chain(std::iter::once((intc::VOICE_ACK_IRQ_LINE, self.intc.voice_ack_line())))
             .chain(std::iter::once((tv_link::IRQ_LINE, self.tv_link.as_ref().is_some_and(|t| t.irq_line()))))
             .chain(std::iter::once((uart::IRQ_LINE, self.uart.irq_line())))
+            .chain(std::iter::once((usb::IRQ_LINE, self.usb.as_ref().is_some_and(|u| u.irq_line()))))
     }
 
     #[cfg(test)]

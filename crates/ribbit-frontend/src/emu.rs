@@ -63,7 +63,15 @@ struct Shared {
     record_audio: Mutex<Option<Vec<i16>>>,
     /// The debugger's breakpoints (debugger.rs).
     breakpoints: Mutex<Breakpoints>,
+    /// Leapster 2 on the PC's USB: the USB/IP server whose client is the
+    /// cable (None = unplugged), and news of it for the UI.
+    usb: Mutex<Option<UsbServer>>,
+    usb_news: Mutex<Option<crate::twist::UsbNews>>,
 }
+
+/// A USB/IP server, shared with the app (it outlives sessions: its port stays
+/// bound).
+pub type UsbServer = Arc<Mutex<ribbit_twist::usbip::Server>>;
 
 pub struct Emu {
     shared: Arc<Shared>,
@@ -82,6 +90,8 @@ impl Emu {
             ui_waiting: AtomicUsize::new(0),
             record_audio: Mutex::new(None),
             breakpoints: Mutex::new(Breakpoints::default()),
+            usb: Mutex::new(None),
+            usb_news: Mutex::new(None),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -102,6 +112,21 @@ impl Emu {
     /// The breakpoint the emulation paused at (once: it is cleared).
     pub fn take_breakpoint(&self) -> Option<u32> {
         self.shared.stats.lock().unwrap().breakpoint.take()
+    }
+
+    /// Leapster 2: offers the console on the PC's USB through `server`, or
+    /// (None) pulls the cable out.
+    pub fn set_usb(&self, server: Option<UsbServer>) {
+        let off = server.is_none();
+        *self.shared.usb.lock().unwrap() = server;
+        if off {
+            self.lock().usb_plug(false);
+        }
+    }
+
+    /// News of the USB link since last asked.
+    pub fn take_usb_news(&self) -> Option<crate::twist::UsbNews> {
+        self.shared.usb_news.lock().unwrap().take()
     }
 
     /// The machine, for the UI thread (held briefly: the emulation thread
@@ -214,6 +239,8 @@ fn run(s: &Shared) {
     let mut diag = (0u32, f64::MAX, 0.0f64, 0u32, Duration::ZERO);
     let mut running_for = Duration::ZERO;
     let mut calibrate = crate::calibrate::AutoCalibrate::new();
+    // Paused on USB: run the console until then (see `run_paused_for_usb`).
+    let mut usb_until: Option<Instant> = None;
     while !s.quit.load(Ordering::Relaxed) {
         let control = {
             let mut g = s.control.lock().unwrap();
@@ -223,7 +250,15 @@ fn run(s: &Shared) {
             if !g.0.running {
                 pace = None;
                 meter = None;
-                let _ = s.wake.wait_timeout(g, Duration::from_millis(50)).unwrap();
+                // A pause (the window in the background) is not a stall:
+                // the log counted one 29 s long.
+                last_chunk = Instant::now();
+                if s.usb.lock().unwrap().is_some() {
+                    drop(g);
+                    run_paused_for_usb(s, &mut usb_until);
+                } else {
+                    let _ = s.wake.wait_timeout(g, Duration::from_millis(50)).unwrap();
+                }
                 continue;
             }
             g.0
@@ -263,7 +298,9 @@ fn run(s: &Shared) {
             diag.4 = diag.4.max(gap);
         }
         let breakpoints = s.breakpoints.lock().unwrap().clone();
+        pump_usb(s, &mut m);
         let r = m.run_cycles(cycles, &breakpoints);
+        pump_usb(s, &mut m);
         running_for += last_chunk.elapsed().min(Duration::from_millis(50));
         last_chunk = Instant::now();
         if jit_report.is_some_and(|after| running_for >= after) {
@@ -360,5 +397,97 @@ fn run(s: &Shared) {
             s.stats.lock().unwrap().speed_percent = speed;
             meter = Some((now, cycles));
         }
+    }
+}
+
+/// Paused with the Leapster 2 on USB: only the BIOS can answer the PC, so
+/// while the host waits for it (io/usb.rs `host_busy`, and 0.3 s after, for
+/// what the BIOS does once a transfer is done) the console runs, silent, at
+/// real-time speed; otherwise it stays paused and the PC's requests are
+/// checked every 5 ms.
+fn run_paused_for_usb(s: &Shared, until: &mut Option<Instant>) {
+    while s.ui_waiting.load(Ordering::SeqCst) > 0 {
+        std::thread::yield_now();
+    }
+    let mut m = s.machine.lock().unwrap_or_else(|e| e.into_inner());
+    pump_usb(s, &mut m);
+    let now = Instant::now();
+    if m.io.usb.as_ref().is_some_and(|u| u.host_busy()) {
+        *until = Some(now + Duration::from_millis(300));
+    }
+    if until.is_none_or(|t| now >= t) {
+        *until = None;
+        drop(m);
+        std::thread::sleep(Duration::from_millis(5));
+        return;
+    }
+    let breakpoints = s.breakpoints.lock().unwrap().clone();
+    if breakpoints.hit(m.cpu.pc) {
+        // Stopped at a breakpoint (debugger): stays there.
+        drop(m);
+        std::thread::sleep(Duration::from_millis(5));
+        return;
+    }
+    let chunk = (CHUNK.as_secs_f64() * m.clock.cpu_hz as f64) as u64;
+    let r = m.run_cycles(chunk, &breakpoints);
+    pump_usb(s, &mut m);
+    // At real-time speed: as fast as it goes, Windows' once-a-second check
+    // of an empty drive kept a CPU core busier than a running game does.
+    let spare = CHUNK.saturating_sub(now.elapsed());
+    if let StopReason::Breakpoint { pc } = r.stop {
+        s.stats.lock().unwrap().breakpoint = Some(pc);
+    }
+    // The sound made meanwhile is dropped (paused means silent).
+    let mut drop_audio = vec![0; m.io.voices.output.len()];
+    m.io.voices.output.pop_into(&mut drop_audio);
+    drop_audio.resize(m.io.voices.dac_output.len(), 0);
+    m.io.voices.dac_output.pop_into(&mut drop_audio);
+    drop(m);
+    std::thread::sleep(spare);
+}
+
+/// Passes the PC's transfers (USB/IP) to the Leapster 2's USB controller and
+/// its answers back (io/usb.rs).
+fn pump_usb(s: &Shared, m: &mut Machine) {
+    use ribbit_core::io::usb::{Outcome, Transfer};
+    use ribbit_twist::usbip::{ECONNRESET, EPIPE, Event};
+    let Some(srv) = s.usb.lock().unwrap().clone() else { return };
+    let srv = srv.lock().unwrap();
+    // The cable is in while the option is on, not only while a USB/IP client
+    // is attached: plugged into a running console, the BIOS restarts it once
+    // and is ready ~7 s later (io/usb.rs), before the client's requests
+    // would time out.
+    if m.io.usb.as_ref().is_some_and(|u| !u.host.attached) {
+        m.usb_plug(true);
+    }
+    while let Some(e) = srv.next_event() {
+        match e {
+            Event::Attached => {
+                if m.io.usb.is_some() {
+                    *s.usb_news.lock().unwrap() = Some(crate::twist::UsbNews::Attached);
+                }
+            }
+            Event::Detached => {
+                if let Some(u) = m.io.usb.as_mut() {
+                    u.cancel_all();
+                    u.take_done();
+                    *s.usb_news.lock().unwrap() = Some(crate::twist::UsbNews::Detached);
+                }
+            }
+            Event::Submit(u) => {
+                m.usb_submit(Transfer { id: u.seq, endpoint: u.endpoint, dir_in: u.dir_in, setup: u.setup, data: u.data, length: u.length })
+            }
+            Event::Unlink(seq) => {
+                m.usb_unlink(seq);
+            }
+        }
+    }
+    for f in m.usb_take_done() {
+        let status = match f.outcome {
+            Outcome::Ok => 0,
+            Outcome::Stalled => -EPIPE,
+            Outcome::Cancelled => -ECONNRESET,
+        };
+        srv.complete(f.id, status, f.data, f.actual);
     }
 }

@@ -65,6 +65,8 @@ pub enum Action {
     /// Use this folder as the RockIt Twist's storage content (None: none).
     SetTwistContent(Option<PathBuf>),
     SetTwistUsb(bool),
+    /// Offer a Leapster 2 on the PC's USB, or stop.
+    SetLeapster2Usb(bool),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
     ImportTwistZip(PathBuf),
     /// The console view was turned on or off.
@@ -77,6 +79,10 @@ pub enum Action {
     PickRecordFolder,
     /// Set the recording output folder.
     SetRecordFolder(PathBuf),
+    /// Recordings back to the default folder (Videos).
+    ResetRecordFolder,
+    /// Show the recordings folder in the file manager.
+    OpenRecordFolder,
     /// First pass of the cheat / memory search.
     CheatFirstScan,
     /// Subsequent pass filtering the cheat candidates.
@@ -148,6 +154,8 @@ pub struct Info {
     pub recording: Option<u64>,
     /// An encoding task is running in the background.
     pub encoding: bool,
+    /// Where recordings are saved (the chosen folder, else Videos).
+    pub record_dir: PathBuf,
     /// Cheat search candidates (addr, value), capped at 200 for display.
     pub cheat_candidates: Vec<(u32, u32)>,
     /// A cheat scan has been done (next-scan is available).
@@ -317,10 +325,7 @@ pub fn draw(
         egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, st, settings, info, actions));
     }
     if settings.show_status_bar && !info.fullscreen && !phone {
-        // The newest message shows in the status bar (nothing to cover).
-        st.toasts.retain(|(_, until)| Instant::now() < *until);
-        let message = st.toasts.last().map(|(m, _)| m.clone());
-        egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, info, message.as_deref()));
+        egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, info));
     }
     let was_running = std::mem::replace(&mut st.was_running, info.running);
     let mut area = egui::Rect::NOTHING;
@@ -397,10 +402,9 @@ pub fn draw(
             });
         });
     }
-    // Over the screen only when there is no status bar to show them in.
-    if !settings.show_status_bar || info.fullscreen || phone {
-        toasts(&ctx, st);
-    }
+    // Dropped down from the top, under the menu bar; the status bar keeps
+    // showing the game and its speed (a message in its place hid them).
+    toasts(&ctx, st, area.top());
     area
 }
 
@@ -963,6 +967,25 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         {
             actions.push(Action::SettingsChanged);
         }
+        let usb = settings.leapster2_usb;
+        if ui
+            .button(if usb {
+                // Green while plugged in, red while not (as the RockIt Twist's).
+                egui::RichText::new("🔌  Leapster 2: unplug from this PC (USB)").color(egui::Color32::from_rgb(80, 200, 110))
+            } else {
+                egui::RichText::new("🔌  Leapster 2: plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
+            })
+            .on_hover_text(
+                "Experimental. Connects the emulated Leapster 2 to this PC as a USB cable would, so programs such as \
+                 LeapLoader can use its two drives. Needs usbip-win2 (winget install usbip-win2). A running Leapster 2 \
+                 restarts once when plugged in, as a real one does. Wait about 7 seconds, then run: \
+                 usbip attach -r 127.0.0.1 -b 1-1",
+            )
+            .clicked()
+        {
+            actions.push(Action::SetLeapster2Usb(!usb));
+            ui.close();
+        }
         if ui
             .checkbox(&mut settings.auto_calibrate, "Calibrate automatically")
             .on_hover_text("Ribbit presses the calibration targets for you when the calibration screen appears.")
@@ -1240,21 +1263,37 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 actions.push(Action::ToggleRecord);
                 ui.close();
             }
+            if ui.button("📂  Open recordings folder")
+                .on_hover_text(info.record_dir.display().to_string())
+                .clicked()
+            {
+                actions.push(Action::OpenRecordFolder);
+                ui.close();
+            }
             sub_menu(ui, "Recording settings", |ui| {
-                ui.label(egui::RichText::new("Encoder").strong());
+                ui.label(egui::RichText::new("Encoder").strong()).on_hover_text(
+                    "These need FFmpeg on your PATH. Without it, Windows saves recordings as H.264 (.mp4) \
+                     with its own encoder; other systems save uncompressed .avi.",
+                );
                 for enc in [RecordEncoder::H264, RecordEncoder::H265, RecordEncoder::Vp9, RecordEncoder::Lossless] {
                     if ui.radio_value(&mut settings.record_encoder, enc, enc.label()).clicked() {
                         actions.push(Action::SettingsChanged);
                     }
                 }
                 ui.separator();
-                let folder_label = settings.record_folder
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "recordings/ (default)".to_string());
-                if ui.button(format!("Output: {folder_label}…")).clicked() {
+                let default = if settings.record_folder.is_some() { "" } else { " (default)" };
+                ui.label(egui::RichText::new(format!("Saved in{default}")).strong());
+                ui.label(egui::RichText::new(info.record_dir.display().to_string()).weak());
+                if ui.button("📂  Open folder").clicked() {
+                    actions.push(Action::OpenRecordFolder);
+                    ui.close();
+                }
+                if ui.button("Change folder…").clicked() {
                     actions.push(Action::PickRecordFolder);
+                    ui.close();
+                }
+                if settings.record_folder.is_some() && ui.button("Use the Videos folder").clicked() {
+                    actions.push(Action::ResetRecordFolder);
                     ui.close();
                 }
             });
@@ -1629,15 +1668,8 @@ fn updates_window(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings
     st.show_updates = open && !close;
 }
 
-fn status_bar(ui: &mut egui::Ui, info: &Info, message: Option<&str>) {
+fn status_bar(ui: &mut egui::Ui, info: &Info) {
     ui.horizontal(|ui| {
-        if let Some(m) = message {
-            // A message (BIOS chosen, save deleted...) in place of the
-            // status text while it shows.
-            ui.label(egui::RichText::new(m).color(ACCENT).strong());
-            ui.ctx().request_repaint();
-            return;
-        }
         ui.label(if info.running { info.title.as_str() } else { "No game running" });
         if info.experimental_touch && info.running {
             ui.label(egui::RichText::new("· touch: experimental").weak());
@@ -1852,7 +1884,7 @@ fn library_screen(
                 if !tab.is_none_or(|f| f.lists(g.family)) { return false; }
                 if !matches(g) { return false; }
                 if *favorites_only && !settings.favorites.contains(&g.path) { return false; }
-                if g.tags.contains(&"Internal") && settings.hide_builtin_tabs.contains(tab_name) { return false; }
+                if g.has_tag("Internal") && settings.hide_builtin_tabs.contains(tab_name) { return false; }
                 // Hide games that belong to a folder from the main list (show them inside the folder).
                 if open_folder.is_none() && !*favorites_only && settings.folders.iter().any(|f| f.games.contains(&g.path)) { return false; }
                 true
@@ -1884,7 +1916,7 @@ fn library_screen(
                     }
                     // Built-in toggle: only when the current tab has Internal games.
                     let tab_has_builtins = library.games.iter().any(|g| {
-                        g.tags.contains(&"Internal") && g.family.is_book() == *books && tab.is_none_or(|f| f.lists(g.family))
+                        g.has_tag("Internal") && g.family.is_book() == *books && tab.is_none_or(|f| f.lists(g.family))
                     });
                     if tab_has_builtins && !*favorites_only {
                         let hidden = settings.hide_builtin_tabs.contains(tab_name);
@@ -2429,7 +2461,12 @@ fn power_button(ui: &mut egui::Ui, hover: &str) -> bool {
 /// state's outline) and its hover colour comes from its own response (a
 /// fixed-size one never lit up before).
 fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
-    let galley = egui::WidgetText::from(egui::RichText::new(text).strong()).into_galley(
+    primary_button_text(ui, egui::RichText::new(text).strong().into(), min)
+}
+
+/// `primary_button` with text laid out by the caller (mixed sizes).
+fn primary_button_text(ui: &mut egui::Ui, text: egui::WidgetText, min: egui::Vec2) -> egui::Response {
+    let galley = text.into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
         f32::INFINITY,
@@ -2752,7 +2789,18 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
                     }
                 });
                 ui.add_space(20.0);
-                if primary_button(ui, "▶   Play", egui::vec2(180.0, 46.0)).clicked() {
+                // The ▶ larger than the word (the user's request).
+                let mut play = egui::text::LayoutJob::default();
+                let style = egui::TextStyle::Button.resolve(ui.style());
+                let format = |size: f32| egui::TextFormat {
+                    font_id: egui::FontId::new(size, style.family.clone()),
+                    color: egui::Color32::WHITE,
+                    valign: egui::Align::Center,
+                    ..Default::default()
+                };
+                play.append("▶", 0.0, format(style.size * 1.7));
+                play.append("  Play", 0.0, egui::TextFormat { font_id: egui::FontId::new(style.size, style.family.clone()), ..format(0.0) });
+                if primary_button_text(ui, play.into(), egui::vec2(180.0, 46.0)).clicked() {
                     actions.push(Action::PlayFromLibrary(game.path.clone()));
                 }
             });
@@ -2948,7 +2996,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
     p.galley(at, title, egui::Color32::WHITE);
     let mut x = at.x;
     let y = at.y + two_lines + 6.0;
-    for r in region.into_iter().chain(game.tags.iter().copied()) {
+    for r in region.into_iter().chain(game.tags.iter().map(|t| t.as_ref())) {
         let g = p.layout_no_wrap(r.to_string(), egui::FontId::proportional(11.0), egui::Color32::from_gray(200));
         let b = egui::Rect::from_min_size(egui::pos2(x, y), g.size() + egui::vec2(12.0, 4.0));
         p.rect_filled(b, 5, egui::Color32::from_white_alpha(14));
@@ -3472,20 +3520,33 @@ fn zippity_clean_prompt(ctx: &egui::Context, path: &std::path::Path) -> Option<A
     answer
 }
 
-fn toasts(ctx: &egui::Context, st: &mut UiState) {
-    st.toasts.retain(|(_, until)| Instant::now() < *until);
+fn toasts(ctx: &egui::Context, st: &mut UiState, top: f32) {
+    let now = Instant::now();
+    st.toasts.retain(|(_, until)| now < *until);
     if st.toasts.is_empty() {
         return;
     }
-    // Bottom centre, above the status bar: clear of the menus, the library's
-    // header and the game's own text. Solid, so nothing shows through.
-    egui::Area::new("toasts".into())
-        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -44.0])
-        .order(egui::Order::Tooltip)
-        .interactable(false)
-        .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            for (text, _) in &st.toasts {
+    // Top centre, like a phone's notifications: each comes out from under
+    // the menu bar and slides back up into it when it ends (cut off at the
+    // bar's edge), the newest on top. Solid, so nothing shows through.
+    const SLIDE: f32 = 0.3;
+    let mut y = top + 8.0;
+    for (text, until) in st.toasts.iter().rev() {
+        let id = egui::Id::new(("toast", text, until));
+        let shown = ctx.animate_bool_with_time(id, true, SLIDE);
+        let leaving = (until.saturating_duration_since(now).as_secs_f32() / SLIDE).min(1.0);
+        let t = shown.min(leaving);
+        // Its height from the last frame (a first guess before that).
+        let height = ctx.memory(|m| m.area_rect(id)).map_or(40.0, |r| r.height());
+        let ease = 1.0 - (1.0 - t) * (1.0 - t);
+        egui::Area::new(id)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, y - (1.0 - ease) * (y - top + height + 20.0)])
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .constrain(false)
+            .show(ctx, |ui| {
+                let below_bar = egui::Rect::from_min_max(egui::pos2(f32::NEG_INFINITY, top), egui::pos2(f32::INFINITY, f32::INFINITY));
+                ui.set_clip_rect(ui.clip_rect().intersect(below_bar));
                 egui::Frame::NONE
                     .fill(egui::Color32::from_rgb(28, 32, 30))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(46, 170, 82, 120)))
@@ -3494,10 +3555,11 @@ fn toasts(ctx: &egui::Context, st: &mut UiState) {
                     .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: egui::Color32::from_black_alpha(120) })
                     .show(ui, |ui| {
                         ui.set_max_width(560.0);
-                        ui.add(egui::Label::new(egui::RichText::new(text).color(egui::Color32::from_gray(235))).wrap());
+                        ui.add(egui::Label::new(egui::RichText::new(text).color(ACCENT).strong()).wrap());
                     });
-            }
-        });
+            });
+        y += (height + 6.0) * ease;
+    }
     ctx.request_repaint();
 }
 

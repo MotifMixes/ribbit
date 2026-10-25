@@ -76,6 +76,9 @@ struct Session {
     /// A save state was successfully loaded this session: skip the shutdown
     /// animation on close (the game may be mid-state, not at a clean exit).
     loaded_save_state: bool,
+    /// The game has no save yet (when it started): `first_start_notice`
+    /// says so once the game begins writing one.
+    first_start: Option<Instant>,
     /// The cartridge played.
     cart_path: Option<PathBuf>,
     /// EXPERIMENTAL HD picture, when HD vectors are on and this BIOS supports it.
@@ -113,6 +116,9 @@ pub struct App {
     zippity_cleaning: Option<std::thread::JoinHandle<anyhow::Result<PathBuf>>>,
     /// A zip of RockIt Twist packages being unpacked.
     twist_import: Option<std::thread::JoinHandle<anyhow::Result<crate::twist::Imported>>>,
+    /// The Leapster 2's USB/IP server, once started (its port stays bound
+    /// for the rest of the program).
+    leapster2_usb: Option<crate::emu::UsbServer>,
     /// A RockIt Twist session (early emulation), instead of the others.
     twist: Option<crate::twist::TwistSession>,
     /// An original LeapPad being played.
@@ -199,7 +205,9 @@ pub struct App {
     /// Active screen recording, or None.
     recording: Option<crate::record::Recorder>,
     /// Background thread encoding the last finished recording, or None.
-    encoding: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+    encoding: Option<std::thread::JoinHandle<anyhow::Result<crate::record::Saved>>>,
+    /// The default recordings folder (Videos), looked up once.
+    record_default: PathBuf,
     /// Scratch buffer for audio samples drained each frame while recording.
     rec_audio: Vec<i16>,
     /// Cheat / memory search state.
@@ -271,6 +279,7 @@ impl App {
             tv_frame: Vec::new(),
             zippity_cleaning: None,
             twist_import: None,
+            leapster2_usb: None,
             twist: None,
             leappad: None,
             console_view: ConsoleView::default(),
@@ -321,6 +330,7 @@ impl App {
             tab_shown: false,
             recording: None,
             encoding: None,
+            record_default: crate::record::default_folder(&opts_data_dir),
             rec_audio: Vec::new(),
             cheat: crate::cheat::CheatSearch::default(),
         };
@@ -492,9 +502,6 @@ impl App {
         // the console; docs/compatibility.md).
         let first_start = saves.cart.as_ref().is_some_and(|p| !p.exists());
         saves.load(&mut machine)?;
-        if first_start {
-            self.ui.toast_for("First start of this game: it may take a while to set up its save", std::time::Duration::from_secs(25));
-        }
         // Leapster 2: it cannot finish calibrating at boot (its Flash player
         // asserts about 2 s in and the BIOS restarts the console), so it
         // boots with the stored calibration, a new console getting the
@@ -543,6 +550,7 @@ impl App {
             idle_snapshot: None,
             closing: None,
             loaded_save_state: false,
+            first_start: first_start.then(Instant::now),
             cart_path: cart.clone(),
             hd,
             experimental_touch: machine.experimental_touch_enabled(),
@@ -564,6 +572,7 @@ impl App {
         if let Some(a) = &mut self.audio {
             a.clear();
         }
+        self.apply_leapster2_usb();
         self.update_title();
         Ok(())
     }
@@ -724,7 +733,7 @@ impl App {
         }
         // A console's built-in games: the Zippity's NAND, or a Leapster
         // BIOS's own games (that BIOS with no cartridge in).
-        let internal = self.library.games.iter().find(|g| g.path == path && g.tags.contains(&"Internal"));
+        let internal = self.library.games.iter().find(|g| g.path == path && g.has_tag("Internal"));
         if internal.is_some_and(|g| matches!(g.family, crate::library::Family::Leapster | crate::library::Family::Leapster2)) {
             self.next_bios = Some(path);
             if let Err(e) = self.boot(None) {
@@ -877,7 +886,7 @@ impl App {
                         .library
                         .games
                         .iter()
-                        .find(|g| g.path == nand && g.tags.contains(&"Internal"))
+                        .find(|g| g.path == nand && g.has_tag("Internal"))
                         .map_or_else(|| "Zippity Built-in Games".to_string(), |g| g.title.clone()),
                 };
                 z.set_on_home(self.settings.zippity_on_home);
@@ -1499,6 +1508,18 @@ impl App {
                     "RockIt Twist unplugged from USB"
                 });
             }
+            Action::SetLeapster2Usb(on) => {
+                self.settings.leapster2_usb = on;
+                self.save_settings();
+                self.apply_leapster2_usb();
+                if on {
+                    self.ui.toast(
+                        "Leapster 2 plugged in. Wait about 7 seconds, then run: usbip attach -r 127.0.0.1 -b 1-1",
+                    );
+                } else {
+                    self.ui.toast("Leapster 2 unplugged from USB");
+                }
+            }
             Action::ImportTwistZip(path) => self.import_twist_zip(path),
             Action::ConsoleViewChanged => self.console_view_changed(),
             Action::Reset => self.reset(),
@@ -1560,6 +1581,17 @@ impl App {
             Action::SetRecordFolder(path) => {
                 self.settings.record_folder = Some(path);
                 self.save_settings();
+            }
+            Action::ResetRecordFolder => {
+                self.settings.record_folder = None;
+                self.save_settings();
+            }
+            Action::OpenRecordFolder => {
+                // Made now if nothing was recorded yet (the file manager
+                // would open somewhere else).
+                let dir = self.record_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                open_folder(&dir);
             }
             Action::CheatFirstScan => {
                 self.sync_cheat_from_ui();
@@ -1660,6 +1692,28 @@ impl App {
                 }
                 self.save_settings();
             }
+        }
+    }
+
+    /// A game's first start: says it may take a while once the game starts
+    /// writing its save (Pet Pals then shows a black screen for about 20 s),
+    /// not at power-on over the BIOS's own screen. The first write comes
+    /// after the LeapFrog logo (about 8 s in for Pet Pals, Cars and Sonic X).
+    fn first_start_notice(&mut self) {
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        let Some(since) = s.first_start else {
+            return;
+        };
+        // A write long after start-up is the player saving, not set-up.
+        if since.elapsed() > std::time::Duration::from_secs(30) {
+            s.first_start = None;
+            return;
+        }
+        if s.emu.lock().io.eeprom.cart_dirty {
+            s.first_start = None;
+            self.ui.toast_for("First start of this game: it may take a while to set up its save", std::time::Duration::from_secs(25));
         }
     }
 
@@ -2059,8 +2113,33 @@ impl App {
     /// Paused by the user, or by being in the background. A RockIt Twist
     /// plugged into the PC keeps running in the background: the program
     /// talking to it over USB (LeapFrog Connect) is the active window then.
+    /// Offers the running Leapster 2 on USB if so set (starting the USB/IP
+    /// server the first time), else unplugs it.
+    fn apply_leapster2_usb(&mut self) {
+        let Some(s) = &self.session else { return };
+        if s.hardware != Hardware::Leapster2 {
+            return;
+        }
+        if !self.settings.leapster2_usb {
+            s.emu.set_usb(None);
+            return;
+        }
+        if self.leapster2_usb.is_none() {
+            match ribbit_twist::usbip::Server::start(leapster2_usb_device(), ribbit_twist::usbip::PORT) {
+                Ok(srv) => self.leapster2_usb = Some(std::sync::Arc::new(std::sync::Mutex::new(srv))),
+                Err(e) => {
+                    self.ui.toast(format!("Leapster 2 USB: can't listen on port 3240 ({e})"));
+                    return;
+                }
+            }
+        }
+        s.emu.set_usb(self.leapster2_usb.clone());
+    }
+
     fn halted(&self) -> bool {
-        let on_usb = self.twist.is_some() && self.settings.twist_usb;
+        // A console plugged into the PC keeps running in the background.
+        let on_usb = (self.twist.is_some() && self.settings.twist_usb)
+            || (self.settings.leapster2_usb && self.session.as_ref().is_some_and(|s| s.hardware == Hardware::Leapster2));
         self.paused || (self.background && self.settings.pause_in_background && !on_usb)
     }
 
@@ -2133,19 +2212,32 @@ impl App {
         }
     }
 
-    fn toggle_record(&mut self) {
-        // Poll finished encoding.
-        if let Some(t) = self.encoding.take() {
-            if t.is_finished() {
-                match t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("encoding thread panicked"))) {
-                    Ok(()) => {}
-                    Err(e) => self.ui.problem("Recording encoding failed", format!("{e:#}"), ""),
-                }
-            } else {
-                self.encoding = Some(t);
-            }
-        }
+    /// Where recordings go: the chosen folder, else the player's Videos folder.
+    fn record_dir(&self) -> PathBuf {
+        self.settings.record_folder.clone().unwrap_or_else(|| self.record_default.clone())
+    }
 
+    /// Says where a finished recording went (or why it didn't).
+    fn poll_encoding(&mut self) {
+        if !self.encoding.as_ref().is_some_and(|t| t.is_finished()) {
+            return;
+        }
+        let Some(t) = self.encoding.take() else { return };
+        match t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("encoding thread panicked"))) {
+            Ok(saved) => {
+                let name = saved.path.file_name().map_or_else(|| saved.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                let folder = crate::record::folder_of(&saved.path).display();
+                let parts = if saved.parts > 1 { format!(" (in {} parts)", saved.parts) } else { String::new() };
+                let note = saved.note.map(|n| format!("
+{n}")).unwrap_or_default();
+                self.ui.toast_for(format!("Recording saved: {name}{parts} in {folder}{note}"), std::time::Duration::from_secs(10));
+            }
+            Err(e) => self.ui.problem("The recording couldn't be saved", format!("{e:#}"), ""),
+        }
+    }
+
+    fn toggle_record(&mut self) {
+        self.poll_encoding();
         if let Some(mut rec) = self.recording.take() {
             // Stop: flush remaining buffered audio and start encoding.
             if let Some(s) = &self.session {
@@ -2159,8 +2251,8 @@ impl App {
             let encoder = self.settings.record_encoder;
             match rec.finish(encoder) {
                 Ok(task) => {
-                    let output = task.output_path.clone();
-                    self.ui.toast(format!("Recording stopped: encoding to {}…", output.display()));
+                    let folder = crate::record::folder_of(&task.output_path).display();
+                    self.ui.toast(format!("Recording stopped: saving it in {folder}…"));
                     self.encoding = Some(std::thread::spawn(move || task.run()));
                 }
                 Err(e) => self.ui.problem("Recording failed", format!("{e:#}"), ""),
@@ -2168,11 +2260,12 @@ impl App {
         } else {
             // Start.
             let Some(s) = &self.session else { return };
-            let dir = self.settings.record_folder.clone()
-                .unwrap_or_else(|| self.opts.data_dir.join("recordings"));
-            match crate::record::Recorder::start(&dir, self.settings.record_encoder) {
+            let dir = self.record_dir();
+            // The raw frames wait in the data folder, not the Videos folder.
+            let temp = self.opts.data_dir.join("recording-temp");
+            match crate::record::Recorder::start(&dir, &temp, self.settings.record_encoder) {
                 Ok(rec) => {
-                    self.ui.toast(format!("Recording to {}…", rec.output_path.display()));
+                    self.ui.toast(format!("Recording… (F8 to stop). It will be saved in {}", dir.display()));
                     s.emu.start_record_audio();
                     self.recording = Some(rec);
                 }
@@ -2337,6 +2430,12 @@ impl App {
             && let Some(a) = &mut self.audio
         {
             a.clear();
+        }
+        match s.emu.take_usb_news() {
+            Some(crate::twist::UsbNews::Attached) => self.ui.toast("Leapster 2: the PC (USB/IP) connected"),
+            Some(crate::twist::UsbNews::Detached) => self.ui.toast("Leapster 2: the PC (USB/IP) disconnected"),
+            Some(crate::twist::UsbNews::Failed(e)) => self.ui.toast(format!("Leapster 2 USB: {e}")),
+            None => {}
         }
         let stats = s.emu.stats();
         self.speed_percent = stats.speed_percent;
@@ -2653,7 +2752,9 @@ impl App {
             self.check_closing_animation();
         } else {
             self.check_idle_power_off();
+            self.first_start_notice();
         }
+        self.poll_encoding();
         let (mut hd_frame, mut hd_dirty) = (false, false);
         if let Some(s) = &mut self.session {
             let passes = {
@@ -2771,6 +2872,7 @@ impl App {
                 console_view_available: view_available,
                 recording: self.recording.as_ref().map(|r| r.started.elapsed().as_secs()),
                 encoding: self.encoding.as_ref().is_some_and(|t| !t.is_finished()),
+                record_dir: self.settings.record_folder.clone().unwrap_or_else(|| self.record_default.clone()),
                 cheat_candidates: {
                     // The values now (while the window is open), so a Set,
                     // or the game changing one, shows at once; the scan's
@@ -3316,6 +3418,24 @@ const CLEAN_FAILED: &str = "The players are still there. Nothing was lost: the d
                             kept beside it as a .with-saves.bak file.";
 
 /// A path's file name, for messages.
+/// The Leapster 2 as USB/IP lists it before a client imports it (BIOS 0.6's
+/// device descriptor, VERIFIED with examples/l2usb.rs: vendor 0x0F63,
+/// LeapFrog; product 0x1100; USB 1.1, full speed; one mass-storage
+/// interface, SCSI, Bulk-Only).
+fn leapster2_usb_device() -> ribbit_twist::usbip::DeviceInfo {
+    ribbit_twist::usbip::DeviceInfo {
+        busid: "1-1".into(),
+        vendor: 0x0F63,
+        product: 0x1100,
+        bcd_device: 0x0001,
+        class: (0, 0, 0),
+        configuration: 1,
+        num_configurations: 1,
+        interfaces: vec![(8, 6, 0x50)],
+        speed: 2,
+    }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }

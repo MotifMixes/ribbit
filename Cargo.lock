@@ -3460,6 +3460,7 @@ dependencies = [
  "tracing",
  "ureq",
  "wgpu",
+ "windows",
  "windows-sys 0.61.2",
  "winit",
 ]

@@ -51,6 +51,9 @@ flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation"] }
+# Recording without FFmpeg: Media Foundation's H.264/AAC encoder (record.rs)
+# and the Videos folder.
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 egui-winit = { version = "0.36.2", default-features = false, features = ["android-native-activity"] }

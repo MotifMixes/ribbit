@@ -47,7 +47,7 @@
 //! (nand.rs) and no SD driver.
 
 use ribbit_memory::Bus;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const BASE: u32 = 0x0180_00E0;
 pub const END: u32 = 0x0180_00F8;
@@ -93,6 +93,14 @@ pub struct SdCard {
     /// Set when a sector was written (for saving; not saved).
     #[serde(skip)]
     pub dirty: bool,
+    /// The sectors written since `synced` was set (for saving; not saved).
+    #[serde(skip)]
+    pub changed: BTreeSet<u32>,
+    /// Set by the save code when its file holds `sectors` apart from
+    /// `changed`, so it can add just those. A card from a save state starts
+    /// unsynced (not saved).
+    #[serde(skip)]
+    pub synced: bool,
 }
 
 impl SdCard {
@@ -126,7 +134,7 @@ impl SdCard {
 
     /// The same card after a power cycle: its data, nothing else.
     pub fn powered_on(self) -> Self {
-        Self { sectors: self.sectors, dirty: self.dirty, ..Default::default() }
+        Self { sectors: self.sectors, dirty: self.dirty, changed: self.changed, synced: self.synced, ..Default::default() }
     }
 
     /// The written sectors as a save file (sparse.rs).
@@ -141,6 +149,8 @@ impl SdCard {
             Some(mut s) => {
                 s.retain(|&n, _| n < CARD_SECTORS);
                 self.sectors = s;
+                self.changed.clear();
+                self.synced = false;
                 true
             }
             None => false,
@@ -333,6 +343,7 @@ impl SdSlot {
                 }
                 if n < CARD_SECTORS {
                     card.sectors.insert(n, s);
+                    card.changed.insert(n);
                     card.dirty = true;
                 }
                 status |= WRITE_CRC_OK;

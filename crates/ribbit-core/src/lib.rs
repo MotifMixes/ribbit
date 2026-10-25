@@ -128,8 +128,8 @@ const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 /// timing (pending load, config flag); 3 = memory timing (caches, register
 /// ready times, load latency); 4 = GPIO output latches, Leapster 2 flash;
 /// 5 = Leapster 2 on-chip RAM and SD slot; 6 = dual-MAC accumulators, PCM DMA;
-/// 7 = paused voices.
-pub const STATE_VERSION: u32 = 7;
+/// 7 = paused voices; 8 = Leapster 2 USB controller.
+pub const STATE_VERSION: u32 = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -497,8 +497,8 @@ impl Machine {
         io.leapster2_power = Some([0xFFFF_FFFF, selection]);
         // The SD slot with its card (io/sd.rs) or, on CIP3, no SD slot: the
         // pin block carries the NAND's ready/busy line instead (io/nand.rs).
-        // The USB device controller, no cable (io/usb.rs).
-        io.usb = Some(Default::default());
+        // The USB controller, no cable until the frontend plugs one in (io/usb.rs).
+        io.usb = Some(io::usb::UsbDevice::new());
         if firmware.leapster2_nand() {
             io.sd = Some(Default::default());
             io.nand = Some(Default::default());
@@ -690,6 +690,7 @@ impl Machine {
         let flash = self.io.spi_flash.take();
         let nand = self.io.nand.take();
         let sd_card = self.io.sd.as_mut().and_then(|s| s.card.take());
+        let usb_host = self.io.usb.as_mut().map(|u| (std::mem::take(&mut u.host), u.log));
         self.io = Peripherals::default();
         Self::install_leapster2(&mut self.io, &self.firmware, self.cartridge.is_some());
         if let (Some(f), Some(slot)) = (flash, self.io.spi_flash.as_mut()) {
@@ -704,6 +705,11 @@ impl Machine {
         {
             // The card keeps its sectors; the card powers up in its idle state.
             slot.card = Some(card.powered_on());
+        }
+        if let (Some((host, log)), Some(usb)) = (usb_host, self.io.usb.as_mut()) {
+            // The cable stays in; the host sees the device again.
+            usb.log = log;
+            usb.restarted(host);
         }
         self.io.straps = straps;
         self.io.gpio.unresolved_lines = lines;
@@ -769,6 +775,7 @@ impl Machine {
                 self.io.event_syncs += 1;
             }
             self.io.catch_up();
+            self.run_usb();
             self.cpu.set_irq_lines(Peripherals::irq_mask(), self.io.irq_levels());
             self.io.horizon = self.io.next_event();
             self.io.sync_needed = false;
@@ -1029,6 +1036,7 @@ impl Machine {
                 self.io.event_syncs += 1;
             }
             self.io.catch_up();
+            self.run_usb();
             self.cpu.set_irq_lines(Peripherals::irq_mask(), self.io.irq_levels());
             self.io.horizon = self.io.next_event();
             self.io.sync_needed = false;
@@ -1259,15 +1267,15 @@ impl Machine {
     }
 
     /// Loads a `rewind_snapshot`, keeping the SD card's current sectors (and
-    /// whether they still need saving).
+    /// what of them still needs saving).
     pub fn load_rewind_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
-        let dirty = self.io.sd.as_ref().and_then(|sd| sd.card.as_ref()).is_some_and(|c| c.dirty);
-        let sectors = self.sd_sectors_mut().map(std::mem::take);
+        let card = self.io.sd.as_mut().and_then(|sd| sd.card.as_mut());
+        let kept = card.map(|c| (std::mem::take(&mut c.sectors), std::mem::take(&mut c.changed), c.synced, c.dirty));
         let result = self.load_state(bytes);
-        if let (Some(sectors), Some(card)) = (sectors, self.sd_sectors_mut()) {
-            *card = sectors;
-        }
-        if let Some(card) = self.io.sd.as_mut().and_then(|sd| sd.card.as_mut()) {
+        if let (Some((sectors, changed, synced, dirty)), Some(card)) = (kept, self.io.sd.as_mut().and_then(|sd| sd.card.as_mut())) {
+            card.sectors = sectors;
+            card.changed = changed;
+            card.synced = synced;
             card.dirty |= dirty;
         }
         result
@@ -1287,12 +1295,16 @@ impl Machine {
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
         let body = bytes.strip_prefix(STATE_MAGIC.as_slice()).ok_or(StateError::NotAState)?;
         let version = u32::from_le_bytes(body.get(..4).ok_or(StateError::NotAState)?.try_into().unwrap());
-        if version != STATE_VERSION {
+        // Version 7 (1.4.x-1.5.1) differs only in the USB controller.
+        if version != STATE_VERSION && version != 7 {
             return Err(StateError::Version(version));
         }
         let payload =
             miniz_oxide::inflate::decompress_to_vec(&body[4..]).map_err(|e| StateError::Damaged(format!("{e:?}")))?;
-        let s: State = bincode::deserialize(&payload).map_err(|e| StateError::Damaged(e.to_string()))?;
+        io::usb::READING_V7.with(|v| v.set(version == 7));
+        let s = bincode::deserialize::<State>(&payload);
+        io::usb::READING_V7.with(|v| v.set(false));
+        let s = s.map_err(|e| StateError::Damaged(e.to_string()))?;
         if s.bios_crc != self.firmware.id().crc32 || s.cart_crc != self.cartridge.as_ref().map(|c| c.id().crc32) {
             return Err(StateError::WrongImages);
         }
@@ -1360,6 +1372,43 @@ impl Machine {
         self.cpu.instructions_retired = retired;
         self.restarts += 1;
         tracing::info!(target: "ribbit::boot", restarts = self.restarts, "the BIOS restarted the console (0x0180_B000 bit 8)");
+    }
+
+    /// Leapster 2: plugs the USB cable in or pulls it out (io/usb.rs).
+    /// False on other models.
+    pub fn usb_plug(&mut self, attached: bool) -> bool {
+        let Some(u) = self.io.usb.as_mut() else { return false };
+        u.plug(attached);
+        self.io.sync_needed = true;
+        true
+    }
+
+    /// Leapster 2: a transfer from the USB host.
+    pub fn usb_submit(&mut self, t: io::usb::Transfer) {
+        if let Some(u) = self.io.usb.as_mut() {
+            u.submit(t);
+            self.io.sync_needed = true;
+        }
+    }
+
+    /// Leapster 2: cancels a host transfer; true if it had not finished.
+    pub fn usb_unlink(&mut self, id: u32) -> bool {
+        self.io.usb.as_mut().is_some_and(|u| u.unlink(id))
+    }
+
+    /// Leapster 2: the host transfers finished since the last call.
+    pub fn usb_take_done(&mut self) -> Vec<io::usb::Finished> {
+        self.io.usb.as_mut().map(|u| u.take_done()).unwrap_or_default()
+    }
+
+    /// Leapster 2: the USB controller's due work (io/usb.rs): it reads and
+    /// writes buffer descriptors and packets in memory.
+    fn run_usb(&mut self) {
+        if let Some(u) = self.io.usb.as_mut()
+            && u.due
+        {
+            u.service(&mut self.bus);
+        }
     }
 
     /// Leapster 2: runs an SD command descriptor the program started (io/sd.rs).

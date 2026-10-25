@@ -131,6 +131,8 @@ pub struct Settings {
     /// Offer the RockIt Twist on the PC's USB (a USB/IP server for
     /// usbip-win2 and LeapFrog Connect).
     pub twist_usb: bool,
+    /// Offer a running Leapster 2 on the PC's USB (USB/IP, as `twist_usb`).
+    pub leapster2_usb: bool,
     /// The player's RockIt Twist keys: action (`twist::action_name`) to key
     /// name; actions not here keep their default keys.
     pub twist_keys: BTreeMap<String, String>,
@@ -237,6 +239,7 @@ impl Default for Settings {
             console_view_keys: true,
             twist_content: None,
             twist_usb: false,
+            leapster2_usb: false,
             twist_keys: BTreeMap::new(),
             leappad_bios: None,
             leappad_books: BTreeMap::new(),

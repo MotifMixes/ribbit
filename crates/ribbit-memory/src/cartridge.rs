@@ -14,6 +14,11 @@
 //! ```
 //! All multi-byte fields are little-endian; pointers are CPU addresses in
 //! the 0x8000_0000 cartridge window.
+//!
+//! Most carts start with code instead and keep the header elsewhere, its
+//! address at 0x140 (0x8000_0144 on Wall-E, Sonic X and Counting on Zero:
+//! "LEAP" there, then the same layout; a player's sweep of 272 dumps,
+//! 2026-10-25).
 
 use crate::image::ImageId;
 use crate::known::{self, KnownImage};
@@ -22,6 +27,8 @@ use thiserror::Error;
 
 pub const CART_MAGIC: &[u8; 4] = b"LEAP";
 const DIRECTORY_OFFSET: usize = 0x20;
+/// Where carts that do not start with the header keep its address.
+const HEADER_POINTER_OFFSET: usize = 0x140;
 
 #[derive(Debug, Error)]
 pub enum CartridgeError {
@@ -148,14 +155,21 @@ fn cart_offset(data: &[u8], ptr: u32) -> Result<usize, HeaderError> {
 }
 
 pub fn parse_header(data: &[u8]) -> Result<CartHeader, HeaderError> {
-    if data.get(0..4) != Some(CART_MAGIC.as_slice()) {
-        return Err(HeaderError::BadMagic);
-    }
-    let field_04 = u16_at(data, 4)?;
-    let count = u16_at(data, 6)? as usize;
+    let magic_at = |o: usize| data.get(o..o + 4) == Some(CART_MAGIC.as_slice());
+    let base = if magic_at(0) {
+        0
+    } else {
+        u32_at(data, HEADER_POINTER_OFFSET)
+            .ok()
+            .and_then(|ptr| cart_offset(data, ptr).ok())
+            .filter(|&o| magic_at(o))
+            .ok_or(HeaderError::BadMagic)?
+    };
+    let field_04 = u16_at(data, base + 4)?;
+    let count = u16_at(data, base + 6)? as usize;
     let mut directory = Vec::with_capacity(count);
     for i in 0..count {
-        let at = DIRECTORY_OFFSET + 8 * i;
+        let at = base + DIRECTORY_OFFSET + 8 * i;
         let tag = u16_at(data, at)?;
         let sub_count = u16_at(data, at + 2)? as usize;
         let ptr = u32_at(data, at + 4)?;
@@ -255,6 +269,21 @@ mod tests {
         rom[0x40..0x48].copy_from_slice(&[1, 0, 0, 1, 0x00, 0x08, 0x00, 0x80]);
         rom[0x48..0x50].copy_from_slice(&[2, 0, 0, 1, 0x10, 0x00, 0x00, 0x00]);
         rom
+    }
+
+    #[test]
+    fn header_found_through_the_pointer_at_0x140() {
+        // The same header moved to 0x200, its address at 0x140.
+        let head = synthetic_cart();
+        let mut rom = vec![0u8; 0x1000];
+        rom[0x200..0x228].copy_from_slice(&head[..0x28]);
+        rom[0x40..0x50].copy_from_slice(&head[0x40..0x50]);
+        rom[0x140..0x144].copy_from_slice(&0x8000_0200u32.to_le_bytes());
+        let cart = Cartridge::from_bytes(rom.clone()).unwrap();
+        assert_eq!(cart.header().unwrap().directory[0].entries[1], SubEntry { id: 2, flags: 0x100, value: 0x10 });
+        // A pointer to something else is no header.
+        rom[0x200] = b'X';
+        assert_eq!(Cartridge::from_bytes(rom).unwrap().header().unwrap_err(), &HeaderError::BadMagic);
     }
 
     #[test]

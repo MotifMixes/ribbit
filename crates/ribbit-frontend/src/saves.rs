@@ -71,6 +71,9 @@ impl SavePaths {
         {
             anyhow::bail!("{} is not an SD card image", path.display());
         }
+        if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine)) {
+            card.synced = path.exists();
+        }
         if let (Some(path), Some(nand)) = (&self.nand, machine.io.nand.as_mut())
             && path.exists()
             && !nand.load_image(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
@@ -112,10 +115,20 @@ impl SavePaths {
         if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine))
             && card.dirty
         {
-            write_atomic(path, &card.image())?;
+            // A card holds up to 1 GiB (a LeapLoader card ~680 MB), written a
+            // sector at a time: rewriting the file each time stalled the game
+            // for a second. Add the changed sectors to the file instead, and
+            // rewrite it when it no longer matches the card or the old copies
+            // have piled up.
+            let appended = card.synced && append_sectors(path, card).is_ok_and(|count| count <= 2 * card.sectors.len() + COMPACT_SLACK);
+            if !appended {
+                write_atomic(path, &card.image())?;
+            }
+            card.changed.clear();
+            card.synced = true;
             card.dirty = false;
             written += 1;
-            tracing::info!(target: "ribbit::saves", path = %path.display(), "SD card saved");
+            tracing::info!(target: "ribbit::saves", path = %path.display(), appended, "SD card saved");
         }
         if let (Some(path), Some(nand)) = (&self.nand, machine.io.nand.as_mut())
             && nand.dirty
@@ -127,6 +140,16 @@ impl SavePaths {
         }
         Ok(written)
     }
+}
+
+/// Old sector copies an SD card file may carry before it is rewritten (8 MB).
+const COMPACT_SLACK: usize = 16_384;
+
+/// Adds the card's changed sectors to its file; the file's sector count.
+fn append_sectors(path: &Path, card: &ribbit_core::io::sd::SdCard) -> std::io::Result<usize> {
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let blocks = card.changed.iter().map(|n| (*n, card.sectors[n].as_slice()));
+    Ok(ribbit_core::io::sparse::append(&mut file, ribbit_core::io::sd::SECTOR, blocks)? as usize)
 }
 
 fn sd_card(machine: &Machine) -> Option<&ribbit_core::io::sd::SdCard> {
@@ -204,6 +227,40 @@ mod tests {
         fresh.io.sd = Some(ribbit_core::io::sd::SdSlot::with_card());
         paths.load(&mut fresh).unwrap();
         assert_eq!(sd_card(&fresh).unwrap().sectors, sd_card(&m).unwrap().sectors);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sd_card_saves_add_only_the_changed_sectors() {
+        let dir = std::env::temp_dir().join(format!("ribbit-sdappend-{}", std::process::id()));
+        let path = dir.join("sd.img");
+        let paths = SavePaths { sd: Some(path.clone()), ..Default::default() };
+        let mut m = machine_with_cart();
+        m.io.sd = Some(ribbit_core::io::sd::SdSlot::with_card());
+        let card = sd_card_mut(&mut m).unwrap();
+        for n in 0..100 {
+            card.sectors.insert(n, vec![n as u8; 512]);
+        }
+        card.dirty = true;
+        paths.flush(&mut m).unwrap();
+        let full = std::fs::metadata(&path).unwrap().len();
+        let card = sd_card_mut(&mut m).unwrap();
+        card.sectors.insert(5, vec![0xA5; 512]);
+        card.changed.insert(5);
+        card.dirty = true;
+        paths.flush(&mut m).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), full + 516, "one sector added");
+        let mut fresh = machine_with_cart();
+        fresh.io.sd = Some(ribbit_core::io::sd::SdSlot::with_card());
+        paths.load(&mut fresh).unwrap();
+        assert_eq!(sd_card(&fresh).unwrap().sectors, sd_card(&m).unwrap().sectors);
+        // A card replaced from elsewhere (a save state) is written in full.
+        let card = sd_card_mut(&mut m).unwrap();
+        card.synced = false;
+        card.sectors.remove(&99);
+        card.dirty = true;
+        paths.flush(&mut m).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), full - 516);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -222,10 +222,150 @@ pub struct Game {
     pub subtitle: String,
     /// Label, value pairs for the details tooltip.
     pub details: Vec<(&'static str, String)>,
-    /// Badges shown with the game ("Internal": built into the console).
-    pub tags: Vec<&'static str>,
+    /// Badges shown with the game ("Internal": built into the console;
+    /// "Prototype" and its build date).
+    pub tags: Vec<std::borrow::Cow<'static, str>>,
     pub(crate) key: String,
     pub art: Art,
+}
+
+impl Game {
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|t| t == tag)
+    }
+}
+
+/// A prototype or pre-release build, going by its name: these dumps are not
+/// in the known list, and players name them after what they are ("Wall-E
+/// December 20th 2007 prototype", "ROX Alpha 1.15", "1.8 Beta",
+/// "Animation Sample 1").
+fn is_prototype(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| matches!(w, "prototype" | "proto" | "beta" | "alpha" | "sample" | "submission" | "unreleased" | "j2s"))
+}
+
+/// The build date compiled into the program ("Dec 20 2007 16:28:29", C's
+/// `__DATE__ __TIME__`) as "Dec 20, 2007"; the latest one when there are
+/// several (libraries carry their own). Prototypes show it as a tag, since
+/// the date is what tells one build from another.
+fn build_date(rom: &[u8]) -> Option<String> {
+    const MONTHS: [&[u8]; 12] = [b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec"];
+    let digits = |b: &[u8]| b.iter().all(u8::is_ascii_digit);
+    let mut best: Option<(u32, usize, u32)> = None;
+    // "Mmm dd yyyy hh:mm:ss": 20 bytes; the day is space-padded.
+    for w in rom.windows(20) {
+        let Some(month) = MONTHS.iter().position(|m| w[..3] == **m) else { continue };
+        let day = &w[4..6];
+        let ok = w[3] == b' '
+            && (day[0] == b' ' || day[0].is_ascii_digit())
+            && day[1].is_ascii_digit()
+            && w[6] == b' '
+            && digits(&w[7..11])
+            && w[11] == b' '
+            && digits(&w[12..14])
+            && w[14] == b':'
+            && digits(&w[15..17])
+            && w[17] == b':'
+            && digits(&w[18..20]);
+        if !ok {
+            continue;
+        }
+        let year: u32 = std::str::from_utf8(&w[7..11]).ok()?.parse().ok()?;
+        let day: u32 = std::str::from_utf8(day).ok()?.trim().parse().ok()?;
+        if !(1990..2100).contains(&year) || !(1..=31).contains(&day) {
+            continue;
+        }
+        let key = (year, month, day);
+        if best.is_none_or(|b| key > b) {
+            best = Some(key);
+        }
+    }
+    best.map(|(y, m, d)| format!("{} {d}, {y}", std::str::from_utf8(MONTHS[m]).unwrap()))
+}
+
+const MONTH_NAMES: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/// "2008-04-23" (a file name's) or "Apr 23 2008 10:00:00" (a header's) as
+/// "Apr 23, 2008".
+fn pretty_date(s: &str) -> Option<String> {
+    let s = s.trim();
+    let num = |t: &str| t.parse::<u32>().ok();
+    if let [y, m, d] = s.split('-').collect::<Vec<_>>()[..] {
+        let (y, m, d) = (num(y)?, num(m)?, num(d)?);
+        return (s.len() == 10 && y >= 1990 && (1..=12).contains(&m) && (1..=31).contains(&d))
+            .then(|| format!("{} {d}, {y}", MONTH_NAMES[m as usize - 1]));
+    }
+    let mut w = s.split_whitespace();
+    let (m, d, y) = (w.next()?, num(w.next()?)?, num(w.next()?)?);
+    (MONTH_NAMES.contains(&m) && (1..=31).contains(&d) && y >= 1990).then(|| format!("{m} {d}, {y}"))
+}
+
+/// A header's version field ("v1.0", "A04, v1.0", "v 1.1", "1") as "v1.0";
+/// None for anything else ("Example do not ship or release").
+fn header_version(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_lowercase();
+    let number = |t: &str| {
+        let n: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        let n = n.trim_end_matches('.').to_string();
+        n.starts_with(|c: char| c.is_ascii_digit()).then_some(n)
+    };
+    let tidy = |n: String| if n.contains('.') { format!("v{n}") } else { format!("v{n}.0") };
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+        return Some(tidy(s));
+    }
+    s.match_indices('v').find_map(|(i, _)| {
+        let word_start = i == 0 || !s.as_bytes()[i - 1].is_ascii_alphabetic();
+        word_start.then(|| number(s[i + 1..].trim_start())).flatten().map(tidy)
+    })
+}
+
+/// What a tidy file name says after the title, read from the right (a game
+/// collection's names, 2026-10-25): "Cars - Supercharged (USA) (Leapster2)
+/// (Proto) (Alpha 002) (2008-04-23)" gives the region, editions, "Proto",
+/// the version and the build date, each optional. Read from the right
+/// because a title can hold parentheses of its own; reading stops at the
+/// region, or at a group it does not know, which stays in the title.
+#[derive(Debug, Default, PartialEq)]
+struct NameTags {
+    title: String,
+    region: Option<String>,
+    extras: Vec<String>,
+    prototype: bool,
+    version: Option<String>,
+    date: Option<String>,
+}
+
+const REGIONS: &[&str] = &[
+    "USA", "UK", "Europe", "France", "Germany", "Spain", "Canada", "Australia", "Netherlands", "Italy", "Mexico", "World",
+];
+const EDITIONS: &[&str] = &["L-MAX", "Leapster2", "Leapster 2", "POP LP7"];
+
+fn name_tags(name: &str) -> NameTags {
+    let mut t = NameTags { title: name.trim().to_string(), ..Default::default() };
+    while let Some((head, group)) = t.title.strip_suffix(')').and_then(|r| r.rsplit_once(" (")) {
+        let (head, group) = (head.to_string(), group.trim().to_string());
+        let lower = group.to_ascii_lowercase();
+        let is_version = ["v", "alpha ", "beta ", "pre-alpha "].iter().any(|p| lower.starts_with(p))
+            && group.chars().any(|c| c.is_ascii_digit());
+        if group.contains('-') && pretty_date(&group).is_some() && t.date.is_none() {
+            t.date = Some(group);
+        } else if is_version && t.version.is_none() {
+            t.version = Some(group);
+        } else if lower == "proto" || lower == "prototype" {
+            t.prototype = true;
+        } else if EDITIONS.iter().any(|e| e.eq_ignore_ascii_case(&group)) {
+            t.extras.insert(0, group);
+        } else if REGIONS.iter().any(|r| r.eq_ignore_ascii_case(&group)) {
+            t.region = Some(group);
+            t.title = head;
+            break;
+        } else {
+            break;
+        }
+        t.title = head;
+    }
+    t
 }
 
 pub enum Art {
@@ -898,7 +1038,7 @@ fn describe_zippity_nand(path: &Path, known: Option<&ribbit_memory::known::Known
         title,
         subtitle: "Mickey Mouse Clubhouse, Pooh, Little Einsteins and more".into(),
         details,
-        tags: vec!["Internal"],
+        tags: vec!["Internal".into()],
         key,
         art: Art::Missing,
     }
@@ -945,7 +1085,7 @@ fn describe_builtin(path: &Path, bios: &BiosFile) -> Game {
             ("BIOS", bios.name.clone()),
             ("File", path.display().to_string()),
         ],
-        tags: vec!["Internal"],
+        tags: vec!["Internal".into()],
         key,
         art: Art::Missing,
     }
@@ -959,11 +1099,18 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     // Known dumps by name; otherwise the file name, which players usually
     // keep tidy (the header's title can be generic, e.g. "Included Title").
-    let title = known
+    let named = known
         .map(|k| crate::app::short_name(k.name))
         .or_else(|| (!stem.is_empty()).then(|| stem.clone()))
         .or(header_title.clone())
         .unwrap_or_default();
+    // Its tags come off the end; the region stays on (the card shows it).
+    let name = name_tags(&named);
+    let title = match &name.region {
+        Some(r) => format!("{} ({r})", name.title),
+        None => name.title.clone(),
+    };
+    let version = name.version.clone().or_else(|| cart.header_text(0x07).as_deref().and_then(header_version));
     // "Oct 09 2003 18:23:53" -> "2003".
     let year = built.as_deref().and_then(|b| b.split_whitespace().nth(2)).map(str::to_string);
     let size = format!("{} MB", cart.rom().len().div_ceil(1 << 20));
@@ -975,8 +1122,11 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     if let Some(p) = part {
         details.push(("Part number", p));
     }
-    if let Some(b) = built {
-        details.push(("Built", b));
+    if let Some(v) = &version {
+        details.push(("Version", v.clone()));
+    }
+    if let Some(b) = &built {
+        details.push(("Built", b.clone()));
     }
     if let Some(k) = known {
         if let Some(cat) = k.name.split_once(" [").and_then(|(_, r)| r.split_once(']')).map(|(c, _)| c) {
@@ -993,7 +1143,26 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     details.push(("CRC32", key.clone()));
     details.push(("File", path.display().to_string()));
     let family = if known.is_some_and(|k| LEAPSTER2_ONLY.contains(&k.crc32)) { Family::Leapster2 } else { Family::Leapster };
-    Game { path: path.to_path_buf(), family, title, subtitle, details, tags: Vec::new(), key, art }
+    let mut tags: Vec<std::borrow::Cow<'static, str>> = name.extras.into_iter().map(Into::into).collect();
+    let prototype = name.prototype || (known.is_none() && is_prototype(&stem));
+    if prototype {
+        tags.push("Prototype".into());
+    }
+    if let Some(v) = version {
+        tags.push(v.into());
+    }
+    // A prototype's build date tells one build from another: the header's,
+    // else the file name's, else a compile stamp found in the program.
+    if prototype
+        && let Some(date) = built
+            .as_deref()
+            .and_then(pretty_date)
+            .or_else(|| name.date.as_deref().and_then(pretty_date))
+            .or_else(|| build_date(cart.rom()))
+    {
+        tags.push(date.into());
+    }
+    Game { path: path.to_path_buf(), family, title, subtitle, details, tags, key, art }
 }
 
 /// Boots the game unseen and returns its most colourful early screen.
@@ -1313,6 +1482,59 @@ mod tests {
         assert_eq!(img.size, [640, 640]);
         assert_eq!(img.pixels[0], egui::Color32::from_rgb(0x12, 0x34, 0x56));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prototypes_by_name() {
+        assert!(is_prototype("Wall-E December 20th 2007 prototype"));
+        assert!(is_prototype("Counting on Zero (prototype, repaired)"));
+        assert!(is_prototype("ROX Alpha 1.15r2"));
+        assert!(is_prototype("Disney Princess Enchanted Learning (1.8 Beta)"));
+        assert!(is_prototype("The Incredibles - Animation Sample 1"));
+        assert!(!is_prototype("Wall-E (USA)"));
+        assert!(!is_prototype("Alphabet Park"));
+    }
+
+    #[test]
+    fn file_name_tags_read_from_the_right() {
+        let t = name_tags("Cars - Supercharged (USA) (Leapster2) (Proto) (Alpha 002) (2008-04-23)");
+        assert_eq!(t.title, "Cars - Supercharged");
+        assert_eq!(t.region.as_deref(), Some("USA"));
+        assert_eq!(t.extras, ["Leapster2"]);
+        assert!(t.prototype);
+        assert_eq!(t.version.as_deref(), Some("Alpha 002"));
+        assert_eq!(t.date.as_deref(), Some("2008-04-23"));
+        let t = name_tags("NASCAR (USA) (L-MAX) (v1.0) (2006-02-24)");
+        assert_eq!((t.title.as_str(), t.extras.len(), t.prototype, t.version.as_deref()), ("NASCAR", 1, false, Some("v1.0")));
+        // A title with parentheses of its own, and names in other formats.
+        assert_eq!(name_tags("Scooby-Doo (Et les nombres fous) (France) (v1.0)").title, "Scooby-Doo (Et les nombres fous)");
+        assert_eq!(name_tags("Bratz World (500-11201-A, USA)").title, "Bratz World (500-11201-A, USA)");
+        assert_eq!(name_tags("Counting on Zero (prototype, repaired)").region, None);
+        assert_eq!(name_tags("Wall-E (USA)").title, "Wall-E");
+    }
+
+    #[test]
+    fn versions_and_dates_normalised() {
+        assert_eq!(header_version("v1.0").as_deref(), Some("v1.0"));
+        assert_eq!(header_version("A03, v1.0").as_deref(), Some("v1.0"));
+        assert_eq!(header_version("v 1.1").as_deref(), Some("v1.1"));
+        assert_eq!(header_version("1").as_deref(), Some("v1.0"));
+        assert_eq!(header_version("v1.0 - Initial Release JBM3").as_deref(), Some("v1.0"));
+        assert_eq!(header_version("Example do not ship or release"), None);
+        assert_eq!(pretty_date("2008-04-23").as_deref(), Some("Apr 23, 2008"));
+        assert_eq!(pretty_date("Dec 20 2007 16:28:29").as_deref(), Some("Dec 20, 2007"));
+        assert_eq!(pretty_date("Feb  9 2005").as_deref(), Some("Feb 9, 2005"));
+        assert_eq!(pretty_date("v1.0"), None);
+    }
+
+    #[test]
+    fn build_date_is_the_latest_compile_stamp() {
+        let mut rom = vec![0u8; 256];
+        rom[10..30].copy_from_slice(b"Feb  9 2005 10:00:00");
+        rom[100..120].copy_from_slice(b"Apr 29 2005 13:50:19");
+        rom[200..211].copy_from_slice(b"Dec 31 2009"); // no time: not a build stamp
+        assert_eq!(build_date(&rom).as_deref(), Some("Apr 29, 2005"));
+        assert_eq!(build_date(&[0; 64]), None);
     }
 
     #[test]

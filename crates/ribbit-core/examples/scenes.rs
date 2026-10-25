@@ -143,6 +143,10 @@ fn main() {
         // Research: the Leapster 2's 0x0180_B008 (bits 1-2 = boot selection).
         p[1] = u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap();
     }
+    if std::env::var_os("RIBBIT_L2_MENU").is_some() {
+        // As the frontend: a Leapster 2 starts through its system menu.
+        m.boot_leapster2_system();
+    }
     m.record_trace_tail = false;
     if std::env::var_os("RIBBIT_TV").is_some() {
         // EXPERIMENTAL: Leapster TV (video chip and controller link).
@@ -562,6 +566,29 @@ fn main() {
                 let data = std::fs::read(w[1]).unwrap();
                 m.io.spi_flash.as_mut().expect("no SPI flash").load(&data);
             }
+            Some("pcs") => {
+                // pcs MS [TOP]: single-step MS and print the busiest addresses.
+                let none = Breakpoints::default();
+                let end = m.cpu.cycles + num(1, 1000) * (m.clock.cpu_hz / 1000);
+                let mut counts = std::collections::HashMap::<u32, u64>::new();
+                while m.cpu.cycles < end {
+                    *counts.entry(m.cpu.pc).or_default() += 1;
+                    m.run(1, &none);
+                }
+                let mut v: Vec<_> = counts.into_iter().collect();
+                v.sort_by_key(|&(pc, n)| (std::cmp::Reverse(n), pc));
+                let total: u64 = v.iter().map(|x| x.1).sum();
+                println!("{total} steps; {} distinct addresses", v.len());
+                for (pc, n) in v.iter().take(num(2, 40) as usize) {
+                    println!("{pc:08x} {n:>10} {:5.2}%", 100.0 * *n as f64 / total as f64);
+                }
+            }
+            Some("sdload") => {
+                // sdload PATH: load the SD card from a save file (as the frontend does).
+                let data = std::fs::read(w[1]).unwrap();
+                let card = m.io.sd.as_mut().and_then(|s| s.card.as_mut()).expect("no SD card");
+                assert!(card.load_image(&data), "not an SD card image");
+            }
             Some("irqrate") => {
                 // irqrate MS: interrupts taken per line over the next MS.
                 let before = m.interrupt_counts;
@@ -871,6 +898,7 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
         let chunk = left.min(if meter.rec.is_some() { 16 } else { WINDOW_MS });
         left -= chunk;
         let skipped0 = m.idle_skipped_steps();
+        let jit0 = m.jit.as_ref().map(|j| (j.stats.instructions, j.stats.runs, j.stats.exits, j.stats.compile_ns, j.stats.interpreted));
         let t = Instant::now();
         let r = match std::env::var("REC_CHUNK_US").ok().filter(|_| meter.rec.is_some()) {
             // Research: run the window in small slices, as the frontend does.
@@ -906,6 +934,20 @@ fn run_ms(m: &mut Machine, ms: u64, meter: &mut Meter) {
             meter.rows.push((meter.label.clone(), speed, idle));
             if std::env::var_os("VERBOSE").is_some() {
                 println!("{t_ms:8} ms {:24} {speed:6.0}% idle {idle:3.0}% {:.1} ns/step {} steps", meter.label, wall * 1e9 / r.steps as f64, r.steps);
+                // JIT_WINDOW=1: what the window's compiled code did.
+                if let (Some((i0, r0, e0, c0, n0)), Some(j)) = (jit0, m.jit.as_ref())
+                    && std::env::var_os("JIT_WINDOW").is_some()
+                {
+                    let s = &j.stats;
+                    let ex: Vec<u64> = (0..6).map(|k| s.exits[k] - e0[k]).collect();
+                    println!(
+                        "           jit {} instr in {} runs, {} blocks interpreted, exits {ex:?}, compile {:.1} ms",
+                        s.instructions - i0,
+                        s.runs - r0,
+                        s.interpreted - n0,
+                        (s.compile_ns - c0) as f64 / 1e6
+                    );
+                }
             }
         }
     }
