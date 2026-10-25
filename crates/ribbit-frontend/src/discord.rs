@@ -1,6 +1,7 @@
 //! Discord Rich Presence: "Playing Ribbit", the game's name and how long it
 //! has been played, like Dolphin's. Talks to the local Discord app over its
-//! IPC pipe (frames of opcode, length, JSON); does nothing when Discord is
+//! IPC pipe (frames of opcode, length, JSON: a named pipe on Windows, a Unix
+//! socket on macOS and Linux); does nothing when Discord is
 //! not running, and retries now and then.
 
 use std::io::{Read, Write};
@@ -64,9 +65,14 @@ impl Discord {
     }
 }
 
+/// The connection to Discord.
+trait Pipe: Read + Write + Send {}
+impl<T: Read + Write + Send> Pipe for T {}
+type Conn = Box<dyn Pipe>;
+
 fn worker(rx: &Receiver<Presence>) {
     let mut want = Presence::Off;
-    let mut pipe: Option<std::fs::File> = None;
+    let mut pipe: Option<Conn> = None;
     let mut sent: Option<Presence> = None;
     loop {
         if pipe.is_none() && want != Presence::Off {
@@ -96,19 +102,46 @@ fn worker(rx: &Receiver<Presence>) {
 }
 
 #[cfg(windows)]
-fn open_pipe(n: u32) -> Option<std::fs::File> {
-    std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{n}")).ok()
+fn open_pipe(n: u32) -> Option<Conn> {
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{n}")).ok()?;
+    Some(Box::new(f))
 }
 
-#[cfg(not(windows))]
-fn open_pipe(_n: u32) -> Option<std::fs::File> {
-    // Unix sockets need a different transport; not supported yet.
+#[cfg(unix)]
+fn open_pipe(n: u32) -> Option<Conn> {
+    let s = unix_socket_paths(n).into_iter().find_map(|p| std::os::unix::net::UnixStream::connect(p).ok())?;
+    Some(Box::new(s))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn open_pipe(_n: u32) -> Option<Conn> {
     None
 }
 
+/// Where Discord puts its socket `discord-ipc-<n>`: the first of
+/// XDG_RUNTIME_DIR, TMPDIR (macOS: the per-user temporary folder), TMP and
+/// TEMP that is set, else /tmp; on Linux also inside the Flatpak and Snap
+/// packages' folders there.
+#[cfg(unix)]
+fn unix_socket_paths(n: u32) -> Vec<std::path::PathBuf> {
+    let base = ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .find_map(|v| std::env::var_os(v).filter(|d| !d.is_empty()))
+        .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+    let name = format!("discord-ipc-{n}");
+    ["", "app/com.discordapp.Discord", "snap.discord", "app/com.discordapp.DiscordCanary"]
+        .iter()
+        .map(|sub| base.join(sub).join(&name))
+        .collect()
+}
+
 /// Connects and says hello; None when Discord is not running.
-fn connect() -> Option<std::fs::File> {
-    let mut pipe = (0..10).find_map(open_pipe)?;
+fn connect() -> Option<Conn> {
+    hello((0..10).find_map(open_pipe)?)
+}
+
+/// The handshake on a fresh connection.
+fn hello(mut pipe: Conn) -> Option<Conn> {
     let hello = format!(r#"{{"v":1,"client_id":"{CLIENT_ID}"}}"#);
     write_frame(&mut pipe, 0, &hello).ok()?;
     read_frame(&mut pipe).ok()?; // READY (or an error, which the next write reports)
@@ -116,7 +149,7 @@ fn connect() -> Option<std::fs::File> {
     Some(pipe)
 }
 
-fn write_frame(pipe: &mut std::fs::File, op: u32, json: &str) -> std::io::Result<()> {
+fn write_frame(pipe: &mut dyn Pipe, op: u32, json: &str) -> std::io::Result<()> {
     let mut frame = Vec::with_capacity(8 + json.len());
     frame.extend_from_slice(&op.to_le_bytes());
     frame.extend_from_slice(&(json.len() as u32).to_le_bytes());
@@ -124,7 +157,7 @@ fn write_frame(pipe: &mut std::fs::File, op: u32, json: &str) -> std::io::Result
     pipe.write_all(&frame)
 }
 
-fn read_frame(pipe: &mut std::fs::File) -> std::io::Result<(u32, String)> {
+fn read_frame(pipe: &mut dyn Pipe) -> std::io::Result<(u32, String)> {
     let mut head = [0u8; 8];
     pipe.read_exact(&mut head)?;
     let op = u32::from_le_bytes(head[..4].try_into().unwrap());
@@ -137,7 +170,7 @@ fn read_frame(pipe: &mut std::fs::File) -> std::io::Result<(u32, String)> {
     Ok((op, String::from_utf8_lossy(&body).into_owned()))
 }
 
-fn send_activity(pipe: &mut std::fs::File, p: &Presence) -> std::io::Result<()> {
+fn send_activity(pipe: &mut dyn Pipe, p: &Presence) -> std::io::Result<()> {
     let msg = format!(
         r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{},"activity":{}}},"nonce":"{}"}}"#,
         std::process::id(),
@@ -210,6 +243,39 @@ mod tests {
         assert!(json.contains(r#""large_image":"ribbit""#));
         assert_eq!(json_str("a\"b\\c\n"), r#""a\"b\\c\u000a""#);
         assert_eq!(activity_json(&Presence::Off), "null");
+    }
+
+    /// macOS and Linux: Discord's side of a Unix socket answers the
+    /// handshake and receives the status.
+    #[cfg(unix)]
+    #[test]
+    fn talks_to_discord_over_a_unix_socket() {
+        let (ours, mut discord) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut d: Conn = Box::new(discord.try_clone().unwrap());
+            let (op, hello) = read_frame(&mut *d).unwrap();
+            assert_eq!(op, 0);
+            assert!(hello.contains(CLIENT_ID));
+            write_frame(&mut *d, 1, r#"{"cmd":"DISPATCH","evt":"READY"}"#).unwrap();
+            let (op, msg) = read_frame(&mut *d).unwrap();
+            write_frame(&mut *d, 1, r#"{"cmd":"SET_ACTIVITY"}"#).unwrap();
+            let _ = discord.flush();
+            (op, msg)
+        });
+        let mut conn = hello(Box::new(ours)).expect("handshake");
+        send_activity(&mut *conn, &Presence::Browsing).unwrap();
+        let (op, msg) = server.join().unwrap();
+        assert_eq!(op, 1);
+        assert!(msg.contains(r#""cmd":"SET_ACTIVITY""#) && msg.contains("Browsing games"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_paths_include_the_plain_and_packaged_discords() {
+        let p = unix_socket_paths(0);
+        assert!(p[0].ends_with("discord-ipc-0"));
+        assert!(p.iter().any(|p| p.to_string_lossy().contains("app/com.discordapp.Discord/discord-ipc-0")));
+        assert!(p.iter().any(|p| p.to_string_lossy().contains("snap.discord/discord-ipc-0")));
     }
 
     #[test]
