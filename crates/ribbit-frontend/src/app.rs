@@ -2303,7 +2303,7 @@ impl App {
             // Step back one snapshot per frame.
             if let Some(state) = s.rewind.pop_back() {
                 let mut m = s.emu.lock();
-                let _ = m.load_state(&state);
+                let _ = m.load_rewind_state(&state);
                 s.last_snapshot = m.cpu.cycles;
             }
             s.emu.resync();
@@ -2322,7 +2322,7 @@ impl App {
         {
             let mut m = s.emu.lock();
             if m.cpu.cycles >= s.last_snapshot + REWIND_EVERY_CYCLES {
-                let _ = s.compress.todo.send(m.snapshot());
+                let _ = s.compress.todo.send(m.rewind_snapshot());
                 s.last_snapshot = m.cpu.cycles;
             }
             if let Err(e) = s.autosave.tick(&s.saves, &mut m, now) {

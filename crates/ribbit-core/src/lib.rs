@@ -1243,6 +1243,40 @@ impl Machine {
         RawState(payload)
     }
 
+    /// A rewind snapshot: `snapshot` without the SD card's sectors (the card
+    /// in it is empty; same format). A large card (a LeapLoader card holds
+    /// ~680 MB) made every half-second snapshot cost seconds of serialising and
+    /// compressing, and the queued snapshots grew without bound. The card is
+    /// kept in its own file, so rewinding leaves it as it is
+    /// (`load_rewind_state`). Not for save states: those keep the card.
+    pub fn rewind_snapshot(&mut self) -> RawState {
+        let sectors = self.sd_sectors_mut().map(std::mem::take);
+        let raw = self.snapshot();
+        if let (Some(sectors), Some(card)) = (sectors, self.sd_sectors_mut()) {
+            *card = sectors;
+        }
+        raw
+    }
+
+    /// Loads a `rewind_snapshot`, keeping the SD card's current sectors (and
+    /// whether they still need saving).
+    pub fn load_rewind_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        let dirty = self.io.sd.as_ref().and_then(|sd| sd.card.as_ref()).is_some_and(|c| c.dirty);
+        let sectors = self.sd_sectors_mut().map(std::mem::take);
+        let result = self.load_state(bytes);
+        if let (Some(sectors), Some(card)) = (sectors, self.sd_sectors_mut()) {
+            *card = sectors;
+        }
+        if let Some(card) = self.io.sd.as_mut().and_then(|sd| sd.card.as_mut()) {
+            card.dirty |= dirty;
+        }
+        result
+    }
+
+    fn sd_sectors_mut(&mut self) -> Option<&mut std::collections::BTreeMap<u32, Vec<u8>>> {
+        self.io.sd.as_mut()?.card.as_mut().map(|c| &mut c.sectors)
+    }
+
     /// The complete machine state, compressed (see `snapshot`).
     pub fn save_state(&self) -> Vec<u8> {
         self.snapshot().compress()
@@ -1572,6 +1606,29 @@ mod tests {
         m.run(24_576, &Breakpoints::default());
         let x = m.io.adc.fifo[0] >> 5 & 0x7FF;
         assert!(x.abs_diff(0x200) < 0x20, "{x:#x}");
+    }
+
+    #[test]
+    fn rewind_snapshots_leave_the_sd_card_alone() {
+        let prog = [MOV_R0_1[0], MOV_R0_1[1], B_SELF[0], B_SELF[1]];
+        let mut m = machine(&prog);
+        m.io.sd = Some(io::sd::SdSlot::with_card());
+        fn card(m: &mut Machine) -> &mut io::sd::SdCard {
+            m.io.sd.as_mut().unwrap().card.as_mut().unwrap()
+        }
+        card(&mut m).sectors.insert(9000, vec![1; 512]);
+        let full = m.snapshot().compress();
+        let rewind = m.rewind_snapshot().compress();
+        assert!(rewind.len() < full.len(), "the card is left out");
+        assert_eq!(card(&mut m).sectors[&9000], vec![1; 512], "and put back");
+        // A later write survives rewinding, and still needs saving.
+        card(&mut m).sectors.insert(9001, vec![2; 512]);
+        card(&mut m).dirty = true;
+        m.load_rewind_state(&rewind).unwrap();
+        assert_eq!((card(&mut m).sectors[&9000][0], card(&mut m).sectors[&9001][0], card(&mut m).dirty), (1, 2, true));
+        // A save state keeps the card.
+        m.load_state(&full).unwrap();
+        assert!(!card(&mut m).sectors.contains_key(&9001));
     }
 
     #[test]

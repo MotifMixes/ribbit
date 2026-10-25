@@ -19,5 +19,6 @@ A save state is the whole console at one moment: load it to carry on from exactl
 ## Rewind and fast-forward
 
 - Hold `` ` `` (the key left of `1`) to rewind: the last 30 seconds play backwards while you hold it.
+  Rewinding doesn't undo what a game wrote to the Leapster 2's SD card; save states do include the card.
 - Hold `Tab` to fast-forward.
 - **Emulation › Speed** runs at 50%, 100% (normal), 200%, 400% or as fast as possible. The status bar at the bottom shows the speed the game actually runs at.
