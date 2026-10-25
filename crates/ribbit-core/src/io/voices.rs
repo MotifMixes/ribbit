@@ -54,8 +54,10 @@
 //! voice | 0x20 (0x4002_F5EC) and voice | 0x08 (0x4002_F634). Top-Secret Personal
 //! Beeswax pauses the speech at commas (page turns) and resumes it; stopping
 //! there lost the rest of the sentence (a player's report). Paused voices hold
-//! their place and stay set in 0x0180_2078 (HYPOTHESIS: the pause routine only
-//! pauses a playing voice and the resume routine does not check it).
+//! their place but read as free in 0x0180_2078: the Leapster 2 BIOS 0.6 stops raw
+//! sounds (LF_StopAudioPlayer) with the pause command and then looks for free voices
+//! there (VERIFIED-FW behaviour, LeapLoader 2026-10-25; before, paused voices stayed
+//! set and the BIOS ran out of voices). The resume routine does not check the register.
 //!
 //! Not modelled: analog output, the other 0x0180_4000 registers (0x41A4 +
 //! 4 x voice is written with the volume at start and restored from 0x41E8 +
@@ -174,10 +176,15 @@ impl Default for VoiceEngine {
 
 impl VoiceEngine {
     /// 0x0180_2078: playing voices (voice 0 in bit 7, voices 1-7 in bits 0-6).
+    /// Playing voices. A paused voice does not count: the Leapster 2 BIOS 0.6 stops a raw sound
+    /// (LF_StopAudioPlayer) with the pause command (byte 0x20 | voice) and then picks free voices from
+    /// this register, so a paused voice that read as playing was never handed out again (LeapLoader's
+    /// menu music fell silent at its second restart).
     pub fn status(&self) -> u32 {
-        let mut s = (self.triggered[0] as u32) << 7;
+        let on = |v: usize| (self.triggered[v] && !self.paused[v]) as u32;
+        let mut s = on(0) << 7;
         for v in 1..8 {
-            s |= (self.triggered[v] as u32) << (v - 1);
+            s |= on(v) << (v - 1);
         }
         s
     }
@@ -785,7 +792,7 @@ mod tests {
         e.command(PAUSE_COMMAND, 5);
         e.advance(HZ, HZ, &mut mem);
         assert!(e.triggered[5], "a paused voice does not run out");
-        assert_eq!(e.status(), 1 << 4, "and still reads as playing");
+        assert_eq!(e.status(), 0, "but reads as free (the BIOS stops raw sounds this way)");
         e.command(RESUME_COMMAND, 5);
         e.advance(HZ / 200 - 1, HZ, &mut mem);
         assert!(e.triggered[5], "the other 40 samples are still to come");
