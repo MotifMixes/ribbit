@@ -175,6 +175,14 @@ pub struct App {
     discord: crate::discord::Discord,
     /// Frames left to size the window around the screen (0 = done).
     fit_window: u8,
+    /// When the window was last drawn, and when egui asked to draw it
+    /// again (None: not until something happens); `woken`: an event came
+    /// in since (see `next_redraw`).
+    drawn_at: Instant,
+    repaint_at: Option<Instant>,
+    woken: bool,
+    /// The status line's period: since when, and frames drawn (`log_status`).
+    status: (Instant, u32),
     /// The running game's own settings are on: its name and the player's
     /// usual settings (see game_settings.rs).
     game_own: Option<(String, Settings)>,
@@ -314,6 +322,10 @@ impl App {
             lcd_px: (0.0, 0.0, 0.0, 0.0),
             idle_left: None,
             fit_window: 0,
+            drawn_at: Instant::now(),
+            repaint_at: None,
+            woken: true,
+            status: (Instant::now(), 0),
             game_own: None,
             #[cfg(target_os = "macos")]
             sheet: None,
@@ -1219,6 +1231,57 @@ impl App {
             (None, _) => "The SD card is the card file again",
         };
         self.ui.toast_for(if restarted { format!("{what}; the Leapster 2 restarted") } else { what.to_string() }, Duration::from_secs(6));
+    }
+
+    /// When to draw the main window next. Every frame while something
+    /// runs or moves (a game, the LeapPad, a recording, the debugger's
+    /// windows, a file dialog); else after input, when egui asks (an
+    /// animation, a message), and now and then for work done in the
+    /// background (the library scan, the update check). Ribbit used to draw
+    /// every frame with nothing changing, keeping the GPU busy all the time,
+    /// even in the background; a player's Mac froze now and then while
+    /// Ribbit sat at the library (2026-10-26).
+    fn next_redraw(&self, now: Instant) -> Instant {
+        #[cfg(target_os = "macos")]
+        let picking = self.sheet.is_some() || self.native_pick.is_some();
+        #[cfg(not(target_os = "macos"))]
+        let picking = self.native_pick.is_some();
+        let busy = self.session.is_some()
+            || self.zippity.is_some()
+            || self.twist.is_some()
+            || self.leappad.is_some()
+            || self.recording.is_some()
+            || self.fit_window > 0
+            || self.closing_animation
+            || self.popouts.any()
+            || picking;
+        if busy || self.woken {
+            return now;
+        }
+        let focused = self.main_focused || self.popouts.focused;
+        let every = if focused { IDLE_REDRAW } else { BACKGROUND_REDRAW };
+        let due = self.drawn_at + every;
+        self.repaint_at.map_or(due, |at| at.min(due))
+    }
+
+    /// Every 30 s, a line in the log (frames drawn, a game running, in the
+    /// background), written to disk at once: the last lines before a
+    /// system freeze then survive the forced restart.
+    fn log_status(&mut self, now: Instant) {
+        let span = now.duration_since(self.status.0);
+        if span < STATUS_EVERY {
+            return;
+        }
+        let running = self.session.is_some() || self.zippity.is_some() || self.twist.is_some() || self.leappad.is_some();
+        tracing::info!(target: "ribbit::perf",
+            fps = (self.status.1 as f64 / span.as_secs_f64()).round(),
+            running,
+            background = !(self.main_focused || self.popouts.focused),
+            "status (last 30 s)");
+        self.status = (now, 0);
+        if let Ok(f) = std::fs::OpenOptions::new().append(true).open(self.opts.data_dir.join("ribbit.log")) {
+            let _ = f.sync_data();
+        }
     }
 
     /// The console running (None: none).
@@ -2913,6 +2976,8 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let frame_start = Instant::now();
+        (self.drawn_at, self.woken) = (frame_start, false);
+        self.status.1 += 1;
         #[cfg(not(target_os = "android"))]
         self.poll_pads();
         self.emulate();
@@ -3151,6 +3216,8 @@ impl App {
             }
         });
         self.touch_area = area;
+        // Duration::MAX (nothing to animate) overflows: no time asked.
+        self.repaint_at = out.viewport_output.get(&egui::ViewportId::ROOT).and_then(|v| frame_start.checked_add(v.repaint_delay));
         state.handle_platform_output(&gpu.window, out.platform_output);
         let ppp = out.pixels_per_point;
         if self.fit_window > 0 {
@@ -3228,6 +3295,13 @@ impl App {
         self.frame_diag.frame(frame_start, took, running && !self.halted());
     }
 }
+
+/// With nothing running or moving, the window is drawn at least this
+/// often: in front, and in the background (`next_redraw`).
+const IDLE_REDRAW: Duration = Duration::from_millis(250);
+const BACKGROUND_REDRAW: Duration = Duration::from_secs(1);
+/// How often `log_status` writes its line.
+const STATUS_EVERY: Duration = Duration::from_secs(30);
 
 /// The window's frame rate, its longest gap between frames and its own
 /// work per frame, logged every 10 s while a game runs (for reports of
@@ -3387,6 +3461,9 @@ impl ApplicationHandler for App {
             (Some(st), Some(g)) => st.on_window_event(&g.window, &event).consumed,
             _ => false,
         };
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.woken = true;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -3479,11 +3556,21 @@ impl ApplicationHandler for App {
         if focused == self.background {
             self.focus_changed(focused);
         }
+        let now = Instant::now();
+        let next = self.next_redraw(now);
         if let Some(g) = &self.gpu {
-            g.window.request_redraw();
+            if next <= now {
+                g.window.request_redraw();
+            }
             self.popouts.sync(event_loop, g, &mut self.ui.debug, &self.ui.debug_snapshot.system);
             self.popouts.request_redraws();
         }
+        event_loop.set_control_flow(if next <= now {
+            winit::event_loop::ControlFlow::Wait
+        } else {
+            winit::event_loop::ControlFlow::WaitUntil(next)
+        });
+        self.log_status(now);
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

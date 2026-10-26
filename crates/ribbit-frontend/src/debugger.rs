@@ -581,6 +581,11 @@ impl Popouts {
     }
 
     /// Asks each window for a picture now and then.
+    /// Whether any of the windows is open.
+    pub fn any(&self) -> bool {
+        self.memory.is_some() || self.cpu.is_some()
+    }
+
     pub fn request_redraws(&self) {
         for p in [&self.memory, &self.cpu].into_iter().flatten() {
             if p.drawn.is_none_or(|t| t.elapsed() >= REDRAW) {

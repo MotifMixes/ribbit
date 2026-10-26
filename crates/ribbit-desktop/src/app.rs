@@ -14,6 +14,10 @@ fn main() {
     // Nobody sees this program's stderr: the log goes to a file as well, for
     // players to send when something goes wrong.
     let log = data_dir.join("ribbit.log");
+    // The last run's log is kept: after a crash or a forced restart,
+    // Ribbit may be started again (macOS reopens it) before anyone
+    // looks.
+    let _ = std::fs::rename(&log, data_dir.join("ribbit.previous.log"));
     ribbit_debug::init_logging_to_file("info", &log);
     tracing::info!("Ribbit {} ({} {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
     {
