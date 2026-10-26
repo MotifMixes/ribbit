@@ -9,6 +9,7 @@
 //! | 30 | battery OK (SysMgr line A) | VERIFIED-FW, see below |
 //! | 12 | batteries are not the rechargeable pack (SysMgr line B) | VERIFIED-FW, see below |
 //! | 11 | v1.5 only: power-off request when 0 (SysMgr line C) | VERIFIED-FW, see below |
+//! | 27 | Leapster 2 with an SD slot: SD card locked when 1 (write-protect switch HYPOTHESIS) | VERIFIED-BEHAVIOUR, see below |
 //! | other non-button bits | not read by the SysMgr's configured lines | UNKNOWN |
 //!
 //! The board lines. Every BIOS's SysMgr loads a battery-monitor resource
@@ -40,6 +41,15 @@
 //! now"; Ribbit does not adopt that guess for the unknown bits, but
 //! `unresolved_lines` can be set explicitly for experiments (`--input-lines`).
 //!
+//! Bit 27 on a Leapster 2 with an SD slot: with it at 1, the Connected B5
+//! BIOS (152-12076) mounts the card (reads its FAT twice) but never writes
+//! to it, and its home screen greys out the SD icon; with every other
+//! unresolved bit at 1 it behaves as with 0 (Ribbit test, 2026-10-26: the
+//! MAME workaround below hid a Mac player's card). HYPOTHESIS: the socket's
+//! write-protect switch, as card detect is a separate pin (sd.rs, 0x0180_00EC
+//! bit 6). The card is never locked: io/mod.rs clears the bit, so the MAME
+//! workaround leaves it alone.
+//!
 //! Output and configuration registers (names VERIFIED-FW: the Leapster 2
 //! BIOS 0.6 prints them on its UART, reading them from these addresses,
 //! 0x4005_824E-0x4005_82BE): GIODataOut 0x0180_0040, GIOPull 0x0180_0044,
@@ -66,6 +76,8 @@ pub const NOT_RECHARGEABLE: u32 = 1 << 12;
 pub const NO_POWER_OFF_REQUEST: u32 = 1 << 11;
 /// The board lines the SysMgr reads.
 pub const BOARD_LINES: u32 = BATTERY_OK | NOT_RECHARGEABLE | NO_POWER_OFF_REQUEST;
+/// GIODataIn bit 27 on a Leapster 2 with an SD slot: the card is locked.
+pub const SD_LOCKED: u32 = 1 << 27;
 
 fn default_board_lines() -> u32 {
     BOARD_LINES

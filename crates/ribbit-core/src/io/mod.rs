@@ -291,7 +291,12 @@ impl Peripherals {
         if addr == gpio::ADDR
             && let Some(f) = &self.spi_flash
         {
-            let v = self.gpio.read(addr).unwrap_or(0) & !spiflash::PIN_MISO;
+            let mut v = self.gpio.read(addr).unwrap_or(0) & !spiflash::PIN_MISO;
+            if self.sd.as_ref().is_some_and(|s| s.card.is_some()) {
+                // The SD card is not locked (gpio.rs, bit 27), whatever the
+                // unresolved lines.
+                v &= !gpio::SD_LOCKED;
+            }
             return Some(v | if f.miso() { spiflash::PIN_MISO } else { 0 });
         }
         if let Some([b004, b008]) = self.leapster2_power {
@@ -844,6 +849,17 @@ impl MachineBus<'_> {
 mod tests {
     use super::*;
     use ribbit_memory::Firmware;
+
+    #[test]
+    fn a_leapster_2_sd_card_is_never_locked() {
+        // The MAME workaround sets every unresolved line; bit 27 would lock
+        // the card (B5 then greys out its SD icon).
+        let mut io = Peripherals { spi_flash: Some(Default::default()), ..Default::default() };
+        io.gpio.unresolved_lines = !ribbit_input::BUTTON_BITS;
+        assert_ne!(io.read32(gpio::ADDR).unwrap() & gpio::SD_LOCKED, 0, "no SD slot: unresolved");
+        io.sd = Some(sd::SdSlot::with_card());
+        assert_eq!(io.read32(gpio::ADDR).unwrap() & gpio::SD_LOCKED, 0);
+    }
 
     #[test]
     fn irq_bitmask_matches_per_line_outputs() {
