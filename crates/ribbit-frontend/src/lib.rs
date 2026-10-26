@@ -32,6 +32,7 @@ mod library;
 mod manual;
 mod perf;
 pub mod saves;
+pub mod sdcard;
 pub mod settings;
 mod ui;
 mod touch_pad;

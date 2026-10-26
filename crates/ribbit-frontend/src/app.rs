@@ -489,6 +489,9 @@ impl App {
         }
         machine.keep_awake = !self.settings.turn_off_when_idle;
         let mut saves = SavePaths::for_machine(&self.save_dir(), &machine);
+        if saves.sd.is_some() {
+            saves.sd_folder = self.settings.leapster2_sd_folder.clone().map(|d| Arc::new(crate::sdcard::Folder::new(d)));
+        }
         if let Some(p) = &self.opts.system_eeprom {
             saves.system = Some(p.clone());
         }
@@ -1060,6 +1063,164 @@ impl App {
         }
     }
 
+    /// Emulation › Leapster 2 SD card: changes the card of the running
+    /// Leapster 2 (which then restarts, as if the card had been swapped with
+    /// the power off), or else the card file of the Leapster 2 BIOS picked in
+    /// the library, for its next start.
+    fn sd_card(&mut self, job: crate::sdcard::Job) {
+        match self.sd_card_job(&job) {
+            Ok(done) => self.ui.toast_for(done, Duration::from_secs(6)),
+            Err(e) => {
+                let title = if matches!(job, crate::sdcard::Job::Export(_)) {
+                    "The SD card's files weren't copied"
+                } else {
+                    "The SD card wasn't changed"
+                };
+                self.ui.problem(title, format!("{e:#}"), String::new());
+            }
+        }
+    }
+
+    fn sd_card_job(&mut self, job: &crate::sdcard::Job) -> Result<String> {
+        use crate::sdcard::{self, Job};
+        // The new contents (None: unchanged) and what to say.
+        let change = |sectors: &mut sdcard::Sectors| -> Result<(Option<sdcard::Sectors>, String)> {
+            Ok(match job {
+                Job::LoadImage(path) => {
+                    let (s, copied) = sdcard::load_image(path)?;
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let how = if copied { " (its files: the card was larger than 2 GB)" } else { "" };
+                    (Some(s), format!("SD card loaded from {name}{how}"))
+                }
+                Job::Export(dir) => {
+                    let n = sdcard::export(sectors, dir)?;
+                    (None, format!("{n} files copied from the SD card to {}", dir.display()))
+                }
+                Job::Empty => (Some(sdcard::fresh()), "The SD card is empty (freshly formatted)".to_string()),
+            })
+        };
+        // The running Leapster 2's card.
+        if let Some(s) = &mut self.session
+            && let Some(path) = s.saves.sd.clone()
+        {
+            let mut m = s.emu.lock();
+            s.saves.flush(&mut m)?;
+            let card = crate::saves::sd_card_mut(&mut m).context("this Leapster 2 has no SD card")?;
+            let (new, mut done) = change(&mut card.sectors)?;
+            let Some(new) = new else {
+                return Ok(done);
+            };
+            backup_card(&path, job)?;
+            card.sectors = new;
+            card.changed.clear();
+            card.synced = false;
+            card.dirty = true;
+            s.saves.flush(&mut m)?;
+            // With an SD card folder the image's files went into it: the
+            // card is the whole folder again.
+            if let (Some(folder), Some(card)) = (s.saves.sd_folder.clone(), crate::saves::sd_card_mut(&mut m)) {
+                folder.load(card)?;
+            }
+            m.reset();
+            drop(m);
+            s.emu.resync();
+            done.push_str("; the Leapster 2 restarted");
+            return Ok(done);
+        }
+        // Not running: the card file of the Leapster 2 BIOS picked in the library.
+        let bios = self
+            .settings
+            .bios_picked
+            .get(Hardware::Leapster2.name())
+            .cloned()
+            .or_else(|| self.library.bios_list(Hardware::Leapster2).into_iter().next().map(|b| b.path.clone()))
+            .context("no Leapster 2 BIOS yet: add one in the library (Leapster 2 tab), then try again")?;
+        let fw = ribbit_memory::Firmware::from_bytes(std::fs::read(&bios).with_context(|| format!("reading {}", bios.display()))?)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", bios.display()))?;
+        if fw.leapster2_nand() {
+            anyhow::bail!(
+                "the Leapster 2 BIOS picked in the library ({}) is a CIP3 board's, which has no SD card slot. Pick 0.6 or Connected B5.",
+                bios.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            );
+        }
+        if let Some(dir) = &self.settings.leapster2_sd_folder {
+            let Job::LoadImage(image) = job else {
+                anyhow::bail!("the SD card is the folder {} now: change the files there", dir.display());
+            };
+            let n = sdcard::export(&mut sdcard::load_image(image)?.0, dir)?;
+            return Ok(format!("{n} files from the image copied into the SD card folder"));
+        }
+        let path = self.save_dir().join(format!("sdcard-{:08x}.img", fw.id().crc32));
+        let mut sectors = if path.exists() { sdcard::load_image(&path)?.0 } else { sdcard::fresh() };
+        let (new, done) = change(&mut sectors)?;
+        if let Some(new) = new {
+            backup_card(&path, job)?;
+            crate::saves::write_atomic(&path, &ribbit_core::io::sparse::encode(&new, ribbit_core::io::sd::SECTOR))?;
+        }
+        Ok(done)
+    }
+
+    /// Chooses (or stops using) the Leapster 2's SD card folder; a running
+    /// Leapster 2 restarts with it. An empty folder first gets the card's
+    /// files, so the profiles and games on the card carry on.
+    fn set_sd_folder(&mut self, path: Option<PathBuf>) {
+        let mut seeded = None;
+        if let Some(dir) = &path
+            && std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_none())
+            && (self.settings.leapster2_sd_folder.is_none() || self.session.as_ref().is_some_and(|s| s.saves.sd.is_some()))
+        {
+            match self.sd_card_job(&crate::sdcard::Job::Export(dir.clone())) {
+                Ok(_) => seeded = Some(()),
+                // No Leapster 2 BIOS yet: the folder starts empty.
+                Err(e) => tracing::info!(target: "ribbit::saves", "SD card folder not filled from the card: {e:#}"),
+            }
+        }
+        self.settings.leapster2_sd_folder = path.clone();
+        self.save_settings();
+        let mut restarted = false;
+        if let Some(s) = &mut self.session
+            && s.saves.sd.is_some()
+        {
+            let mut m = s.emu.lock();
+            if let Err(e) = s.saves.flush(&mut m) {
+                tracing::warn!(target: "ribbit::saves", "saving: {e:#}");
+            }
+            s.saves.sd_folder = path.clone().map(|d| Arc::new(crate::sdcard::Folder::new(d)));
+            let loaded = match (&s.saves.sd_folder, crate::saves::sd_card_mut(&mut m)) {
+                (Some(folder), Some(card)) => folder.load(card).map(|_| ()),
+                // Back to the card file (or a new card).
+                (None, Some(card)) => {
+                    let file = s.saves.sd.clone().filter(|p| p.exists());
+                    match file.map(|p| crate::sdcard::load_image(&p)).transpose() {
+                        Ok(sectors) => {
+                            card.sectors = sectors.map_or_else(crate::sdcard::fresh, |(s, _)| s);
+                            card.changed.clear();
+                            card.dirty = false;
+                            card.synced = s.saves.sd.as_ref().is_some_and(|p| p.exists());
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                _ => Ok(()),
+            };
+            m.reset();
+            drop(m);
+            s.emu.resync();
+            if let Err(e) = loaded {
+                self.ui.problem("The SD card folder couldn't be used", format!("{e:#}"), String::new());
+                return;
+            }
+            restarted = true;
+        }
+        let what = match (&path, seeded) {
+            (Some(_), Some(())) => "SD card folder chosen: the card's files were copied into it",
+            (Some(_), None) => "SD card folder chosen",
+            (None, _) => "The SD card is the card file again",
+        };
+        self.ui.toast_for(if restarted { format!("{what}; the Leapster 2 restarted") } else { what.to_string() }, Duration::from_secs(6));
+    }
+
     /// The console running (None: none).
     fn current_hardware(&self) -> Option<Hardware> {
         if self.twist.is_some() {
@@ -1256,6 +1417,8 @@ impl App {
             Pick::TwistZip => None,
             Pick::RecordFolder => self.settings.record_folder.clone(),
             Pick::LeapPadBook => self.leappad.as_ref().and_then(|l| l.cart.clone()),
+            Pick::SdFolder => self.settings.leapster2_sd_folder.clone(),
+            Pick::SdImage | Pick::SdExport => None,
         };
         #[cfg(target_os = "macos")]
         if self.sheet.is_none()
@@ -1304,6 +1467,9 @@ impl App {
                 self.save_settings();
             }
             Pick::LeapPadBook => self.open_leappad_book(Some(path)),
+            Pick::SdFolder => self.set_sd_folder(Some(path)),
+            Pick::SdImage => self.sd_card(crate::sdcard::Job::LoadImage(path)),
+            Pick::SdExport => self.sd_card(crate::sdcard::Job::Export(path)),
         }
     }
 
@@ -1521,6 +1687,8 @@ impl App {
                 }
             }
             Action::ImportTwistZip(path) => self.import_twist_zip(path),
+            Action::SdCard(job) => self.sd_card(job),
+            Action::SetSdFolder(path) => self.set_sd_folder(path),
             Action::ConsoleViewChanged => self.console_view_changed(),
             Action::Reset => self.reset(),
             Action::TogglePause => self.toggle_pause(),
@@ -3386,6 +3554,15 @@ fn control_keys(c: &crate::console_view::Control, settings: &Settings) -> String
 /// "Game (USA, alt) [500-11002 / 500-01168] (MAME: x)" -> "Game (USA, alt)".
 pub(crate) fn short_name(full: &str) -> String {
     full.split(" [").next().unwrap_or(full).trim().to_string()
+}
+
+/// Before the SD card is replaced (an image, an empty card): its old file is
+/// kept beside it as `.img.bak`.
+fn backup_card(path: &Path, job: &crate::sdcard::Job) -> Result<()> {
+    if matches!(job, crate::sdcard::Job::LoadImage(_) | crate::sdcard::Job::Empty) && path.exists() {
+        std::fs::copy(path, path.with_extension("img.bak")).with_context(|| format!("backing up {}", path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

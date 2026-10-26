@@ -128,6 +128,9 @@ pub struct Settings {
     /// A folder written onto the RockIt Twist's internal storage at power-on
     /// (laid out like its F: drive), if one is chosen.
     pub twist_content: Option<PathBuf>,
+    /// The Leapster 2's SD card folder, if one is chosen: the card is made
+    /// from it at power-on and what the console writes goes back into it.
+    pub leapster2_sd_folder: Option<PathBuf>,
     /// Offer the RockIt Twist on the PC's USB (a USB/IP server for
     /// usbip-win2 and LeapFrog Connect).
     pub twist_usb: bool,
@@ -238,6 +241,7 @@ impl Default for Settings {
             console_view_twist: true,
             console_view_keys: true,
             twist_content: None,
+            leapster2_sd_folder: None,
             twist_usb: false,
             leapster2_usb: false,
             twist_keys: BTreeMap::new(),

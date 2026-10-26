@@ -20,9 +20,12 @@ pub struct SavePaths {
     pub sd: Option<PathBuf>,
     /// Leapster 2 CIP3 NAND (`io::nand`; its programmed pages).
     pub nand: Option<PathBuf>,
+    /// The SD card folder, when one is chosen: the card comes from it and
+    /// goes back into it, and `sd` isn't used.
+    pub sd_folder: Option<std::sync::Arc<crate::sdcard::Folder>>,
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -42,6 +45,7 @@ impl SavePaths {
             flash: machine.io.spi_flash.as_ref().map(|_| dir.join(format!("flash-{bios:08x}.bin"))),
             sd: sd_card(machine).map(|_| dir.join(format!("sdcard-{bios:08x}.img"))),
             nand: machine.io.nand.as_ref().map(|_| dir.join(format!("nand-{bios:08x}.img"))),
+            sd_folder: None,
         }
     }
 
@@ -65,13 +69,16 @@ impl SavePaths {
         {
             flash.load(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?);
         }
-        if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine))
+        if let (Some(folder), Some(card)) = (&self.sd_folder, sd_card_mut(machine)) {
+            let files = folder.load(card)?;
+            tracing::info!(target: "ribbit::saves", dir = %folder.dir.display(), files, "SD card made from its folder");
+        } else if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine))
             && path.exists()
             && !card.load_image(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
         {
             anyhow::bail!("{} is not an SD card image", path.display());
         }
-        if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine)) {
+        if let (None, Some(path), Some(card)) = (&self.sd_folder, &self.sd, sd_card_mut(machine)) {
             card.synced = path.exists();
         }
         if let (Some(path), Some(nand)) = (&self.nand, machine.io.nand.as_mut())
@@ -112,10 +119,16 @@ impl SavePaths {
             written += 1;
             tracing::info!(target: "ribbit::saves", path = %path.display(), "internal flash saved");
         }
-        if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine))
+        if let (Some(folder), Some(card)) = (&self.sd_folder, sd_card_mut(machine))
             && card.dirty
         {
-            // A card holds up to 1 GiB (a LeapLoader card ~680 MB), written a
+            let files = folder.sync(card)?;
+            written += 1;
+            tracing::info!(target: "ribbit::saves", dir = %folder.dir.display(), files, "SD card written to its folder");
+        } else if let (Some(path), Some(card)) = (&self.sd, sd_card_mut(machine))
+            && card.dirty
+        {
+            // A card holds up to 2 GiB (a LeapLoader card ~680 MB), written a
             // sector at a time: rewriting the file each time stalled the game
             // for a second. Add the changed sectors to the file instead, and
             // rewrite it when it no longer matches the card or the old copies
@@ -152,11 +165,11 @@ fn append_sectors(path: &Path, card: &ribbit_core::io::sd::SdCard) -> std::io::R
     Ok(ribbit_core::io::sparse::append(&mut file, ribbit_core::io::sd::SECTOR, blocks)? as usize)
 }
 
-fn sd_card(machine: &Machine) -> Option<&ribbit_core::io::sd::SdCard> {
+pub(crate) fn sd_card(machine: &Machine) -> Option<&ribbit_core::io::sd::SdCard> {
     machine.io.sd.as_ref().and_then(|s| s.card.as_ref())
 }
 
-fn sd_card_mut(machine: &mut Machine) -> Option<&mut ribbit_core::io::sd::SdCard> {
+pub(crate) fn sd_card_mut(machine: &mut Machine) -> Option<&mut ribbit_core::io::sd::SdCard> {
     machine.io.sd.as_mut().and_then(|s| s.card.as_mut())
 }
 

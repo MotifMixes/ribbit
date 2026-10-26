@@ -9,6 +9,16 @@ These play the same Leapster cartridges with their own BIOS. Put the BIOS in you
 - The **Leapster TV** shows a 4:3 TV picture; its controller and stylus work as on the handhelds.
 - The **Leapster 2** starts on its own main menu, as the real one does; **Emulation › Leapster 2: start games directly** goes straight into the cartridge. **Leapster 2 Main Menu** in the library turns it on without a game.
 
+### The Leapster 2's SD card
+
+The Leapster 2 (BIOS 0.6 and Connected B5) has an SD card; the CIP3 board has none. **Emulation › 💾 Leapster 2 SD card** changes it, with nothing to install:
+
+- **SD card folder…** makes a folder on this PC the card, as the RockIt Twist's content folder: the card is made from the folder each time the Leapster 2 starts, and what the console writes to the card (profiles, saves) goes back into it, deleted files included. Lay the folder out like the card's top level; for a LeapLoader card, choose the folder LeapLoader built. An empty folder first gets the card's files. **Open the folder** shows it, and **Stop using the folder** goes back to the card file in the save folder. A `Leapster` folder is added if there is none: the Connected B5 BIOS formats a card without one.
+- **Load a card image…** takes a real card's image (`.img` from Win32 Disk Imager or `dd`) or a Ribbit card file (`sdcard-….img`). Without an SD card folder it replaces the card, and the old card is kept as `.img.bak`; with one, the image's files are copied into the folder.
+- **Copy the card's files to a folder…** and **Empty the card** (a freshly formatted card; the old one is kept as `.img.bak`) are there while no SD card folder is used.
+
+A running Leapster 2 restarts with the new card. Without a game running, these change the card of the Leapster 2 BIOS picked in the library. The emulated card holds 2 GB (a card made by an earlier Ribbit keeps its 1 GB volume until it is emptied); an image of a larger card has its files copied onto it. Each BIOS keeps its own card file (`sdcard-<BIOS CRC>.img`, in the save folder).
+
 These consoles are experimental: some games may not work yet. The [compatibility list](https://github.com/MotifMixes/ribbit/blob/main/docs/compatibility.md) says what has been tested.
 
 ## Zippity

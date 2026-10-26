@@ -18,6 +18,13 @@ pub enum Pick {
     RecordFolder,
     /// A virtual LeapPad book (.toml).
     LeapPadBook,
+    /// The Leapster 2's SD card folder (the card is made from it, and
+    /// written back to it).
+    SdFolder,
+    /// An SD card image for the Leapster 2.
+    SdImage,
+    /// A folder the Leapster 2's SD card files are copied into.
+    SdExport,
 }
 
 impl Pick {
@@ -30,14 +37,21 @@ impl Pick {
             Pick::TwistZip => "Import RockIt Twist games (.zip)",
             Pick::RecordFolder => "Choose recording output folder",
             Pick::LeapPadBook => "Open a LeapPad book (.toml)",
+            Pick::SdFolder => "Choose the Leapster 2's SD card folder",
+            Pick::SdImage => "Load an SD card image into the Leapster 2",
+            Pick::SdExport => "Choose a folder for the SD card's files",
         }
     }
 
     /// Whether a folder is chosen (not a file).
     pub fn is_folder(self) -> bool {
-        matches!(self, Pick::RomFolder | Pick::TwistContent | Pick::RecordFolder)
+        matches!(self, Pick::RomFolder | Pick::TwistContent | Pick::RecordFolder | Pick::SdFolder | Pick::SdExport)
     }
 }
+
+/// SD card image extensions (Win32 Disk Imager, dd, Ribbit's own card files).
+#[cfg(not(target_os = "android"))]
+const SD_IMAGES: [&str; 4] = ["img", "bin", "raw", "dd"];
 
 /// Native file dialog (blocks until the user chooses). Windows and Linux;
 /// macOS uses `SheetPick`.
@@ -67,6 +81,9 @@ pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
     if what == Pick::LeapPadBook {
         return d.add_filter("LeapPad books", &["toml"]).add_filter("All files", &["*"]).pick_file();
     }
+    if what == Pick::SdImage {
+        return d.add_filter("SD card images", &SD_IMAGES).add_filter("All files", &["*"]).pick_file();
+    }
     d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"]).add_filter("All files", &["*"]).pick_file()
 }
 
@@ -94,6 +111,8 @@ impl SheetPick {
             Box::pin(d.add_filter("Zip archives", &["zip"]).add_filter("All files", &["*"]).pick_file())
         } else if what == Pick::LeapPadBook {
             Box::pin(d.add_filter("LeapPad books", &["toml"]).add_filter("All files", &["*"]).pick_file())
+        } else if what == Pick::SdImage {
+            Box::pin(d.add_filter("SD card images", &SD_IMAGES).add_filter("All files", &["*"]).pick_file())
         } else {
             Box::pin(
                 d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"])

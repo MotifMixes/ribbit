@@ -34,7 +34,7 @@
 //! CMD17 (read 512 bytes), CMD24 (write 512 bytes).
 //!
 //! Model: commands complete at once (timing UNKNOWN) and the card is never
-//! busy. The card is a 1 GiB standard-capacity SD card that starts freshly
+//! busy. The card is a 2 GiB standard-capacity SD card that starts freshly
 //! formatted (fat.rs; 0.6 never formats it) and stores written sectors. Size:
 //! HYPOTHESIS. The real card's size is not known, but it must be over 512
 //! MiB: B5 formats the SD volume with 0 root directory entries (0x400C_E920),
@@ -68,8 +68,8 @@ const TYPE_WIDE: u8 = 1 << 6;
 const WRITE_CRC_OK: u16 = 0x2000;
 
 pub const SECTOR: usize = 512;
-/// 1 GiB (HYPOTHESIS; see above).
-pub const CARD_SECTORS: u32 = 0x20_0000;
+/// 2 GiB, the largest standard-capacity card (size HYPOTHESIS; see above).
+pub const CARD_SECTORS: u32 = 0x40_0000;
 
 /// SD card states (card status bits 12:9).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -117,18 +117,22 @@ impl SdCard {
         with_crc(c)
     }
 
-    /// CSD version 1.0 for 1 GiB: READ_BL_LEN 9, C_SIZE 4095, C_SIZE_MULT 7.
+    /// CSD version 1.0 for 2 GiB, as a 2 GB card's: READ_BL_LEN 10 (1024-byte
+    /// blocks; transfers stay 512 bytes, as READ_BL_PARTIAL allows), C_SIZE
+    /// 4095, C_SIZE_MULT 7. The BIOS's parser (0.6 0x400C_F2E8) doubles the
+    /// sector count for READ_BL_LEN 10.
     fn csd() -> u128 {
         let mut c: u128 = 0;
         c |= 0x0E << 112; // TAAC
         c |= 0x32 << 96; // TRAN_SPEED 25 MHz
         c |= 0x5B5 << 84; // CCC
-        c |= 9 << 80; // READ_BL_LEN
+        c |= 10 << 80; // READ_BL_LEN
+        c |= 1 << 79; // READ_BL_PARTIAL
         c |= 4095 << 62; // C_SIZE
         c |= 7 << 47; // C_SIZE_MULT
         c |= 1 << 46; // ERASE_BLK_EN
         c |= 0x7F << 39; // SECTOR_SIZE
-        c |= 9 << 22; // WRITE_BL_LEN
+        c |= 10 << 22; // WRITE_BL_LEN
         with_crc(c)
     }
 
@@ -448,8 +452,8 @@ mod tests {
         assert_eq!(csd[3] >> 6, 0, "CSD version 1");
         let c_size = ((csd[5] & 3) as u32) << 10 | (csd[4] as u32) << 2 | (csd[11] >> 6) as u32;
         let mult = ((csd[10] & 3) as u32) << 1 | (csd[9] >> 7) as u32;
-        assert_eq!((c_size + 1) * (4 << mult), CARD_SECTORS);
-        assert_eq!(csd[6] & 0xF, 9, "READ_BL_LEN 512");
+        assert_eq!(csd[6] & 0xF, 10, "READ_BL_LEN 1024");
+        assert_eq!((c_size + 1) * (4 << mult) * 2, CARD_SECTORS);
         assert_eq!(command(&mut s, &mut m, 7, 8, rca << 16) & 1, 0);
         assert_eq!(s.card.as_ref().unwrap().state, CardState::Tran);
     }

@@ -33,6 +33,8 @@ ab_glyph = "0.2.32"
 epaint_default_fonts = "0.36.2"
 # Reading GitHub's release list (update check).
 serde_json = "1"
+# The Leapster 2's SD card from this PC: its FAT volume (sdcard.rs).
+fatfs = "0.3.6"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 egui-winit = "0.36.2"

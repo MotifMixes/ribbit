@@ -69,6 +69,10 @@ pub enum Action {
     SetLeapster2Usb(bool),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
     ImportTwistZip(PathBuf),
+    /// Change the Leapster 2's SD card (Emulation › Leapster 2 SD card).
+    SdCard(crate::sdcard::Job),
+    /// Use this folder as the Leapster 2's SD card (None: the card file).
+    SetSdFolder(Option<PathBuf>),
     /// The console view was turned on or off.
     ConsoleViewChanged,
     /// The update is installed: save, start the new version and quit.
@@ -369,6 +373,9 @@ pub fn draw(
             Pick::TwistZip => Action::ImportTwistZip(path),
             Pick::RecordFolder => Action::SetRecordFolder(path),
             Pick::LeapPadBook => Action::OpenLeapPadBook(path),
+            Pick::SdFolder => Action::SetSdFolder(Some(path)),
+            Pick::SdImage => Action::SdCard(crate::sdcard::Job::LoadImage(path)),
+            Pick::SdExport => Action::SdCard(crate::sdcard::Job::Export(path)),
         });
     }
     if phone {
@@ -986,6 +993,67 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::SetLeapster2Usb(!usb));
             ui.close();
         }
+        sub_menu(ui, "💾  Leapster 2 SD card", |ui| {
+            let folder = settings.leapster2_sd_folder.clone();
+            let name = folder.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+            if ui
+                .button(match &name {
+                    Some(n) => format!("Folder: {n}…"),
+                    None => "SD card folder…".to_string(),
+                })
+                .on_hover_text(
+                    "A folder on this PC that is the Leapster 2's SD card, like the RockIt Twist's content folder: \
+                     the card is made from it each time the Leapster 2 starts, and what the console writes to the \
+                     card (profiles, saves, logs) goes back into it. Lay it out like the card's top level; for a \
+                     LeapLoader card, the folder LeapLoader built. An empty folder first gets the card's files. \
+                     The card holds 2 GB. Nothing to install.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::SdFolder));
+                ui.close();
+            }
+            if let Some(dir) = &folder {
+                if ui.button("Open the folder").clicked() {
+                    actions.push(Action::OpenFolder(dir.clone()));
+                    ui.close();
+                }
+                if ui.button("Stop using the folder").on_hover_text("Back to the card file in the save folder. The folder's files stay where they are.").clicked() {
+                    actions.push(Action::SetSdFolder(None));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui
+                .button("Load a card image…")
+                .on_hover_text(if folder.is_some() {
+                    "Copies a card image's files into the SD card folder: a real card's image (.img from Win32 Disk \
+                     Imager or dd) or a Ribbit card file (sdcard-….img)."
+                } else {
+                    "Replaces the card with an image: a real card's image (.img from Win32 Disk Imager or dd) \
+                     or a Ribbit card file (sdcard-….img, e.g. from another BIOS). The old card is kept as .img.bak."
+                })
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::SdImage));
+                ui.close();
+            }
+            if folder.is_none() {
+                if ui.button("Copy the card's files to a folder…").on_hover_text("For the games' saves, or a backup.").clicked() {
+                    actions.push(Action::Pick(Pick::SdExport));
+                    ui.close();
+                }
+                if ui
+                    .button("Empty the card")
+                    .on_hover_text("A freshly formatted card, as a new Leapster 2's. The old card is kept as .img.bak.")
+                    .clicked()
+                {
+                    actions.push(Action::SdCard(crate::sdcard::Job::Empty));
+                    ui.close();
+                }
+            }
+            ui.label(egui::RichText::new("A running Leapster 2 restarts with the new card.").weak());
+        });
         if ui
             .checkbox(&mut settings.auto_calibrate, "Calibrate automatically")
             .on_hover_text("Ribbit presses the calibration targets for you when the calibration screen appears.")
