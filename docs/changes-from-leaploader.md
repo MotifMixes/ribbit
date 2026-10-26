@@ -45,7 +45,7 @@ Ribbit is left as it is (LeapLoader pads its long sounds instead).
 * **Change:** ribbit-core `io/usb.rs` models the controller at 0x0180_F000 (Freescale USB-FS OTG: OTG
   glue, device core, buffer descriptors in on-chip RAM, interrupt line 15) and the host at the other end
   of the cable; `Machine::usb_plug` / `usb_submit` / `usb_unlink` / `usb_take_done`. The frontend offers
-  it through the RockIt Twist's USB/IP server (port 3240): Options menu, "Leapster 2: plug into this
+  it through the RockIt Twist's USB/IP server (port 3240): Emulation menu, "Leapster 2: plug into this
   PC (USB)". The cable is in while the option is on; a USB/IP client's attach and detach only connect
   the PC (its unfinished transfers are cancelled on detach). `STATE_VERSION` 8.
 * **The reboot loop and its fix:** the BIOS's SET ADDRESS handler posts an attach event, and the USB task
