@@ -15,9 +15,19 @@
 //!   vector-0x12 handler, which reads 0x0180_8818 (bit 1 = error), writes 0x0E
 //!   to it and acknowledges flag bit 14.
 //!
-//! Model: the copy completes instantly when 0x1B is written; completion sets
-//! interrupt flag bit 14 (routed to CPU line 0x12 by `IntFlags`). The status
-//! register never reports an error. Other command values, the panel timing
+//! Model: the copy is made when 0x1B is written; completion sets interrupt
+//! flag bit 14 (routed to CPU line 0x12 by `IntFlags`), at once on the
+//! Leapster and after `transfer_ticks` on the Leapster 2. The status
+//! register never reports an error.
+//!
+//! Leapster 2 transfer time: VERIFIED-BEHAVIOUR that it is not instant.
+//! LeapWolf (a homebrew Wolfenstein 3D, works on hardware) never sleeps; the
+//! Connected B5 BIOS's button task (event loop 0x400B_0A76, poll 0x400B_2EE0)
+//! only runs while the game waits in `CopyToScreen`, and with an instant copy
+//! it never ran, so the buttons never reached the game (Ribbit test,
+//! 2026-10-26). The duration is a HYPOTHESIS: one 32-bit word per 16 MHz
+//! peripheral tick (a 160-line frame, 9600 words, takes 0.6 ms). The
+//! Leapster's transfer time is UNKNOWN and stays instant. Other command values, the panel timing
 //! registers (0x0180_8004-802C, 0x0180_8094-809C) and the dither tables
 //! (0x0180_8180-81BC) are not modelled.
 
@@ -59,9 +69,40 @@ pub struct LcdController {
     pub transfers: u64,
     /// Command values other than 0 and 0x1B (not executed).
     pub unknown_commands: u64,
+    /// Peripheral ticks until a timed copy (Leapster 2) completes; 0 if
+    /// none. Not in save states: a state saved during a copy loads without
+    /// its completion, and the BIOS's wait times out and copies again.
+    #[serde(skip)]
+    pub busy_ticks: u64,
+}
+
+/// Peripheral ticks a Leapster 2 copy of `words` takes (HYPOTHESIS, see the
+/// module notes).
+pub fn transfer_ticks(words: u32) -> u64 {
+    u64::from(words).max(1)
 }
 
 impl LcdController {
+    /// Starts the completion countdown of a timed copy.
+    pub fn start_transfer(&mut self, words: u32) {
+        self.busy_ticks = transfer_ticks(words);
+    }
+
+    /// Ticks until a timed copy completes (`u64::MAX` if none).
+    pub fn ticks_to_done(&self) -> u64 {
+        if self.busy_ticks == 0 { u64::MAX } else { self.busy_ticks }
+    }
+
+    /// Advances a timed copy; raises the completion flag when it ends.
+    pub fn advance(&mut self, ticks: u64, intc: &mut super::intc::IntFlags) {
+        if self.busy_ticks > 0 {
+            self.busy_ticks = self.busy_ticks.saturating_sub(ticks);
+            if self.busy_ticks == 0 {
+                intc.raise(super::intc::FLAG_DMA);
+            }
+        }
+    }
+
     pub fn read(&self, addr: u32) -> Option<u32> {
         Some(match addr {
             LCD_BASE => self.regs.fb_base,
@@ -124,6 +165,20 @@ mod tests {
         assert_eq!(lcd.regs, LcdRegs { fb_base: 0, stride: 0xF0, format: 0x8000_0004 });
         assert!(lcd.regs.enabled());
         assert_eq!(lcd.read(LCD_STRIDE), Some(0xF0));
+    }
+
+    #[test]
+    fn a_timed_copy_completes_after_its_transfer_time() {
+        let mut lcd = LcdController::default();
+        let mut intc = super::super::intc::IntFlags::default();
+        assert_eq!(lcd.ticks_to_done(), u64::MAX);
+        lcd.start_transfer(9600);
+        assert_eq!(lcd.ticks_to_done(), 9600, "0.6 ms at 16 MHz");
+        lcd.advance(9599, &mut intc);
+        assert_eq!(intc.flags & super::super::intc::FLAG_DMA, 0);
+        lcd.advance(1, &mut intc);
+        assert_ne!(intc.flags & super::super::intc::FLAG_DMA, 0);
+        assert_eq!(lcd.ticks_to_done(), u64::MAX);
     }
 
     #[test]

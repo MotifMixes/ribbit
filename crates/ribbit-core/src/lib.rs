@@ -1434,7 +1434,13 @@ impl Machine {
         if let Some(hd) = &mut self.hd {
             hd.end_pass();
         }
-        self.io.intc.raise(io::intc::FLAG_DMA);
+        // The Leapster 2's copy takes time (io/lcd.rs); the Leapster's is
+        // instant.
+        if self.io.leapster2_power.is_some() {
+            self.io.lcd.start_transfer(dma.words);
+        } else {
+            self.io.intc.raise(io::intc::FLAG_DMA);
+        }
     }
 
     /// The console's picture: the LCD, or on a Leapster TV (no LCD) the TV

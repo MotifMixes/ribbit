@@ -431,11 +431,12 @@ impl Peripherals {
     }
 
     /// Ticks from now until the earliest device event that can change an
-    /// interrupt line: a timer wrap, an ADC conversion or a UART transfer.
+    /// interrupt line: a timer wrap, an ADC conversion, a UART transfer or
+    /// the end of a Leapster 2 LCD copy.
     pub fn next_event(&self) -> u64 {
         let timers = self.timers.iter().map(|t| t.ticks_to_wrap()).min().unwrap_or(u64::MAX);
         let usb = self.usb.as_ref().map_or(u64::MAX, |u| u.ticks_to_next());
-        timers.min(self.adc.ticks_to_next()).min(self.uart.ticks_to_ready()).min(usb)
+        timers.min(self.adc.ticks_to_next()).min(self.uart.ticks_to_ready()).min(usb).min(self.lcd.ticks_to_done())
     }
 
     /// Advances all devices by `ticks` peripheral-clock counts.
@@ -444,6 +445,7 @@ impl Peripherals {
             t.advance(ticks, cpu_halted);
         }
         self.uart.advance(ticks);
+        self.lcd.advance(ticks, &mut self.intc);
         if let Some(u) = &mut self.usb {
             u.advance(ticks);
         }
