@@ -4,7 +4,9 @@ The Didj (2008, codename "Lightning") is a handheld built on the LF1000, LeapFro
 Pollux VR3520F: an ARM926EJ-S at 393 MHz with 32 MB of SDRAM, a 320x240 LCD, a 3D engine, and 256 MB of
 internal NAND. It runs Linux 2.6.20 with LeapFrog's Brio libraries; games come on NAND cartridges.
 
-**Status: not emulated yet.** Milestone 1 is done (formats and the NAND image, `crates/ribbit-didj`).
+**Status: boots to Linux user space, no screen yet.** `crates/ribbit-didj` holds the formats, the NAND image (M1)
+and a boot machine (M2): the real lightning-boot and kernel run to the root file system mount and the first user
+process, then the kernel oopses (see "Boot log").
 
 Tags: VERIFIED = checked on the firmware files or the GPL source; UNKNOWN = not known yet.
 
@@ -20,12 +22,12 @@ Tags: VERIFIED = checked on the firmware files or the GPL source; UNKNOWN = not 
 
 Ribbit keeps these sources in `local/didj-src/` (git-ignored) and the packages in `didj/` (git-ignored).
 
-## Boot chain (from the source; not run yet)
+## Boot chain (VERIFIED by running the packaged files, except where marked)
 
-1. The LF1000 loads the start of NAND into SDRAM at address 0 and runs it. The README says the hardware loads
-   0x800 bytes and the loader reads the rest, but that read is commented out in `bootstrap.c`, and the packaged
-   lightning-boot.bin is 7386 bytes. So the hardware probably loads more than 0x800 bytes. How much it loads,
-   and how SDRAM is set up first, is UNKNOWN.
+1. The LF1000 loads the start of NAND into SDRAM at address 0 and runs it. The packaged lightning-boot.bin
+   starts with a bootstrap that reads NAND 0x800-0x1FFFF to SDRAM 0x800 itself (seen in the binary; in the
+   opendidj source that call is commented out), so the hardware needs to load only the first 0x800 bytes, as the
+   README says. How SDRAM is set up first is UNKNOWN. Ribbit copies the whole first block.
 2. lightning-boot latches the power on (Alive GPIO VDDPWRON), reads the board and cartridge IDs from GPIO
    pins into a scratch register, and reads the boot flags (JFFS2 in Atomic_Boot_Flags) to pick Kernel0/RFS0
    or Kernel1/RFS1. It shows `bootsplash.rgb`, loads `uImage` with its 64-byte header at 0x8000 - 64, builds
@@ -33,8 +35,25 @@ Ribbit keeps these sources in `local/didj-src/` (git-ignored) and the packages i
 3. The kernel mounts the root file system (JFFS2) and the Brio partition. Brio's AppManager then runs the
    menu and games.
 
-The bootloader's UART debug output is compiled in only with `DEBUG=1`. Whether the packaged build has it is
-UNKNOWN.
+The packaged lightning-boot prints nothing on the UART (no `DEBUG`). It checks the battery on ADC channel 2
+(mV = 1957 * reading / 256 + 190, at least 4400) and waits for PWRMODE's CHGPLL bit to clear.
+
+## Boot log (Ribbit, firmware 1.35.2.4222)
+
+`cargo run --release -p ribbit-didj --example didjboot -- didj 15000` (15 billion cycles, about 3 minutes)
+prints the UART and the registers the software touched that have no model yet. The kernel reports:
+
+- "Linux version 2.6.20.1-leapfrog (gstanfield@lightning-release) (gcc version 4.1.1) #9 Wed Apr 22 15:32:34
+  PDT 2009", CPU ID 0x41069265, PLL0 393.218 MHz, PLL1 147 MHz, timers 4.593 MHz (PLL1 / 32), HZ 100.
+- Command line: `mem=18M init=/sbin/init console=ttyS0,115200 root=31:04 ro rootflags=noatime
+  rootfstype=jffs2 ubi.mtd=Brio ubi.mtd=prg_Brio ubi.mtd=Cartridge ubi.mtd=EXT ubi.mtd=prg_EXT`.
+- The NAND driver uses Linux's software ECC (3 bytes per 256 in spare bytes 40-63; HWECC is off in
+  lf1000_defconfig). With erased spare bytes JFFS2 sees flipped bits, so Ribbit's image carries that ECC.
+- It expects LCD chip ID 0x96 over SPI0 and an audio codec on I2C; Ribbit answers neither yet.
+
+Known gaps: the cartridge chip select reaches the internal NAND (the cart slot should be empty); after
+"VFS: Mounted root (jffs2 filesystem) readonly" the first process (`sh`, pid 22) faults at 0x400af000 and the
+kernel oopses (NULL pointer at 0x4 in the page fault path), probably a gap in the ARM core's MMU model.
 
 ## Internal NAND (VERIFIED: kernel source and packages)
 
@@ -86,7 +105,7 @@ blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
 ## Plan
 
 1. **M1 (done):** these notes, the package reader, and the NAND image.
-2. **M2:** boot lightning-boot and the kernel to its UART log (ARM926EJ-S from `ribbit-arm`, SDRAM, NAND
+2. **M2 (done):** boot lightning-boot and the kernel to its UART log (ARM926EJ-S from `ribbit-arm`, SDRAM, NAND
    controller, UART, timers, interrupt controller).
 3. **M3:** interrupts, timers, GPIO and the NAND controller, enough for the kernel to mount its file systems.
 4. **M4:** display (MLC/DPC).

@@ -3477,6 +3477,7 @@ dependencies = [
 name = "ribbit-didj"
 version = "1.6.1"
 dependencies = [
+ "ribbit-arm",
  "ribbit-core",
 ]
 

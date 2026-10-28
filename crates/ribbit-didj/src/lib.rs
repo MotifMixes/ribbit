@@ -2,8 +2,7 @@
 //! VR3520F, ARM926EJ-S) running Linux 2.6.20 and LeapFrog's Brio libraries.
 //! See docs/didj.md.
 //!
-//! NOT EMULATED YET. This crate holds what has been verified about the
-//! console so far:
+//! Boots to Linux user space (no screen yet). This crate holds:
 //!
 //! * `package`: its software packages (`.lfp` zip archives) and their
 //!   `meta.inf`, and the firmware files they carry.
@@ -12,7 +11,12 @@
 //! * `nand`: the internal 256 MB NAND: its geometry, partitions, and an
 //!   image built from the firmware packages, as LeapFrog Connect installs
 //!   them.
+//! * `machine`: the boot machine (ARM926EJ-S, SDRAM, NAND controller,
+//!   UARTs, ADC, SPI0); every other register is logged.
+//! * `timer`: the timers and the interrupt controller.
 
+pub mod machine;
 pub mod nand;
 pub mod package;
 pub mod tfs;
+pub mod timer;

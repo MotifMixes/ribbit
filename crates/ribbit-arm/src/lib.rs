@@ -342,6 +342,11 @@ impl Arm {
             let ret = self.r[15].wrapping_add(4);
             self.exception(vector::IRQ, mode::IRQ, ret);
         }
+        // An interrupt ends a wait even when the CPSR masks it (ARM926EJ-S
+        // TRM, wait for interrupt); Linux idles with interrupts off.
+        if self.irq_line || self.fiq_line {
+            self.waiting = false;
+        }
         if self.waiting {
             self.cycles += 1;
             return false;

@@ -10,9 +10,11 @@
 //!
 //! A block is bad when the first spare byte of its page 0 or 1 is not 0xFF
 //! (lightning-boot `nand_check_block`). Lightning-boot reads with the
-//! controller's BCH decoder but ignores its error flag, so an image built
-//! here leaves the spare area erased (no ECC). Whether the kernel's MTD
-//! driver checks ECC is UNKNOWN (to be checked at M3).
+//! controller's BCH decoder but ignores its error flag. The kernel uses
+//! Linux's software ECC instead (lf1000_defconfig: MTD_NAND_LF1000_HWECC
+//! not set; VERIFIED in a boot: with erased spare bytes it "corrects" good
+//! data): 3 bytes per 256 data bytes, in spare bytes 40-63 (nand_oob_64).
+//! Pages written here get that ECC, as the console's kernel writes it.
 
 use crate::package::Firmware;
 
@@ -23,6 +25,34 @@ pub const PAGES_PER_BLOCK: usize = 64;
 pub const BLOCK: usize = PAGE * PAGES_PER_BLOCK;
 pub const BLOCKS: usize = 2048;
 pub const SIZE: usize = BLOCK * BLOCKS;
+
+/// Where the software ECC starts in the spare area (nand_oob_64 eccpos).
+pub const ECC_POS: usize = 40;
+
+/// Linux 2.6.20's software ECC of 256 bytes (drivers/mtd/nand/nand_ecc.c,
+/// without CONFIG_MTD_NAND_ECC_SMC): a Hamming code of 6 column parities
+/// and 16 line parities, inverted. All-0xFF data gives FF FF FF.
+pub fn soft_ecc(data: &[u8; 256]) -> [u8; 3] {
+    // Column parities: bits 0,2,4,6 / 1,3,5,7 / 0,1,4,5 / 2,3,6,7 /
+    // 0-3 / 4-7, and (bit 6) the byte's parity: nand_ecc_precalc_table.
+    const GROUPS: [u8; 7] = [0x55, 0xAA, 0x33, 0xCC, 0x0F, 0xF0, 0xFF];
+    let (mut reg1, mut reg2, mut reg3) = (0u8, 0u8, 0u8);
+    for (i, &b) in data.iter().enumerate() {
+        let idx = GROUPS.iter().enumerate().fold(0u8, |a, (k, g)| a | (((b & g).count_ones() & 1) as u8) << k);
+        reg1 ^= idx & 0x3F;
+        if idx & 0x40 != 0 {
+            reg3 ^= i as u8;
+            reg2 ^= !(i as u8);
+        }
+    }
+    // Interleave the line parities: reg3 bit n, reg2 bit n, high bits first.
+    let (mut tmp1, mut tmp2) = (0u8, 0u8);
+    for n in 0..4 {
+        tmp1 |= (reg3 >> (7 - n) & 1) << (7 - 2 * n) | (reg2 >> (7 - n) & 1) << (6 - 2 * n);
+        tmp2 |= (reg3 >> (3 - n) & 1) << (7 - 2 * n) | (reg2 >> (3 - n) & 1) << (6 - 2 * n);
+    }
+    [!tmp1, !tmp2, (!reg1) << 2 | 0x03]
+}
 
 /// A partition (kernel MTD names).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,12 +117,17 @@ impl Nand {
         (0..2).any(|i| self.page(block * PAGES_PER_BLOCK + i)[PAGE] != 0xFF)
     }
 
-    /// Writes `data` at byte `offset` of the data area (page aligned),
-    /// leaving the spare area as it is.
+    /// Writes `data` at byte `offset` of the data area (page aligned), with
+    /// each page's software ECC in its spare area.
     pub fn write(&mut self, offset: usize, data: &[u8]) {
         assert_eq!(offset % PAGE, 0);
         for (i, chunk) in data.chunks(PAGE).enumerate() {
-            self.page_mut(offset / PAGE + i)[..chunk.len()].copy_from_slice(chunk);
+            let p = self.page_mut(offset / PAGE + i);
+            p[..chunk.len()].copy_from_slice(chunk);
+            for step in 0..PAGE / 256 {
+                let ecc = soft_ecc(p[step * 256..][..256].try_into().unwrap());
+                p[PAGE + ECC_POS + step * 3..][..3].copy_from_slice(&ecc);
+            }
         }
     }
 
@@ -168,6 +203,16 @@ mod tests {
         n.erase(1);
         assert!(!n.is_bad(1));
         assert_eq!(n.read(BLOCK, 4), [0xFF; 4]);
+    }
+
+    #[test]
+    fn soft_ecc_values() {
+        assert_eq!(soft_ecc(&[0xFF; 256]), [0xFF; 3]);
+        assert_eq!(soft_ecc(&[0; 256]), [0xFF; 3]);
+        // One set bit (byte 0, bit 0): line parity at line 0, column 0.
+        let mut d = [0u8; 256];
+        d[0] = 1;
+        assert_eq!(soft_ecc(&d), [0xAA, 0xAA, 0xAB]);
     }
 
     #[test]
