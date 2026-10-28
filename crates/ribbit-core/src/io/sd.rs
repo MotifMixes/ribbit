@@ -90,6 +90,12 @@ pub struct SdCard {
     pub rca: u16,
     app_cmd: bool,
     pub wide: bool,
+    /// A high-capacity (SDHC) card: CCS in the OCR, CSD version 2.0 and
+    /// block addressing. Off: a standard-capacity card (byte addressing).
+    /// Set from the environment variable RIBBIT_SDHC=1 (an experiment); not
+    /// saved, so save states keep their format and load as standard capacity.
+    #[serde(skip)]
+    pub hc: bool,
     /// Set when a sector was written (for saving; not saved).
     #[serde(skip)]
     pub dirty: bool,
@@ -136,9 +142,24 @@ impl SdCard {
         with_crc(c)
     }
 
+    /// CSD version 2.0 (SDHC): C_SIZE in 512 KiB units.
+    fn csd_hc() -> u128 {
+        let mut c: u128 = 0;
+        c |= 1 << 126; // CSD_STRUCTURE 1
+        c |= 0x0E << 112; // TAAC
+        c |= 0x32 << 96; // TRAN_SPEED 25 MHz
+        c |= 0x5B5 << 84; // CCC
+        c |= 9 << 80; // READ_BL_LEN
+        c |= ((CARD_SECTORS / 1024 - 1) as u128) << 48; // C_SIZE
+        c |= 1 << 46; // ERASE_BLK_EN
+        c |= 0x7F << 39; // SECTOR_SIZE
+        c |= 9 << 22; // WRITE_BL_LEN
+        with_crc(c)
+    }
+
     /// The same card after a power cycle: its data, nothing else.
     pub fn powered_on(self) -> Self {
-        Self { sectors: self.sectors, dirty: self.dirty, changed: self.changed, synced: self.synced, ..Default::default() }
+        Self { sectors: self.sectors, dirty: self.dirty, changed: self.changed, synced: self.synced, hc: self.hc, ..Default::default() }
     }
 
     /// The written sectors as a save file (sparse.rs).
@@ -185,7 +206,7 @@ impl SdCard {
                 if self.state == CardState::Idle {
                     self.state = CardState::Ready;
                 }
-                Some(short(0x3F, 0x80FF_8000) | 0xFF)
+                Some(short(0x3F, 0x80FF_8000 | (self.hc as u32) << 30) | 0xFF)
             }
             (true, 6) => {
                 self.wide = arg & 3 == 2;
@@ -201,7 +222,7 @@ impl SdCard {
                 let s = self.status();
                 Some(short(3, (self.rca as u32) << 16 | (s >> 6 & 0x2000) | (s & 0x1FFF)))
             }
-            (_, 9) => Some(Self::csd()),
+            (_, 9) => Some(if self.hc { Self::csd_hc() } else { Self::csd() }),
             (_, 7) => {
                 // RCA 0 deselects every card (SD specification).
                 let me = arg >> 16 != 0 && (arg >> 16) as u16 == self.rca;
@@ -271,7 +292,8 @@ impl SdSlot {
     /// A slot with a freshly formatted card in it (fat.rs).
     pub fn with_card() -> Self {
         let sectors = super::fat::format_fat32(CARD_SECTORS).into_iter().collect();
-        Self { card: Some(SdCard { sectors, ..Default::default() }), ..Default::default() }
+        let hc = std::env::var("RIBBIT_SDHC").is_ok_and(|v| v == "1");
+        Self { card: Some(SdCard { sectors, hc, ..Default::default() }), ..Default::default() }
     }
 
     pub fn inputs(&self) -> u32 {
@@ -338,8 +360,8 @@ impl SdSlot {
             let len = (bus.read16(d + 0x0C) as usize).min(SECTOR);
             let buf = bus.read32(d + 0x10);
             let card = self.card.as_mut().unwrap();
-            // Byte address on a standard-capacity card.
-            let n = arg / SECTOR as u32;
+            // Byte address on a standard-capacity card, block number on SDHC.
+            let n = if card.hc { arg } else { arg / SECTOR as u32 };
             if kind & TYPE_WRITE != 0 {
                 let mut s = card.sector(n);
                 for (i, b) in s.iter_mut().enumerate().take(len) {

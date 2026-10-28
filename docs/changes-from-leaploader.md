@@ -3,6 +3,19 @@
 LeapLoader (an SD-card loader for the Leapster 2) is tested in Ribbit. Fixes found there are made in
 Ribbit directly and listed here.
 
+## 2026-10-26: an optional high-capacity (SDHC) card
+
+* **Why:** real Leapster 2 owners mostly use SDHC cards, and Ribbit's card is standard capacity (byte
+  addresses). A LeapLoader bug on the Connected console (BIOS B5) looked like it could be a block/byte
+  addressing mix-up after a warm restart, which only an SDHC card would show.
+* **Change:** `SdCard::hc` (off by default; `SdSlot::with_card` sets it from the environment variable
+  `RIBBIT_SDHC=1`). With it ACMD41 answers with CCS (OCR bit 30), CMD9 with a CSD version 2.0 (C_SIZE
+  in 512 KiB units, same 2 GiB), and CMD17/CMD24 take block numbers. A card's `hc` survives CMD0; it is not
+  saved (save states keep their format; a card from a state is standard capacity).
+* **Verified (EMU):** BIOS B5 from power-on to a LeapLoader game through two restarts with `hc` on: all
+  CMD17/CMD24 arguments were block numbers and the 8 MiB game read back intact. So B5 handles SDHC
+  across warm restarts; the LeapLoader bug was elsewhere (stubs calling BIOS 0.6 addresses).
+
 ## 2026-10-25: a paused voice reads as free in the voice status register
 
 * **Problem:** the Leapster 2 BIOS 0.6 stops a raw sound (`LF_StopAudioPlayer`) with the pause command
