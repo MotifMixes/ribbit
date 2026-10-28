@@ -30,3 +30,6 @@ zippity/
 # Local Claude Code settings and Python caches.
 /.claude/
 __pycache__/
+
+# Didj firmware packages and cartridge dumps (the user's own files).
+/didj/

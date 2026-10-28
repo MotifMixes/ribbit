@@ -1,0 +1,13 @@
+[package]
+name = "ribbit-didj"
+description = "LeapFrog Didj: its package and firmware formats and its internal NAND (emulation not started)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# The didjnand example reads system packages (.lfp zip archives).
+ribbit-core.workspace = true

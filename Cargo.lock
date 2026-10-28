@@ -3474,6 +3474,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ribbit-didj"
+version = "1.6.1"
+dependencies = [
+ "ribbit-core",
+]
+
+[[package]]
 name = "ribbit-frontend"
 version = "1.6.1"
 dependencies = [
