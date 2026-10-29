@@ -24,6 +24,49 @@ pub trait ArmBus {
     fn write8(&mut self, addr: u32, value: u8);
     fn write16(&mut self, addr: u32, value: u16);
     fn write32(&mut self, addr: u32, value: u32);
+    /// The pages a JIT compiled code from (`ribbit-armjit`); a bus that
+    /// returns one marks every write into RAM with `CodeWatch::wrote`.
+    fn code_watch(&mut self) -> Option<&mut CodeWatch> {
+        None
+    }
+}
+
+/// Physical 1 KB pages holding compiled code. A write into a watched page
+/// stops watching it and lists it in `written`, for the JIT to drop its
+/// blocks (self-modifying code; Linux loads programs by writing them).
+#[derive(Debug, Clone, Default)]
+pub struct CodeWatch {
+    bits: Vec<u64>,
+    pub written: Vec<u32>,
+}
+
+impl CodeWatch {
+    pub const PAGE_SHIFT: u32 = 10;
+
+    pub fn watch(&mut self, pa: u32) {
+        let p = (pa >> Self::PAGE_SHIFT) as usize;
+        if self.bits.len() <= p / 64 {
+            self.bits.resize(p / 64 + 1, 0);
+        }
+        self.bits[p / 64] |= 1 << (p % 64);
+    }
+
+    /// A write at physical address `pa`.
+    #[inline]
+    pub fn wrote(&mut self, pa: usize) {
+        let p = pa >> Self::PAGE_SHIFT;
+        if let Some(w) = self.bits.get_mut(p / 64)
+            && *w & (1 << (p % 64)) != 0
+        {
+            *w &= !(1 << (p % 64));
+            self.written.push(p as u32);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.bits.clear();
+        self.written.clear();
+    }
 }
 
 /// Processor modes (CPSR bits 4-0).
@@ -253,7 +296,7 @@ impl Arm {
         Ok(())
     }
 
-    pub(crate) fn load32(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
+    pub fn load32(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
         self.check_align(va, 3)?;
         let pa = self.translate(bus, va & !3, false)?;
         // ARMv5: an unaligned word load rotates the aligned word.
@@ -266,12 +309,12 @@ impl Arm {
         Ok(bus.read16(pa) as u32)
     }
 
-    pub(crate) fn load8(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
+    pub fn load8(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
         let pa = self.translate(bus, va, false)?;
         Ok(bus.read8(pa) as u32)
     }
 
-    pub(crate) fn store32(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
+    pub fn store32(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
         self.check_align(va, 3)?;
         let pa = self.translate(bus, va & !3, true)?;
         bus.write32(pa, v);
@@ -285,14 +328,14 @@ impl Arm {
         Ok(())
     }
 
-    pub(crate) fn store8(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
+    pub fn store8(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
         let pa = self.translate(bus, va, true)?;
         bus.write8(pa, v as u8);
         Ok(())
     }
 
-    /// A data abort for the instruction being executed.
-    pub(crate) fn data_abort(&mut self, f: Fault) {
+    /// A data abort for the instruction being executed (`current`).
+    pub fn data_abort(&mut self, f: Fault) {
         self.cp15.fsr = f.status;
         self.cp15.far = f.addr;
         let ret = self.current.wrapping_add(8);

@@ -1,6 +1,14 @@
 # ARM JIT (Didj, later RockIt Twist / Zippity)
 
-Status: DESIGN, nothing built yet (2026-10-29).
+Status: phase 1 built (2026-10-29), crate `ribbit-armjit`. Checks:
+`src/tests.rs` lockstep (300 random programs, interpreter vs JIT, state and
+memory identical); `didjboot didj 3000` with `DIDJ_JIT=exact` gives the
+interpreter's instruction count, PC and PCM output exactly. Speed (i9,
+first 3000 M cycles): interpreter 45 s, exact 28 s, JIT 23 s; 89% of
+instructions run compiled. Normal mode lets a block end a slice up to 31
+instructions late, so instruction counts differ slightly (PCM identical).
+Not watched for self-modifying code: GA3D writes into SDRAM (frame
+buffers, never code so far).
 
 ## Why
 

@@ -1,0 +1,15 @@
+[package]
+name = "ribbit-armjit"
+description = "ARM (ARMv5TE) just-in-time compiler for the processor in ribbit-arm, for the LeapFrog Didj (docs/arm-jit-design.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ribbit-arm.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+ribbit-jit.workspace = true
+dynasm = "=5.1.0"
+dynasmrt = "=5.1.0"

@@ -14,6 +14,11 @@ fn main() {
     let flash = ribbit_didj::nand_from_packages(dir.as_ref(), std::env::var_os("DIDJ_NO_BRIO").is_none()).unwrap_or_else(|e| panic!("{e}"));
 
     let mut didj = Didj::new(flash);
+    // DIDJ_JIT=0 runs the interpreter alone; DIDJ_JIT=exact runs blocks only
+    // where they fit in the slice (results identical to the interpreter's).
+    let jit_mode = std::env::var("DIDJ_JIT").unwrap_or_default();
+    didj.jit.enabled &= jit_mode != "0";
+    didj.exact = jit_mode == "exact";
     let mut ran = 0;
     let mut last_pc = u32::MAX;
     let mut same = 0;
@@ -100,6 +105,7 @@ fn main() {
     let r = [0xC000_0814, 0xC000_0810, 0xC000_0820, 0xC000_1808, 0xC000_1804, 0xC000_1800].map(|a| t.read(a));
     println!("IC mask {:08x}:{:08x} pend {:08x}; timer0 ctrl {:08x} match {:08x} count {:08x}", r[0], r[1], r[2], r[3], r[4], r[5]);
     println!("{ran} instructions, pc {:#010x}, cpsr {:#x}", didj.cpu.r[15], didj.cpu.cpsr);
+    println!("JIT: {:?}", didj.jit.stats);
     println!("PCM out: {} bytes, {} not zero", wav.len(), wav.iter().filter(|&&b| b != 0).count());
     if let Ok(path) = std::env::var("DIDJ_WAV") {
         let rate = didj.bus.dma.pcm_rate as u32;

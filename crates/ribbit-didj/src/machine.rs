@@ -9,7 +9,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use ribbit_arm::{Arm, ArmBus};
+use ribbit_arm::{Arm, ArmBus, CodeWatch};
+use ribbit_armjit::ArmJit;
 
 use crate::nand::{self, Nand};
 use crate::timer::{self, Timers};
@@ -217,6 +218,8 @@ struct NandChip {
 
 pub struct Bus {
     pub sdram: Vec<u8>,
+    /// SDRAM pages the JIT compiled code from.
+    code: CodeWatch,
     pub nand: Nand,
     chip: NandChip,
     pub timers: Timers,
@@ -516,6 +519,7 @@ impl Bus {
         let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
         if a + size as usize <= SDRAM_SIZE {
             self.sdram[a..a + size as usize].copy_from_slice(&v.to_le_bytes()[..size as usize]);
+            self.code.wrote(a);
             return;
         }
         if Self::nand_port(addr).is_some() {
@@ -570,11 +574,18 @@ impl ArmBus for Bus {
     fn write32(&mut self, addr: u32, value: u32) {
         self.write_n(addr, value, 4)
     }
+    fn code_watch(&mut self) -> Option<&mut CodeWatch> {
+        Some(&mut self.code)
+    }
 }
 
 pub struct Didj {
     pub cpu: Arm,
     pub bus: Bus,
+    pub jit: ArmJit,
+    /// Compiled blocks run only when they fit in the slice, so the results
+    /// match the interpreter's exactly (for checking the JIT; slower).
+    pub exact: bool,
 }
 
 impl Didj {
@@ -584,6 +595,7 @@ impl Didj {
         sdram[..BOOT_COPY].copy_from_slice(&flash.read(0, BOOT_COPY));
         let bus = Bus {
             sdram,
+            code: CodeWatch::default(),
             nand: flash,
             chip: NandChip::default(),
             timers: Timers::new(),
@@ -602,7 +614,7 @@ impl Didj {
             pc: 0,
             frame_cycles: 0,
         };
-        Self { cpu: Arm::new(), bus }
+        Self { cpu: Arm::new(), bus, jit: ArmJit::new(SDRAM_SIZE as u32), exact: false }
     }
 
     /// The processor clock and the PLL outputs, from the clock registers.
@@ -629,9 +641,12 @@ impl Didj {
         let end = self.cpu.cycles + n;
         while self.cpu.cycles < end {
             let before = self.cpu.cycles;
-            for _ in 0..SLICE {
+            // Compiled blocks may end a slice up to 31 instructions late
+            // (unless `exact`); interrupts are taken between blocks.
+            while self.cpu.cycles - before < SLICE {
                 self.bus.pc = self.cpu.r[15];
-                if !self.cpu.step(&mut self.bus) {
+                let budget = if self.exact { SLICE - (self.cpu.cycles - before) } else { u64::MAX };
+                if !self.jit.step(&mut self.cpu, &mut self.bus, budget) {
                     // Waiting for an interrupt: skip to the next slice.
                     self.cpu.cycles += SLICE - 1;
                     break;

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 ribbit-arm.workspace = true
+ribbit-armjit.workspace = true
 # fatfs for the Brio volume; zip for the packages in the examples.
 ribbit-core.workspace = true
 crc32fast.workspace = true

@@ -3411,6 +3411,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ribbit-armjit"
+version = "1.6.1"
+dependencies = [
+ "dynasm",
+ "dynasmrt",
+ "ribbit-arm",
+ "ribbit-jit",
+]
+
+[[package]]
 name = "ribbit-audio"
 version = "1.6.1"
 
@@ -3479,6 +3489,7 @@ version = "1.6.1"
 dependencies = [
  "crc32fast",
  "ribbit-arm",
+ "ribbit-armjit",
  "ribbit-core",
 ]
 
