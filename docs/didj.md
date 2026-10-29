@@ -69,16 +69,27 @@ What it took to get past the kernel (each a hardware behaviour Linux relies on):
 - UART0 receive: RX byte at 0x12, data ready in TRSTATUS bit 0 / FSR bits 0-3, interrupt pending bit 1 and
   enable bit 5 of 0x18 (8250-lf1000.c). `didjboot` types commands into the shell with it.
 
-Now: BusyBox init runs `/etc/init.d/rcS`, which mounts the Brio volume Ribbit built (below) as `/Didj`,
-starts monitord and `launch_main`, and gives a `#` shell on ttyS0. `launch_main` finds and starts
-AppManager, which opens the audio driver (32000 Hz) and then waits on DMA ("HW is not busy, but fifo is
-not empty": no DMA or I2S model yet).
+- DMA (dma.c): 8 channels 0x80 apart from 0xC0000000, each with a command queue at +0x10 (CMDSPACE 0x2C
+  = free slots; size GUESS 7); IRQ 3. Audio goes out in 4 KiB fragments to PCM out (request 24), so
+  Ribbit paces those at 4 bytes per sample at 32000 Hz. Before this AppManager stopped at "HW is not
+  busy, but fifo is not empty".
+- GA3D, the 3D engine (0xC001A000, mapped to user space by /dev/ga3d, driven by the closed
+  libopengles_lite.so, MagicEyes "MES_GRP3D" HAL): 0x00 queue on, 0x04 queue start and 0x08 its last word
+  (physical, 8-byte entries), 0x0C rear (software's write pointer), 0x10 front (the engine's read
+  pointer), 0x14 status (idle = bits 0xBF0000 all set). The menu waits for the front to reach the rear.
+  Ribbit's stand-in (until M6): always idle, every command read at once, nothing drawn.
 
-Known gaps: no LCD (SPI0 ID 0x96), audio codec (I2C0), DMA, display, sound or buttons yet. The buttons are
+Now: BusyBox init runs `/etc/init.d/rcS`, which mounts the Brio volume Ribbit built (below) as `/Didj`,
+starts monitord and `launch_main`, and gives a `#` shell on ttyS0. `launch_main` starts AppManager, which
+loads the menu (`BLT/BLT.so`), plays the splash (VideoTask, the logo animation) with its sounds (heard
+in `DIDJ_WAV`: about 13 s), leaves the splash state and waits for input ("Screen brightness set for low
+power"). Nothing is shown yet.
+
+Known gaps: no LCD (SPI0 ID 0x96), audio codec (I2C0), display, 3D drawing or buttons yet. The buttons are
 GPIO port C pins 0-4 and 7-13 with edge interrupts (lf1000-keypad.c); headphones port B pin 10.
 
-`didjboot` options (environment): `DIDJ_TYPE="ps;ls /Didj"` types one command at each new shell prompt;
-`DIDJ_NAND=<file>` saves the Brio partition (pages with spare bytes); `DIDJ_NO_BRIO=1` leaves Brio
+`didjboot` options (environment): `DIDJ_TYPE=$'ps\nls /Didj'` types one line at each new shell prompt;
+`DIDJ_WAV=<file>` saves the sound sent to PCM out; `DIDJ_NAND=<file>` saves the Brio partition (pages with spare bytes); `DIDJ_NO_BRIO=1` leaves Brio
 erased (the console then formats it itself); `DIDJ_DUMP=<file>` saves SDRAM.
 
 ## Brio partition (VERIFIED: what the kernel and rcS write to an empty one, in Ribbit)
@@ -159,8 +170,8 @@ blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
 
 1. **M1 (done):** these notes, the package reader, and the NAND image.
 2. **M2 (done):** boot lightning-boot and the kernel to its UART log (ARM926EJ-S from `ribbit-arm`, SDRAM, NAND
-   controller, UART, timers, interrupt controller). Since then: user space, the Brio partition, AppManager
-   starting.
+   controller, UART, timers, interrupt controller). Since then: user space, the Brio partition, DMA,
+   AppManager and the menu running (splash sounds play).
 3. **M3:** interrupts, timers, GPIO and the NAND controller, enough for the kernel to mount its file systems.
 4. **M4:** display (MLC/DPC).
 5. **M5:** audio and buttons.

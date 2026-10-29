@@ -121,6 +121,20 @@ const FRAME_HZ: u64 = 60;
 const GPIOAPAD: u32 = 0xC000_A018;
 const CART_DETECT: u32 = 1 << 18;
 
+/// The 3D engine (GA3D, user space maps it through /dev/ga3d). Not
+/// modelled yet (milestone M6): it draws nothing, is always idle, and has
+/// read every queued command at once. From libopengles_lite
+/// (MES_GRP3D_OpenCommandQueue, _CheckBusy): 0x00 1 = queue on, 0x04 the
+/// queue's start and 0x08 its last word (physical; 8-byte entries), 0x0C
+/// the rear (where software has written to), 0x10 the front (how far the
+/// engine has read), 0x14 status, idle when bits 16-21 and 23 (0xBF0000)
+/// are all set.
+const GA3D: u32 = 0xC001_A000;
+const GA3D_REAR: u32 = GA3D + 0x0C;
+const GA3D_FRONT: u32 = GA3D + 0x10;
+const GA3D_STATUS: u32 = GA3D + 0x14;
+const GA3D_IDLE: u32 = 0x00BF_0000;
+
 /// UART 0-5 (uart.h); the transmit holding register and the status.
 const UARTS: [u32; 6] = [0xC001_6000, 0xC001_6080, 0xC001_6800, 0xC001_6880, 0xC001_7000, 0xC001_7080];
 const TRSTATUS: u32 = 0x08;
@@ -161,6 +175,7 @@ pub struct Bus {
     chip: NandChip,
     pub timers: Timers,
     spi: Spi,
+    pub dma: crate::dma::Dma,
     adc_pending: bool,
     /// Registers with no model: the last value written.
     regs: HashMap<u32, u32>,
@@ -282,6 +297,8 @@ impl Bus {
             NFCONTROL => return self.regs.get(&addr).copied().unwrap_or(0) | RNB,
             NFECCSTATUS => return NFECCDECDONE,
             GPIOAPAD => return CART_DETECT,
+            GA3D_STATUS => return GA3D_IDLE,
+            GA3D_FRONT => return self.regs.get(&GA3D_REAR).copied().unwrap_or(0),
             _ => {}
         }
         if (timer::TIMER_BASE..timer::TIMER_END).contains(&addr) || (timer::IC_BASE..timer::IC_END).contains(&addr) {
@@ -373,6 +390,11 @@ impl Bus {
         if let Some(v) = addr.checked_sub(SPI0).filter(|&o| o < 8).and_then(|o| self.spi.read(o)) {
             return v;
         }
+        if (crate::dma::BASE..crate::dma::END).contains(&addr) {
+            let shift = 8 * (addr & 3);
+            let mask = if size == 4 { u32::MAX } else { (1 << (8 * size)) - 1 };
+            return (self.dma.read(addr & !3) >> shift) & mask;
+        }
         if addr == UARTS[0] + RHB {
             return self.uart_rx.pop_front().unwrap_or(0) as u32;
         }
@@ -397,6 +419,12 @@ impl Bus {
         }
         // Narrow writes merge into the register's 32-bit value.
         let base = addr & !3;
+        if (crate::dma::BASE..crate::dma::END).contains(&addr) {
+            let shift = 8 * (addr & 3);
+            let mask = if size == 4 { u32::MAX } else { ((1 << (8 * size)) - 1) << shift };
+            let old = self.dma.read(base);
+            return self.dma.write(base, (old & !mask) | ((v << shift) & mask), &self.sdram);
+        }
         let shift = 8 * (addr & 3);
         let mask = if size == 4 { u32::MAX } else { ((1 << (8 * size)) - 1) << shift };
         let old = self.regs.get(&base).copied().unwrap_or(0);
@@ -446,6 +474,7 @@ impl Didj {
             chip: NandChip::default(),
             timers: Timers::new(),
             spi: Spi::default(),
+            dma: Default::default(),
             adc_pending: false,
             regs: HashMap::new(),
             touched: BTreeMap::new(),
@@ -487,6 +516,7 @@ impl Didj {
             }
             let (cpu_hz, plls) = self.clocks();
             self.bus.timers.tick(self.cpu.cycles - before, cpu_hz, plls);
+            self.bus.dma.tick(self.cpu.cycles - before, cpu_hz, &self.bus.sdram);
             self.bus.frame_cycles += self.cpu.cycles - before;
             if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
                 self.bus.frame_cycles = 0;
@@ -502,6 +532,9 @@ impl Didj {
             let rx = !self.bus.uart_rx.is_empty();
             if self.bus.regs.get(&(UARTS[0] + INTSTATUS)).is_some_and(|v| v & THRI_ENABLE != 0 || rx && v & RDI_ENABLE != 0) {
                 self.bus.timers.raise(UART0_IRQ);
+            }
+            if self.bus.dma.irq() {
+                self.bus.timers.raise(crate::dma::IRQ);
             }
             if self.bus.spi.irq() {
                 self.bus.timers.raise(SPI_IRQ);

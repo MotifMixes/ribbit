@@ -48,11 +48,13 @@ fn main() {
     let mut same = 0;
     // Where the CPU is, sampled once per million instructions: 4 KB page -> count.
     let mut samples = std::collections::HashMap::<u32, u32>::new();
-    // DIDJ_TYPE="ps;ls /Didj": shell commands, typed one per "# " prompt on UART0.
+    // DIDJ_TYPE=$'ps\nls /Didj': shell commands, one per line, typed one per "# " prompt on UART0.
     let typed = std::env::var("DIDJ_TYPE").unwrap_or_default();
-    let mut commands = typed.split(';').filter(|c| !c.is_empty()).map(|c| format!("{c}
+    let mut commands = typed.lines().filter(|c| !c.is_empty()).map(|c| format!("{c}
 "));
     let (mut prompts, mut len, mut quiet) = (0, 0, 0);
+    // DIDJ_WAV=<file> saves the sound sent to PCM out (16-bit stereo).
+    let mut wav: Vec<u8> = Vec::new();
     for _ in 0..millions {
         let out = didj.bus.uart.first().map_or("", |s| s.as_str());
         (quiet, len) = if out.len() == len { (quiet + 1, len) } else { (0, out.len()) };
@@ -65,6 +67,7 @@ fn main() {
             }
         }
         let n = didj.run(1_000_000);
+        wav.extend(didj.bus.dma.pcm.drain(..));
         ran += n;
         *samples.entry(didj.cpu.r[15] & !0xFFF).or_default() += 1;
         // A tight loop that never leaves one address range: report and stop.
@@ -82,6 +85,21 @@ fn main() {
     let r = [0xC000_0814, 0xC000_0810, 0xC000_0820, 0xC000_1808, 0xC000_1804, 0xC000_1800].map(|a| t.read(a));
     println!("IC mask {:08x}:{:08x} pend {:08x}; timer0 ctrl {:08x} match {:08x} count {:08x}", r[0], r[1], r[2], r[3], r[4], r[5]);
     println!("{ran} instructions, pc {:#010x}, cpsr {:#x}", didj.cpu.r[15], didj.cpu.cpsr);
+    println!("PCM out: {} bytes, {} not zero", wav.len(), wav.iter().filter(|&&b| b != 0).count());
+    if let Ok(path) = std::env::var("DIDJ_WAV") {
+        let rate = didj.bus.dma.pcm_rate as u32;
+        let mut f = b"RIFF".to_vec();
+        f.extend((36 + wav.len() as u32).to_le_bytes());
+        f.extend(b"WAVEfmt ");
+        f.extend(16u32.to_le_bytes());
+        f.extend([1u16, 2].iter().flat_map(|v| v.to_le_bytes()));
+        f.extend([rate, rate * 4].iter().flat_map(|v| v.to_le_bytes()));
+        f.extend([4u16, 16].iter().flat_map(|v| v.to_le_bytes()));
+        f.extend(b"data");
+        f.extend((wav.len() as u32).to_le_bytes());
+        f.extend(&wav);
+        std::fs::write(&path, f).expect("can't write the WAV");
+    }
     for (i, s) in didj.bus.uart.iter().enumerate() {
         if !s.is_empty() {
             println!("--- UART{i} ---\n{s}");

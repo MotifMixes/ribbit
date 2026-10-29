@@ -16,8 +16,10 @@
 //! * `machine`: the boot machine (ARM926EJ-S, SDRAM, NAND controller,
 //!   UARTs, ADC, SPI0); every other register is logged.
 //! * `timer`: the timers and the interrupt controller.
+//! * `dma`: the DMA controller (audio out paced at the sample rate).
 
 pub mod brio;
+pub mod dma;
 pub mod machine;
 pub mod nand;
 pub mod package;
