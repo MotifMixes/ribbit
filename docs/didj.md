@@ -186,6 +186,8 @@ blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
 - UBI attaches it as ubi2 (PEB 16 KiB, LEB 15360, VID header 0x200, data 0x400) and `rcS` ("Configuring
   Cartridge") mounts the FAT32 volume read-only at /Cart. The game is in /Cart/jdi (folder = ShortName), with
   meta.inf (Name, ProductID 0x000F0007, PreviewImage Description.png, Icon IconNormal.png) and App.so.
+- From the menu (main wheel, cartridge item), Star Wars: The Clone Wars starts: title screen, then its attract
+  demo (Kashyyyk-1.dmo), its files read from /Cart/jdi (VERIFIED 2026-10-29, didjboot with DIDJ_KEYS).
 - The kernel probes the slot only at start-up; what the console does when a cartridge goes in or out while on
   is UNKNOWN (Ribbit puts it in before power-on).
 
