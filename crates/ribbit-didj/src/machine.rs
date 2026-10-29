@@ -114,12 +114,40 @@ const MLC_DIRTY: [(u32, u32); 4] = [(MLC, 1 << 3), (MLC + 0x24, 1 << 4), (MLC + 
 /// not modelled yet).
 const FRAME_HZ: u64 = 60;
 
-/// GPIO port A's input levels (gpio_hal.h GPIOAPAD). Pin 18 is the
-/// cartridge detect, low when a cartridge is in (nand.h
+/// GPIO ports A-C, 0x40 apart (gpio_hal.h): detect modes (2 bits a pin,
+/// 0 low level, 1 high level, 2 falling edge, 3 rising edge), interrupt
+/// enables, detected flags (write 1 to clear) and input levels. Any enabled
+/// flag raises IRQ 13 (platform.h LF1000_GPIO_IRQ).
+const GPIO: u32 = 0xC000_A000;
+const GPIO_PORTS: usize = 3;
+const GPIODETMODE0: u32 = 0x08;
+const GPIOINTENB: u32 = 0x10;
+const GPIODET: u32 = 0x14;
+const GPIOPAD: u32 = 0x18;
+const GPIO_IRQ: u32 = 13;
+/// Port A pin 18 is the cartridge detect, low when a cartridge is in (nand.h
 /// NAND_CART_DETECT_LEVEL; launch_main reads it with gpio-control): high
 /// here, an empty slot. The other pins read low (UNKNOWN).
-const GPIOAPAD: u32 = 0xC000_A018;
 const CART_DETECT: u32 = 1 << 18;
+
+/// The buttons: port C pins, low while pressed (lf1000-keypad.c button_map;
+/// L and R swap on boards before EP1, these are the later boards').
+pub mod button {
+    pub const LEFT: u32 = 1 << 0;
+    pub const RIGHT: u32 = 1 << 1;
+    pub const UP: u32 = 1 << 2;
+    pub const DOWN: u32 = 1 << 3;
+    pub const R: u32 = 1 << 4;
+    pub const L: u32 = 1 << 7;
+    pub const A: u32 = 1 << 8;
+    pub const B: u32 = 1 << 9;
+    /// Menu / start.
+    pub const MENU: u32 = 1 << 10;
+    pub const HINT: u32 = 1 << 11;
+    pub const PAUSE: u32 = 1 << 12;
+    pub const BRIGHTNESS: u32 = 1 << 13;
+    pub const ALL: u32 = 0x3F9F;
+}
 
 /// UART 0-5 (uart.h); the transmit holding register and the status.
 const UARTS: [u32; 6] = [0xC001_6000, 0xC001_6080, 0xC001_6800, 0xC001_6880, 0xC001_7000, 0xC001_7080];
@@ -178,6 +206,11 @@ pub struct Bus {
     pub pc: u32,
     /// Cycles since the last frame.
     frame_cycles: u64,
+    /// The buttons held down (`button` bits).
+    pub buttons: u32,
+    /// GPIO detected flags and the input levels last seen, per port.
+    gpio_det: [u32; GPIO_PORTS],
+    gpio_last: [u32; GPIO_PORTS],
 }
 
 impl Bus {
@@ -193,6 +226,38 @@ impl Bus {
             (0..n).fold(0, |v, i| v | (self.sdram.get((a + i) as usize).copied().unwrap_or(0) as u32) << (8 * i))
         };
         crate::mlc::compose(|a| self.reg(a), mem)
+    }
+
+    fn gpio_pad(&self, port: usize) -> u32 {
+        match port {
+            0 => CART_DETECT,
+            2 => button::ALL & !self.buttons,
+            _ => 0,
+        }
+    }
+
+    /// Latches the GPIO detect flags from the input levels; true when an
+    /// enabled one is set.
+    fn gpio_tick(&mut self) -> bool {
+        let mut irq = false;
+        for port in 0..GPIO_PORTS {
+            let base = GPIO + port as u32 * 0x40;
+            let (pad, last) = (self.gpio_pad(port), self.gpio_last[port]);
+            let modes = self.reg(base + GPIODETMODE0) as u64 | (self.reg(base + GPIODETMODE0 + 4) as u64) << 32;
+            for pin in 0..32 {
+                let (now, was) = (pad >> pin & 1, last >> pin & 1);
+                let hit = match modes >> (2 * pin) & 3 {
+                    0 => now == 0,
+                    1 => now == 1,
+                    2 => was == 1 && now == 0,
+                    _ => was == 0 && now == 1,
+                };
+                self.gpio_det[port] |= (hit as u32) << pin;
+            }
+            self.gpio_last[port] = pad;
+            irq |= self.gpio_det[port] & self.reg(base + GPIOINTENB) != 0;
+        }
+        irq
     }
 
     fn note(&mut self, addr: u32, write: bool) {
@@ -297,8 +362,15 @@ impl Bus {
         match addr {
             NFCONTROL => return self.regs.get(&addr).copied().unwrap_or(0) | RNB,
             NFECCSTATUS => return NFECCDECDONE,
-            GPIOAPAD => return CART_DETECT,
             _ => {}
+        }
+        if (GPIO..GPIO + 0x40 * GPIO_PORTS as u32).contains(&addr) {
+            let port = ((addr - GPIO) / 0x40) as usize;
+            match addr & 0x3F {
+                GPIODET => return self.gpio_det[port],
+                GPIOPAD => return self.gpio_pad(port),
+                _ => {}
+            }
         }
         if (timer::TIMER_BASE..timer::TIMER_END).contains(&addr) || (timer::IC_BASE..timer::IC_END).contains(&addr) {
             return self.timers.read(addr);
@@ -335,6 +407,10 @@ impl Bus {
         }
         if (timer::TIMER_BASE..timer::TIMER_END).contains(&addr) || (timer::IC_BASE..timer::IC_END).contains(&addr) {
             return self.timers.write(addr, v);
+        }
+        if (GPIO..GPIO + 0x40 * GPIO_PORTS as u32).contains(&addr) && addr & 0x3F == GPIODET {
+            self.gpio_det[((addr - GPIO) / 0x40) as usize] &= !v;
+            return;
         }
         if let Some(&u) = UARTS.iter().find(|&&u| addr.wrapping_sub(u) < 0x80) {
             if addr - u == THB {
@@ -490,6 +566,9 @@ impl Didj {
             dma: Default::default(),
             ga3d: Default::default(),
             adc_pending: false,
+            buttons: 0,
+            gpio_det: [0; GPIO_PORTS],
+            gpio_last: [0; GPIO_PORTS],
             regs: HashMap::new(),
             touched: BTreeMap::new(),
             recent: Default::default(),
@@ -552,6 +631,9 @@ impl Didj {
             }
             if self.bus.spi.irq() {
                 self.bus.timers.raise(SPI_IRQ);
+            }
+            if self.bus.gpio_tick() {
+                self.bus.timers.raise(GPIO_IRQ);
             }
             (self.cpu.irq_line, self.cpu.fiq_line) = self.bus.timers.lines();
         }

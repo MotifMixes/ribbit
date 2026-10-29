@@ -57,7 +57,33 @@ fn main() {
     let frames_dir = std::env::var("DIDJ_FRAMES").ok();
     let mut last_frame = Vec::new();
     let mut wav: Vec<u8> = Vec::new();
-    for _ in 0..millions {
+    // DIDJ_KEYS="50000:RIGHT 60000:A": at that many million cycles (the
+    // run's count), hold a button for 30 million.
+    let keys: Vec<(u64, u32)> = std::env::var("DIDJ_KEYS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|k| {
+            let (at, name) = k.split_once(':').expect("DIDJ_KEYS entries are <millions>:<button>");
+            use ribbit_didj::machine::button::*;
+            let bit = match name {
+                "LEFT" => LEFT,
+                "RIGHT" => RIGHT,
+                "UP" => UP,
+                "DOWN" => DOWN,
+                "A" => A,
+                "B" => B,
+                "L" => L,
+                "R" => R,
+                "MENU" => MENU,
+                "HINT" => HINT,
+                "PAUSE" => PAUSE,
+                _ => panic!("unknown button {name}"),
+            };
+            (at.parse().expect("bad DIDJ_KEYS time"), bit)
+        })
+        .collect();
+    for m in 0..millions {
+        didj.bus.buttons = keys.iter().filter(|&&(at, _)| (at..at + 30).contains(&m)).fold(0, |b, &(_, k)| b | k);
         let out = didj.bus.uart.first().map_or("", |s| s.as_str());
         (quiet, len) = if out.len() == len { (quiet + 1, len) } else { (0, out.len()) };
         let seen = out.matches("# ").count();

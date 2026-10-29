@@ -82,10 +82,18 @@ loads the menu (`BLT/BLT.so`), plays the splash (VideoTask, the logo animation) 
 in `DIDJ_WAV`: about 13 s), leaves the splash state and waits for input ("Screen brightness set for low
 power"). The menu shows its first-start "Select your Country" screen (drawn by the 3D engine).
 
-Known gaps: no LCD (SPI0 ID 0x96), audio codec (I2C0) or buttons yet. The buttons are
-GPIO port C pins 0-4 and 7-13 with edge interrupts (lf1000-keypad.c); headphones port B pin 10.
+Known gaps: no LCD (SPI0 ID 0x96) or audio codec (I2C0) yet.
 
-`didjboot` options (environment): `DIDJ_TYPE=$'ps\nls /Didj'` types one line at each new shell prompt;
+Buttons: GPIO port C pins, low while pressed (lf1000-keypad.c): left 0, right 1, up 2, down 3, R 4,
+L 7, A 8, B 9, menu 10, hint 11, pause 12, brightness 13 (L/R swapped on boards before EP1). The driver
+uses *level* interrupts: it waits for low level, and after 4 interrupts in a row (its debounce; the
+level keeps re-setting the flag after each clear) reports the press and switches the pin to high
+level for the release. GPIO ports A-C sit 0x40 apart from 0xC000A000: DETMODE0/1 (2 bits a pin:
+low, high, falling, rising), INTENB 0x10, DET 0x14 (write 1 to clear), PAD 0x18; IRQ 13.
+Headphones are port B pin 10 (not modelled; reads low).
+
+`didjboot` options (environment): `DIDJ_KEYS="50000:RIGHT 60000:A"` holds a button for 30 million
+cycles at that many million cycles; `DIDJ_TYPE=$'ps\nls /Didj'` types one line at each new shell prompt;
 `DIDJ_WAV=<file>` saves the sound sent to PCM out; `DIDJ_NAND=<file>` saves the Brio partition (pages with spare bytes); `DIDJ_NO_BRIO=1` leaves Brio
 erased (the console then formats it itself); `DIDJ_DUMP=<file>` saves SDRAM.
 
