@@ -591,6 +591,11 @@ impl Didj {
         (cpu.unwrap_or(393_000_000), plls)
     }
 
+    /// The processor clock (Hz).
+    pub fn cpu_hz(&self) -> u64 {
+        self.clocks().0
+    }
+
     /// Runs `n` processor cycles (one per instruction for now), the timers
     /// and interrupts with them. Returns the instructions run.
     pub fn run(&mut self, n: u64) -> u64 {

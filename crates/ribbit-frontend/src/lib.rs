@@ -11,6 +11,7 @@ mod cheat;
 mod record;
 mod console_view;
 mod device_fonts;
+mod didj;
 mod discord;
 mod emu;
 mod files;

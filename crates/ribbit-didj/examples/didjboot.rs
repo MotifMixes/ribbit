@@ -3,44 +3,15 @@
 //! model yet (milestone 2):
 //!   cargo run -p ribbit-didj --example didjboot -- <folder of .lfp files> [million instructions]
 
-use ribbit_core::zip;
-use ribbit_didj::brio;
 use ribbit_didj::machine::Didj;
-use ribbit_didj::nand::Nand;
-use ribbit_didj::package::{self, Firmware};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = args.first().expect("usage: didjboot <folder of .lfp files> [million instructions]");
     let millions: u64 = args.get(1).map_or(50, |s| s.parse().expect("not a number"));
 
-    let mut fw = Firmware::default();
-    let mut brio_files = Vec::new();
-    for e in std::fs::read_dir(dir).expect("can't read the folder").flatten() {
-        let path = e.path();
-        if package::package_id(&path.to_string_lossy()).is_none() {
-            continue;
-        }
-        let data = std::fs::read(&path).expect("can't read a package");
-        let mut rest = Vec::new();
-        let mut firmware = false;
-        for entry in zip::entries(&data).expect("not a zip archive") {
-            let bytes = zip::read_entry(&data, &entry).unwrap();
-            if fw.add(&entry.name, bytes.clone()) {
-                firmware = true;
-            }
-            rest.push((entry.name, bytes));
-        }
-        // DIDJ_NO_BRIO=1 leaves Brio erased (the console then formats it).
-        if !firmware && std::env::var_os("DIDJ_NO_BRIO").is_none() {
-            brio_files.extend(brio::package_files(rest));
-        }
-    }
-    let mut flash = Nand::from_firmware(&fw).unwrap_or_else(|e| panic!("{e}"));
-    if !brio_files.is_empty() {
-        brio::install(&mut flash, &brio_files).unwrap_or_else(|e| panic!("Brio: {e}"));
-        println!("Brio: {} files and folders", brio_files.len());
-    }
+    // DIDJ_NO_BRIO=1 leaves Brio erased (the console then formats it).
+    let flash = ribbit_didj::nand_from_packages(dir.as_ref(), std::env::var_os("DIDJ_NO_BRIO").is_none()).unwrap_or_else(|e| panic!("{e}"));
 
     let mut didj = Didj::new(flash);
     let mut ran = 0;

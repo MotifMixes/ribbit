@@ -79,6 +79,7 @@ pub fn partition(name: &str) -> Option<Partition> {
 
 /// The flash, data and spare area. Blocks never written read as erased
 /// (0xFF) and take no memory.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Nand {
     blocks: Vec<Option<Box<[u8]>>>,
 }
@@ -111,6 +112,50 @@ impl Nand {
     /// Erases block `n` (to 0xFF, data and spare).
     pub fn erase(&mut self, n: usize) {
         self.blocks[n] = None;
+    }
+
+    /// The blocks that differ from `base`, for a save file: each a 32-bit
+    /// block number, then a byte (0 erased, 1 written) and, when written,
+    /// the block with its spare areas.
+    pub fn changes_from(&self, base: &Nand) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (n, (a, b)) in self.blocks.iter().zip(&base.blocks).enumerate() {
+            if a != b {
+                out.extend((n as u32).to_le_bytes());
+                match a {
+                    Some(data) => {
+                        out.push(1);
+                        out.extend_from_slice(data);
+                    }
+                    None => out.push(0),
+                }
+            }
+        }
+        out
+    }
+
+    /// Applies `changes_from`'s output.
+    pub fn apply_changes(&mut self, mut changes: &[u8]) -> Result<(), String> {
+        const RAW: usize = PAGE_RAW * PAGES_PER_BLOCK;
+        while !changes.is_empty() {
+            let bad = || "a damaged NAND save".to_string();
+            let n = u32::from_le_bytes(changes.get(..4).ok_or_else(bad)?.try_into().unwrap()) as usize;
+            if n >= BLOCKS {
+                return Err(bad());
+            }
+            match changes.get(4) {
+                Some(0) => {
+                    self.blocks[n] = None;
+                    changes = &changes[5..];
+                }
+                Some(1) => {
+                    self.blocks[n] = Some(changes.get(5..5 + RAW).ok_or_else(bad)?.into());
+                    changes = &changes[5 + RAW..];
+                }
+                _ => return Err(bad()),
+            }
+        }
+        Ok(())
     }
 
     pub fn is_bad(&self, block: usize) -> bool {
@@ -229,5 +274,26 @@ mod tests {
         assert_eq!(n.read(0x120_0000 + BLOCK * 10 - 1, 2), [3, 0xFF]);
         assert_eq!(n.read(0x140_0000, 1), [4]);
         assert!(Nand::from_firmware(&Firmware::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    #[test]
+    fn changes_round_trip() {
+        let mut base = Nand::erased();
+        base.write(0, &[1; PAGE]);
+        base.write(5 * BLOCK, &[2; PAGE]);
+        let mut now = base.clone();
+        now.write(3 * BLOCK, &[3; PAGE]);
+        now.erase(5);
+        let changes = now.changes_from(&base);
+        let mut back = base.clone();
+        back.apply_changes(&changes).unwrap();
+        assert!(back == now);
+        assert!(base.changes_from(&base).is_empty());
+        assert!(back.apply_changes(&changes[..7]).is_err());
     }
 }

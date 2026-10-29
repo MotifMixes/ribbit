@@ -183,6 +183,8 @@ pub fn layout_for(hw: Hardware) -> Option<Layout> {
         Hardware::LeapsterTv | Hardware::Zippity => None,
         // The LeapPad draws itself (leappad.rs).
         Hardware::LeapPad => None,
+        // Not drawn yet.
+        Hardware::Didj => None,
     }
 }
 

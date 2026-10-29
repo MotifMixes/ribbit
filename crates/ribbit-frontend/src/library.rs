@@ -144,6 +144,8 @@ pub enum Family {
     RockItTwist,
     /// A cartridge of the original LeapPad (1999 book-and-pen pad).
     LeapPad,
+    /// A Didj package: the console's firmware (its menu) or a game.
+    Didj,
 }
 
 /// Cartridges made for the Leapster 2 alone, by CRC32: the "Leapster 2
@@ -154,7 +156,7 @@ const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 impl Family {
     /// The library tabs: the game consoles in alphabetical order, then the
     /// LeapPad (a book reader; Ribbit is a game emulator first).
-    pub const ALL: [Family; 5] = [Family::Leapster, Family::Leapster2, Family::RockItTwist, Family::Zippity, Family::LeapPad];
+    pub const ALL: [Family; 6] = [Family::Didj, Family::Leapster, Family::Leapster2, Family::RockItTwist, Family::Zippity, Family::LeapPad];
 
     /// A book reader's (the library's Books side), not a game console's.
     pub fn is_book(self) -> bool {
@@ -168,17 +170,19 @@ impl Family {
             Family::Zippity => "Zippity",
             Family::RockItTwist => "RockIt Twist",
             Family::LeapPad => "LeapPad",
+            Family::Didj => "Didj",
         }
     }
 
     /// Whether a console of this hardware runs the family's games.
     pub fn runs_on(self, hw: Hardware) -> bool {
         match self {
-            Family::Leapster => !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad),
+            Family::Leapster => !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj),
             Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
             Family::RockItTwist => hw == Hardware::RockItTwist,
             Family::LeapPad => hw == Hardware::LeapPad,
+            Family::Didj => hw == Hardware::Didj,
         }
     }
 
@@ -190,6 +194,7 @@ impl Family {
             Family::Zippity => Hardware::Zippity,
             Family::RockItTwist => Hardware::RockItTwist,
             Family::LeapPad => Hardware::LeapPad,
+            Family::Didj => Hardware::Didj,
         }
     }
 
@@ -594,6 +599,8 @@ impl Library {
             // Its base ROM is kept in the settings (File > Open BIOS); a
             // book played without one says so.
             Hardware::LeapPad => true,
+            // Started from its packages (it says which are missing).
+            Hardware::Didj => true,
             _ => self.bios_for(hw).is_some(),
         }
     }
@@ -605,7 +612,7 @@ impl Library {
     pub fn consoles(&self) -> Vec<Hardware> {
         let have: Vec<Hardware> = CONSOLES
             .into_iter()
-            .filter(|&hw| !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad))
+            .filter(|&hw| !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj))
             .filter(|&hw| self.bios_for(hw).is_some())
             .collect();
         if have.is_empty() { vec![Hardware::Leapster] } else { have }
@@ -625,6 +632,7 @@ impl Library {
             Hardware::Zippity => Family::Zippity,
             Hardware::RockItTwist => Family::RockItTwist,
             Hardware::LeapPad => Family::LeapPad,
+            Hardware::Didj => Family::Didj,
             _ => Family::Leapster,
         }
     }
@@ -737,7 +745,7 @@ fn worker(
                 }
                 continue;
             }
-            Some(Found::Twist(game) | Found::LeapPad(game)) => {
+            Some(Found::Twist(game) | Found::LeapPad(game) | Found::Didj(game)) => {
                 if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
                     return;
                 }
@@ -879,6 +887,8 @@ enum Found {
     Twist(Game),
     /// A LeapPad book cartridge.
     LeapPad(Game),
+    /// A Didj package: its firmware (the console) or a game.
+    Didj(Game),
 }
 
 /// Zippity images: the system NAND (with spare area) and cartridges.
@@ -886,6 +896,11 @@ const ZIPPITY_NAND_SIZE: usize = 0x1080_0000;
 const ZIPPITY_CART_SIZE: usize = 0x420_0000;
 
 fn classify(path: &Path) -> Option<Found> {
+    // Didj packages are named DIDJ-0x<product>-<version>.lfp; only some
+    // are listed (the rest are found again beside them when one starts).
+    if crate::didj::is_package(path) {
+        return crate::didj::describe_package(path).map(Found::Didj);
+    }
     // RockIt Twist packages go by name and first bytes (they are big, and
     // a .lfp is a zip that must not be unpacked as a ROM).
     if let Some(game) = crate::twist::describe_package(path) {
@@ -933,6 +948,7 @@ pub fn family_of(path: &Path) -> Option<Family> {
         Found::Zippity(_) | Found::ZippityNand(_) => Some(Family::Zippity),
         Found::Twist(_) => Some(Family::RockItTwist),
         Found::LeapPad(_) => Some(Family::LeapPad),
+        Found::Didj(_) => Some(Family::Didj),
         Found::Bios(..) => None,
     }
 }

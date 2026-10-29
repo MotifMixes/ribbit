@@ -29,3 +29,37 @@ pub mod package;
 pub mod tfs;
 pub mod timer;
 pub mod ubi;
+
+/// The internal NAND as LeapFrog Connect leaves it with the packages in
+/// `dir` (the `DIDJ-0x...lfp` files): the firmware written raw, the rest
+/// installed on the Brio partition (left erased with `brio` false; the
+/// console then formats it).
+pub fn nand_from_packages(dir: &std::path::Path, brio: bool) -> Result<nand::Nand, String> {
+    let mut fw = package::Firmware::default();
+    let mut brio_files = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        if package::package_id(&path.to_string_lossy()).is_none() {
+            continue;
+        }
+        let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut rest = Vec::new();
+        let mut firmware = false;
+        for entry in ribbit_core::zip::entries(&data).map_err(|e| format!("{}: {e}", path.display()))? {
+            let bytes = ribbit_core::zip::read_entry(&data, &entry).map_err(|e| format!("{}: {e}", path.display()))?;
+            if fw.add(&entry.name, bytes.clone()) {
+                firmware = true;
+            }
+            rest.push((entry.name, bytes));
+        }
+        if !firmware && brio {
+            brio_files.extend(brio::package_files(rest));
+        }
+    }
+    let mut flash = nand::Nand::from_firmware(&fw)?;
+    if !brio_files.is_empty() {
+        brio::install(&mut flash, &brio_files).map_err(|e| format!("Brio: {e}"))?;
+    }
+    Ok(flash)
+}

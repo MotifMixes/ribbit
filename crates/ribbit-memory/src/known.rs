@@ -25,6 +25,9 @@ pub enum Hardware {
     /// The original LeapFrog LeapPad (1999 book-and-pen pad): an 8051 base
     /// and a book cartridge; no screen (crates/ribbit-leappad).
     LeapPad,
+    /// LeapFrog Didj (2008 handheld): an LF1000 (ARM926EJ-S) running Linux,
+    /// its NAND built from its firmware packages (crates/ribbit-didj).
+    Didj,
 }
 
 impl Hardware {
@@ -38,6 +41,7 @@ impl Hardware {
             Hardware::Zippity => "Zippity",
             Hardware::RockItTwist => "RockIt Twist",
             Hardware::LeapPad => "LeapPad",
+            Hardware::Didj => "Didj",
         }
     }
 }

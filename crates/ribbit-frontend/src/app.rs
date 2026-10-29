@@ -110,6 +110,8 @@ pub struct App {
     session: Option<Session>,
     /// A Zippity being played (instead of `session`'s Leapster).
     zippity: Option<crate::zippity::ZipSession>,
+    /// A Didj being played.
+    didj: Option<crate::didj::DidjSession>,
     /// Its latest picture.
     tv_frame: Vec<u32>,
     /// Removing the saved players from a Zippity dump (the cleaned dump).
@@ -284,6 +286,7 @@ impl App {
             settings_path,
             session: None,
             zippity: None,
+            didj: None,
             tv_frame: Vec::new(),
             zippity_cleaning: None,
             twist_import: None,
@@ -607,6 +610,10 @@ impl App {
             // Back to the Leapster's square screen.
             self.fit_window = FIT_TRIES;
         }
+        if let Some(d) = self.didj.take() {
+            d.stop();
+            self.fit_window = FIT_TRIES;
+        }
         if let Some(s) = self.session.take() {
             // How long closing takes, for "the library takes a while to
             // come back" reports.
@@ -745,6 +752,10 @@ impl App {
                 return self.start_leappad(None);
             }
             None => {}
+        }
+        // A Didj package: the Didj, built from the packages beside it.
+        if crate::didj::is_package(&path) {
+            return self.start_didj(path);
         }
         // A console's built-in games: the Zippity's NAND, or a Leapster
         // BIOS's own games (that BIOS with no cartridge in).
@@ -922,6 +933,37 @@ impl App {
                     ),
                     None => format!("Ribbit couldn't load the Zippity's memory dump \"{}\". It may be damaged or not a full dump.", file_name(&nand)),
                 },
+                format!("{e:#}"),
+            ),
+        }
+    }
+
+    /// Plays a Didj built from the packages in the folder of `package` (the
+    /// one chosen in the library). It starts at its menu, whichever package
+    /// was chosen.
+    fn start_didj(&mut self, package: PathBuf) {
+        self.end_session();
+        let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::didj::DidjSession::start(&dir, &self.save_dir(), sink) {
+            Ok(mut d) => {
+                self.fit_window = FIT_TRIES;
+                if let Some(g) = self.library.games.iter().find(|g| g.path == package) {
+                    d.title.clone_from(&g.title);
+                }
+                self.didj = Some(d);
+                self.paused = false;
+                if let Some(a) = &mut self.audio {
+                    a.clear();
+                }
+                self.update_title();
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't start the Didj",
+                format!(
+                    "Ribbit builds the Didj's memory from its packages (DIDJ-0x….lfp files: Bootstrap, Device Firmware, Brio and the Base_ ones), all in one folder: \"{}\". One may be missing or damaged.",
+                    dir.display()
+                ),
                 format!("{e:#}"),
             ),
         }
@@ -1248,6 +1290,7 @@ impl App {
         let picking = self.native_pick.is_some();
         let busy = self.session.is_some()
             || self.zippity.is_some()
+            || self.didj.is_some()
             || self.twist.is_some()
             || self.leappad.is_some()
             || self.recording.is_some()
@@ -1272,7 +1315,7 @@ impl App {
         if span < STATUS_EVERY {
             return;
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.twist.is_some() || self.leappad.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
         tracing::info!(target: "ribbit::perf",
             fps = (self.status.1 as f64 / span.as_secs_f64()).round(),
             running,
@@ -1290,6 +1333,8 @@ impl App {
             Some(Hardware::RockItTwist)
         } else if self.zippity.is_some() {
             Some(Hardware::Zippity)
+        } else if self.didj.is_some() {
+            Some(Hardware::Didj)
         } else {
             self.session.as_ref().map(|s| s.hardware)
         }
@@ -1319,6 +1364,9 @@ impl App {
         }
         if let Some(z) = &self.zippity {
             z.set_button(b, state);
+        }
+        if let Some(d) = &self.didj {
+            d.set_button(b, state);
         }
     }
 
@@ -1442,6 +1490,9 @@ impl App {
             }
             if let Some(z) = &self.zippity {
                 z.set_button(b, false);
+            }
+            if let Some(d) = &self.didj {
+                d.set_button(b, false);
             }
         }
         if let Some(t) = &mut self.twist {
@@ -1573,7 +1624,11 @@ impl App {
         } else if let Some(l) = &self.leappad {
             l.debug_snapshot(&mut self.ui.debug, &bps, paused)
         } else {
-            let system = if self.zippity.is_some() { "Zippity" } else if self.twist.is_some() { "RockIt Twist" } else { "no game" };
+            let system = if self.zippity.is_some() {
+                "Zippity"
+            } else if self.didj.is_some() {
+                "Didj"
+            } else if self.twist.is_some() { "RockIt Twist" } else { "no game" };
             crate::debugger::Snapshot { system: system.into(), ..Default::default() }
         };
     }
@@ -1654,6 +1709,7 @@ impl App {
                 .as_ref()
                 .map(|s| &s.title)
                 .or(self.zippity.as_ref().map(|z| &z.title))
+                .or(self.didj.as_ref().map(|d| &d.title))
                 .or(self.leappad.as_ref().map(|l| &l.title))
                 .or(self.twist.as_ref().map(|t| &t.title));
             let t = match title {
@@ -2312,6 +2368,10 @@ impl App {
             z.reset();
             self.ui.toast("Reset");
         }
+        if let Some(d) = &self.didj {
+            d.reset();
+            self.ui.toast("Reset");
+        }
         if let Some(s) = &mut self.session {
             {
                 let mut m = s.emu.lock();
@@ -2324,7 +2384,7 @@ impl App {
     }
 
     fn toggle_pause(&mut self) {
-        if self.zippity.is_some() || self.twist.is_some() {
+        if self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() {
             self.paused = !self.paused;
             if let Some(a) = &mut self.audio {
                 a.clear();
@@ -2600,6 +2660,13 @@ impl App {
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
+        if let Some(d) = &self.didj {
+            d.set_running(!halted);
+            d.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+            self.speed_percent = d.speed_percent();
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
         let Some(s) = &mut self.session else {
             return;
         };
@@ -2829,7 +2896,7 @@ impl App {
         let open = self.ui.side_menu_open();
         let (was_open, paused_by_menu) = self.side_menu;
         if open && !was_open {
-            let running = self.session.is_some() || self.zippity.is_some() || self.twist.is_some();
+            let running = self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some();
             let pause = running && !self.paused;
             if pause {
                 self.toggle_pause();
@@ -2850,7 +2917,7 @@ impl App {
         let Some(set) = self.opts.keep_screen_on else {
             return;
         };
-        let playing = (self.session.is_some() || self.zippity.is_some() || self.twist.is_some()) && !self.paused;
+        let playing = (self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
         if playing != self.screen_on {
             set(playing);
             self.screen_on = playing;
@@ -2964,7 +3031,7 @@ impl App {
                 PadEvent::Button(b, pressed) => self.press(Source::Gamepad, b, pressed),
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
-                    if (self.session.is_some() || self.zippity.is_some() || self.twist.is_some()) && !self.paused {
+                    if (self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
                         self.toggle_pause();
                     }
                 }
@@ -3041,6 +3108,9 @@ impl App {
         if let Some(z) = &self.zippity {
             z.frame(&mut self.tv_frame);
         }
+        if let Some(d) = &self.didj {
+            d.frame(&mut self.tv_frame);
+        }
         if let Some(t) = &self.twist {
             t.frame(&mut self.tv_frame);
         }
@@ -3054,6 +3124,8 @@ impl App {
             Some((ribbit_twist::SCREEN_W, ribbit_twist::SCREEN_H))
         } else if self.zippity.is_some() {
             Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
+        } else if self.didj.is_some() {
+            Some((crate::didj::SCREEN_W, crate::didj::SCREEN_H))
         } else {
             None
         };
@@ -3077,7 +3149,7 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some() || self.zippity.is_some() || self.twist.is_some() || self.leappad.is_some(),
+                running: self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 leappad: self.leappad.is_some(),
                 paused: halted,
@@ -3090,6 +3162,7 @@ impl App {
                     .as_ref()
                     .map(|s| s.title.clone())
                     .or(self.zippity.as_ref().map(|z| z.title.clone()))
+                    .or(self.didj.as_ref().map(|d| d.title.clone()))
                     .or(self.twist.as_ref().map(|t| t.title.clone()))
                     .or(self.leappad.as_ref().map(|l| l.title.clone()))
                     .unwrap_or_default(),
@@ -3159,7 +3232,10 @@ impl App {
                 (Some(z), _, _) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
                 (None, Some(t), _) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
                 (None, None, Some(l)) => crate::discord::Presence::playing(&l.title, "LeapPad", l.started).with_series(l.series.as_deref()),
-                (None, None, None) => crate::discord::Presence::Browsing,
+                (None, None, None) => match &self.didj {
+                    Some(d) => crate::discord::Presence::playing(&d.title, "Didj", d.started),
+                    None => crate::discord::Presence::Browsing,
+                },
             },
         });
         let (ui_state, settings, library) = (&mut self.ui, &mut self.settings, &mut self.library);
@@ -3243,7 +3319,7 @@ impl App {
             None => Gpu::lcd_rect(px_area, display),
         };
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = (self.session.is_some() || self.zippity.is_some() || self.twist.is_some())
+        let lcd = (self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some())
             .then_some((self.lcd_px, display, self.settings.ai));
         let mut deltas = out.textures_delta;
         let rendered = gpu.render(lcd, &jobs, &deltas, ppp);
@@ -3291,7 +3367,7 @@ impl App {
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.twist.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some();
         self.frame_diag.frame(frame_start, took, running && !self.halted());
     }
 }

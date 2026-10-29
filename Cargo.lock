@@ -3506,6 +3506,7 @@ dependencies = [
  "ribbit-core",
  "ribbit-cpu",
  "ribbit-debug",
+ "ribbit-didj",
  "ribbit-input",
  "ribbit-leappad",
  "ribbit-memory",

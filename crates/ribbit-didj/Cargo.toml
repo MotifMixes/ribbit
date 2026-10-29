@@ -1,6 +1,6 @@
 [package]
 name = "ribbit-didj"
-description = "LeapFrog Didj: its package and firmware formats and its internal NAND (emulation not started)"
+description = "LeapFrog Didj emulation: LF1000 machine, display, 3D engine, packages and internal NAND"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
