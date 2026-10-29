@@ -120,6 +120,38 @@ const FRAME_HZ: u64 = 60;
 /// flag raises IRQ 13 (platform.h LF1000_GPIO_IRQ).
 const GPIO: u32 = 0xC000_A000;
 const GPIO_PORTS: usize = 3;
+
+/// Register values by address, hashed by a multiply: the run loop looks some
+/// up every slice, and SipHash made that a large part of the time.
+type Regs = HashMap<u32, u32, std::hash::BuildHasherDefault<AddrHasher>>;
+
+#[derive(Default)]
+struct AddrHasher(u64);
+
+impl std::hash::Hasher for AddrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 << 8 | b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.0 = (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+/// Bits 0, 2, 4, ... 62 of `x`, packed.
+fn even_bits(mut x: u64) -> u32 {
+    x &= 0x5555_5555_5555_5555;
+    x = (x | x >> 1) & 0x3333_3333_3333_3333;
+    x = (x | x >> 2) & 0x0F0F_0F0F_0F0F_0F0F;
+    x = (x | x >> 4) & 0x00FF_00FF_00FF_00FF;
+    x = (x | x >> 8) & 0x0000_FFFF_0000_FFFF;
+    x = (x | x >> 16) & 0x0000_0000_FFFF_FFFF;
+    x as u32
+}
 const GPIODETMODE0: u32 = 0x08;
 const GPIOINTENB: u32 = 0x10;
 const GPIODET: u32 = 0x14;
@@ -193,7 +225,7 @@ pub struct Bus {
     pub ga3d: crate::ga3d::Ga3d,
     adc_pending: bool,
     /// Registers with no model: the last value written.
-    regs: HashMap<u32, u32>,
+    regs: Regs,
     /// Unmodelled addresses in order of first access: (address, first PC,
     /// read count, write count).
     pub touched: BTreeMap<u32, (u32, u64, u64)>,
@@ -244,16 +276,11 @@ impl Bus {
             let base = GPIO + port as u32 * 0x40;
             let (pad, last) = (self.gpio_pad(port), self.gpio_last[port]);
             let modes = self.reg(base + GPIODETMODE0) as u64 | (self.reg(base + GPIODETMODE0 + 4) as u64) << 32;
-            for pin in 0..32 {
-                let (now, was) = (pad >> pin & 1, last >> pin & 1);
-                let hit = match modes >> (2 * pin) & 3 {
-                    0 => now == 0,
-                    1 => now == 1,
-                    2 => was == 1 && now == 0,
-                    _ => was == 0 && now == 1,
-                };
-                self.gpio_det[port] |= (hit as u32) << pin;
-            }
+            // Each pin's two mode bits: 0 low level, 1 high level, 2
+            // falling edge, 3 rising edge.
+            let (lo, hi) = (even_bits(modes), even_bits(modes >> 1));
+            let hit = !hi & !lo & !pad | !hi & lo & pad | hi & !lo & last & !pad | hi & lo & !last & pad;
+            self.gpio_det[port] |= hit;
             self.gpio_last[port] = pad;
             irq |= self.gpio_det[port] & self.reg(base + GPIOINTENB) != 0;
         }
@@ -450,11 +477,11 @@ impl Bus {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
         let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
         if a + size as usize <= SDRAM_SIZE {
-            let mut v = 0;
-            for i in 0..size as usize {
-                v |= (self.sdram[a + i] as u32) << (8 * i);
-            }
-            return v;
+            return match size {
+                4 => u32::from_le_bytes(self.sdram[a..a + 4].try_into().unwrap()),
+                2 => u16::from_le_bytes(self.sdram[a..a + 2].try_into().unwrap()) as u32,
+                _ => self.sdram[a] as u32,
+            };
         }
         if Self::nand_port(addr) == Some(NFDATA) {
             let mut v = 0;
@@ -488,9 +515,7 @@ impl Bus {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
         let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
         if a + size as usize <= SDRAM_SIZE {
-            for i in 0..size as usize {
-                self.sdram[a + i] = (v >> (8 * i)) as u8;
-            }
+            self.sdram[a..a + size as usize].copy_from_slice(&v.to_le_bytes()[..size as usize]);
             return;
         }
         if Self::nand_port(addr).is_some() {
@@ -569,7 +594,7 @@ impl Didj {
             buttons: 0,
             gpio_det: [0; GPIO_PORTS],
             gpio_last: [0; GPIO_PORTS],
-            regs: HashMap::new(),
+            regs: Regs::default(),
             touched: BTreeMap::new(),
             recent: Default::default(),
             uart: Vec::new(),

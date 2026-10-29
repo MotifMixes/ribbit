@@ -345,3 +345,19 @@ fn alignment_fault_when_a_bit_set() {
     assert_eq!(a.mode(), mode::ABT);
     assert_eq!((a.cp15.fsr, a.cp15.far), (1, 0x2001));
 }
+
+/// Interpreter speed on flat RAM (MMU off): a load/add/store/count loop.
+/// `cargo test --release -p ribbit-arm bench_loop -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_loop() {
+    let code = [0xE592_1000, 0xE280_0001, 0xE582_0004, 0xE253_3001, 0x1AFF_FFFA];
+    let n = 100_000_000;
+    let t = std::time::Instant::now();
+    let (a, _) = run_arm(&code, n, |a, _| {
+        a.r[2] = 0x8000;
+        a.r[3] = u32::MAX;
+    });
+    let s = t.elapsed().as_secs_f64();
+    println!("{} M instructions/s (r0 {})", (n as f64 / s / 1e6) as u64, a.r[0]);
+}
