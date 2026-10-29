@@ -121,20 +121,6 @@ const FRAME_HZ: u64 = 60;
 const GPIOAPAD: u32 = 0xC000_A018;
 const CART_DETECT: u32 = 1 << 18;
 
-/// The 3D engine (GA3D, user space maps it through /dev/ga3d). Not
-/// modelled yet (milestone M6): it draws nothing, is always idle, and has
-/// read every queued command at once. From libopengles_lite
-/// (MES_GRP3D_OpenCommandQueue, _CheckBusy): 0x00 1 = queue on, 0x04 the
-/// queue's start and 0x08 its last word (physical; 8-byte entries), 0x0C
-/// the rear (where software has written to), 0x10 the front (how far the
-/// engine has read), 0x14 status, idle when bits 16-21 and 23 (0xBF0000)
-/// are all set.
-const GA3D: u32 = 0xC001_A000;
-const GA3D_REAR: u32 = GA3D + 0x0C;
-const GA3D_FRONT: u32 = GA3D + 0x10;
-const GA3D_STATUS: u32 = GA3D + 0x14;
-const GA3D_IDLE: u32 = 0x00BF_0000;
-
 /// UART 0-5 (uart.h); the transmit holding register and the status.
 const UARTS: [u32; 6] = [0xC001_6000, 0xC001_6080, 0xC001_6800, 0xC001_6880, 0xC001_7000, 0xC001_7080];
 const TRSTATUS: u32 = 0x08;
@@ -176,6 +162,7 @@ pub struct Bus {
     pub timers: Timers,
     spi: Spi,
     pub dma: crate::dma::Dma,
+    pub ga3d: crate::ga3d::Ga3d,
     adc_pending: bool,
     /// Registers with no model: the last value written.
     regs: HashMap<u32, u32>,
@@ -194,6 +181,20 @@ pub struct Bus {
 }
 
 impl Bus {
+    /// An unmodelled register's last written value (0 if never written).
+    pub fn reg(&self, addr: u32) -> u32 {
+        self.regs.get(&addr).copied().unwrap_or(0)
+    }
+
+    /// The picture on the screen: (width, height, 0x00RRGGBB pixels).
+    pub fn frame(&self) -> (usize, usize, Vec<u32>) {
+        let mem = |a: u32, n: u32| {
+            let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&a) { crate::mlc::block_sdram(a, false) as u32 } else { a };
+            (0..n).fold(0, |v, i| v | (self.sdram.get((a + i) as usize).copied().unwrap_or(0) as u32) << (8 * i))
+        };
+        crate::mlc::compose(|a| self.reg(a), mem)
+    }
+
     fn note(&mut self, addr: u32, write: bool) {
         if self.recent.len() == 64 {
             self.recent.pop_front();
@@ -297,8 +298,6 @@ impl Bus {
             NFCONTROL => return self.regs.get(&addr).copied().unwrap_or(0) | RNB,
             NFECCSTATUS => return NFECCDECDONE,
             GPIOAPAD => return CART_DETECT,
-            GA3D_STATUS => return GA3D_IDLE,
-            GA3D_FRONT => return self.regs.get(&GA3D_REAR).copied().unwrap_or(0),
             _ => {}
         }
         if (timer::TIMER_BASE..timer::TIMER_END).contains(&addr) || (timer::IC_BASE..timer::IC_END).contains(&addr) {
@@ -372,7 +371,8 @@ impl Bus {
     }
 
     fn read_n(&mut self, addr: u32, size: u32) -> u32 {
-        let a = addr as usize;
+        // Block (2D) addresses reach SDRAM through the display-mode layout.
+        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
         if a + size as usize <= SDRAM_SIZE {
             let mut v = 0;
             for i in 0..size as usize {
@@ -390,6 +390,11 @@ impl Bus {
         if let Some(v) = addr.checked_sub(SPI0).filter(|&o| o < 8).and_then(|o| self.spi.read(o)) {
             return v;
         }
+        if (crate::ga3d::BASE..crate::ga3d::END).contains(&addr) {
+            let shift = 8 * (addr & 3);
+            let mask = if size == 4 { u32::MAX } else { (1 << (8 * size)) - 1 };
+            return (self.ga3d.read(addr & !3) >> shift) & mask;
+        }
         if (crate::dma::BASE..crate::dma::END).contains(&addr) {
             let shift = 8 * (addr & 3);
             let mask = if size == 4 { u32::MAX } else { (1 << (8 * size)) - 1 };
@@ -404,7 +409,8 @@ impl Bus {
     }
 
     fn write_n(&mut self, addr: u32, v: u32, size: u32) {
-        let a = addr as usize;
+        // Block (2D) addresses reach SDRAM through the display-mode layout.
+        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
         if a + size as usize <= SDRAM_SIZE {
             for i in 0..size as usize {
                 self.sdram[a + i] = (v >> (8 * i)) as u8;
@@ -419,6 +425,13 @@ impl Bus {
         }
         // Narrow writes merge into the register's 32-bit value.
         let base = addr & !3;
+        if (crate::ga3d::BASE..crate::ga3d::END).contains(&addr) {
+            let shift = 8 * (addr & 3);
+            let mask = if size == 4 { u32::MAX } else { ((1 << (8 * size)) - 1) << shift };
+            let v = (self.ga3d.read(base) & !mask) | ((v << shift) & mask);
+            let mut mem = crate::ga3d::Mem { sdram: &mut self.sdram };
+            return self.ga3d.write(base, v, &mut mem);
+        }
         if (crate::dma::BASE..crate::dma::END).contains(&addr) {
             let shift = 8 * (addr & 3);
             let mask = if size == 4 { u32::MAX } else { ((1 << (8 * size)) - 1) << shift };
@@ -475,6 +488,7 @@ impl Didj {
             timers: Timers::new(),
             spi: Spi::default(),
             dma: Default::default(),
+            ga3d: Default::default(),
             adc_pending: false,
             regs: HashMap::new(),
             touched: BTreeMap::new(),

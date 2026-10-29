@@ -4,9 +4,9 @@ The Didj (2008, codename "Lightning") is a handheld built on the LF1000, LeapFro
 Pollux VR3520F: an ARM926EJ-S at 393 MHz with 32 MB of SDRAM, a 320x240 LCD, a 3D engine, and 256 MB of
 internal NAND. It runs Linux 2.6.20 with LeapFrog's Brio libraries; games come on NAND cartridges.
 
-**Status: boots to Linux user space, no screen yet.** `crates/ribbit-didj` holds the formats, the NAND image (M1)
-and a boot machine (M2): the real lightning-boot and kernel run to the root file system mount and the first user
-process; init runs its scripts to a shell (see "Boot log").
+**Status: boots to the menu; the start-up screens show (health warning, copyright, the "didj" logo video).**
+The menu itself is drawn by the 3D engine, not modelled yet, so it shows black. `crates/ribbit-didj` holds the
+formats, the NAND image, and the machine: ARM926EJ-S, NAND, timers, DMA (sound), and the MLC display compositor.
 
 Tags: VERIFIED = checked on the firmware files or the GPL source; UNKNOWN = not known yet.
 
@@ -74,18 +74,15 @@ What it took to get past the kernel (each a hardware behaviour Linux relies on):
   Ribbit paces those at 4 bytes per sample at 32000 Hz. Before this AppManager stopped at "HW is not
   busy, but fifo is not empty".
 - GA3D, the 3D engine (0xC001A000, mapped to user space by /dev/ga3d, driven by the closed
-  libopengles_lite.so, MagicEyes "MES_GRP3D" HAL): 0x00 queue on, 0x04 queue start and 0x08 its last word
-  (physical, 8-byte entries), 0x0C rear (software's write pointer), 0x10 front (the engine's read
-  pointer), 0x14 status (idle = bits 0xBF0000 all set). The menu waits for the front to reach the rear.
-  Ribbit's stand-in (until M6): always idle, every command read at once, nothing drawn.
+  libopengles_lite.so): see "3D engine" below.
 
 Now: BusyBox init runs `/etc/init.d/rcS`, which mounts the Brio volume Ribbit built (below) as `/Didj`,
 starts monitord and `launch_main`, and gives a `#` shell on ttyS0. `launch_main` starts AppManager, which
 loads the menu (`BLT/BLT.so`), plays the splash (VideoTask, the logo animation) with its sounds (heard
 in `DIDJ_WAV`: about 13 s), leaves the splash state and waits for input ("Screen brightness set for low
-power"). Nothing is shown yet.
+power"). The menu shows its first-start "Select your Country" screen (drawn by the 3D engine).
 
-Known gaps: no LCD (SPI0 ID 0x96), audio codec (I2C0), display, 3D drawing or buttons yet. The buttons are
+Known gaps: no LCD (SPI0 ID 0x96), audio codec (I2C0) or buttons yet. The buttons are
 GPIO port C pins 0-4 and 7-13 with edge interrupts (lf1000-keypad.c); headphones port B pin 10.
 
 `didjboot` options (environment): `DIDJ_TYPE=$'ps\nls /Didj'` types one line at each new shell prompt;
@@ -166,6 +163,64 @@ A `.lfp` is a plain zip with a `meta.inf` (`Device="Didj"`). IDs are `DIDJ-0x000
 Cartridge dumps are 69206016 bytes: small-page NAND, 512 + 16 bytes per page, 32 pages per 16 KiB block, 4096
 blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
 
+## Display (VERIFIED in Ribbit unless marked)
+
+The MLC (0xC000_4000, kernel drivers/lf1000/mlc) composes the 320 x 240 picture over a background colour
+(white at the menu). Registers at the menu, 1.35.2.4222: SCREENSIZE 0x00EF013F (the size less one), CONTROLT
+0x0C02 (enabled, video on top). Layer 0: A8R8G8B8 (format 0x0653) at 0x01200000, the kernel's frame buffer
+(LF1000_MLC_FB_BASE, 18 MB): the start-up screens. Layer 1: R5G6B5 (0x4432) at 0x21500000, 4096-byte rows: the
+3D engine's output (the menu). Layer 2 (video): YUV 4:2:0, Y 0x0124B000 (its block bit kept elsewhere: the driver
+mentions MEMCONTROL), Cb 0x2124B800, Cr 0x212A3800, 4096-byte rows, scale across 0x800 (1:1) and down 0x5DB.
+
+Addresses with bit 29 set are "block" (2D) addresses: segment (16 MB of SDRAM) in bits 24-28, row V in
+12-23, byte U in 0-11 of a 4096 x 4096-byte square. Software maps them (through the MLC device's mmap) and
+writes them directly (the splash video does). The memory controller stores the square in 2 KiB blocks of
+64 x 32 bytes, 64 blocks to a row (POLLUX data book 22.2.4, Table 22-2 "display mode"): SDRAM offset =
+segment << 24 | V[11:5] << 17 | U[11:6] << 11 | V[4:0] << 6 | U[5:0]. Texture mode (Table 22-3, how the 3D
+engine reads textures and palettes) stores each block as 4 x 2-byte cells: ... | V[4:1] << 7 | U[5:2] << 3 |
+V[0] << 2 | U[1:0]. Segment 1 (0x21xxxxxx) is SDRAM 16-32 MB, above the kernel's `mem=18M`
+(`mlc::block_sdram`; VERIFIED: the menu's textures, written by the CPU at plain SDRAM addresses, appear).
+
+## 3D engine (POLLUX data book Release 0.91, chapter 22, unless marked)
+
+The data book is at gp2x.dev (the GP2X Wiz has the same chip). It documents the whole engine; Ribbit models it
+in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIED by it drawing correctly.
+
+- Command processor: a queue in SDRAM (the menu's: 0x01300000-0x0131FFFC). 0x04 CMDQSTART, 0x08 CMDQEND (the
+  last word), 0x0C CMDQFRONT (software's write pointer), 0x10 CMDQREAR (the engine's read pointer; GUESS:
+  reset by writing CMDQSTART), 0x14 STATUS (idle flags 0xBF0000). Commands by bits 28-31: 15 = register fill
+  (bits 16-24 count - 1, bits 0-10 register word index, bits 11-15 wait/interrupt flags), 4-13 = one-word
+  head that is also the first data word, written to register CMDID * 2 (1, 1, 1, 1, 2, 2, 2, 2, 1, 1 words;
+  9 also loads the palette), 14 = NOP. The library waits for idle with CONTROL 0x40000004 (NOP flag).
+- CONTROL (0x20) starts a sub-module: 0 the primitive processor, 1 the GTE, 2 the TSE, 3 the rasterizer
+  (mode bits 3-4: 1 memory fill, 2 LUT fill, 3 texture cache clear).
+- Primitive processor (PRIMCON1 0x100: bit 0 GTE, 1 matrix palette, 2 index buffer, 6-7 index size,
+  8-15 valid streams): indices from IDXSTART to IDXEND (0x104, 0x108, inclusive), up to 8 vertex streams
+  (0x120 + 12n: address, stride, param = destination word bits 20-31, count - 1 bits 8-19, type 0-7), a
+  per-vertex control table (PPARAM 0x110-0x11C, end/loop at 0x10C). The menu: indexed triangle lists, 16-bit
+  indices, stream 1 positions (s15.16 into C0), stream 4 texture coordinates (into C4).
+- GTE: a 4-wide float vector processor; 512 instructions at 0x800, 252 input/constant vectors at 0x1000.
+  Instruction bits: 27-31 ID, 26 output (vertex 24-25, 3 = the current one; component 22-23: position,
+  colour A R G B, texture coordinates) or working register 22-25, sources at 17-21 and 12-16 (bit 4 =
+  constant, paged by SETPAGE), output modifier 7-11, write mask 3-6, delay 0-2. SETPAGE (31): page 1 in bits
+  8-11, page 0 in 0-3 (the data book's figure and example disagree; the menu's program only makes sense
+  this way). The modifier table (22-22) is printed one row late: 0 = xyzw, 3 = wxyz, 24-27 = xxxx..wwww,
+  28-31 = -x..-w. MAD (11) adds the last MUL result (GUESS). Pipeline timing isn't modelled.
+- Clipper: 0 <= x, y, z <= w, then Xs = left + W * Xc / Wc, Ys = bottom - H * Yc / Wc (VPORTBOT, VPORTH,
+  VPORTLEFT, VPORTW at 0xF0-0xFC, floats; the menu: 239.6, 240, -0.5, 320, so pixel centres are at whole
+  coordinates).
+- Rasterizer: render target and Z buffer are 16-bit sub-segments (11-bit ids: segment << 3 | n; n's
+  2048 x 1024-byte area is at U (n & 1) * 2048, V (n >> 1) * 1024) through 2-bit-per-256-pixel address tables.
+  The menu: render target sub-segment 0x0A, three buffers (rows 0, 256, 512), Z at rows 768, 0x319E clear.
+  Textures: TEXSUBSEGMENT {segment, page[4:2]} + TEXINFO page[1:0]; a page is 1024 x 512 bytes, 32 to a
+  segment in 2 x 2 groups. The menu uses R4G4B4A4 (mode 41) textures modulated by the vertex colour, alpha test
+  GREATER 0, alpha blending (source alpha, 1 - source alpha) and Z LESS.
+- Not modelled yet: fog, dithering, mipmaps, tile-indexed textures, the Z-valid buffer, interrupts, timing.
+  Memory fill's value: GUESS bits 0-15 (the data book says 8-15).
+
+`didjboot` with `DIDJ_FRAMES=<folder>` saves the screen every 100 million instructions when it changed, and
+`DIDJ_FRAME=<file>` the last one (PPM).
+
 ## Plan
 
 1. **M1 (done):** these notes, the package reader, and the NAND image.
@@ -173,8 +228,9 @@ blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
    controller, UART, timers, interrupt controller). Since then: user space, the Brio partition, DMA,
    AppManager and the menu running (splash sounds play).
 3. **M3:** interrupts, timers, GPIO and the NAND controller, enough for the kernel to mount its file systems.
-4. **M4:** display (MLC/DPC).
+4. **M4:** display (MLC/DPC). The MLC's RGB and video layers draw (2026-10-29); DPC timing not modelled.
 5. **M5:** audio and buttons.
-6. **M6:** 3D engine.
+6. **M6:** 3D engine. The command processor, primitive processor, GTE, clipper, TSE and rasterizer draw the
+   menu (2026-10-29).
 7. **M7:** frontend, saves, and an Enhanced/Original mode toggle.
 8. **M8:** speed (ARM JIT).

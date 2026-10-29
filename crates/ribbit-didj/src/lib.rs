@@ -17,10 +17,13 @@
 //!   UARTs, ADC, SPI0); every other register is logged.
 //! * `timer`: the timers and the interrupt controller.
 //! * `dma`: the DMA controller (audio out paced at the sample rate).
+//! * `mlc`: the display's layer compositor (the RGB layers; not video yet).
 
 pub mod brio;
 pub mod dma;
+pub mod ga3d;
 pub mod machine;
+pub mod mlc;
 pub mod nand;
 pub mod package;
 pub mod tfs;

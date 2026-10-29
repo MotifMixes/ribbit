@@ -54,6 +54,8 @@ fn main() {
 "));
     let (mut prompts, mut len, mut quiet) = (0, 0, 0);
     // DIDJ_WAV=<file> saves the sound sent to PCM out (16-bit stereo).
+    let frames_dir = std::env::var("DIDJ_FRAMES").ok();
+    let mut last_frame = Vec::new();
     let mut wav: Vec<u8> = Vec::new();
     for _ in 0..millions {
         let out = didj.bus.uart.first().map_or("", |s| s.as_str());
@@ -69,6 +71,22 @@ fn main() {
         let n = didj.run(1_000_000);
         wav.extend(didj.bus.dma.pcm.drain(..));
         ran += n;
+        // DIDJ_FRAMES=<folder> saves the screen every 100 million
+        // instructions when it has changed.
+        if let Some(dir) = &frames_dir
+            && ran / 100_000_000 != (ran - n) / 100_000_000
+        {
+            let (w, h, px) = didj.bus.frame();
+            if px != last_frame {
+                let mut f = format!("P6
+{w} {h}
+255
+").into_bytes();
+                f.extend(px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
+                std::fs::write(format!("{dir}/frame_{:06}.ppm", ran / 1_000_000), f).expect("can't write a frame");
+                last_frame = px;
+            }
+        }
         *samples.entry(didj.cpu.r[15] & !0xFFF).or_default() += 1;
         // A tight loop that never leaves one address range: report and stop.
         let pc = didj.cpu.r[15] & !0xFF;
@@ -105,6 +123,11 @@ fn main() {
             println!("--- UART{i} ---\n{s}");
         }
     }
+    println!("--- MLC (0xC0004000) ---");
+    for row in (0..0xC0).step_by(0x10) {
+        let v: Vec<String> = (0..4).map(|k| format!("{:08x}", didj.bus.reg(0xC000_4000 + row + 4 * k))).collect();
+        println!("{row:02x}: {}", v.join(" "));
+    }
     println!("--- unmodelled registers (address: first pc, reads, writes) ---");
     for (a, (pc, r, w)) in &didj.bus.touched {
         println!("{a:#010x}: {pc:#010x} r{r} w{w}");
@@ -118,6 +141,26 @@ fn main() {
     let hot: Vec<String> = hot.iter().take(12).map(|(p, n)| format!("{p:08x}:{n}")).collect();
     println!("--- busiest pages (page:samples) ---
 {}", hot.join(" "));
+    let g = &didj.bus.ga3d;
+    println!("--- GA3D: {} register writes, {} invalid commands, {} triangles, starts (control: count) ---", g.trace.len(), g.invalid, g.triangles);
+    println!("{}", g.starts.iter().map(|(c, n)| format!("{c:#x}:{n}")).collect::<Vec<_>>().join(" "));
+    println!("pixels (in, z fail, transparent, alpha fail, written): {:?}", g.pixels.get());
+    // DIDJ_GA3D=<file> saves the GA3D register writes (offset value).
+    if let Ok(path) = std::env::var("DIDJ_GA3D") {
+        let t: String = g.trace.iter().map(|(o, v)| format!("{o:04x} {v:08x}
+")).collect();
+        std::fs::write(&path, t).expect("can't write the GA3D trace");
+    }
+    // DIDJ_FRAME=<file.ppm> saves the screen.
+    if let Ok(path) = std::env::var("DIDJ_FRAME") {
+        let (w, h, px) = didj.bus.frame();
+        let mut f = format!("P6
+{w} {h}
+255
+").into_bytes();
+        f.extend(px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
+        std::fs::write(&path, f).expect("can't write the frame");
+    }
     // DIDJ_DUMP=<file> saves SDRAM, to disassemble the kernel.
     if let Ok(path) = std::env::var("DIDJ_DUMP") {
         std::fs::write(&path, &didj.bus.sdram).expect("can't write the dump");
