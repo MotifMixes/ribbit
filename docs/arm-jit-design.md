@@ -1,14 +1,31 @@
 # ARM JIT (Didj, later RockIt Twist / Zippity)
 
-Status: phase 1 built (2026-10-29), crate `ribbit-armjit`. Checks:
-`src/tests.rs` lockstep (300 random programs, interpreter vs JIT, state and
-memory identical); `didjboot didj 3000` with `DIDJ_JIT=exact` gives the
-interpreter's instruction count, PC and PCM output exactly. Speed (i9,
-first 3000 M cycles): interpreter 45 s, exact 28 s, JIT 23 s; 89% of
-instructions run compiled. Normal mode lets a block end a slice up to 31
-instructions late, so instruction counts differ slightly (PCM identical).
-Not watched for self-modifying code: GA3D writes into SDRAM (frame
-buffers, never code so far).
+Status: phase 2 mostly built (2026-10-29), crate `ribbit-armjit`. Checks:
+`src/tests.rs` lockstep (300 random programs, 5000 checked by hand;
+interpreter vs JIT, state and memory identical); `didjboot didj 3000` with
+`DIDJ_JIT=exact` gives the interpreter's instruction count, PC and PCM
+output exactly. Speed (i9, one P-core, first 3000 M cycles, including the
+~4 s NAND build at start): interpreter 45 s, phase 1 23 s, now 11.0 s, about
+real time for that stretch. `bench_loop` (ribbit-armjit): 695 M
+instructions/s, 7.2 ns to enter a block.
+
+Phase 2 so far: everything ARM compiles. Native: data processing (all
+shifter forms), LDR/STR word/byte/halfword/signed (and LDR pc), LDM/STM
+(not the S forms), MUL/MLA/UMULL/SMULL/..., SMUL<x><y>/SMLA<x><y>, CLZ,
+MRS/MSR of the CPSR (a mode change goes to the interpreter), B/BL/BX/BLX,
+PLD. The rest (LDM/STM with S, SPSR access, LDRT/STRT, SWP, LDRD/STRD,
+coprocessor, SWI) calls `Arm::execute_arm` from inside the block, which
+then stops only if r15, the mode, T, I or F changed or compiled code was
+written; MCR, SWI and the cond-0xF space end the block. Loads and stores
+reach SDRAM directly through two 1024-entry tables (virtual 4 KB page ->
+physical, privileged and User mode each), filled by the helpers, emptied
+when `Cp15::generation` changes; pages with compiled code are never in the
+store table. Not done: Thumb, flags kept in host flags, block linking.
+
+Found on the way: CP15 flushed the TLB on every c1 write; Linux wrote c1
+474 K times in the first 3000 M cycles (~60 000 a second), so only M/S/R
+changes (and real TTB/DACR changes) flush now (534 K -> 51 K flushes,
+interpreter results unchanged).
 
 ## Why
 

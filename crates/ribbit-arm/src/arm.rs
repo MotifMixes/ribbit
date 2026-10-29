@@ -484,7 +484,7 @@ fn halfword_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
                 set_reg(a, rn, moved);
             }
             set_reg(a, rd, lo);
-            set_reg(a, rd + 1, hi);
+            set_reg(a, (rd + 1) & 15, hi);
         } else {
             let (lo, hi) = (a.r[rd as usize], a.r[(rd + 1) as usize & 15]);
             if let Err(f) = a.store32(bus, addr, lo).and_then(|_| a.store32(bus, addr.wrapping_add(4), hi)) {

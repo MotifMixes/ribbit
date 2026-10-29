@@ -577,6 +577,9 @@ impl ArmBus for Bus {
     fn code_watch(&mut self) -> Option<&mut CodeWatch> {
         Some(&mut self.code)
     }
+    fn ram(&mut self) -> Option<(*mut u8, usize)> {
+        Some((self.sdram.as_mut_ptr(), self.sdram.len()))
+    }
 }
 
 pub struct Didj {

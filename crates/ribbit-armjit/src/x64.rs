@@ -12,10 +12,10 @@
 //! All three are callee-saved in the System V ABI, so they survive the
 //! helpers; everything else is scratch. Each instruction computes exactly
 //! what `arm::execute` computes; the NZCV flags are stored to the CPSR after
-//! every flag-setting instruction (phase 1).
+//! every flag-setting instruction.
 
 use crate::decode::{Instr, Operand};
-use crate::{Ctx, exit};
+use crate::{Ctx, FAST, exit};
 use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use ribbit_arm::{Arm, psr};
@@ -32,8 +32,24 @@ const CURRENT: i32 = offset_of!(Arm, current) as i32;
 const CPU: i32 = offset_of!(Ctx, cpu) as i32;
 const LOAD32: i32 = offset_of!(Ctx, load32) as i32;
 const LOAD8: i32 = offset_of!(Ctx, load8) as i32;
+const LOAD16: i32 = offset_of!(Ctx, load16) as i32;
 const STORE32: i32 = offset_of!(Ctx, store32) as i32;
 const STORE8: i32 = offset_of!(Ctx, store8) as i32;
+const STORE16: i32 = offset_of!(Ctx, store16) as i32;
+const EXEC: i32 = offset_of!(Ctx, exec) as i32;
+const RAM: i32 = offset_of!(Ctx, ram) as i32;
+const READS: i32 = offset_of!(Ctx, reads) as i32;
+const WRITES: i32 = offset_of!(Ctx, writes) as i32;
+
+/// Access sizes for `Gen::mem`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Size {
+    Word,
+    Byte,
+    Half,
+    SignedByte,
+    SignedHalf,
+}
 
 fn reg(n: u32) -> i32 {
     R + 4 * n as i32
@@ -85,28 +101,39 @@ struct StoreStub {
     writeback: Option<u32>,
 }
 
+/// An interpreted instruction that ends the block (r15 already set).
+struct ExecStub {
+    label: DynamicLabel,
+    count: u32,
+    pc: u32,
+}
+
 struct Gen {
     ops: Asm,
     done: DynamicLabel,
     faults: Vec<FaultStub>,
     stores: Vec<StoreStub>,
+    execs: Vec<ExecStub>,
+    /// Instructions after which the block ends early with r15 the next
+    /// one: block transfers that wrote compiled code, MSRs that unmasked
+    /// interrupts. With the exit code.
+    afters: Vec<(ExecStub, u32)>,
 }
 
 /// Machine code for `instrs`, the block at `va` (all ARM, one 1 KB page).
-/// `fallback`: the block stops before an instruction it does not handle.
-pub(crate) fn emit(va: u32, instrs: &[Instr], fallback: bool) -> Option<Vec<u8>> {
+pub(crate) fn emit(va: u32, instrs: &[Instr]) -> Option<Vec<u8>> {
     let mut ops = Asm::new(0);
     let (done, ret) = (ops.new_dynamic_label(), ops.new_dynamic_label());
-    let mut g = Gen { ops, done, faults: Vec::new(), stores: Vec::new() };
-    // Four pushes and 8 bytes after the return address leave rsp 16-byte
-    // aligned for the helper calls.
+    let mut g = Gen { ops, done, faults: Vec::new(), stores: Vec::new(), execs: Vec::new(), afters: Vec::new() };
+    // Four pushes and 72 bytes after the return address leave rsp 16-byte
+    // aligned for the helper calls; [rsp] holds 16 words for LDM.
     dynasm!(g.ops
         ; .arch x64
         ; push rbx
         ; push r12
         ; push r13
         ; push r14
-        ; sub rsp, 8
+        ; sub rsp, 72
         ; mov r12, rdi
         ; mov rbx, QWORD [r12 + CPU]
     );
@@ -122,7 +149,7 @@ pub(crate) fn emit(va: u32, instrs: &[Instr], fallback: bool) -> Option<Vec<u8>>
     }
     let next = va.wrapping_add(4 * n);
     let last = next.wrapping_sub(4);
-    let code = if fallback { exit::FALLBACK } else { exit::DONE };
+    let code = exit::DONE;
     dynasm!(g.ops
         ; .arch x64
         ; mov DWORD [rbx + R15], next as i32
@@ -132,7 +159,7 @@ pub(crate) fn emit(va: u32, instrs: &[Instr], fallback: bool) -> Option<Vec<u8>>
         ; mov DWORD [rbx + CURRENT], last as i32
         ; mov eax, code as i32
         ; =>ret
-        ; add rsp, 8
+        ; add rsp, 72
         ; pop r14
         ; pop r13
         ; pop r12
@@ -157,6 +184,31 @@ pub(crate) fn emit(va: u32, instrs: &[Instr], fallback: bool) -> Option<Vec<u8>>
             ; add QWORD [rbx + INSTRUCTIONS], s.count as i32
             ; mov DWORD [rbx + CURRENT], s.pc as i32
             ; mov eax, exit::CODE_WRITTEN as i32
+            ; jmp =>ret
+        );
+    }
+    for (e, code) in std::mem::take(&mut g.afters) {
+        let label = e.label;
+        dynasm!(g.ops
+            ; .arch x64
+            ; =>label
+            ; mov DWORD [rbx + R15], e.pc.wrapping_add(4) as i32
+            ; add QWORD [rbx + CYCLES], e.count as i32
+            ; add QWORD [rbx + INSTRUCTIONS], e.count as i32
+            ; mov DWORD [rbx + CURRENT], e.pc as i32
+            ; mov eax, code as i32
+            ; jmp =>ret
+        );
+    }
+    for e in std::mem::take(&mut g.execs) {
+        let label = e.label;
+        dynasm!(g.ops
+            ; .arch x64
+            ; =>label
+            ; add QWORD [rbx + CYCLES], e.count as i32
+            ; add QWORD [rbx + INSTRUCTIONS], e.count as i32
+            ; mov DWORD [rbx + CURRENT], e.pc as i32
+            ; mov eax, exit::DONE as i32
             ; jmp =>ret
         );
     }
@@ -246,7 +298,79 @@ impl Gen {
                     dynasm!(self.ops ; .arch x64 ; setc dl ; movzx edx, dl);
                 }
             }
+            Operand::RegShift { rm, kind, rs } => {
+                // The value in r10 (64 bits wide, so shifts of 32 and more
+                // need no special cases), the amount in ecx.
+                let (zero, end) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov r10d, DWORD [rbx + reg(rm)]
+                    ; mov ecx, DWORD [rbx + reg(rs)]
+                    ; and ecx, 0xFF
+                    ; jz =>zero
+                );
+                match kind {
+                    // Shift by n - 1 (at most 63), take the carry, then by 1 more.
+                    0 => dynasm!(self.ops
+                        ; .arch x64
+                        ; mov eax, 64 ; cmp ecx, eax ; cmova ecx, eax ; dec ecx
+                        ; shl r10, cl ; bt r10, 31 ; setc dl ; shl r10, 1
+                    ),
+                    1 => dynasm!(self.ops
+                        ; .arch x64
+                        ; mov eax, 64 ; cmp ecx, eax ; cmova ecx, eax ; dec ecx
+                        ; shr r10, cl ; bt r10, 0 ; setc dl ; shr r10, 1
+                    ),
+                    2 => dynasm!(self.ops
+                        ; .arch x64
+                        ; mov eax, 32 ; cmp ecx, eax ; cmova ecx, eax ; dec ecx
+                        ; movsxd r10, r10d ; sar r10, cl ; bt r10, 0 ; setc dl ; sar r10, 1
+                    ),
+                    // ROR by a multiple of 32 leaves the value; the carry
+                    // is bit 31 of the result either way.
+                    _ => dynasm!(self.ops ; .arch x64 ; ror r10d, cl ; bt r10d, 31 ; setc dl),
+                }
+                dynasm!(self.ops ; .arch x64 ; movzx edx, dl ; jmp =>end ; =>zero);
+                if carry {
+                    self.c_to_edx();
+                }
+                dynasm!(self.ops ; .arch x64 ; =>end ; mov ecx, r10d);
+            }
         }
+    }
+
+    /// Runs instruction `w` with the interpreter; the block ends when the
+    /// helper says so.
+    fn exec(&mut self, w: u32, pc: u32, count: u32) {
+        let label = self.ops.new_dynamic_label();
+        self.execs.push(ExecStub { label, count, pc });
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rdi, r12
+            ; mov esi, w as i32
+            ; mov edx, pc as i32
+            ; call QWORD [r12 + EXEC]
+            ; test eax, eax
+            ; jnz =>label
+        );
+    }
+
+    /// N and Z of the CPSR from the host's SF and ZF.
+    fn nz_from_host(&mut self) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; sets dl
+            ; setz r8b
+            ; movzx edx, dl
+            ; shl edx, 31
+            ; movzx r8d, r8b
+            ; shl r8d, 30
+            ; or edx, r8d
+            ; mov r9d, DWORD [rbx + CPSR]
+            ; and r9d, !(psr::N | psr::Z) as i32
+            ; or r9d, edx
+            ; mov DWORD [rbx + CPSR], r9d
+        );
     }
 
     fn c_to_edx(&mut self) {
@@ -262,7 +386,147 @@ impl Gen {
         match *ins {
             Instr::Alu { op, s, rn, rd, op2, .. } => self.alu(op, s, rn, rd, op2, pc),
             Instr::Mem { load, byte, pre, up, writeback, rn, rd, offset, .. } => {
-                self.mem(load, byte, pre, up, writeback, rn, rd, offset, pc, count)
+                let size = if byte { Size::Byte } else { Size::Word };
+                self.mem(load, size, pre, up, writeback, rn, rd, offset, pc, count)
+            }
+            Instr::Half { load, sh, pre, up, writeback, rn, rd, offset, .. } => {
+                let size = match sh {
+                    1 => Size::Half,
+                    2 => Size::SignedByte,
+                    _ => Size::SignedHalf,
+                };
+                self.mem(load, size, pre, up, writeback, rn, rd, offset, pc, count)
+            }
+            Instr::Multiple { load, pre, up, writeback, rn, list, .. } => {
+                self.multiple(load, pre, up, writeback, rn, list, pc, count)
+            }
+            Instr::Mul { acc, s, rd, rn, rs, rm, .. } => {
+                dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + reg(rm)] ; imul eax, DWORD [rbx + reg(rs)]);
+                if acc {
+                    dynasm!(self.ops ; .arch x64 ; add eax, DWORD [rbx + reg(rn)]);
+                }
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(rd)], eax);
+                if s {
+                    dynasm!(self.ops ; .arch x64 ; test eax, eax);
+                    self.nz_from_host();
+                }
+            }
+            Instr::MulLong { signed, acc, s, hi, lo, rs, rm, .. } => {
+                // The low 64 bits of a 64-bit multiply are the same signed
+                // or not; only the widening differs.
+                if signed {
+                    dynasm!(self.ops ; .arch x64 ; movsxd rax, DWORD [rbx + reg(rm)] ; movsxd rcx, DWORD [rbx + reg(rs)]);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + reg(rm)] ; mov ecx, DWORD [rbx + reg(rs)]);
+                }
+                dynasm!(self.ops ; .arch x64 ; imul rax, rcx);
+                if acc {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov edx, DWORD [rbx + reg(hi)]
+                        ; shl rdx, 32
+                        ; mov ecx, DWORD [rbx + reg(lo)]
+                        ; or rdx, rcx
+                        ; add rax, rdx
+                    );
+                }
+                // Low word first: with hi == lo the high word wins.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov DWORD [rbx + reg(lo)], eax
+                    ; mov rcx, rax
+                    ; shr rcx, 32
+                    ; mov DWORD [rbx + reg(hi)], ecx
+                );
+                if s {
+                    dynasm!(self.ops ; .arch x64 ; test rax, rax);
+                    self.nz_from_host();
+                }
+            }
+            Instr::Clz { rd, rm, .. } => {
+                // BSR leaves the destination alone for 0 (all x86-64 CPUs
+                // do; the manuals say undefined), so preset it to -1: 31 - -1 = 32.
+                self.rn_to_eax(rm, pc);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov ecx, -1
+                    ; bsr ecx, eax
+                    ; mov eax, 31
+                    ; sub eax, ecx
+                    ; mov DWORD [rbx + reg(rd)], eax
+                );
+            }
+            Instr::Mrs { rd, .. } => {
+                dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + CPSR] ; mov DWORD [rbx + reg(rd)], eax);
+            }
+            Instr::Exec { w, .. } => self.exec(w, pc, count),
+            Instr::Nop => {}
+            Instr::Bx { link, rm, .. } => {
+                // The target is read before BLX writes lr.
+                dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + reg(rm)]);
+                if link {
+                    dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(14)], pc.wrapping_add(4) as i32);
+                }
+                self.interwork();
+            }
+            Instr::Smul { acc, x, y, rd, rn, rs, rm, .. } => {
+                let (hx, hy) = (if x { 2 } else { 0 }, if y { 2 } else { 0 });
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsx eax, WORD [rbx + reg(rm) + hx]
+                    ; movsx ecx, WORD [rbx + reg(rs) + hy]
+                    ; imul eax, ecx
+                );
+                if acc {
+                    // Q on signed overflow of the accumulation.
+                    let ok = self.ops.new_dynamic_label();
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; add eax, DWORD [rbx + reg(rn)]
+                        ; jno =>ok
+                        ; or DWORD [rbx + CPSR], psr::Q as i32
+                        ; =>ok
+                    );
+                }
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(rd)], eax);
+            }
+            Instr::Msr { mask, src, cond } => {
+                // In User mode only the flags byte is written. A mode change
+                // banks registers: the interpreter does those.
+                match src {
+                    Operand::Imm(v, _) => dynasm!(self.ops ; .arch x64 ; mov ecx, v as i32),
+                    _ => self.operand(src, pc, false),
+                }
+                let (slow, after) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + CPSR]
+                    ; mov edx, eax
+                    ; and edx, 0x1F
+                    ; mov r8d, mask as i32
+                    ; mov r9d, (mask & 0xFF00_0000) as i32
+                    ; cmp edx, ribbit_arm::mode::USR as i32
+                    ; cmove r8d, r9d
+                    ; and ecx, r8d
+                    ; not r8d
+                    ; and r8d, eax
+                    ; or ecx, r8d
+                    ; mov edx, ecx
+                    ; xor edx, eax
+                    ; test edx, 0x1F
+                    ; jnz =>slow
+                    ; mov DWORD [rbx + CPSR], ecx
+                    // I or F cleared: an interrupt may be taken now.
+                    ; and edx, eax
+                    ; test edx, (psr::I | psr::F) as i32
+                    ; jnz =>after
+                );
+                self.afters.push((ExecStub { label: after, count, pc }, exit::DONE));
+                let over = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch x64 ; jmp =>over ; =>slow);
+                let w = msr_word(cond, mask, src);
+                self.exec(w, pc, count);
+                dynasm!(self.ops ; .arch x64 ; =>over);
             }
             Instr::Branch { link, target, .. } => {
                 if link {
@@ -343,7 +607,7 @@ impl Gen {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mem(&mut self, load: bool, byte: bool, pre: bool, up: bool, writeback: bool, rn: u32, rd: u32, offset: Operand, pc: u32, count: u32) {
+    fn mem(&mut self, load: bool, size: Size, pre: bool, up: bool, writeback: bool, rn: u32, rd: u32, offset: Operand, pc: u32, count: u32) {
         // Offset in ecx, base in eax, the moved base in r13d.
         self.operand(offset, pc, false);
         self.rn_to_eax(rn, pc);
@@ -362,19 +626,15 @@ impl Gen {
         let fault = self.ops.new_dynamic_label();
         self.faults.push(FaultStub { label: fault, count });
         if load {
-            let f = if byte { LOAD8 } else { LOAD32 };
-            dynasm!(self.ops
-                ; .arch x64
-                ; mov rdi, r12
-                ; mov edx, pc as i32
-                ; call QWORD [r12 + f]
-                ; bt rax, 32
-                ; jc =>fault
-            );
+            self.access(true, size, pc, fault, None);
             if let Some(rn) = back {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(rn)], r13d);
             }
-            dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(rd)], eax);
+            if rd == 15 {
+                self.interwork();
+            } else {
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(rd)], eax);
+            }
         } else {
             if rd == 15 {
                 // ARM926 stores the instruction's address plus 12.
@@ -382,20 +642,191 @@ impl Gen {
             } else {
                 dynasm!(self.ops ; .arch x64 ; mov edx, DWORD [rbx + reg(rd)]);
             }
-            let f = if byte { STORE8 } else { STORE32 };
             let label = self.ops.new_dynamic_label();
             self.stores.push(StoreStub { label, fault, count, pc, writeback: back });
-            dynasm!(self.ops
-                ; .arch x64
-                ; mov rdi, r12
-                ; mov ecx, pc as i32
-                ; call QWORD [r12 + f]
-                ; test eax, eax
-                ; jnz =>label
-            );
+            self.access(false, size, pc, fault, Some(label));
             if let Some(rn) = back {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(rn)], r13d);
             }
         }
+    }
+
+    /// Branches to eax as a load into r15 does (ARMv5: bit 0 selects
+    /// Thumb), ending the block.
+    fn interwork(&mut self) {
+        let (arm, set) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+        let done = self.done;
+        dynasm!(self.ops
+            ; .arch x64
+            ; test al, 1
+            ; jz =>arm
+            ; or DWORD [rbx + CPSR], psr::T as i32
+            ; and eax, !1
+            ; jmp =>set
+            ; =>arm
+            ; and eax, !3
+            ; =>set
+            ; mov DWORD [rbx + R15], eax
+            ; jmp =>done
+        );
+    }
+
+    /// A load into eax, or a store of edx, at esi: straight to RAM when the
+    /// page is in the fast table, else through the helper. A helper that
+    /// took an abort goes to `fault`. A store helper's other results go to
+    /// `stub` (which tells the two apart), or without one are or-ed into
+    /// r14d (`exit::CODE_WRITTEN` noted for a block transfer).
+    fn access(&mut self, load: bool, size: Size, pc: u32, fault: DynamicLabel, stub: Option<DynamicLabel>) {
+        // The page's entry in the table (eax its index, rcx the table); a
+        // misaligned address never matches a tag.
+        let mask = !0xFFFu32
+            | match size {
+                Size::Word => 3,
+                Size::Half | Size::SignedHalf => 1,
+                _ => 0,
+            };
+        let (slow, over) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+        let table = if load { READS } else { WRITES };
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov eax, esi
+            ; shr eax, 12
+            ; and eax, (FAST - 1) as i32
+            ; mov rcx, QWORD [r12 + table]
+            ; mov r8d, esi
+            ; and r8d, mask as i32
+            ; cmp r8d, DWORD [rcx + rax * 8]
+            ; jne =>slow
+            ; mov r8d, DWORD [rcx + rax * 8 + 4]
+            ; add r8d, esi
+            ; add r8, QWORD [r12 + RAM]
+        );
+        if load {
+            match size {
+                Size::Word => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [r8]),
+                Size::Byte | Size::SignedByte => dynasm!(self.ops ; .arch x64 ; movzx eax, BYTE [r8]),
+                _ => dynasm!(self.ops ; .arch x64 ; movzx eax, WORD [r8]),
+            }
+            let f = match size {
+                Size::Word => LOAD32,
+                Size::Byte | Size::SignedByte => LOAD8,
+                Size::Half | Size::SignedHalf => LOAD16,
+            };
+            dynasm!(self.ops
+                ; .arch x64
+                ; jmp =>over
+                ; =>slow
+                ; mov rdi, r12
+                ; mov edx, pc as i32
+                ; call QWORD [r12 + f]
+                ; bt rax, 32
+                ; jc =>fault
+                ; =>over
+            );
+            match size {
+                Size::SignedByte => dynasm!(self.ops ; .arch x64 ; movsx eax, al),
+                Size::SignedHalf => dynasm!(self.ops ; .arch x64 ; movsx eax, ax),
+                _ => {}
+            }
+        } else {
+            match size {
+                Size::Word => dynasm!(self.ops ; .arch x64 ; mov DWORD [r8], edx),
+                Size::Byte => dynasm!(self.ops ; .arch x64 ; mov BYTE [r8], dl),
+                _ => dynasm!(self.ops ; .arch x64 ; mov WORD [r8], dx),
+            }
+            let f = match size {
+                Size::Byte => STORE8,
+                Size::Half => STORE16,
+                _ => STORE32,
+            };
+            dynasm!(self.ops
+                ; .arch x64
+                ; jmp =>over
+                ; =>slow
+                ; mov rdi, r12
+                ; mov ecx, pc as i32
+                ; call QWORD [r12 + f]
+            );
+            match stub {
+                Some(stub) => dynasm!(self.ops ; .arch x64 ; test eax, eax ; jnz =>stub),
+                None => dynasm!(self.ops ; .arch x64 ; cmp eax, exit::FAULT as i32 ; je =>fault ; or r14d, eax),
+            }
+            dynasm!(self.ops ; .arch x64 ; =>over);
+        }
+    }
+
+    /// LDM/STM without the S bit, `list` not empty, the base not r15.
+    #[allow(clippy::too_many_arguments)]
+    fn multiple(&mut self, load: bool, pre: bool, up: bool, writeback: bool, rn: u32, list: u32, pc: u32, count: u32) {
+        let n = list.count_ones() as i32;
+        // The lowest address from the base, and the written-back base's move.
+        let (start, delta) = match (pre, up) {
+            (false, true) => (0, 4 * n),
+            (true, true) => (4, 4 * n),
+            (false, false) => (4 - 4 * n, -4 * n),
+            (true, false) => (-4 * n, -4 * n),
+        };
+        let fault = self.ops.new_dynamic_label();
+        self.faults.push(FaultStub { label: fault, count });
+        // The base stays in r[rn] until the end (loads go to the stack
+        // first: an abort leaves every register as it was).
+        dynasm!(self.ops ; .arch x64 ; mov r13d, DWORD [rbx + reg(rn)] ; add r13d, start);
+        if !load {
+            dynasm!(self.ops ; .arch x64 ; xor r14d, r14d);
+        }
+        let first = list.trailing_zeros();
+        for (k, r) in (0..16).filter(|r| list & (1 << r) != 0).enumerate() {
+            if !load {
+                if r == 15 {
+                    dynasm!(self.ops ; .arch x64 ; mov edx, pc.wrapping_add(12) as i32);
+                } else if r == rn && writeback && r != first {
+                    // The base, when not first in the list, is stored written back.
+                    dynasm!(self.ops ; .arch x64 ; mov edx, DWORD [rbx + reg(rn)] ; add edx, delta);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; mov edx, DWORD [rbx + reg(r)]);
+                }
+            }
+            dynasm!(self.ops ; .arch x64 ; mov esi, r13d);
+            self.access(load, Size::Word, pc, fault, None);
+            if load {
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rsp + 4 * k as i32], eax);
+            }
+            dynasm!(self.ops ; .arch x64 ; add r13d, 4);
+        }
+        if writeback {
+            dynasm!(self.ops ; .arch x64 ; add DWORD [rbx + reg(rn)], delta);
+        }
+        if load {
+            let mut pc_slot = None;
+            for (k, r) in (0..16).filter(|r| list & (1 << r) != 0).enumerate() {
+                if r == 15 {
+                    pc_slot = Some(k);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rsp + 4 * k as i32] ; mov DWORD [rbx + reg(r)], eax);
+                }
+            }
+            if let Some(k) = pc_slot {
+                dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rsp + 4 * k as i32]);
+                self.interwork();
+            }
+        } else {
+            let label = self.ops.new_dynamic_label();
+            self.afters.push((ExecStub { label, count, pc }, exit::CODE_WRITTEN));
+            dynasm!(self.ops ; .arch x64 ; test r14d, r14d ; jnz =>label);
+        }
+    }
+}
+
+/// The MSR instruction word an `Instr::Msr` came from (for the interpreter).
+fn msr_word(cond: u32, mask: u32, src: Operand) -> u32 {
+    let fields = (0..4).filter(|i| mask & (0xFF << (8 * i)) != 0).fold(0, |f, i| f | 1 << (16 + i));
+    let base = cond << 28 | fields;
+    match src {
+        Operand::Imm(v, _) => {
+            // Any rotation that gives v back.
+            let rot = (0..16).find(|r| v.rotate_left(2 * r) <= 0xFF).unwrap_or(0);
+            base | 0x0320_F000 | rot << 8 | v.rotate_left(2 * rot)
+        }
+        Operand::Reg { rm, .. } | Operand::RegShift { rm, .. } => base | 0x0120_F000 | rm,
     }
 }

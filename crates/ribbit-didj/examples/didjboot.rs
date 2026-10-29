@@ -19,6 +19,8 @@ fn main() {
     let jit_mode = std::env::var("DIDJ_JIT").unwrap_or_default();
     didj.jit.enabled &= jit_mode != "0";
     didj.exact = jit_mode == "exact";
+    // DIDJ_JIT_PROFILE=1 counts the interpreted instructions by kind.
+    didj.jit.profile = std::env::var_os("DIDJ_JIT_PROFILE").is_some();
     let mut ran = 0;
     let mut last_pc = u32::MAX;
     let mut same = 0;
@@ -106,6 +108,10 @@ fn main() {
     println!("IC mask {:08x}:{:08x} pend {:08x}; timer0 ctrl {:08x} match {:08x} count {:08x}", r[0], r[1], r[2], r[3], r[4], r[5]);
     println!("{ran} instructions, pc {:#010x}, cpsr {:#x}", didj.cpu.r[15], didj.cpu.cpsr);
     println!("JIT: {:?}", didj.jit.stats);
+    if didj.jit.profile {
+        let c = didj.jit.stats.classes;
+        println!("interpreted by kind: {}", ribbit_armjit::CLASSES.iter().zip(c).map(|(n, v)| format!("{n} {v}")).collect::<Vec<_>>().join(", "));
+    }
     println!("PCM out: {} bytes, {} not zero", wav.len(), wav.iter().filter(|&&b| b != 0).count());
     if let Ok(path) = std::env::var("DIDJ_WAV") {
         let rate = didj.bus.dma.pcm_rate as u32;

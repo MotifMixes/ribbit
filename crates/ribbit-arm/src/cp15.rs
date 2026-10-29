@@ -33,6 +33,10 @@ pub struct Cp15 {
     /// (virtual page | 1, physical page | `Perm` bits) per slot; 0 = empty.
     #[serde(skip, default = "empty_tlb")]
     tlb: Vec<(u32, u32)>,
+    /// Counts TLB flushes (every translation change), for a JIT's own
+    /// page tables.
+    #[serde(skip)]
+    pub generation: u32,
 }
 
 fn empty_tlb() -> Vec<(u32, u32)> {
@@ -53,6 +57,7 @@ impl Default for Cp15 {
             context_id: 0,
             other: Default::default(),
             tlb: empty_tlb(),
+            generation: 0,
         }
     }
 }
@@ -68,6 +73,7 @@ impl Cp15 {
 
     pub fn flush_tlb(&mut self) {
         self.tlb.iter_mut().for_each(|e| *e = (0, 0));
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// MRC p15: the register's value.
@@ -94,17 +100,25 @@ impl Cp15 {
     /// MCR p15. Returns true for "wait for interrupt".
     pub fn write(&mut self, crn: u32, op1: u32, crm: u32, op2: u32, v: u32) -> bool {
         match (crn, crm, op2) {
+            // Only M, S and R change what the TLB holds (Linux rewrites c1
+            // often, e.g. its alignment-trap setting).
             (1, _, _) => {
-                self.control = v;
-                self.flush_tlb();
+                let old = std::mem::replace(&mut self.control, v);
+                if (old ^ v) & 0x301 != 0 {
+                    self.flush_tlb();
+                }
             }
             (2, _, _) => {
-                self.ttb = v & 0xFFFF_C000;
-                self.flush_tlb();
+                let old = std::mem::replace(&mut self.ttb, v & 0xFFFF_C000);
+                if old != self.ttb {
+                    self.flush_tlb();
+                }
             }
             (3, _, _) => {
-                self.dacr = v;
-                self.flush_tlb();
+                let old = std::mem::replace(&mut self.dacr, v);
+                if old != v {
+                    self.flush_tlb();
+                }
             }
             (5, _, 1) => self.ifsr = v,
             (5, _, _) => self.fsr = v,

@@ -29,6 +29,12 @@ pub trait ArmBus {
     fn code_watch(&mut self) -> Option<&mut CodeWatch> {
         None
     }
+    /// Plain RAM from physical address 0 (pointer, size): reading and
+    /// writing it directly is the same as the access functions (writes
+    /// still go through `CodeWatch` when it watches the page). For a JIT.
+    fn ram(&mut self) -> Option<(*mut u8, usize)> {
+        None
+    }
 }
 
 /// Physical 1 KB pages holding compiled code. A write into a watched page
@@ -61,6 +67,12 @@ impl CodeWatch {
             *w &= !(1 << (p % 64));
             self.written.push(p as u32);
         }
+    }
+
+    /// Whether any of the four 1 KB pages of the 4 KB page at `pa` is watched.
+    pub fn watched_4k(&self, pa: u32) -> bool {
+        let p = (pa >> Self::PAGE_SHIFT) as usize & !3;
+        self.bits.get(p / 64).is_some_and(|w| (w >> (p % 64)) & 0xF != 0)
     }
 
     pub fn clear(&mut self) {
@@ -303,7 +315,7 @@ impl Arm {
         Ok(bus.read32(pa).rotate_right(8 * (va & 3)))
     }
 
-    pub(crate) fn load16(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
+    pub fn load16(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
         self.check_align(va, 1)?;
         let pa = self.translate(bus, va & !1, false)?;
         Ok(bus.read16(pa) as u32)
@@ -321,7 +333,7 @@ impl Arm {
         Ok(())
     }
 
-    pub(crate) fn store16(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
+    pub fn store16(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
         self.check_align(va, 1)?;
         let pa = self.translate(bus, va & !1, true)?;
         bus.write16(pa, v as u16);
@@ -434,6 +446,13 @@ impl Arm {
             arm::execute(self, bus, word);
         }
         true
+    }
+
+    /// Runs ARM instruction `w` as `step` does after fetching it: `current`
+    /// is its address and r15 already points past it. For a JIT running
+    /// what it does not compile; the counters are left alone.
+    pub fn execute_arm(&mut self, bus: &mut impl ArmBus, w: u32) {
+        arm::execute(self, bus, w);
     }
 
     fn prefetch_abort(&mut self, f: Fault) -> bool {
