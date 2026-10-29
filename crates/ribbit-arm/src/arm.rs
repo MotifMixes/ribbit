@@ -414,7 +414,8 @@ fn swap(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
     set_reg(a, rd, old);
 }
 
-/// LDR/STR/LDRB/STRB (and the T forms, treated as the plain ones).
+/// LDR/STR/LDRB/STRB, and the T forms (post-indexed with W set), whose
+/// access is checked as User mode's.
 fn single_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
     let (p, u, b, wb, l) =
         (w & (1 << 24) != 0, w & (1 << 23) != 0, w & (1 << 22) != 0, w & (1 << 21) != 0, w & (1 << 20) != 0);
@@ -427,8 +428,10 @@ fn single_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
     let base = reg(a, rn);
     let moved = if u { base.wrapping_add(offset) } else { base.wrapping_sub(offset) };
     let addr = if p { moved } else { base };
+    a.user_access = !p && wb;
     if l {
         let v = if b { a.load8(bus, addr) } else { a.load32(bus, addr) };
+        a.user_access = false;
         let v = match v {
             Ok(v) => v,
             Err(f) => return a.data_abort(f),
@@ -447,6 +450,7 @@ fn single_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
         // IMPLEMENTATION DEFINED; ARM926 stores +12).
         let v = if rd == 15 { a.current.wrapping_add(12) } else { a.r[rd as usize] };
         let r = if b { a.store8(bus, addr, v) } else { a.store32(bus, addr, v) };
+        a.user_access = false;
         if let Err(f) = r {
             return a.data_abort(f);
         }

@@ -101,6 +101,9 @@ pub struct Arm {
     pub instructions: u64,
     /// The address of the instruction being executed (diagnostics).
     pub current: u32,
+    /// LDRT/STRT: the access is checked as User mode's.
+    #[serde(skip)]
+    pub(crate) user_access: bool,
     /// Undefined instructions met, for the machine to report.
     #[serde(skip)]
     pub undefined_log: Vec<(u32, u32)>,
@@ -128,6 +131,7 @@ impl Arm {
             cycles: 0,
             instructions: 0,
             current: 0,
+            user_access: false,
             undefined_log: Vec::new(),
         };
         a.r[15] = 0;
@@ -236,16 +240,28 @@ impl Arm {
     // ---- memory, through the MMU --------------------------------------
 
     fn translate(&mut self, bus: &mut impl ArmBus, va: u32, write: bool) -> Result<u32, Fault> {
-        self.cp15.translate(bus, va, write)
+        let user = self.user_access || self.mode() == mode::USR;
+        self.cp15.translate(bus, va, write, user)
+    }
+
+    /// With c1's A bit set, an unaligned word or halfword access takes an
+    /// alignment fault (status 1) before translation.
+    fn check_align(&self, va: u32, mask: u32) -> Result<(), Fault> {
+        if va & mask != 0 && self.cp15.control & 2 != 0 {
+            return Err(Fault { status: 1, addr: va });
+        }
+        Ok(())
     }
 
     pub(crate) fn load32(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
+        self.check_align(va, 3)?;
         let pa = self.translate(bus, va & !3, false)?;
         // ARMv5: an unaligned word load rotates the aligned word.
         Ok(bus.read32(pa).rotate_right(8 * (va & 3)))
     }
 
     pub(crate) fn load16(&mut self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
+        self.check_align(va, 1)?;
         let pa = self.translate(bus, va & !1, false)?;
         Ok(bus.read16(pa) as u32)
     }
@@ -256,12 +272,14 @@ impl Arm {
     }
 
     pub(crate) fn store32(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
+        self.check_align(va, 3)?;
         let pa = self.translate(bus, va & !3, true)?;
         bus.write32(pa, v);
         Ok(())
     }
 
     pub(crate) fn store16(&mut self, bus: &mut impl ArmBus, va: u32, v: u32) -> Result<(), Fault> {
+        self.check_align(va, 1)?;
         let pa = self.translate(bus, va & !1, true)?;
         bus.write16(pa, v as u16);
         Ok(())
@@ -356,14 +374,16 @@ impl Arm {
         self.cycles += 1;
         self.instructions += 1;
         if self.thumb() {
-            let word = match self.cp15.translate(bus, pc & !1, false) {
+            let user = self.mode() == mode::USR;
+            let word = match self.cp15.translate(bus, pc & !1, false, user) {
                 Ok(pa) => bus.read16(pa),
                 Err(f) => return self.prefetch_abort(f),
             };
             self.r[15] = pc.wrapping_add(2);
             thumb::execute(self, bus, word);
         } else {
-            let word = match self.cp15.translate(bus, pc & !3, false) {
+            let user = self.mode() == mode::USR;
+            let word = match self.cp15.translate(bus, pc & !3, false, user) {
                 Ok(pa) => bus.read32(pa),
                 Err(f) => return self.prefetch_abort(f),
             };

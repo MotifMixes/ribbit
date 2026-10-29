@@ -104,12 +104,31 @@ impl Spi {
     }
 }
 
+/// MLC (multi-layer controller): software sets a "dirty" bit to commit a
+/// layer's new settings, and the hardware clears it when it takes them at
+/// the next frame (kernel drivers/lf1000/mlc: MLCCONTROLT bit 3, layer
+/// control bit 4 at 0x24, 0x58, 0x7C).
+const MLC: u32 = 0xC000_4000;
+const MLC_DIRTY: [(u32, u32); 4] = [(MLC, 1 << 3), (MLC + 0x24, 1 << 4), (MLC + 0x58, 1 << 4), (MLC + 0x7C, 1 << 4)];
+/// Frames per second (GUESS: 60; the real rate follows the DPC timing,
+/// not modelled yet).
+const FRAME_HZ: u64 = 60;
+
 /// UART 0-5 (uart.h); the transmit holding register and the status.
 const UARTS: [u32; 6] = [0xC001_6000, 0xC001_6080, 0xC001_6800, 0xC001_6880, 0xC001_7000, 0xC001_7080];
 const TRSTATUS: u32 = 0x08;
 const THB: u32 = 0x10;
 /// Transmit buffer empty, transmitter empty; nothing received.
 const TRSTATUS_IDLE: u32 = 0b110;
+/// INTSTATUSREG (serial_reg-lf1000.h): pending flags in bits 0-3 (bit 0
+/// transmit holding register empty), their enables in bits 4-7. Bytes go
+/// out at once here, so "transmit empty" is always pending; Linux's console
+/// waits for that interrupt after each write.
+const INTSTATUS: u32 = 0x18;
+const THRI_PENDING: u32 = 1 << 0;
+const THRI_ENABLE: u32 = 1 << 4;
+/// UART0's interrupt (the others are UNKNOWN use on the Didj).
+const UART0_IRQ: u32 = 10;
 
 #[derive(Default)]
 struct NandChip {
@@ -133,13 +152,21 @@ pub struct Bus {
     /// Unmodelled addresses in order of first access: (address, first PC,
     /// read count, write count).
     pub touched: BTreeMap<u32, (u32, u64, u64)>,
+    /// The last unmodelled accesses, oldest first: (address, PC, write).
+    pub recent: std::collections::VecDeque<(u32, u32, bool)>,
     pub uart: Vec<String>,
     /// The PC of the instruction being run (for the access log).
     pub pc: u32,
+    /// Cycles since the last frame.
+    frame_cycles: u64,
 }
 
 impl Bus {
     fn note(&mut self, addr: u32, write: bool) {
+        if self.recent.len() == 64 {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((addr, self.pc, write));
         let e = self.touched.entry(addr).or_insert((self.pc, 0, 0));
         if write {
             e.2 += 1;
@@ -246,6 +273,7 @@ impl Bus {
             match addr - u {
                 TRSTATUS => return TRSTATUS_IDLE,
                 THB => return 0,
+                INTSTATUS => return self.regs.get(&addr).copied().unwrap_or(0) | THRI_PENDING,
                 _ => {}
             }
         }
@@ -277,6 +305,11 @@ impl Bus {
                     self.uart.resize(n + 1, String::new());
                 }
                 self.uart[n].push(v as u8 as char);
+                return;
+            }
+            if addr - u == INTSTATUS {
+                // Pending flags clear by writing 1; only the enables stay.
+                self.regs.insert(addr, v & !0xF);
                 return;
             }
         }
@@ -391,8 +424,10 @@ impl Didj {
             adc_pending: false,
             regs: HashMap::new(),
             touched: BTreeMap::new(),
+            recent: Default::default(),
             uart: Vec::new(),
             pc: 0,
+            frame_cycles: 0,
         };
         Self { cpu: Arm::new(), bus }
     }
@@ -426,8 +461,20 @@ impl Didj {
             }
             let (cpu_hz, plls) = self.clocks();
             self.bus.timers.tick(self.cpu.cycles - before, cpu_hz, plls);
+            self.bus.frame_cycles += self.cpu.cycles - before;
+            if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
+                self.bus.frame_cycles = 0;
+                for (reg, bit) in MLC_DIRTY {
+                    if let Some(v) = self.bus.regs.get_mut(&reg) {
+                        *v &= !bit;
+                    }
+                }
+            }
             if self.bus.adc_pending && self.bus.regs.get(&ADCINTENB).is_some_and(|v| v & 1 != 0) {
                 self.bus.timers.raise(ADC_IRQ);
+            }
+            if self.bus.regs.get(&(UARTS[0] + INTSTATUS)).is_some_and(|v| v & THRI_ENABLE != 0) {
+                self.bus.timers.raise(UART0_IRQ);
             }
             if self.bus.spi.irq() {
                 self.bus.timers.raise(SPI_IRQ);

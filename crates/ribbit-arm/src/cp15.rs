@@ -1,8 +1,7 @@
 //! CP15, the system control coprocessor (ARM926EJ-S TRM chapter 2), and the
 //! MMU (ARMv5 VMSA: sections, coarse and fine page tables; large, small and
-//! tiny pages). Access permissions and domains are checked only to the
-//! extent of "no access" domains (UNVERIFIED need: firmware so far relies on
-//! translation, not protection). Caches are not modelled (the instruction
+//! tiny pages), with domain and access-permission checks (Linux needs the
+//! permission faults for copy-on-write). Caches are not modelled (the instruction
 //! and data caches are coherent with memory in this model, so their
 //! maintenance operations do nothing).
 
@@ -31,7 +30,7 @@ pub struct Cp15 {
     /// Writes to registers this model does not use, by (crn, op1, crm, op2).
     #[serde(skip)]
     pub other: std::collections::BTreeMap<(u32, u32, u32, u32), u32>,
-    /// (virtual page | 1, physical page) per slot; 0 = empty.
+    /// (virtual page | 1, physical page | `Perm` bits) per slot; 0 = empty.
     #[serde(skip, default = "empty_tlb")]
     tlb: Vec<(u32, u32)>,
 }
@@ -128,34 +127,75 @@ impl Cp15 {
         false
     }
 
-    /// Virtual to physical (the FCSE, then the MMU when on).
-    pub fn translate(&mut self, bus: &mut impl ArmBus, va: u32, _write: bool) -> Result<u32, Fault> {
+    /// Virtual to physical (the FCSE, then the MMU when on). `user` is a
+    /// User-mode access (User mode, or LDRT/STRT).
+    pub fn translate(&mut self, bus: &mut impl ArmBus, va: u32, write: bool, user: bool) -> Result<u32, Fault> {
         let va = if va < 0x0200_0000 { va | self.fcse_pid } else { va };
         if !self.mmu_on() {
             return Ok(va);
         }
         let slot = (va >> 12) as usize % TLB;
-        let (tag, page) = self.tlb[slot];
-        if tag == (va & !0xFFF) | 1 {
-            return Ok(page | (va & 0xFFF));
+        let (tag, entry) = self.tlb[slot];
+        let (pa, entry) = if tag == (va & !0xFFF) | 1 {
+            ((entry & !0xFFF) | (va & 0xFFF), entry & 0xFFF)
+        } else {
+            let (pa, bits, cacheable) = self.walk(bus, va)?;
+            if cacheable {
+                self.tlb[slot] = ((va & !0xFFF) | 1, (pa & !0xFFF) | bits);
+            }
+            (pa, bits)
+        };
+        let need = match (user, write) {
+            (false, false) => perm::PRIV_R,
+            (false, true) => perm::PRIV_W,
+            (true, false) => perm::USER_R,
+            (true, true) => perm::USER_W,
+        };
+        if entry & need == 0 {
+            // Permission fault: 0xD for a section, 0xF for a page.
+            let status = if entry & perm::PAGE != 0 { 0xF } else { 0xD };
+            return Err(Fault { status: status | (entry & perm::DOMAIN), addr: va });
         }
-        let pa = self.walk(bus, va)?;
-        self.tlb[slot] = ((va & !0xFFF) | 1, pa & !0xFFF);
         Ok(pa)
     }
 
-    fn walk(&self, bus: &mut impl ArmBus, va: u32) -> Result<u32, Fault> {
+    /// The accesses an AP field allows (VMSAv5 table; S and R from c1).
+    fn ap_perm(&self, ap: u32) -> u32 {
+        let (s, r) = (self.control & (1 << 8) != 0, self.control & (1 << 9) != 0);
+        match ap {
+            0 => match (s, r) {
+                (false, false) => 0,
+                (true, false) => perm::PRIV_R,
+                // R alone, and S with R (UNPREDICTABLE), read-only for both.
+                _ => perm::PRIV_R | perm::USER_R,
+            },
+            1 => perm::PRIV_R | perm::PRIV_W,
+            2 => perm::PRIV_R | perm::PRIV_W | perm::USER_R,
+            _ => perm::ALL,
+        }
+    }
+
+    /// Walks the tables: (physical address, `perm` bits, whether the whole
+    /// 4 KB page shares one permission so the TLB may keep it).
+    fn walk(&self, bus: &mut impl ArmBus, va: u32) -> Result<(u32, u32, bool), Fault> {
         let l1 = bus.read32(self.ttb | ((va >> 20) << 2));
         let domain = (l1 >> 5) & 0xF;
-        let domain_none = (self.dacr >> (2 * domain)) & 3 == 0;
+        // 0 no access, 1 client (permissions checked), 2 reserved (treated
+        // as manager), 3 manager (not checked).
+        let access = (self.dacr >> (2 * domain)) & 3;
         let fault = |status: u32| Err(Fault { status: status | (domain << 4), addr: va });
+        let bits = |ap_perm: u32, page: bool| {
+            let p = if access == 1 { ap_perm } else { perm::ALL };
+            p | (domain << 4) | if page { perm::PAGE } else { 0 }
+        };
         match l1 & 3 {
             0 => fault(0x5), // section translation fault
             2 => {
-                if domain_none {
+                if access == 0 {
                     return fault(0x9);
                 }
-                Ok((l1 & 0xFFF0_0000) | (va & 0x000F_FFFF))
+                let pa = (l1 & 0xFFF0_0000) | (va & 0x000F_FFFF);
+                Ok((pa, bits(self.ap_perm((l1 >> 10) & 3), false), true))
             }
             kind => {
                 let l2_addr = if kind == 1 {
@@ -164,16 +204,40 @@ impl Cp15 {
                     (l1 & 0xFFFF_F000) | (((va >> 10) & 0x3FF) << 2)
                 };
                 let l2 = bus.read32(l2_addr);
-                if domain_none {
+                if l2 & 3 == 0 {
+                    return fault(0x7); // page translation fault
+                }
+                if access == 0 {
                     return fault(0xB);
                 }
-                match l2 & 3 {
-                    0 => fault(0x7), // page translation fault
-                    1 => Ok((l2 & 0xFFFF_0000) | (va & 0xFFFF)),
-                    2 => Ok((l2 & 0xFFFF_F000) | (va & 0xFFF)),
-                    _ => Ok((l2 & 0xFFFF_FC00) | (va & 0x3FF)),
-                }
+                // Large pages have four 16 KB subpages, small pages four
+                // 1 KB subpages, tiny pages one AP field.
+                let (pa, sub) = match l2 & 3 {
+                    1 => ((l2 & 0xFFFF_0000) | (va & 0xFFFF), (va >> 14) & 3),
+                    2 => ((l2 & 0xFFFF_F000) | (va & 0xFFF), (va >> 10) & 3),
+                    _ => ((l2 & 0xFFFF_FC00) | (va & 0x3FF), 0),
+                };
+                let ap = (l2 >> (4 + 2 * sub)) & 3;
+                let uniform = match l2 & 3 {
+                    2 => (l2 >> 4) & 0xFF == ((l2 >> 4) & 3) * 0x55,
+                    3 => false, // 1 KB pages: never cached
+                    _ => true,
+                };
+                Ok((pa, bits(self.ap_perm(ap), true), uniform))
             }
         }
     }
+}
+
+/// Permission bits kept in a TLB entry's low 12 bits.
+mod perm {
+    pub const PRIV_R: u32 = 1;
+    pub const PRIV_W: u32 = 2;
+    pub const USER_R: u32 = 4;
+    pub const USER_W: u32 = 8;
+    pub const ALL: u32 = 0xF;
+    /// The domain, already shifted to its FSR position (bits 4-7).
+    pub const DOMAIN: u32 = 0xF0;
+    /// A page (not a section): permission faults are 0xF, not 0xD.
+    pub const PAGE: u32 = 0x100;
 }

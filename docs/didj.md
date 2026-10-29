@@ -6,7 +6,7 @@ internal NAND. It runs Linux 2.6.20 with LeapFrog's Brio libraries; games come o
 
 **Status: boots to Linux user space, no screen yet.** `crates/ribbit-didj` holds the formats, the NAND image (M1)
 and a boot machine (M2): the real lightning-boot and kernel run to the root file system mount and the first user
-process, then the kernel oopses (see "Boot log").
+process; init runs its scripts to a shell (see "Boot log").
 
 Tags: VERIFIED = checked on the firmware files or the GPL source; UNKNOWN = not known yet.
 
@@ -51,9 +51,36 @@ prints the UART and the registers the software touched that have no model yet. T
   lf1000_defconfig). With erased spare bytes JFFS2 sees flipped bits, so Ribbit's image carries that ECC.
 - It expects LCD chip ID 0x96 over SPI0 and an audio codec on I2C; Ribbit answers neither yet.
 
-Known gaps: the cartridge chip select reaches the internal NAND (the cart slot should be empty); after
-"VFS: Mounted root (jffs2 filesystem) readonly" the first process (`sh`, pid 22) faults at 0x400af000 and the
-kernel oopses (NULL pointer at 0x4 in the page fault path), probably a gap in the ARM core's MMU model.
+What it took to get past the kernel (each a hardware behaviour Linux relies on):
+
+- MMU access permissions and alignment faults (ARM926EJ-S). Without permission faults, writes to
+  copy-on-write pages went straight into shared pages and corrupted the slab allocator (oops in
+  `cache_alloc_refill`, NULL at 0x4). Linux runs with c1's A bit set, so unaligned accesses fault too.
+- MLC dirty flags: software sets MLCCONTROLT bit 3 or a layer's control bit 4 (0x24, 0x58, 0x7C) and waits
+  for the hardware to clear it at the next frame. Ribbit clears them once per frame (60 Hz, GUESS).
+- UART0 "transmit empty" interrupt (IRQ 10; INTSTATUSREG 0x18: pending bits 0-3, write 1 to clear, enables
+  bits 4-7). The kernel's printk polls, but user space's console writes wait for this interrupt, so `rcS`
+  hung on its first `echo` without it.
+
+Now: BusyBox init runs `/etc/init.d/rcS`, which formats the empty Brio partition ("UBI device is empty.
+Formatting", then `mkfs.vfat`), starts monitord and `launch_main`, and gives a `#` shell on ttyS0.
+`launch_main` finds no AppManager because Brio is empty.
+
+Known gaps: the cartridge chip select reaches the internal NAND ("Cart insert detected but no /Cart
+mount"; the slot should be empty); no LCD (SPI0 ID 0x96), audio codec (I2C0), display or sound yet.
+
+## Root file system (VERIFIED: erootfs.jffs2 in 1.35.2.4222)
+
+- `/etc/ubi/ubi.config`: `Brio:/Didj:Didj prg_Brio:/opt/Didj:Didj Cartridge:/Cart:Cartridge
+  EXT:/opt/mfg:MFG_PAYLOAD prg_EXT:/opt/prg_mfg:MFG_PAYLOAD` (MTD, mount point, FAT label).
+- `/etc/init.d/ubi`: each UBI device gets one volume, id 0, named `ubi_<MTD>` (`ubimkvol --maxavsize`),
+  used through its MTD block device as FAT (`mkfs.vfat -n <label> -S 512`, mounted `vfat`).
+- `/usr/bin/launch_main` runs `AppManager` (or `/flags/main_app`) from PATH
+  `/Cart/Base/Brio/bin:/Didj/Base/Brio/bin/:/Didj/Base/bin/`; libraries come from
+  `/Didj/Base/Brio/lib/:/Didj/Base/lib/`. So the system packages (meta.inf `Type="System"`,
+  `Name="Base_<dir>"`) unpack under `/Didj/Base/` (Base_bin holds `bin/AppManager`). Where applications
+  (`Type="Application"`, e.g. JetPack Heroes `POW/`) go is UNKNOWN; GUESS `/Didj/<dir>`, like a cartridge's
+  `/JDI` at its root.
 
 ## Internal NAND (VERIFIED: kernel source and packages)
 

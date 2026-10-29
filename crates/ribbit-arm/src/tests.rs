@@ -292,3 +292,56 @@ fn mmu_fault_aborts() {
     assert_eq!(a.cp15.far, 0x8000_0000);
     assert_eq!(a.cp15.fsr & 0xF, 5);
 }
+
+/// A small page at VA 0x00100000 (PA 0x20000) with AP `ap` (all four subpages), domain 0 as
+/// a client; VA 0 is an identity section. Runs `word` at 0x1000 in `m`.
+fn page_access(ap: u32, m: u32, word: u32) -> Arm {
+    let mut bus = Ram::new();
+    bus.write32(0x4000, 0x0000_0C02);
+    // L1 entry 1: a coarse table at 0x8000.
+    bus.write32(0x4004, 0x0000_8001);
+    bus.write32(0x8000, 0x0002_0002 | ap * 0x550);
+    bus.write32(0x1000, word);
+    let mut a = Arm::new();
+    a.cp15.ttb = 0x4000;
+    a.cp15.dacr = 1;
+    a.cp15.control |= 1;
+    a.set_cpsr(m);
+    a.r[15] = 0x1000;
+    a.r[1] = 0x0010_0000;
+    a.step(&mut bus);
+    a
+}
+
+#[test]
+fn mmu_page_permissions() {
+    const STR: u32 = 0xE581_0000; // str r0,[r1]
+    const STRT: u32 = 0xE4A1_0000; // strt r0,[r1],#0
+    // User read-only (AP 2): User writes fault (page permission, 0xF);
+    // privileged writes pass, privileged STRT faults.
+    let a = page_access(2, mode::SVC, STR);
+    assert_eq!(a.mode(), mode::SVC);
+    let a = page_access(2, mode::SVC, STRT);
+    assert_eq!(a.mode(), mode::ABT);
+    assert_eq!(a.cp15.fsr, 0xF);
+    // The identity section at VA 0 holds the code, AP 3 there.
+    let a = page_access(2, mode::USR, STR);
+    assert_eq!(a.mode(), mode::ABT);
+    assert_eq!(a.cp15.far, 0x0010_0000);
+    // AP 3: User writes pass.
+    let a = page_access(3, mode::USR, STR);
+    assert_eq!(a.mode(), mode::USR);
+}
+
+#[test]
+fn alignment_fault_when_a_bit_set() {
+    let mut bus = Ram::new();
+    bus.write32(0x1000, 0xE591_0000); // ldr r0,[r1]
+    let mut a = Arm::new();
+    a.cp15.control |= 2;
+    a.r[15] = 0x1000;
+    a.r[1] = 0x2001;
+    a.step(&mut bus);
+    assert_eq!(a.mode(), mode::ABT);
+    assert_eq!((a.cp15.fsr, a.cp15.far), (1, 0x2001));
+}
