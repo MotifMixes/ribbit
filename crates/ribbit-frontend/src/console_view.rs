@@ -58,6 +58,16 @@ pub enum Shape {
     Cross,
     /// Two round lobes joined by a narrower waist (the Switch).
     Peanut,
+    /// An oval filling the rect, then turned by this many radians
+    /// (positive: the top leans right), as the Leapster's A and B.
+    Oval(f32),
+}
+
+/// `p` turned by `a` radians about `c` (positive: clockwise on screen).
+fn turn(p: Pos2, c: Pos2, a: f32) -> Pos2 {
+    let (s, co) = a.sin_cos();
+    let d = p - c;
+    c + vec2(d.x * co - d.y * s, d.x * s + d.y * co)
 }
 
 /// Where a button's keyboard key is drawn, relative to it.
@@ -67,7 +77,6 @@ pub enum CapAt {
     Below,
     Above,
     Left,
-    Right,
 }
 
 /// What a keycap on the console view stands for.
@@ -115,6 +124,24 @@ pub struct Layout {
     pub speaker: Option<Pos2>,
     /// Recesses the controls sit in, drawn under them.
     pub housings: Vec<Housing>,
+    /// The case's outline and speaker grille.
+    pub look: Look,
+    /// Words printed on the face (unit square: where each is centred).
+    pub prints: Vec<(Pos2, &'static str)>,
+    /// The picture's pixels across, when the screen is sized to a whole
+    /// multiple of them (the picture is drawn at whole multiples: it then
+    /// fills the screen, no dark border left round it).
+    pub lcd: Option<f32>,
+}
+
+/// How the case is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    /// A rounded rectangle; the speaker as rings.
+    Rounded,
+    /// The Leapster's: wide wings over a narrower rounded bottom; the
+    /// speaker as a round grille of slots.
+    Leapster,
 }
 
 /// A recess in the face (a well a control sits in, a tray, an LED slot),
@@ -127,6 +154,8 @@ pub struct Housing {
     pub round: f32,
     pub fill: Color32,
     pub glow: Option<Color32>,
+    /// Turned by this many radians (positive: clockwise).
+    pub tilt: f32,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
@@ -311,8 +340,11 @@ pub fn rockit_twist() -> Layout {
         bezel: rgb(70, 160, 40),
         controls,
         speaker: Some(pos2((515.0 - o.0) / o.2, (575.0 - o.1) / o.3)),
+        look: Look::Rounded,
+        prints: Vec::new(),
+        lcd: None,
         housings: {
-            let well = |rect, round, glow| Housing { rect, round, fill: rgb(14, 14, 16), glow };
+            let well = |rect, round, glow| Housing { rect, round, fill: rgb(14, 14, 16), glow, tilt: 0.0 };
             let mut h = vec![
                 // The grid's tray, edged in green light.
                 well(px(966.0, 226.0, 1306.0, 546.0, o), 0.16, Some(rgb(80, 235, 70))),
@@ -334,90 +366,130 @@ pub fn rockit_twist() -> Layout {
 }
 
 /// The original Leapster, after the Parent Guide's diagram (approximate).
+/// The Leapster as it looks (from photos of one): a silver case, wide
+/// wings over a narrower rounded bottom, the screen on a lighter panel
+/// running down the middle to the stylus slot. Left: a silver D-pad in a
+/// blue ring, HOME, HINT and PAUSE in an arc above it (named on the case).
+/// Right: the speaker grille over A and B, ovals in one recess.
+/// Brightness, contrast and volume (on the real one's edges) sit low on
+/// the face.
 pub fn leapster() -> Layout {
     use ribbit_input::Button as B;
-    let aspect = 2.0;
+    // Measured on a photo of one (the case 805 x 520 pixels there).
+    let aspect = 1.55;
     let l = |b| Target::Leapster(b);
     let press = |b| Action::Press(Target::Leapster(b));
-    // The 160 x 160 LCD, square, centred a little high.
-    let h = 0.70;
-    let screen = Rect::from_center_size(pos2(0.5, 0.47), vec2(h / aspect, h));
-    let small = |name, c: Pos2, glyph, b| Control {
+    let blue = rgb(84, 108, 220);
+    // The 160 x 160 LCD, square, a little left of and below the middle of
+    // its panel (the logo is above it).
+    let h = 0.587;
+    let screen = Rect::from_center_size(pos2(0.496, 0.476), vec2(h / aspect, h));
+    let small = |name, c: Pos2, b| Control {
         name,
-        rect: circle(c, 0.045, aspect),
-        shape: Shape::Circle,
-        color: rgb(70, 140, 70),
-        glyph,
-        cap_at: CapAt::Right,
+        rect: Rect::from_center_size(c, vec2(0.036, 0.07)),
+        shape: Shape::Oval(0.0),
+        color: blue,
+        glyph: "",
+        cap_at: CapAt::Below,
         action: press(b),
     };
     let tiny = |name, c: Pos2, glyph, b| Control {
         name,
-        rect: Rect::from_center_size(c, vec2(0.07 / aspect, 0.045)),
+        rect: Rect::from_center_size(c, vec2(0.05 / aspect, 0.04)),
         shape: Shape::Rounded(0.5),
         color: rgb(150, 155, 165),
         glyph,
         cap_at: CapAt::Above,
         action: press(b),
     };
+    let dpad = pos2(0.124, 0.51);
+    // A and B lean across the line between them (it runs down to the right).
+    let (a, b) = (pos2(0.839, 0.506), pos2(0.904, 0.563));
+    let lean = 0.5;
     let controls = vec![
-        small("Pause", pos2(0.10, 0.17), "⏸", B::Pause),
-        small("Hint", pos2(0.10, 0.30), "?", B::Hint),
-        small("Home", pos2(0.10, 0.43), "⌂", B::Home),
+        small("Home", pos2(0.045, 0.30), B::Home),
+        small("Hint", pos2(0.104, 0.24), B::Hint),
+        small("Pause", pos2(0.176, 0.255), B::Pause),
         Control {
             name: "D-pad",
-            rect: circle(pos2(0.17, 0.68), 0.17, aspect),
+            rect: circle(dpad, 0.104, aspect),
             shape: Shape::Cross,
-            color: rgb(60, 62, 70),
+            color: rgb(196, 200, 210),
             glyph: "",
             cap_at: CapAt::Center,
             action: Action::Dpad([l(B::Up), l(B::Down), l(B::Left), l(B::Right)]),
         },
-        tiny("Brightness down", pos2(0.055, 0.93), "−", B::BrightnessDown),
-        tiny("Brightness up", pos2(0.105, 0.93), "+", B::BrightnessUp),
-        tiny("Contrast", pos2(0.175, 0.93), "◐", B::Contrast),
+        tiny("Brightness down", pos2(0.122, 0.79), "−", B::BrightnessDown),
+        tiny("Brightness up", pos2(0.165, 0.79), "+", B::BrightnessUp),
+        tiny("Contrast", pos2(0.208, 0.79), "◐", B::Contrast),
         Control {
             name: "A",
-            rect: circle(pos2(0.80, 0.64), 0.075, aspect),
-            shape: Shape::Circle,
-            color: rgb(70, 160, 70),
+            rect: Rect::from_center_size(a, vec2(0.052, 0.13)),
+            shape: Shape::Oval(lean),
+            color: blue,
             glyph: "A",
-            cap_at: CapAt::Below,
+            cap_at: CapAt::Left,
             action: press(B::A),
         },
         Control {
             name: "B",
-            rect: circle(pos2(0.885, 0.48), 0.075, aspect),
-            shape: Shape::Circle,
-            color: rgb(70, 160, 70),
+            rect: Rect::from_center_size(b, vec2(0.045, 0.11)),
+            shape: Shape::Oval(lean),
+            color: blue,
             glyph: "B",
             cap_at: CapAt::Below,
             action: press(B::B),
         },
-        tiny("Volume down", pos2(0.84, 0.93), "−", B::VolumeDown),
-        tiny("Volume up", pos2(0.89, 0.93), "+", B::VolumeUp),
+        tiny("Volume down", pos2(0.81, 0.79), "−", B::VolumeDown),
+        tiny("Volume up", pos2(0.853, 0.79), "+", B::VolumeUp),
     ];
+    // The recess A and B share: a capsule along the line between them.
+    let along = ((b.y - a.y) / ((b.x - a.x) * aspect)).atan();
+    let recess = Rect::from_center_size(a.lerp(b, 0.5), vec2(0.24 / aspect, 0.15));
     Layout {
         name: "Leapster",
         aspect,
         screen,
         screen_aspect: 1.0,
-        body: rgb(80, 165, 75),
-        face: rgb(196, 200, 208),
-        face_rect: Rect::from_min_max(pos2(0.035, 0.07), pos2(0.965, 0.97)),
-        corner: 0.2,
-        bezel: rgb(110, 115, 128),
+        body: rgb(178, 181, 190),
+        face: rgb(198, 201, 209),
+        face_rect: Rect::from_min_max(pos2(0.248, 0.02), pos2(0.752, 0.85)),
+        corner: 0.05,
+        bezel: rgb(188, 191, 200),
         controls,
-        speaker: Some(pos2(0.93, 0.18)),
+        speaker: Some(pos2(0.863, 0.235)),
         housings: vec![
-            Housing { rect: circle(pos2(0.17, 0.68), 0.19, aspect), round: 0.5, fill: rgb(150, 154, 164), glow: None },
+            Housing { rect: circle(dpad, 0.125, aspect), round: 0.5, fill: blue, glow: None, tilt: 0.0 },
+            Housing { rect: recess, round: 0.5, fill: rgb(160, 163, 174), glow: None, tilt: along },
+            // Where the stylus's cord is tied.
             Housing {
-                rect: Rect::from_min_max(pos2(0.745, 0.37), pos2(0.94, 0.75)),
+                rect: Rect::from_center_size(pos2(0.49, 0.93), vec2(0.12, 0.07)),
                 round: 0.5,
-                fill: rgb(170, 174, 184),
+                fill: rgb(70, 92, 190),
                 glow: None,
+                tilt: 0.0,
             },
         ],
+        look: Look::Leapster,
+        lcd: Some(160.0),
+        prints: vec![(pos2(0.045, 0.235), "HOME"), (pos2(0.104, 0.175), "HINT"), (pos2(0.176, 0.19), "PAUSE")],
+    }
+}
+
+/// The Leapster's outline in `shell`: the wings (full width, the top
+/// three quarters) blended into the narrower bottom.
+fn leapster_sdf(shell: Rect) -> impl Fn(Pos2) -> f32 {
+    let (w, h) = (shell.width(), shell.height());
+    let upper = rr_sdf(Rect::from_min_max(shell.min, pos2(shell.right(), shell.top() + 0.72 * h)), 0.22 * h);
+    let lower = rr_sdf(
+        Rect::from_min_max(pos2(shell.left() + 0.1 * w, shell.top() + 0.2 * h), pos2(shell.right() - 0.1 * w, shell.bottom())),
+        0.3 * h,
+    );
+    let k = 0.2 * h;
+    move |p| {
+        let (a, b) = (upper(p), lower(p));
+        let t = (k - (a - b).abs()).max(0.0) / k;
+        a.min(b) - t * t * k / 4.0
     }
 }
 
@@ -453,6 +525,10 @@ fn inside(shape: Shape, r: Rect, p: Pos2) -> bool {
             (d.x / (r.width() / 2.0)).powi(2) + (d.y / (r.height() / 2.0)).powi(2) <= 1.0
         }
         Shape::Rounded(_) | Shape::Peanut => r.contains(p),
+        Shape::Oval(a) => {
+            let d = turn(p, r.center(), -a) - r.center();
+            (d.x / (r.width() / 2.0)).powi(2) + (d.y / (r.height() / 2.0)).powi(2) <= 1.0
+        }
         Shape::Cross => {
             let d = p - r.center();
             let (hw, hh) = (r.width() / 2.0, r.height() / 2.0);
@@ -561,7 +637,14 @@ impl ConsoleView {
         lit: &Lit,
     ) -> (Rect, Vec<Event>) {
         let shell = shell_rect(layout, area);
-        let screen = place(shell, layout.screen);
+        let mut screen = place(shell, layout.screen);
+        if let Some(px) = layout.lcd {
+            let ppp = ui.ctx().pixels_per_point();
+            let n = (screen.width().min(screen.height()) * ppp / px).floor();
+            if n >= 1.0 {
+                screen = Rect::from_center_size(screen.center(), Vec2::splat(n * px / ppp));
+            }
+        }
         let shapes = paint(layout, shell, screen, lit, ui.ctx());
         ui.painter().set(under, egui::Shape::Vec(shapes));
         let mut events = Vec::new();
@@ -767,6 +850,49 @@ fn cross_sdf(r: Rect, arm: f32, radius: f32) -> impl Fn(Pos2) -> f32 {
     }
 }
 
+/// The Leapster's D-pad: wide arms, each ending in a point like an arrow,
+/// the corners softened.
+fn leap_cross_sdf(r: Rect) -> impl Fn(Pos2) -> f32 {
+    let w = r.width();
+    let soft = w * 0.025;
+    let (a, l, t) = (w * 0.18 - soft, w * 0.38 - soft, w * 0.48 - soft);
+    let c = r.center();
+    // One arm (pointing up), turned to each side in turn.
+    let arm = [vec2(a, -a), vec2(a, -l), vec2(0.0, -t), vec2(-a, -l), vec2(-a, -a)];
+    let mut points = Vec::new();
+    for turn in 0..4 {
+        for v in &arm {
+            let v = match turn {
+                0 => *v,
+                1 => vec2(-v.y, v.x),
+                2 => -*v,
+                _ => vec2(v.y, -v.x),
+            };
+            points.push(c + v);
+        }
+    }
+    move |p| polygon_sdf(&points, p) - soft
+}
+
+/// Signed distance to a closed polygon (negative inside).
+fn polygon_sdf(v: &[Pos2], p: Pos2) -> f32 {
+    let mut d = (p - v[0]).length_sq();
+    let mut sign = 1.0;
+    let mut j = v.len() - 1;
+    for i in 0..v.len() {
+        let e = v[j] - v[i];
+        let w = p - v[i];
+        let b = w - e * (w.dot(e) / e.dot(e)).clamp(0.0, 1.0);
+        d = d.min(b.length_sq());
+        let c = [p.y >= v[i].y, p.y < v[j].y, e.x * w.y > e.y * w.x];
+        if c.iter().all(|&x| x) || c.iter().all(|&x| !x) {
+            sign = -sign;
+        }
+        j = i;
+    }
+    sign * d.sqrt()
+}
+
 /// Points along a shape's edge (`sdf` <= 0 inside), as seen from `from`
 /// (inside it) in `n` evenly spaced directions, up to `reach` away.
 fn outline(sdf: impl Fn(Pos2) -> f32, from: Pos2, reach: f32, n: usize) -> Vec<Pos2> {
@@ -896,21 +1022,19 @@ fn text(
 /// Pushed in, it stays where it is and sinks into the face: a little
 /// smaller and darker, its shadow drawn in under it (moving it down would
 /// uncover a dark sliver of shadow above it).
-fn dome(out: &mut Vec<egui::Shape>, edge: &[Pos2], center: Pos2, base: Color32, press: f32, glow: f32, unit: f32) {
+///
+/// `soft` (the Leapster): the shadow falls down and to the right rather
+/// than all round, and the edges are gentler.
+fn dome(out: &mut Vec<egui::Shape>, edge: &[Pos2], center: Pos2, base: Color32, press: f32, glow: f32, unit: f32, soft: bool) {
     let depth = unit * 3.0;
     // Shadow: softer and closer as it goes down.
     let lift = 1.0 - press * 0.75;
-    let drop = vec2(unit * 1.5, depth) * lift;
-    let blur = unit * 7.0 * lift + unit * 2.0;
+    let drop = if soft { vec2(unit * 2.5, unit * 4.5) * lift } else { vec2(unit * 1.5, depth) * lift };
+    let blur = if soft { unit * 4.0 * lift + unit * 1.5 } else { unit * 7.0 * lift + unit * 2.0 };
     let near: Vec<Pos2> = edge.iter().map(|p| *p + drop * 0.4).collect();
     let far: Vec<Pos2> = edge.iter().map(|p| *p + (*p - center).normalized() * blur + drop).collect();
-    out.push(band(
-        &far,
-        &near,
-        center,
-        |_| Color32::TRANSPARENT,
-        |_| Color32::from_black_alpha((120.0 * lift + 40.0) as u8),
-    ));
+    let dark = if soft { 70.0 * lift + 30.0 } else { 120.0 * lift + 40.0 };
+    out.push(band(&far, &near, center, |_| Color32::TRANSPARENT, |_| Color32::from_black_alpha(dark as u8)));
     // Glow around it while lit.
     if glow > 0.01 {
         let halo: Vec<Pos2> = edge.iter().map(|p| *p + (*p - center).normalized() * unit * 14.0).collect();
@@ -924,8 +1048,9 @@ fn dome(out: &mut Vec<egui::Shape>, edge: &[Pos2], center: Pos2, base: Color32, 
     let top = shade(face, 1.38 - 0.18 * press);
     // Fanned from the centre the edge was traced from: any other hub
     // spills outside shapes that are not convex (the D-pad's cross).
-    out.push(fan(&pts, c, top, |d| shade(face, 0.68 + 0.28 * lightness(d) - 0.1 * press)));
-    out.push(egui::Shape::closed_line(pts.clone(), Stroke::new((unit * 1.1).max(1.0), shade(base, 0.42))));
+    let (rim_dark, line) = if soft { (0.78, 0.6) } else { (0.68, 0.42) };
+    out.push(fan(&pts, c, top, |d| shade(face, rim_dark + 0.28 * lightness(d) - 0.1 * press)));
+    out.push(egui::Shape::closed_line(pts.clone(), Stroke::new((unit * 1.1).max(1.0), shade(base, line))));
     // A soft gloss towards the top left, the control's own shape made
     // smaller (a round spot looks stuck on anything that is not round).
     let bounds = Rect::from_points(&pts);
@@ -1008,7 +1133,8 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     let mut out = Vec::new();
     let h = shell.height();
     let unit = h / 700.0;
-    let bezel_pad = h * 0.025;
+    // The Leapster's screen sits in a broad silver frame.
+    let bezel_pad = h * if layout.look == Look::Leapster { 0.055 } else { 0.025 };
     let bezel = screen.expand(bezel_pad);
     let face = place(shell, layout.face_rect);
     let from = bezel.center();
@@ -1019,14 +1145,26 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     let rim = |r: Rect, radius: f32, _from: Pos2, _n: usize| rim_at(r, radius, from, &angles);
     // A soft shadow around the case (a band: nothing is drawn under it,
     // so the screen stays clear).
-    let case = rim(shell, body_r, from, N);
+    let silhouette: Option<Box<dyn Fn(Pos2) -> f32>> = match layout.look {
+        Look::Rounded => None,
+        Look::Leapster => Some(Box::new(leapster_sdf(shell))),
+    };
+    let reach = shell.size().length() * 1.5;
+    // The case's outline grown by `d`, moved by `shift`.
+    let case_at = |d: f32, shift: Vec2| match &silhouette {
+        Some(sdf) => outline_at(|p| sdf(p - shift) - d, from, reach, &angles),
+        None => rim(shell.expand(d).translate(shift), body_r + d, from, N),
+    };
+    let case = case_at(0.0, Vec2::ZERO);
     let drop = vec2(unit * 4.0, unit * 9.0);
-    let shadow = rim(shell.expand(unit * 14.0).translate(drop), body_r + unit * 14.0, from, N);
+    let shadow = case_at(unit * 14.0, drop);
     out.push(band(&shadow, &case, from, |_| Color32::TRANSPARENT, |_| Color32::from_black_alpha(130)));
     // The case, bevelled: bright where its edge faces the light.
     let hole = rim(bezel, bezel_pad, from, N);
-    let lip = rim(shell.shrink(unit * 9.0), body_r - unit * 9.0, from, N);
-    out.push(band(&lip, &hole, from, |_| layout.body, |_| layout.body));
+    let lip = case_at(-unit * 9.0, Vec2::ZERO);
+    // The Leapster's silver catches the light up and to the left.
+    let sheen = if layout.look == Look::Leapster { 0.07 } else { 0.0 };
+    out.push(band(&lip, &hole, from, |d| shade(layout.body, 1.0 + sheen * lightness(d)), |_| layout.body));
     out.push(band(
         &case,
         &lip,
@@ -1042,27 +1180,67 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     out.push(band(&face_edge, &face_in, from, |d| shade(layout.face, 0.7 - 0.35 * lightness(d)), |_| layout.face));
     out.push(egui::Shape::closed_line(face_edge, Stroke::new(1.0, shade(layout.body, 0.75))));
     // The screen's frame: raised, the screen set into it.
-    let frame_out = rim(bezel, bezel_pad * 1.4, from, N);
+    // The Leapster's: a silver frame up to a thin dark edge round the LCD,
+    // its corners as round as the opening it sits in (no gap at them).
+    let leap = layout.look == Look::Leapster;
+    let frame_out = rim(bezel, bezel_pad * if leap { 1.0 } else { 1.4 }, from, N);
     let glass = rim(screen, 0.0, from, N);
-    let frame_mid = rim(screen.expand(bezel_pad * 0.45), bezel_pad * 0.6, from, N);
+    let frame_mid = if leap {
+        rim(screen.expand((unit * 3.0).max(1.0)), 0.0, from, N)
+    } else {
+        rim(screen.expand(bezel_pad * 0.45), bezel_pad * 0.6, from, N)
+    };
     out.push(band(&frame_out, &frame_mid, from, |d| shade(layout.bezel, 0.95 + 0.3 * lightness(d)), |_| layout.bezel));
-    out.push(band(
-        &frame_mid,
-        &glass,
-        from,
-        |_| shade(layout.bezel, 0.8),
-        |d| shade(layout.bezel, 0.55 - 0.3 * lightness(d)),
-    ));
-    // Ribbit's own mark on the frame.
-    out.push(text(
-        ctx,
-        pos2(bezel.center().x, bezel.top() + bezel_pad * 0.5),
-        egui::Align2::CENTER_CENTER,
-        "RIBBIT",
-        egui::FontId::proportional((bezel_pad * 0.8).max(6.0)),
-        shade(layout.bezel, 1.7),
-    ));
-    if let Some(sp) = layout.speaker {
+    if leap {
+        out.push(band(&frame_mid, &glass, from, |_| rgb(70, 72, 80), |_| rgb(40, 42, 48)));
+    } else {
+        out.push(band(
+            &frame_mid,
+            &glass,
+            from,
+            |_| shade(layout.bezel, 0.8),
+            |d| shade(layout.bezel, 0.55 - 0.3 * lightness(d)),
+        ));
+    }
+    // Ribbit's own mark: on the Leapster large, on the panel above the
+    // frame (where its own name is); on the others, on the frame.
+    if leap {
+        let at = pos2(bezel.center().x, (face.top() + bezel.top() - bezel_pad * 0.4) / 2.0);
+        let font = egui::FontId::proportional((h * 0.055).max(8.0));
+        out.push(text(ctx, at + vec2(0.0, unit * 1.2), egui::Align2::CENTER_CENTER, "RIBBIT", font.clone(), shade(layout.face, 1.2)));
+        out.push(text(ctx, at, egui::Align2::CENTER_CENTER, "RIBBIT", font, rgb(44, 50, 86)));
+    } else {
+        out.push(text(
+            ctx,
+            pos2(bezel.center().x, bezel.top() + bezel_pad * 0.5),
+            egui::Align2::CENTER_CENTER,
+            "RIBBIT",
+            egui::FontId::proportional((bezel_pad * 0.8).max(6.0)),
+            shade(layout.bezel, 1.7),
+        ));
+    }
+    if let (Some(sp), Look::Leapster) = (layout.speaker, layout.look) {
+        // A round recess with slots across it (traced from its own middle:
+        // `rim` here traces from the screen's).
+        let c = pos2(shell.left() + sp.x * shell.width(), shell.top() + sp.y * shell.height());
+        let r = h * 0.115;
+        let edge = rim_at(Rect::from_center_size(c, vec2(2.0 * r, 2.0 * r)), r, c, &even_angles(96));
+        // A raised lip round it, lit on the top left, then the recess.
+        let lip_edge = rim_at(Rect::from_center_size(c, Vec2::splat(2.0 * r * 1.12)), r * 1.12, c, &even_angles(96));
+        out.push(fan(&lip_edge, c, shade(layout.body, 1.05), |d| shade(layout.body, 1.0 + 0.2 * lightness(d))));
+        out.push(fan(&edge, c, shade(layout.body, 0.72), |d| shade(layout.body, 0.72 - 0.2 * lightness(d))));
+        out.push(egui::Shape::closed_line(edge, Stroke::new(1.0, shade(layout.body, 0.55))));
+        let slots = 9;
+        for i in 0..slots {
+            let y = (i as f32 + 0.5) / slots as f32 * 1.6 - 0.8;
+            let half = (0.85f32.powi(2) - y * y).max(0.0).sqrt() * r;
+            let at = c.y + y * r;
+            let slot = [pos2(c.x - half, at), pos2(c.x + half, at)];
+            out.push(egui::Shape::line_segment(slot, Stroke::new((h * 0.009).max(1.0), shade(layout.body, 0.4))));
+            let lit_edge = slot.map(|p| p + vec2(0.0, h * 0.006));
+            out.push(egui::Shape::line_segment(lit_edge, Stroke::new((h * 0.003).max(1.0), shade(layout.body, 1.15))));
+        }
+    } else if let Some(sp) = layout.speaker {
         let c = pos2(shell.left() + sp.x * shell.width(), shell.top() + sp.y * shell.height());
         for k in 1..=3 {
             let r = h * 0.018 * k as f32;
@@ -1074,8 +1252,15 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
             out.push(egui::Shape::circle_stroke(c, r, Stroke::new((h * 0.006).max(1.0), shade(layout.face, 0.45))));
         }
     }
+    // The Leapster's plastic: softer shadows, no bright edges.
+    let soft = layout.look == Look::Leapster;
     for hs in &layout.housings {
-        housing(&mut out, hs, place(shell, hs.rect), unit);
+        housing(&mut out, hs, place(shell, hs.rect), unit, soft);
+    }
+    for &(at, words) in &layout.prints {
+        let at = pos2(shell.left() + at.x * shell.width(), shell.top() + at.y * shell.height());
+        let font = egui::FontId::proportional((h * 0.028).max(6.0));
+        out.push(text(ctx, at, egui::Align2::CENTER_CENTER, words, font, rgb(64, 84, 196)));
     }
     let mut caps: Vec<(Pos2, String, f32)> = Vec::new();
     let mut cap = |what: CapFor, at: Pos2, on: f32| {
@@ -1093,18 +1278,20 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
             Action::Press(t) => {
                 let p = anim(0, (lit.pressed)(t));
                 let edge = edge_of(c.shape, r);
-                dome(&mut out, &edge, r.center(), c.color, p, p, unit);
+                dome(&mut out, &edge, r.center(), c.color, p, p, unit, soft);
                 // A keycap on the button covers its symbol: one or the other.
                 let capped = c.cap_at == CapAt::Center && lit.show_caps && (lit.cap)(CapFor::Press(t)).is_some();
                 if !capped {
                     glyph(&mut out, ctx, c, r.scale_from_center(press_scale(p)), unit);
                 }
+                // A leaning oval's key goes by what it covers, not its
+                // unturned rect.
+                let r = if let Shape::Oval(_) = c.shape { Rect::from_points(&edge) } else { r };
                 let at = match c.cap_at {
                     CapAt::Center => r.center(),
                     CapAt::Below => pos2(r.center().x, r.bottom() + unit * 6.0),
                     CapAt::Above => pos2(r.center().x, r.top() - unit * 14.0),
                     CapAt::Left => pos2(r.left() - unit * 24.0, r.center().y),
-                    CapAt::Right => pos2(r.right() + unit * 26.0, r.center().y),
                 };
                 cap(CapFor::Press(t), at, p);
             }
@@ -1120,9 +1307,12 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                 // an arrow near each tip, in clear red plastic.
                 let w = r.width();
                 let press = any * 0.5;
-                let cross = cross_sdf(rc, DPAD_ARM, w * 0.1);
+                let cross: Box<dyn Fn(Pos2) -> f32> = match layout.look {
+                    Look::Leapster => Box::new(leap_cross_sdf(rc)),
+                    Look::Rounded => Box::new(cross_sdf(rc, DPAD_ARM, w * 0.1)),
+                };
                 let edge = outline(&cross, rc.center(), w, N);
-                dome(&mut out, &edge, rc.center(), c.color, press, 0.0, unit);
+                dome(&mut out, &edge, rc.center(), c.color, press, 0.0, unit, soft);
                 let mid = rc.center();
                 let sunk = |p: &Pos2| mid + (*p - mid) * press_scale(press);
                 // The bevel: a flat top inset from the edge, the sloping
@@ -1140,10 +1330,12 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                 out.push(fan(&top_edge, mid, shade(face, 1.2 - 0.15 * press), |d| {
                     shade(face, 0.95 + 0.12 * lightness(d))
                 }));
-                out.push(egui::Shape::closed_line(
-                    top_edge.clone(),
-                    Stroke::new((unit * 0.8).max(1.0), shade(face, 1.45)),
-                ));
+                if !soft {
+                    out.push(egui::Shape::closed_line(
+                        top_edge.clone(),
+                        Stroke::new((unit * 0.8).max(1.0), shade(face, 1.45)),
+                    ));
+                }
                 for k in 0..4 {
                     let dir = DIRS[k];
                     let side = vec2(-dir.y, dir.x);
@@ -1158,10 +1350,23 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                             alpha(glow_of(face), 0.6 * held[k]),
                         ));
                     }
-                    // A raised arrow near the tip.
                     let tip = mid + dir * w * 0.43;
                     let back = mid + dir * w * 0.36;
                     let s = side * w * 0.055;
+                    if layout.look == Look::Leapster {
+                        // Inside the pointed tip.
+                        let (tip, back, s) = (mid + dir * w * 0.4, mid + dir * w * 0.33, side * w * 0.045);
+                        // The Leapster's arrows are cut in: a dark groove, lit
+                        // on the side away from the light.
+                        let tri = vec![tip, back + s, back - s];
+                        let lit_tri: Vec<Pos2> = tri.iter().map(|p| *p + vec2(unit, unit) * 0.9).collect();
+                        let ink = mix(shade(face, 0.45), glow_of(face), held[k]);
+                        out.push(egui::Shape::closed_line(lit_tri, Stroke::new((unit * 1.2).max(1.0), shade(face, 1.35))));
+                        out.push(egui::Shape::closed_line(tri, Stroke::new((unit * 1.6).max(1.0), ink)));
+                        cap(CapFor::Press(ts[k]), mid + dir * w * 0.255, held[k]);
+                        continue;
+                    }
+                    // A raised arrow near the tip.
                     out.push(egui::Shape::convex_polygon(
                         vec![
                             tip + vec2(unit, unit) * 0.8,
@@ -1178,29 +1383,47 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                     ));
                     cap(CapFor::Press(ts[k]), mid + dir * w * 0.255, held[k]);
                 }
-                // Rings moulded into the middle: each a dark groove with a
-                // lit edge below it.
-                for (k, rad) in [0.13f32, 0.09, 0.05].into_iter().enumerate() {
-                    let rad = w * rad;
-                    out.push(egui::Shape::circle_stroke(
-                        mid + vec2(0.0, unit * 0.7),
-                        rad,
-                        Stroke::new((unit * 0.9).max(1.0), alpha(shade(face, 1.6), 0.7)),
-                    ));
-                    out.push(egui::Shape::circle_stroke(
-                        mid,
-                        rad,
-                        Stroke::new((unit * (1.3 - 0.2 * k as f32)).max(1.0), shade(face, 0.6)),
-                    ));
+                if layout.look == Look::Leapster {
+                    // A low pyramid in the middle: four facets, each lit by
+                    // the way it faces, with creases along the diagonals.
+                    let a = w * DPAD_ARM * 0.85;
+                    let corners = [vec2(-a, -a), vec2(a, -a), vec2(a, a), vec2(-a, a)];
+                    for i in 0..4 {
+                        let (p, q) = (mid + corners[i], mid + corners[(i + 1) % 4]);
+                        let faces = (((p - mid) + (q - mid)) / 2.0).normalized();
+                        let l = lightness(faces);
+                        let tint = if l > 0.0 { Color32::from_white_alpha((70.0 * l) as u8) } else { Color32::from_black_alpha((-45.0 * l) as u8) };
+                        out.push(egui::Shape::convex_polygon(vec![mid, p, q], tint, Stroke::NONE));
+                    }
+                    for c in corners {
+                        let crease = [mid, mid + c];
+                        out.push(egui::Shape::line_segment(crease, Stroke::new((unit * 0.7).max(1.0), alpha(shade(face, 0.7), 0.5))));
+                    }
+                } else {
+                    // Rings moulded into the middle: each a dark groove with a
+                    // lit edge below it.
+                    for (k, rad) in [0.13f32, 0.09, 0.05].into_iter().enumerate() {
+                        let rad = w * rad;
+                        out.push(egui::Shape::circle_stroke(
+                            mid + vec2(0.0, unit * 0.7),
+                            rad,
+                            Stroke::new((unit * 0.9).max(1.0), alpha(shade(face, 1.6), 0.7)),
+                        ));
+                        out.push(egui::Shape::circle_stroke(
+                            mid,
+                            rad,
+                            Stroke::new((unit * (1.3 - 0.2 * k as f32)).max(1.0), shade(face, 0.6)),
+                        ));
+                    }
+                    out.push(egui::Shape::circle_filled(mid, w * 0.02, shade(face, 0.7)));
                 }
-                out.push(egui::Shape::circle_filled(mid, w * 0.02, shade(face, 0.7)));
             }
             Action::Rocker(ts) => {
                 // It rocks towards the side held.
                 let (l, rr) = (anim(0, (lit.pressed)(ts[0])), anim(1, (lit.pressed)(ts[1])));
                 let rc = r.translate(vec2((rr - l) * unit * 4.0, 0.0));
                 let edge = edge_of(c.shape, rc);
-                dome(&mut out, &edge, rc.center(), c.color, l.max(rr) * 0.4, 0.0, unit);
+                dome(&mut out, &edge, rc.center(), c.color, l.max(rr) * 0.4, 0.0, unit, soft);
                 // As on the console: clear purple, each lobe a raised
                 // cushion with curved ridges facing out.
                 let h = rc.height();
@@ -1262,7 +1485,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                 let (up, down) = (way(1), way(-1));
                 let glow = up.max(down);
                 let edge = edge_of(c.shape, r);
-                dome(&mut out, &edge, r.center(), c.color, 0.0, glow, unit);
+                dome(&mut out, &edge, r.center(), c.color, 0.0, glow, unit, soft);
                 let ridge = Stroke::new((unit * 2.2).max(1.0), shade(c.color, 0.55));
                 let shine = Stroke::new((unit * 1.2).max(1.0), shade(c.color, 1.45));
                 if vertical {
@@ -1307,6 +1530,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                         0.0,
                         glow * 0.5,
                         unit * 0.6,
+                        soft,
                     );
                     let d = vec2(ang.cos(), ang.sin());
                     out.push(egui::Shape::circle_filled(
@@ -1324,7 +1548,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                 let up = anim(1, swipe == Some(true));
                 let down = anim(2, swipe == Some(false));
                 let edge = edge_of(c.shape, r);
-                dome(&mut out, &edge, r.center(), c.color, 0.0, touched * 0.6, unit);
+                dome(&mut out, &edge, r.center(), c.color, 0.0, touched * 0.6, unit, soft);
                 // The groove the finger runs in.
                 let groove = Rect::from_center_size(r.center(), vec2(r.width() * 0.5, r.height() * 0.82));
                 out.push(egui::Shape::rect_filled(groove, groove.width() / 2.0, shade(c.color, 0.62)));
@@ -1366,32 +1590,35 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
 
 /// A recess: its upper-left wall in shadow, its lower-right lip catching
 /// the light, and its glowing edge if it has one.
-fn housing(out: &mut Vec<egui::Shape>, hs: &Housing, r: Rect, unit: f32) {
+fn housing(out: &mut Vec<egui::Shape>, hs: &Housing, r: Rect, unit: f32, soft: bool) {
     const N: usize = 96;
     let radius = r.width().min(r.height()) * hs.round;
-    let edge = rim(r, radius, r.center(), N);
+    let c = r.center();
+    let lean = |pts: Vec<Pos2>| -> Vec<Pos2> { pts.into_iter().map(|p| turn(p, c, hs.tilt)).collect() };
+    let edge = lean(rim(r, radius, c, N));
     if let Some(g) = hs.glow {
-        let halo = rim(r.expand(unit * 16.0), radius + unit * 16.0, r.center(), N);
+        let halo = lean(rim(r.expand(unit * 16.0), radius + unit * 16.0, c, N));
         out.push(band(&halo, &edge, r.center(), |_| alpha(g, 0.0), |_| alpha(g, 0.45)));
     }
-    let lip = Color32::from_gray(255);
+    // The lower edge catches the light (not on the Leapster: a pale line).
+    let lip = if soft { hs.fill } else { Color32::from_gray(255) };
     out.push(fan(&edge, r.center(), hs.fill, |d| {
         let l = lightness(d);
-        if l > 0.0 { mix(hs.fill, Color32::BLACK, 0.55 * l) } else { mix(hs.fill, lip, 0.12 * -l) }
+        if l > 0.0 { mix(hs.fill, Color32::BLACK, 0.45 * l) } else { mix(hs.fill, lip, 0.12 * -l) }
     }));
     // The inner wall's shadow, cast down and to the right.
-    let wall = rim(
-        r.shrink(unit * 5.0).translate(vec2(unit * 2.0, unit * 3.0)),
-        (radius - unit * 5.0).max(0.0),
-        r.center(),
-        N,
-    );
+    // (Turned with the recess, then moved: the light stays where it is.)
+    let wall: Vec<Pos2> = lean(rim(r.shrink(unit * 5.0), (radius - unit * 5.0).max(0.0), c, N))
+        .into_iter()
+        .map(|p| p + vec2(unit * 2.0, unit * 3.0))
+        .collect();
     out.push(band(&edge, &wall, r.center(), |_| Color32::from_black_alpha(110), |_| Color32::TRANSPARENT));
     match hs.glow {
         Some(g) => {
             out.push(egui::Shape::closed_line(edge.clone(), Stroke::new((unit * 3.0).max(1.5), g)));
             out.push(egui::Shape::closed_line(edge, Stroke::new((unit * 1.2).max(1.0), mix(g, Color32::WHITE, 0.6))));
         }
+        None if soft => out.push(egui::Shape::closed_line(edge, Stroke::new(1.0, shade(hs.fill, 0.75)))),
         None => out.push(egui::Shape::closed_line(edge, Stroke::new(1.0, mix(hs.fill, lip, 0.18)))),
     }
 }
@@ -1409,6 +1636,13 @@ fn edge_of(shape: Shape, r: Rect) -> Vec<Pos2> {
         Shape::Rounded(k) => rim(r, r.width().min(r.height()) * k, r.center(), N),
         Shape::Cross => outline(cross_sdf(r, DPAD_ARM, r.width() * 0.1), r.center(), r.width(), N),
         Shape::Peanut => outline(peanut_sdf(r), r.center(), r.width(), N),
+        Shape::Oval(a) => (0..N)
+            .map(|i| {
+                let t = std::f32::consts::TAU * i as f32 / N as f32;
+                let p = r.center() + vec2(t.cos() * r.width() / 2.0, t.sin() * r.height() / 2.0);
+                turn(p, r.center(), a)
+            })
+            .collect(),
     }
 }
 

@@ -20,6 +20,14 @@ enum Kind {
     Round(Target),
     /// A small rounded button (Home, Pause...).
     Pill(Target),
+    /// The Leapster's silver plastic behind its controls (not a button),
+    /// with its top left and right corners rounded or not, and the speaker
+    /// grille and A and B's recess on it or not.
+    Body {
+        nw: bool,
+        ne: bool,
+        grille: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +40,19 @@ pub struct Pad {
     caption: &'static str,
     /// Drawn in the Leapster's style: blue buttons, a silver cross in a blue ring.
     leap: bool,
+    /// Round buttons drawn as ovals leaning this far (radians; negative
+    /// leans the top left), like the Leapster's A and B.
+    tilt: f32,
+}
+
+/// A control in the plain style (the Twist and the Zippity).
+fn plain(kind: Kind, rect: Rect, label: &'static str, color: Color32) -> Pad {
+    Pad { kind, rect, label, color, caption: "", leap: false, tilt: 0.0 }
+}
+
+/// A Leapster control.
+fn leap(kind: Kind, rect: Rect, label: &'static str, caption: &'static str, tilt: f32) -> Pad {
+    Pad { kind, rect, label, color: LEAP_BLUE, caption, leap: true, tilt }
 }
 
 /// The controls for `hw` placed in `area` (points; the window's game area).
@@ -58,12 +79,12 @@ pub fn layout(hw: Hardware, area: Rect) -> Vec<Pad> {
                 Rect::from_center_size(pos2(x, bottom - (4.5 + 0.85 * row) * u), vec2(2.2 * u, 0.6 * u))
             };
             let dirs = [TwistButton::DpadUp, TwistButton::DpadDown, TwistButton::DpadLeft, TwistButton::DpadRight];
-            pads.push(Pad { kind: Kind::Dpad(dirs.map(t)), rect: dpad, label: "", color: grey, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Round(t(TwistButton::Check)), rect: first, label: "✔", color: GREEN, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Round(t(TwistButton::Hint)), rect: second, label: "?", color: BLUE, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Pill(t(TwistButton::SwitchLeft)), rect: pill(0, 0.0), label: "◀ Switch", color: grey, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Pill(t(TwistButton::Home)), rect: pill(1, 1.0), label: "Home", color: grey, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Pill(t(TwistButton::SwitchRight)), rect: pill(1, 0.0), label: "Switch ▶", color: grey, caption: "", leap: false });
+            pads.push(plain(Kind::Dpad(dirs.map(t)), dpad, "", grey));
+            pads.push(plain(Kind::Round(t(TwistButton::Check)), first, "✔", GREEN));
+            pads.push(plain(Kind::Round(t(TwistButton::Hint)), second, "?", BLUE));
+            pads.push(plain(Kind::Pill(t(TwistButton::SwitchLeft)), pill(0, 0.0), "◀ Switch", grey));
+            pads.push(plain(Kind::Pill(t(TwistButton::Home)), pill(1, 1.0), "Home", grey));
+            pads.push(plain(Kind::Pill(t(TwistButton::SwitchRight)), pill(1, 0.0), "Switch ▶", grey));
         }
         Hardware::Zippity => {
             let first = round(pos2(right - 0.7 * u, bottom - 1.9 * u));
@@ -74,28 +95,59 @@ pub fn layout(hw: Hardware, area: Rect) -> Vec<Pad> {
                 Rect::from_center_size(pos2(x, bottom - (4.5 + 0.85 * row) * u), vec2(2.2 * u, 0.6 * u))
             };
             let dirs = [Button::Up, Button::Down, Button::Left, Button::Right];
-            pads.push(Pad { kind: Kind::Dpad(dirs.map(l)), rect: dpad, label: "", color: grey, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Round(l(Button::A)), rect: first, label: "", color: GREEN, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Round(l(Button::B)), rect: second, label: "", color: RED, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Round(l(Button::Hint)), rect: third, label: "", color: BLUE, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Pill(l(Button::VolumeDown)), rect: pill(0, 0.0), label: "Left foot", color: grey, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Pill(l(Button::Home)), rect: pill(0, 1.0), label: "Home", color: grey, caption: "", leap: false });
-            pads.push(Pad { kind: Kind::Pill(l(Button::VolumeUp)), rect: pill(1, 0.0), label: "Right foot", color: grey, caption: "", leap: false });
+            pads.push(plain(Kind::Dpad(dirs.map(l)), dpad, "", grey));
+            pads.push(plain(Kind::Round(l(Button::A)), first, "", GREEN));
+            pads.push(plain(Kind::Round(l(Button::B)), second, "", RED));
+            pads.push(plain(Kind::Round(l(Button::Hint)), third, "", BLUE));
+            pads.push(plain(Kind::Pill(l(Button::VolumeDown)), pill(0, 0.0), "Left foot", grey));
+            pads.push(plain(Kind::Pill(l(Button::Home)), pill(0, 1.0), "Home", grey));
+            pads.push(plain(Kind::Pill(l(Button::VolumeUp)), pill(1, 0.0), "Right foot", grey));
         }
-        _ => {
+        _ if !SHELL => {
             // The Leapster's own layout: the D-pad in its blue ring lower left,
             // HOME, HINT and PAUSE in a row above it (named on the body),
             // A on the right with the smaller B right of it and lower.
             let dirs = [Button::Up, Button::Down, Button::Left, Button::Right];
-            pads.push(Pad { kind: Kind::Dpad(dirs.map(l)), rect: dpad, label: "", color: LEAP_BLUE, caption: "", leap: true });
+            pads.push(leap(Kind::Dpad(dirs.map(l)), dpad, "", "", 0.0));
             let a = Rect::from_center_size(pos2(right - 2.0 * u, bottom - 2.4 * u), vec2(1.55 * u, 1.55 * u));
             let b = Rect::from_center_size(pos2(right - 0.6 * u, bottom - 1.55 * u), vec2(1.2 * u, 1.2 * u));
-            pads.push(Pad { kind: Kind::Round(l(Button::A)), rect: a, label: "A", color: LEAP_BLUE, caption: "", leap: true });
-            pads.push(Pad { kind: Kind::Round(l(Button::B)), rect: b, label: "B", color: LEAP_BLUE, caption: "", leap: true });
+            pads.push(leap(Kind::Round(l(Button::A)), a, "A", "", 0.0));
+            pads.push(leap(Kind::Round(l(Button::B)), b, "B", "", 0.0));
             let small = |dx: f32, dy: f32| Rect::from_center_size(dpad_c + vec2(dx * u, dy * u), vec2(0.8 * u, 0.8 * u));
-            pads.push(Pad { kind: Kind::Round(l(Button::Home)), rect: small(-1.1, -2.45), label: "", color: LEAP_BLUE, caption: "HOME", leap: true });
-            pads.push(Pad { kind: Kind::Round(l(Button::Hint)), rect: small(0.0, -2.45), label: "", color: LEAP_BLUE, caption: "HINT", leap: true });
-            pads.push(Pad { kind: Kind::Round(l(Button::Pause)), rect: small(1.1, -2.45), label: "", color: LEAP_BLUE, caption: "PAUSE", leap: true });
+            pads.push(leap(Kind::Round(l(Button::Home)), small(-1.1, -2.45), "", "HOME", 0.0));
+            pads.push(leap(Kind::Round(l(Button::Hint)), small(0.0, -2.45), "", "HINT", 0.0));
+            pads.push(leap(Kind::Round(l(Button::Pause)), small(1.1, -2.45), "", "PAUSE", 0.0));
+        }
+        _ => {
+            // The Leapster's own layout (from a photo of one): the D-pad in its
+            // blue ring lower left with HOME, HINT and PAUSE in an arc above it
+            // (named on the body); A and B leaning ovals in one silver recess on
+            // the right, B lower, under the round speaker grille. Each side sits
+            // on a silver wing growing out of the bottom corner; one body across
+            // the bottom when the wings would nearly meet (a narrow window).
+            let dirs = [Button::Up, Button::Down, Button::Left, Button::Right];
+            let top = bottom - 5.35 * u;
+            let left_wing = Rect::from_min_max(pos2(area.left(), top), pos2(dpad.right() + 0.5 * u, area.bottom()));
+            let a_c = pos2(right - 2.15 * u, bottom - 1.64 * u);
+            let b_c = pos2(right - 0.85 * u, bottom - 0.95 * u);
+            let right_wing = Rect::from_min_max(pos2(a_c.x - 1.2 * u, top), pos2(area.right(), area.bottom()));
+            if right_wing.left() - left_wing.right() < 3.0 * u {
+                let body = left_wing.union(right_wing);
+                pads.push(leap(Kind::Body { nw: true, ne: true, grille: true }, body, "", "", 0.0));
+            } else {
+                pads.push(leap(Kind::Body { nw: false, ne: true, grille: false }, left_wing, "", "", 0.0));
+                pads.push(leap(Kind::Body { nw: true, ne: false, grille: true }, right_wing, "", "", 0.0));
+            }
+            pads.push(leap(Kind::Dpad(dirs.map(l)), dpad, "", "", 0.0));
+            let a = Rect::from_center_size(a_c, vec2(1.15 * u, 1.7 * u));
+            let b = Rect::from_center_size(b_c, vec2(0.95 * u, 1.4 * u));
+            pads.push(leap(Kind::Round(l(Button::A)), a, "A", "", -0.45));
+            pads.push(leap(Kind::Round(l(Button::B)), b, "B", "", -0.45));
+            let small =
+                |dx: f32, dy: f32| Rect::from_center_size(dpad_c + vec2(dx * u, dy * u), vec2(0.72 * u, 0.92 * u));
+            pads.push(leap(Kind::Round(l(Button::Home)), small(-1.35, -1.95), "", "HOME", -0.2));
+            pads.push(leap(Kind::Round(l(Button::Hint)), small(-0.4, -2.5), "", "HINT", 0.0));
+            pads.push(leap(Kind::Round(l(Button::Pause)), small(0.75, -2.35), "", "PAUSE", 0.1));
         }
     }
     pads
@@ -109,16 +161,65 @@ const LEAP_BLUE: Color32 = Color32::from_rgb(84, 108, 220);
 const LEAP_BLUE_DARK: Color32 = Color32::from_rgb(52, 68, 160);
 const LEAP_SILVER: Color32 = Color32::from_rgb(196, 200, 210);
 const LEAP_SILVER_DOWN: Color32 = Color32::from_rgb(150, 154, 166);
-const LEAP_PRINT: Color32 = Color32::from_rgb(150, 168, 245);
+/// The blue print on the body (HOME, HINT, PAUSE), on the silver body and
+/// over the picture (Android).
+const LEAP_PRINT: Color32 = Color32::from_rgb(64, 84, 196);
+const LEAP_PRINT_LIGHT: Color32 = Color32::from_rgb(150, 168, 245);
+/// The Leapster's controls drawn on its silver body, with oval A and B
+/// (desktop). Android keeps the earlier look: loose round buttons.
+const SHELL: bool = !cfg!(target_os = "android");
+const LEAP_BODY: Color32 = Color32::from_rgb(178, 181, 190);
+const LEAP_BODY_EDGE: Color32 = Color32::from_rgb(120, 123, 134);
+const LEAP_RECESS: Color32 = Color32::from_rgb(160, 163, 174);
 
 /// What a finger at `p` is on (the D-pad's side; round buttons answer a
-/// little outside their edge, as fingers are not precise).
+/// little outside their edge, as fingers are not precise, the nearest
+/// one where two reach).
 pub fn hit(pads: &[Pad], p: Pos2) -> Option<Target> {
-    pads.iter().find_map(|pad| match pad.kind {
+    let other = pads.iter().find_map(|pad| match pad.kind {
         Kind::Dpad(ts) => pad.rect.contains(p).then(|| dpad_side(pad.rect, p).map(|s| ts[s])).flatten(),
-        Kind::Round(t) => (p.distance(pad.rect.center()) <= pad.rect.width() * 0.62).then_some(t),
         Kind::Pill(t) => pad.rect.expand(4.0).contains(p).then_some(t),
-    })
+        Kind::Round(_) | Kind::Body { .. } => None,
+    });
+    let round = pads
+        .iter()
+        .filter_map(|pad| match pad.kind {
+            Kind::Round(t) => {
+                let d = p.distance(pad.rect.center()) / (pad.rect.width().max(pad.rect.height()) * 0.62);
+                (d <= 1.0).then_some((d, t))
+            }
+            _ => None,
+        })
+        .reduce(|x, y| if SHELL && y.0 < x.0 { y } else { x });
+    other.or(round.map(|(_, t)| t))
+}
+
+/// An oval's outline: radii `rx`, `ry` around `c`, turned by `tilt`.
+fn oval(c: Pos2, rx: f32, ry: f32, tilt: f32) -> Vec<Pos2> {
+    let (s, co) = tilt.sin_cos();
+    (0..40)
+        .map(|i| {
+            let t = i as f32 / 40.0 * std::f32::consts::TAU;
+            let (x, y) = (rx * t.cos(), ry * t.sin());
+            c + vec2(x * co - y * s, x * s + y * co)
+        })
+        .collect()
+}
+
+/// A capsule from `a` to `b`, `r` wide each side (the recess A and B sit in).
+fn capsule(a: Pos2, b: Pos2, r: f32) -> Vec<Pos2> {
+    let dir = (b - a).normalized();
+    let n = vec2(-dir.y, dir.x);
+    let half = |c: Pos2, from: egui::Vec2| {
+        (0..=16).map(move |i| {
+            let t = i as f32 / 16.0 * std::f32::consts::PI;
+            c + (from * t.cos() - vec2(-from.y, from.x) * t.sin()) * r
+        })
+    };
+    // Around b from n to -n through dir, then around a back to n.
+    let mut points: Vec<Pos2> = half(b, n).collect();
+    points.extend(half(a, -n));
+    points
 }
 
 /// The fingers on the controls.
@@ -238,29 +339,112 @@ pub fn paint(painter: &egui::Painter, pads: &[Pad], pad: &TouchPad) {
             }
             Kind::Round(t) => {
                 let r = p.rect.width() / 2.0;
-                if p.leap {
+                let c = p.rect.center();
+                if p.leap && !SHELL {
                     let down = pad.holds(t);
                     let face = if down { LEAP_BLUE_DARK } else { LEAP_BLUE };
-                    painter.circle(p.rect.center(), r, face, Stroke::new(2.5, LEAP_BLUE_DARK));
+                    painter.circle(c, r, face, Stroke::new(2.5, LEAP_BLUE_DARK));
                     if !down {
                         // A shine on the upper half: the button is domed.
-                        painter.circle_filled(p.rect.center() - vec2(0.0, r * 0.3), r * 0.55, Color32::from_white_alpha(28));
+                        painter.circle_filled(c - vec2(0.0, r * 0.3), r * 0.55, Color32::from_white_alpha(28));
                     }
-                } else {
-                    painter.circle(p.rect.center(), r, fill(p.color, pad.holds(t)), edge);
+                    painter.text(c, egui::Align2::CENTER_CENTER, p.label, egui::FontId::proportional(r * 0.8), text);
+                    if !p.caption.is_empty() {
+                        let at = pos2(c.x, p.rect.top() - r * 0.2);
+                        painter.text(at, egui::Align2::CENTER_BOTTOM, p.caption, egui::FontId::proportional(r * 0.55), LEAP_PRINT_LIGHT);
+                    }
+                    continue;
                 }
+                if p.leap {
+                    let (rx, ry) = (p.rect.width() / 2.0, p.rect.height() / 2.0);
+                    let down = pad.holds(t);
+                    let face = if down { LEAP_BLUE_DARK } else { LEAP_BLUE };
+                    // A dark rim, the face, and a shine on the upper part: domed.
+                    let rim = oval(c, rx, ry, p.tilt);
+                    painter.add(egui::Shape::convex_polygon(rim, face, Stroke::new(2.5, LEAP_BLUE_DARK)));
+                    if !down {
+                        let (s, co) = p.tilt.sin_cos();
+                        let up = vec2(ry * 0.3 * s, -ry * 0.3 * co);
+                        let shine = oval(c + up, rx * 0.55, ry * 0.5, p.tilt);
+                        painter.add(egui::Shape::convex_polygon(shine, Color32::from_white_alpha(30), Stroke::NONE));
+                    }
+                    // The letters are moulded in silver.
+                    let size = rx * 1.15;
+                    painter.text(
+                        c,
+                        egui::Align2::CENTER_CENTER,
+                        p.label,
+                        egui::FontId::proportional(size),
+                        LEAP_SILVER,
+                    );
+                    if !p.caption.is_empty() {
+                        let at = pos2(c.x, p.rect.top() - ry * 0.12);
+                        painter.text(
+                            at,
+                            egui::Align2::CENTER_BOTTOM,
+                            p.caption,
+                            egui::FontId::proportional(rx * 0.85),
+                            LEAP_PRINT,
+                        );
+                    }
+                    continue;
+                }
+                painter.circle(c, r, fill(p.color, pad.holds(t)), edge);
                 let size = if p.label.chars().count() > 2 { r * 0.5 } else { r * 0.8 };
-                painter.text(p.rect.center(), egui::Align2::CENTER_CENTER, p.label, egui::FontId::proportional(size), text);
-                if !p.caption.is_empty() {
-                    let at = pos2(p.rect.center().x, p.rect.top() - r * 0.2);
-                    painter.text(at, egui::Align2::CENTER_BOTTOM, p.caption, egui::FontId::proportional(r * 0.55), LEAP_PRINT);
-                }
+                painter.text(c, egui::Align2::CENTER_CENTER, p.label, egui::FontId::proportional(size), text);
             }
+            Kind::Body { nw, ne, grille } => paint_body(painter, pads, p.rect, nw, ne, grille),
             Kind::Pill(t) => {
                 let h = p.rect.height();
                 painter.rect(p.rect, h / 2.0, fill(p.color, pad.holds(t)), edge, egui::StrokeKind::Inside);
-                painter.text(p.rect.center(), egui::Align2::CENTER_CENTER, p.label, egui::FontId::proportional(h * 0.45), text);
+                painter.text(
+                    p.rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    p.label,
+                    egui::FontId::proportional(h * 0.45),
+                    text,
+                );
             }
+        }
+    }
+}
+
+/// Leapster plastic from the bottom of the window, the top corners asked
+/// for rounded; with `grille`, the speaker grille above A and B, which sit
+/// in one recess.
+fn paint_body(painter: &egui::Painter, pads: &[Pad], r: Rect, nw: bool, ne: bool, grille: bool) {
+    let u = r.height() / 5.8;
+    let round = (1.6 * u).min(255.0) as u8;
+    let corners =
+        egui::CornerRadius { nw: if nw { round } else { 0 }, ne: if ne { round } else { 0 }, ..Default::default() };
+    painter.rect(r, corners, LEAP_BODY, Stroke::new(2.0, LEAP_BODY_EDGE), egui::StrokeKind::Inside);
+    // Light along the top edge, as on the moulded plastic.
+    painter.rect_stroke(
+        r.shrink(3.0),
+        corners,
+        Stroke::new(1.5, Color32::from_white_alpha(60)),
+        egui::StrokeKind::Inside,
+    );
+    if !grille {
+        return;
+    }
+    let (a, b) = (pads.iter().find(|p| p.label == "A"), pads.iter().find(|p| p.label == "B"));
+    if let (Some(a), Some(b)) = (a, b) {
+        let outline = capsule(a.rect.center(), b.rect.center(), a.rect.height() * 0.56);
+        painter.add(egui::Shape::convex_polygon(outline, LEAP_RECESS, Stroke::new(1.5, LEAP_BODY_EDGE)));
+        // The grille: a round recess with slots across it.
+        let c = pos2(a.rect.center().x + 0.55 * u, r.top() + 1.45 * u);
+        let gr = 0.95 * u;
+        painter.circle(c, gr, LEAP_RECESS, Stroke::new(1.5, LEAP_BODY_EDGE));
+        let slots = 8;
+        for i in 0..slots {
+            let y = (i as f32 + 0.5) / slots as f32 * 1.5 - 0.75;
+            let half = (0.8f32.powi(2) - y * y).max(0.0).sqrt() * gr;
+            let at = c.y + y * gr;
+            painter.line_segment(
+                [pos2(c.x - half, at), pos2(c.x + half, at)],
+                Stroke::new(0.08 * u, Color32::from_gray(88)),
+            );
         }
     }
 }
@@ -282,6 +466,7 @@ mod tests {
                             assert_eq!(hit(&pads, up), Some(ts[0]));
                         }
                         Kind::Round(t) | Kind::Pill(t) => assert_eq!(hit(&pads, p.rect.center()), Some(t)),
+                        Kind::Body { .. } => {}
                     }
                 }
             }
@@ -292,8 +477,8 @@ mod tests {
     fn fingers_slide_between_directions_and_let_go() {
         let area = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 800.0));
         let pads = layout(Hardware::Leapster, area);
-        let Kind::Dpad(_) = pads[0].kind else { panic!() };
-        let r = pads[0].rect;
+        let dpad = pads.iter().find(|p| matches!(p.kind, Kind::Dpad(_))).unwrap();
+        let r = dpad.rect;
         let mut tp = TouchPad::default();
         let (taken, t) = tp.down(&pads, 1, r.center() - vec2(0.0, r.height() * 0.4));
         assert!(taken);
