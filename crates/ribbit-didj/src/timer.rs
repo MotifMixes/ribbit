@@ -34,7 +34,7 @@ pub const CLKMODEREG: u32 = 0xC000_F000;
 pub const PLLSETREG0: u32 = 0xC000_F004;
 const CRYSTAL_HZ: u64 = 27_000_000;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct Timer {
     count: u32,
     latched: u32,
@@ -46,7 +46,7 @@ struct Timer {
     acc: u64,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Timers {
     t: [Timer; 5],
     /// Interrupt controller: pending (1 = pending, write 1 to clear), mask

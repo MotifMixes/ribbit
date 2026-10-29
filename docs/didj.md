@@ -278,3 +278,11 @@ poweroff'.
    menu (2026-10-29).
 7. **M7:** frontend, saves, and an Enhanced/Original mode toggle.
 8. **M8:** speed (ARM JIT).
+
+## Save states (Ribbit)
+
+A state is a version number, the machine (bincode, deflated: CPU with CP15 and TLB, SDRAM, devices, register
+values) and the internal NAND's blocks that differ from the image built from the packages; the cartridge is left
+out. The JIT starts empty after a load. `didjboot` with DIDJ_STATE_CHECK=<millions> saves there, runs 200
+million instructions, loads and runs them again: CPU and SDRAM come out identical, with the JIT and in exact mode
+(VERIFIED 2026-10-29 at the menu: 10 MB state, about 0.1 s to save and 0.2 s to load).

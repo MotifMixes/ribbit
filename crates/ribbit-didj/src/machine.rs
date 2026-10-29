@@ -67,7 +67,7 @@ const ADC_READINGS: [u32; 8] = [512, 512, 760, 0, 0, 0, 0, 0];
 const SPI0: u32 = 0xC000_7800;
 const SPI_IRQ: u32 = 12;
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Spi {
     rx: std::collections::VecDeque<u16>,
     /// SSPSPISTATE bits 13-15 (interrupt enables).
@@ -225,7 +225,7 @@ const RDI_ENABLE: u32 = 1 << 5;
 /// UART0's interrupt (the others are UNKNOWN use on the Didj).
 const UART0_IRQ: u32 = 10;
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct NandChip {
     cmd: u8,
     addr: Vec<u8>,
@@ -235,13 +235,17 @@ struct NandChip {
     status: u8,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
     pub sdram: Vec<u8>,
     /// SDRAM pages the JIT compiled code from.
+    #[serde(skip)]
     code: CodeWatch,
+    #[serde(skip)]
     pub nand: Nand,
     chip: NandChip,
     /// The cartridge in the slot.
+    #[serde(skip)]
     pub cart: Option<crate::cart::Cart>,
     pub timers: Timers,
     spi: Spi,
@@ -252,13 +256,17 @@ pub struct Bus {
     regs: Regs,
     /// Unmodelled addresses in order of first access: (address, first PC,
     /// read count, write count).
+    #[serde(skip)]
     pub touched: BTreeMap<u32, (u32, u64, u64)>,
     /// The last unmodelled accesses, oldest first: (address, PC, write).
+    #[serde(skip)]
     pub recent: std::collections::VecDeque<(u32, u32, bool)>,
+    #[serde(skip)]
     pub uart: Vec<String>,
     /// Bytes waiting to be received on UART0 (the console's serial port).
     pub uart_rx: std::collections::VecDeque<u8>,
     /// The PC of the instruction being run (for the access log).
+    #[serde(skip)]
     pub pc: u32,
     /// Cycles since the last frame.
     frame_cycles: u64,
@@ -634,16 +642,60 @@ impl ArmBus for Bus {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Didj {
     pub cpu: Arm,
     pub bus: Bus,
+    #[serde(skip, default = "new_jit")]
     pub jit: ArmJit,
     /// Compiled blocks run only when they fit in the slice, so the results
     /// match the interpreter's exactly (for checking the JIT; slower).
     pub exact: bool,
 }
 
+fn new_jit() -> ArmJit {
+    ArmJit::new(SDRAM_SIZE as u32)
+}
+
+/// Save states: this number, then the machine (bincode, deflated), then the
+/// NAND blocks that differ from the image the console was built from.
+/// Bump it when a saved field changes.
+const STATE_VERSION: u32 = 1;
+
 impl Didj {
+    /// The machine as it is now (a save state). The NAND goes in as its
+    /// changes from `base`, the image it was built from; the cartridge is
+    /// left out (Brio mounts it read-only).
+    pub fn save_state(&self, base: &Nand) -> Vec<u8> {
+        let machine = bincode::serialize(self).expect("serialise the machine");
+        let machine = miniz_oxide::deflate::compress_to_vec(&machine, 1);
+        let mut out = STATE_VERSION.to_le_bytes().to_vec();
+        out.extend((machine.len() as u64).to_le_bytes());
+        out.extend(machine);
+        out.extend(self.bus.nand.changes_from(base));
+        out
+    }
+
+    /// Restores a state from `save_state`, keeping the cartridge. The JIT
+    /// starts empty.
+    pub fn load_state(&mut self, state: &[u8], base: &Nand) -> Result<(), String> {
+        let bad = || "a damaged Didj state".to_string();
+        if state.get(..4).map(|v| u32::from_le_bytes(v.try_into().unwrap())) != Some(STATE_VERSION) {
+            return Err("this state is from another version of the Didj model".into());
+        }
+        let len = u64::from_le_bytes(state.get(4..12).ok_or_else(bad)?.try_into().unwrap()) as usize;
+        let machine = state.get(12..12usize.checked_add(len).ok_or_else(bad)?).ok_or_else(bad)?;
+        let machine = miniz_oxide::inflate::decompress_to_vec(machine).map_err(|_| bad())?;
+        let mut d: Didj = bincode::deserialize(&machine).map_err(|e| e.to_string())?;
+        let mut nand = base.clone();
+        nand.apply_changes(&state[12 + len..])?;
+        d.bus.nand = nand;
+        d.bus.cart = self.bus.cart.take();
+        d.exact = self.exact;
+        *self = d;
+        Ok(())
+    }
+
     /// Powers on: the start of the NAND is copied to SDRAM 0 and run.
     pub fn new(flash: Nand) -> Self {
         let mut sdram = vec![0; SDRAM_SIZE];
@@ -671,7 +723,7 @@ impl Didj {
             pc: 0,
             frame_cycles: 0,
         };
-        Self { cpu: Arm::new(), bus, jit: ArmJit::new(SDRAM_SIZE as u32), exact: false }
+        Self { cpu: Arm::new(), bus, jit: new_jit(), exact: false }
     }
 
     /// The processor clock and the PLL outputs, from the clock registers.

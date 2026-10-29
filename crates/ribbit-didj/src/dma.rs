@@ -43,7 +43,7 @@ pub const PCMOUT: u32 = 24;
 /// A command: source, destination, length - 1 | request ID << 16, mode.
 type Command = [u32; 4];
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Channel {
     /// The registers at 0x00-0x0C (the running or last command).
     current: Command,
@@ -59,6 +59,7 @@ struct Channel {
     intpend: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Dma {
     ch: [Channel; CHANNELS],
     /// The PCM-out sample rate (Hz), set by the audio model; 32000 until

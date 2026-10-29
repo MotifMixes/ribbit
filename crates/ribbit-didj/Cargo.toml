@@ -12,3 +12,7 @@ ribbit-armjit.workspace = true
 # fatfs for the Brio volume; zip for the packages in the examples.
 ribbit-core.workspace = true
 crc32fast.workspace = true
+# Save states.
+serde.workspace = true
+bincode = "1.3"
+miniz_oxide = "0.8"

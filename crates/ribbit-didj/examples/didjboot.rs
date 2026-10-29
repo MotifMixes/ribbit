@@ -17,6 +17,7 @@ fn main() {
         flash.apply_changes(&std::fs::read(&path).expect("can't read the save")).unwrap_or_else(|e| panic!("{e}"));
     }
 
+    let base = flash.clone();
     let mut didj = Didj::new(flash);
     // DIDJ_CART=<file>: a cartridge dump in the slot.
     if let Ok(path) = std::env::var("DIDJ_CART") {
@@ -81,6 +82,31 @@ fn main() {
             if let Some(c) = commands.next() {
                 didj.bus.uart_rx.extend(c.bytes());
             }
+        }
+        // DIDJ_STATE_CHECK=<millions>: there, save a state, run 200 million,
+        // load it and run them again; the CPU and SDRAM must match (use
+        // DIDJ_JIT=exact or 0: the JIT starts empty after a load).
+        if std::env::var("DIDJ_STATE_CHECK").ok().and_then(|v| v.parse::<u64>().ok()) == Some(m) {
+            let t = std::time::Instant::now();
+            let state = didj.save_state(&base);
+            println!("state: {} bytes, saved in {:?}", state.len(), t.elapsed());
+            let run = |d: &mut Didj| {
+                for _ in 0..200 {
+                    d.run(1_000_000);
+                }
+                (d.cpu.clone(), d.bus.sdram.clone())
+            };
+            let first = run(&mut didj);
+            let t = std::time::Instant::now();
+            didj.load_state(&state, &base).unwrap();
+            println!("loaded in {:?}", t.elapsed());
+            let second = run(&mut didj);
+            let (mut a, mut b) = (first.0.clone(), second.0.clone());
+            // Left out of states: the log, and the JIT's TLB flush count.
+            (a.undefined_log, b.undefined_log) = (Vec::new(), Vec::new());
+            (a.cp15.generation, b.cp15.generation) = (0, 0);
+            let differ = first.1.iter().zip(&second.1).filter(|(a, b)| a != b).count();
+            println!("state check: CPU {}, SDRAM bytes differing {differ}", if a == b { "same" } else { "DIFFERENT" });
         }
         let n = didj.run(1_000_000);
         if didj.bus.powered_off {

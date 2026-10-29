@@ -10,6 +10,10 @@
 //! starts the game on it. The cartridge is read-only (Brio mounts it so),
 //! so nothing on it is saved.
 //!
+//! Save states hold the machine and the NAND's changes (loading one puts the
+//! NAND back as it was then, which the system's file systems need), not the
+//! cartridge: they are kept per game title.
+//!
 //! Controls: the D-pad, A and B as they are; the shoulder buttons L and R on
 //! the Leapster's volume buttons (LB and RB on a gamepad); Home is the Didj's
 //! Menu button, Hint and Pause its own, and Brightness Up its brightness
@@ -138,6 +142,18 @@ impl DidjSession {
         } else {
             self.shared.held.fetch_and(!bits, Ordering::Relaxed);
         }
+    }
+
+    /// The console now, for a save slot (its NAND as changes from the built
+    /// image; the cartridge left out).
+    pub fn save_state(&self) -> Vec<u8> {
+        self.shared.didj.lock().unwrap().save_state(&self.original)
+    }
+
+    /// Restores a state from `save_state`. The NAND goes back to what it
+    /// held then, as the system's memory expects.
+    pub fn load_state(&self, state: &[u8]) -> Result<(), String> {
+        self.shared.didj.lock().unwrap().load_state(state, &self.original)
     }
 
     /// Restarts the console (keeping what it has saved).

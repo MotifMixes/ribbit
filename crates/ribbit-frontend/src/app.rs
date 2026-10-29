@@ -756,9 +756,11 @@ impl App {
                     "",
                 );
             };
+            // Titled from the cartridge itself (the library may not be scanned yet).
+            let title = crate::didj::describe_cart(&path, &cart).map(|g| g.title);
             self.start_didj(package, Some(cart));
-            if let (Some(d), Some(g)) = (&mut self.didj, self.library.games.iter().find(|g| g.path == path)) {
-                d.title.clone_from(&g.title);
+            if let (Some(d), Some(t)) = (&mut self.didj, title) {
+                d.title = t;
                 self.update_title();
             }
             return;
@@ -2295,6 +2297,12 @@ impl App {
             (Some(s), _, _) => s.state_key.clone(),
             (None, Some(_), _) => "zippity".to_string(),
             (None, None, Some(t)) if t.machine.is_some() => "rockit-twist".to_string(),
+            // A Didj's states hold no cartridge: one set per game title.
+            (None, None, None) if self.didj.is_some() => {
+                let title = self.didj.as_ref().map_or("", |d| d.title.as_str());
+                let name: String = title.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+                if name == "didj" { name } else { format!("didj-{name}") }
+            }
             _ => return None,
         };
         Some(self.opts.data_dir.join("states").join(format!("{key}-slot{slot}.state")))
@@ -2328,7 +2336,10 @@ impl App {
                 Some(Err(e)) => return self.ui.problem("Couldn't save the state", "The RockIt Twist didn't answer.", e),
                 None => return,
             },
-            (None, None, None) => return,
+            (None, None, None) => match &self.didj {
+                Some(d) => d.save_state(),
+                None => return,
+            },
         };
         let result = (|| -> Result<()> {
             std::fs::create_dir_all(path.parent().unwrap())?;
@@ -2356,7 +2367,10 @@ impl App {
             None => match (&self.zippity, self.twist.as_ref().and_then(|t| t.machine.as_ref())) {
                 (Some(z), _) => z.load_state(&bytes).map_err(anyhow::Error::msg),
                 (None, Some(m)) => m.load_state(bytes).map_err(anyhow::Error::msg),
-                (None, None) => Ok(()),
+                (None, None) => match &self.didj {
+                    Some(d) => d.load_state(&bytes).map_err(anyhow::Error::msg),
+                    None => Ok(()),
+                },
             },
         });
         match result {

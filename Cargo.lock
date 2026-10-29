@@ -3487,10 +3487,13 @@ dependencies = [
 name = "ribbit-didj"
 version = "1.6.1"
 dependencies = [
+ "bincode",
  "crc32fast",
+ "miniz_oxide 0.8.9",
  "ribbit-arm",
  "ribbit-armjit",
  "ribbit-core",
+ "serde",
 ]
 
 [[package]]

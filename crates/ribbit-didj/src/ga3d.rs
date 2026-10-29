@@ -188,6 +188,7 @@ fn test(func: u32, new: u32, old: u32) -> bool {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ga3d {
     pub regs: Vec<u32>,
     /// GTE working registers.
@@ -201,17 +202,23 @@ pub struct Ga3d {
     /// The multiplier's last output, which MAD adds to (GUESS: MUL's).
     mul: [f32; 4],
     /// The colour lookup tables, one per texture stage (R5G6B5).
+    #[serde(with = "lut_serde")]
     lut: [[u16; 256]; 2],
     /// Register writes from the command queue, oldest first: (offset, value).
+    #[serde(skip)]
     pub trace: Vec<(u32, u32)>,
     /// Sub-module starts (GRP3D_CONTROL values) by kind, for the summary.
+    #[serde(skip)]
     pub starts: std::collections::BTreeMap<u32, u64>,
     /// Invalid commands seen (CMDID below 4).
+    #[serde(skip)]
     pub invalid: u64,
     /// Triangles that reached the rasterizer.
+    #[serde(skip)]
     pub triangles: u64,
     /// Pixels: (reached the pipeline, failed the depth test, dropped by
     /// the transparency colour, failed the alpha test, written).
+    #[serde(skip)]
     pub pixels: std::cell::Cell<[u64; 5]>,
 }
 
@@ -968,6 +975,27 @@ impl Ga3d {
 }
 
 /// The render state a primitive needs, read once.
+/// The lookup tables in save states (serde has no 256-entry arrays).
+mod lut_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[[u16; 256]; 2], s: S) -> Result<S::Ok, S::Error> {
+        v.iter().flatten().copied().collect::<Vec<u16>>().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[[u16; 256]; 2], D::Error> {
+        let v = Vec::<u16>::deserialize(d)?;
+        if v.len() != 512 {
+            return Err(serde::de::Error::custom("lookup tables of the wrong size"));
+        }
+        let mut out = [[0; 256]; 2];
+        for (i, x) in v.into_iter().enumerate() {
+            out[i / 256][i % 256] = x;
+        }
+        Ok(out)
+    }
+}
+
 struct State {
     rs: u32,
     cull: bool,
