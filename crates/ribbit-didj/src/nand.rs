@@ -147,6 +147,19 @@ impl Nand {
         out
     }
 
+    /// A CRC-32 of every block (erased ones as their number only), to tell
+    /// whether a save's changes were made against this image.
+    pub fn fingerprint(&self) -> u32 {
+        let mut h = crc32fast::Hasher::new();
+        for (n, b) in self.blocks.iter().enumerate() {
+            h.update(&(n as u32).to_le_bytes());
+            if let Some(data) = b {
+                h.update(data);
+            }
+        }
+        h.finalize()
+    }
+
     /// Applies `changes_from`'s output.
     pub fn apply_changes(&mut self, mut changes: &[u8]) -> Result<(), String> {
         const RAW: usize = PAGE_RAW * PAGES_PER_BLOCK;

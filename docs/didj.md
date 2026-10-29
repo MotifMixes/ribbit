@@ -120,9 +120,12 @@ erased (the console then formats it itself); `DIDJ_DUMP=<file>` saves SDRAM.
 - `/usr/bin/launch_main` runs `AppManager` (or `/flags/main_app`) from PATH
   `/Cart/Base/Brio/bin:/Didj/Base/Brio/bin/:/Didj/Base/bin/`; libraries come from
   `/Didj/Base/Brio/lib/:/Didj/Base/lib/`. So the system packages (meta.inf `Type="System"`,
-  `Name="Base_<dir>"`) unpack under `/Didj/Base/` (Base_bin holds `bin/AppManager`). Where applications
-  (`Type="Application"`, e.g. JetPack Heroes `POW/`) go is UNKNOWN; GUESS `/Didj/<dir>`, like a cartridge's
-  `/JDI` at its root.
+  `Name="Base_<dir>"`) unpack under `/Didj/Base/` (Base_bin holds `bin/AppManager`). Other package
+  types go to the folder libLightningJSON's CPkgPathBase pairs with them (two lists in the same order:
+  System, Application, Avatar, CYODataset, MicroDownload / Base, ProgramFiles, Data/Avatars, Data/CYO,
+  Data/MDL). So JetPack Heroes (`Type="Application"`, `POW/`) unpacks under `/Didj/ProgramFiles/`
+  (VERIFIED in Ribbit 2026-10-29: in `/Didj/POW` the menu showed it as "GAME NOT DOWNLOADED"; in
+  ProgramFiles it starts). The Data/ ones are UNVERIFIED (no such package tried).
 
 ## Internal NAND (VERIFIED: kernel source and packages)
 

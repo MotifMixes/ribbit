@@ -78,10 +78,17 @@ pub fn format(total: usize) -> Vec<u8> {
 }
 
 /// Where a package's files go on the volume, from its meta.inf: the
-/// folder that holds the package's own top folder.
+/// folder that holds the package's own top folder. libLightningJSON's
+/// CPkgPathBase pairs the package types System, Application, Avatar,
+/// CYODataset, MicroDownload with the upload folders Base, ProgramFiles,
+/// Data/Avatars, Data/CYO, Data/MDL (two lists in that order; the menu
+/// shows JetPack Heroes as "GAME NOT DOWNLOADED" when it is anywhere else).
 pub fn install_folder(meta: &Meta) -> &'static str {
     match meta.get("Type") {
-        Some("Application") => "",
+        Some("Application") => "ProgramFiles",
+        Some("Avatar") => "Data/Avatars",
+        Some("CYODataset") => "Data/CYO",
+        Some("MicroDownload") => "Data/MDL",
         _ => "Base",
     }
 }

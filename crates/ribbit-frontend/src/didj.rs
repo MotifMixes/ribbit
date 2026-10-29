@@ -76,6 +76,8 @@ pub struct DidjSession {
     /// to it are kept.
     original: Nand,
     save_path: PathBuf,
+    /// `original`'s fingerprint, kept beside the save.
+    image: String,
 }
 
 impl DidjSession {
@@ -84,6 +86,16 @@ impl DidjSession {
         let cart = cart.map(ribbit_didj::cart::Cart::new).transpose().map_err(anyhow::Error::msg)?;
         let original = ribbit_didj::nand_from_packages(dir, true).map_err(anyhow::Error::msg)?;
         let save_path = save_file(dir, save_dir);
+        // The save holds blocks changed from the built image: on another
+        // image (new packages, or Ribbit building it differently) they
+        // would mix two file system layouts. Such a save is set aside.
+        let image = format!("{:08x}", original.fingerprint());
+        let image_path = save_path.with_extension("nandimage");
+        if save_path.exists() && std::fs::read_to_string(&image_path).ok().as_deref() != Some(image.as_str()) {
+            let aside = save_path.with_extension("nandblocks.other-image");
+            tracing::warn!(target: "ribbit::saves", "{} was made on another NAND image; kept as {}, starting fresh", save_path.display(), aside.display());
+            let _ = std::fs::rename(&save_path, &aside);
+        }
         let mut flash = original.clone();
         if let Ok(changes) = std::fs::read(&save_path)
             && let Err(e) = flash.apply_changes(&changes)
@@ -109,7 +121,7 @@ impl DidjSession {
             run(&s)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path })
+        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image })
     }
 
     /// Copies the latest picture into `out` (SCREEN_W x SCREEN_H).
@@ -176,6 +188,7 @@ impl DidjSession {
         let tmp = self.save_path.with_extension("tmp");
         std::fs::write(&tmp, &changes)?;
         std::fs::rename(&tmp, &self.save_path)?;
+        std::fs::write(self.save_path.with_extension("nandimage"), &self.image)?;
         Ok(())
     }
 
