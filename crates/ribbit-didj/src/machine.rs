@@ -180,7 +180,15 @@ pub mod button {
     pub const PAUSE: u32 = 1 << 12;
     pub const BRIGHTNESS: u32 = 1 << 13;
     pub const ALL: u32 = 0x3F9F;
+    /// Pin 20, high while pressed (hwmon-lf1000.c: rising-edge interrupt,
+    /// reported as KEY_POWER to monitord, which tells the app to shut down).
+    pub const POWER: u32 = 1 << 20;
 }
+
+/// The Alive GPIO's reset register: setting VDDPWRONSET (bit 7) there drops
+/// the power latch lightning-boot set (core.c lf1000_poweroff).
+const ALIVEGPIORSTREG: u32 = 0xC001_9004;
+const VDDPWRONSET: u32 = 1 << 7;
 
 /// UART 0-5 (uart.h); the transmit holding register and the status.
 const UARTS: [u32; 6] = [0xC001_6000, 0xC001_6080, 0xC001_6800, 0xC001_6880, 0xC001_7000, 0xC001_7080];
@@ -243,6 +251,8 @@ pub struct Bus {
     frame_cycles: u64,
     /// The buttons held down (`button` bits).
     pub buttons: u32,
+    /// Linux cut the power (after `poweroff`): the CPU no longer runs.
+    pub powered_off: bool,
     /// GPIO detected flags and the input levels last seen, per port.
     gpio_det: [u32; GPIO_PORTS],
     gpio_last: [u32; GPIO_PORTS],
@@ -266,7 +276,7 @@ impl Bus {
     fn gpio_pad(&self, port: usize) -> u32 {
         match port {
             0 => CART_DETECT,
-            2 => button::ALL & !self.buttons,
+            2 => button::ALL & !self.buttons | button::POWER & self.buttons,
             _ => 0,
         }
     }
@@ -460,6 +470,10 @@ impl Bus {
         self.note(addr, true);
         let v = match addr {
             PWRMODE => v & !CHGPLL,
+            ALIVEGPIORSTREG if v & VDDPWRONSET != 0 => {
+                self.powered_off = true;
+                v
+            }
             ADCCON if v & ADEN != 0 => {
                 self.regs.insert(ADCDAT, ADC_READINGS[(v >> 3 & 7) as usize]);
                 self.adc_pending = true;
@@ -607,6 +621,7 @@ impl Didj {
             ga3d: Default::default(),
             adc_pending: false,
             buttons: 0,
+            powered_off: false,
             gpio_det: [0; GPIO_PORTS],
             gpio_last: [0; GPIO_PORTS],
             regs: Regs::default(),
@@ -642,7 +657,7 @@ impl Didj {
         const SLICE: u64 = 64;
         let start = self.cpu.instructions;
         let end = self.cpu.cycles + n;
-        while self.cpu.cycles < end {
+        while self.cpu.cycles < end && !self.bus.powered_off {
             let before = self.cpu.cycles;
             // Compiled blocks may end a slice up to 31 instructions late
             // (unless `exact`); interrupts are taken between blocks.

@@ -11,7 +11,11 @@ fn main() {
     let millions: u64 = args.get(1).map_or(50, |s| s.parse().expect("not a number"));
 
     // DIDJ_NO_BRIO=1 leaves Brio erased (the console then formats it).
-    let flash = ribbit_didj::nand_from_packages(dir.as_ref(), std::env::var_os("DIDJ_NO_BRIO").is_none()).unwrap_or_else(|e| panic!("{e}"));
+    let mut flash = ribbit_didj::nand_from_packages(dir.as_ref(), std::env::var_os("DIDJ_NO_BRIO").is_none()).unwrap_or_else(|e| panic!("{e}"));
+    // DIDJ_SAVE=<file>: apply the app's saved NAND changes (.nandblocks).
+    if let Ok(path) = std::env::var("DIDJ_SAVE") {
+        flash.apply_changes(&std::fs::read(&path).expect("can't read the save")).unwrap_or_else(|e| panic!("{e}"));
+    }
 
     let mut didj = Didj::new(flash);
     // DIDJ_JIT=0 runs the interpreter alone; DIDJ_JIT=exact runs blocks only
@@ -55,6 +59,7 @@ fn main() {
                 "MENU" => MENU,
                 "HINT" => HINT,
                 "PAUSE" => PAUSE,
+                "POWER" => POWER,
                 _ => panic!("unknown button {name}"),
             };
             (at.parse().expect("bad DIDJ_KEYS time"), bit)
@@ -73,6 +78,10 @@ fn main() {
             }
         }
         let n = didj.run(1_000_000);
+        if didj.bus.powered_off {
+            println!("powered off after {m} million");
+            break;
+        }
         wav.extend(didj.bus.dma.pcm.drain(..));
         ran += n;
         // DIDJ_FRAMES=<folder> saves the screen every 100 million
@@ -173,6 +182,12 @@ fn main() {
     // DIDJ_DUMP=<file> saves SDRAM, to disassemble the kernel.
     if let Ok(path) = std::env::var("DIDJ_DUMP") {
         std::fs::write(&path, &didj.bus.sdram).expect("can't write the dump");
+    }
+    // DIDJ_SAVE_OUT=<file> writes the NAND's changes from the one built
+    // from the packages, as the app saves them (.nandblocks).
+    if let Ok(path) = std::env::var("DIDJ_SAVE_OUT") {
+        let base = ribbit_didj::nand_from_packages(dir.as_ref(), true).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(&path, didj.bus.nand.changes_from(&base)).expect("can't write the save");
     }
     // DIDJ_NAND=<file> saves the Brio partition, each page with its spare area.
     if let Ok(path) = std::env::var("DIDJ_NAND") {

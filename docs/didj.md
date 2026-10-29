@@ -229,6 +229,22 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
 `didjboot` with `DIDJ_FRAMES=<folder>` saves the screen every 100 million instructions when it changed, and
 `DIDJ_FRAME=<file>` the last one (PPM).
 
+## Power off and unclean starts (VERIFIED in Ribbit; sources: hwmon-lf1000.c, monitord, launch_main, init.d/ubi)
+
+- Power button: GPIO port C pin 20, high while pressed, rising-edge interrupt; hwmon-lf1000 reports
+  KEY_POWER ("Power Button" input), monitord tells the app, AppManager shows its shutdown screen and
+  calls Shutdown(); `/etc/init.d/shutdown` unmounts everything, then lf1000_poweroff sets VDDPWRONSET
+  (bit 7) in ALIVEGPIORSTREG (0xC0019004). Fresh boot to power cut: ~2.3 G cycles; 3.0 s in the app.
+- Unclean start: /flags/booted still there, so init.d/ubi runs `fsck.vfat -n` on each UBI volume. Any
+  finding (even "Reclaimed 2 unused clusters") touches /flags/needs_repair and /Didj is not mounted;
+  launch_main then finds no main app and shows DOWNLOAD_FAILED.png ("Download Failed / Please Try
+  Again"), waiting for USB (LeapFrog Connect runs `usbctl -a fsck`). Ribbit used to stop the machine
+  like pulling the batteries, which made this happen; it now presses power and waits for the cut.
+- didjboot: DIDJ_KEYS=...:POWER, DIDJ_SAVE=<.nandblocks> (start from an app save), DIDJ_SAVE_OUT=<file>.
+  A broken save is repaired by DIDJ_TYPE=$'fsck.vfat -a /dev/mtdblock9
+rm -f /flags/needs_repair
+poweroff'.
+
 ## Plan
 
 1. **M1 (done):** these notes, the package reader, and the NAND image.

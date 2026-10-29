@@ -154,7 +154,8 @@ impl DidjSession {
         Ok(())
     }
 
-    /// Stops the machine (after keeping its saves).
+    /// Turns the console off (its power button, `power_off`) and keeps its
+    /// saves.
     pub fn stop(mut self) {
         self.shared.quit.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
@@ -225,6 +226,31 @@ fn run(s: &Shared) {
         if let Some(sink) = s.sink.lock().unwrap().as_mut() {
             sink.push_32k(&mono, gain);
         }
+    }
+    power_off(s);
+}
+
+/// Turns the Didj off with its power button, as a player would: Linux then
+/// unmounts its file systems before cutting the power. Stopping it without
+/// this is pulling the batteries: a file being written is left half done,
+/// the next start's fsck finds it, and the console refuses to mount /Didj
+/// ("Download Failed"). Runs as fast as the host allows; gives up after
+/// 15 s (say, before the system has started).
+fn power_off(s: &Shared) {
+    let mut d = s.didj.lock().unwrap();
+    let hz = d.cpu_hz();
+    let t = Instant::now();
+    d.bus.buttons = button::POWER;
+    d.run(hz / 10);
+    d.bus.buttons = 0;
+    while !d.bus.powered_off && t.elapsed() < Duration::from_secs(15) {
+        d.run(hz / FPS as u64);
+        d.bus.dma.pcm.clear();
+    }
+    if d.bus.powered_off {
+        tracing::info!(target: "ribbit::saves", "Didj powered off in {:.1} s", t.elapsed().as_secs_f32());
+    } else {
+        tracing::warn!(target: "ribbit::saves", "the Didj did not power off in 15 s; saving its NAND as it is");
     }
 }
 
