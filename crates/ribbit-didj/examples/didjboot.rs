@@ -18,6 +18,11 @@ fn main() {
     }
 
     let mut didj = Didj::new(flash);
+    // DIDJ_CART=<file>: a cartridge dump in the slot.
+    if let Ok(path) = std::env::var("DIDJ_CART") {
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        didj.bus.cart = Some(ribbit_didj::cart::Cart::new(data).unwrap_or_else(|e| panic!("{e}")));
+    }
     // DIDJ_JIT=0 runs the interpreter alone; DIDJ_JIT=exact runs blocks only
     // where they fit in the slice (results identical to the interpreter's).
     let jit_mode = std::env::var("DIDJ_JIT").unwrap_or_default();

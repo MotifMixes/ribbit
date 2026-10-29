@@ -915,6 +915,9 @@ fn classify(path: &Path) -> Option<Found> {
     if data.len() < 0x1_0000 {
         return None;
     }
+    if ribbit_didj::cart::Cart::looks_like(&data) {
+        return crate::didj::describe_cart(path, &data).map(Found::Didj);
+    }
     use ribbit_memory::known;
     if data.len() == ZIPPITY_NAND_SIZE && data.starts_with(b"PGandnand") {
         let id = ribbit_memory::ImageId::of(&data);

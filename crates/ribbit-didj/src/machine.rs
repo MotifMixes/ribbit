@@ -34,6 +34,8 @@ const MCU_S: u32 = 0xC001_5800;
 const NFCONTROL: u32 = MCU_S + 0x74;
 const NFECCSTATUS: u32 = MCU_S + 0x8C;
 const RNB: u32 = 1 << 9;
+/// NFCONTROL's bank bit: set, the NAND ports reach the cartridge.
+const NFBANK: u32 = 1 << 0;
 const NFECCDECDONE: u32 = 1 << 1;
 
 /// Clock and power: PWRMODE's CHGPLL bit asks for a PLL change and reads 1
@@ -159,9 +161,11 @@ const GPIODET: u32 = 0x14;
 const GPIOPAD: u32 = 0x18;
 const GPIO_IRQ: u32 = 13;
 /// Port A pin 18 is the cartridge detect, low when a cartridge is in (nand.h
-/// NAND_CART_DETECT_LEVEL; launch_main reads it with gpio-control): high
-/// here, an empty slot. The other pins read low (UNKNOWN).
+/// NAND_CART_DETECT_LEVEL; launch_main reads it with gpio-control). The
+/// other pins read low (UNKNOWN).
 const CART_DETECT: u32 = 1 << 18;
+/// Port B pins 2-5: the cartridge type (gpio.h GPIO_CART_CFG_LOW/HIGH).
+const CART_CFG_SHIFT: u32 = 2;
 
 /// The buttons: port C pins, low while pressed (lf1000-keypad.c button_map;
 /// L and R swap on boards before EP1, these are the later boards').
@@ -189,6 +193,13 @@ pub mod button {
 /// the power latch lightning-boot set (core.c lf1000_poweroff).
 const ALIVEGPIORSTREG: u32 = 0xC001_9004;
 const VDDPWRONSET: u32 = 1 << 7;
+/// The Alive scratch register, which keeps its value through sleep:
+/// writes to the set and reset registers set and clear bits, the read
+/// register shows them (lightning-boot gpio.c `gpio_set_scratchpad`).
+/// Lightning-boot leaves the board and cartridge IDs in it for the kernel.
+const ALIVESCRATCHRST: u32 = 0xC001_9010;
+const ALIVESCRATCHSET: u32 = 0xC001_9014;
+const ALIVESCRATCHREAD: u32 = 0xC001_9018;
 
 /// UART 0-5 (uart.h); the transmit holding register and the status.
 const UARTS: [u32; 6] = [0xC001_6000, 0xC001_6080, 0xC001_6800, 0xC001_6880, 0xC001_7000, 0xC001_7080];
@@ -230,6 +241,8 @@ pub struct Bus {
     code: CodeWatch,
     pub nand: Nand,
     chip: NandChip,
+    /// The cartridge in the slot.
+    pub cart: Option<crate::cart::Cart>,
     pub timers: Timers,
     spi: Spi,
     pub dma: crate::dma::Dma,
@@ -275,7 +288,9 @@ impl Bus {
 
     fn gpio_pad(&self, port: usize) -> u32 {
         match port {
+            0 if self.cart.is_some() => 0,
             0 => CART_DETECT,
+            1 if self.cart.is_some() => crate::cart::PRODUCTION << CART_CFG_SHIFT,
             2 => button::ALL & !self.buttons | button::POWER & self.buttons,
             _ => 0,
         }
@@ -317,7 +332,16 @@ impl Bus {
         NAND_WINDOWS.iter().find(|&&w| addr.wrapping_sub(w) < 0x20).map(|&w| addr - w)
     }
 
+    /// The cartridge, when NFCONTROL selects its bank; None for the
+    /// internal flash. An empty slot reads as nothing there.
+    fn cart_bank(&mut self) -> Option<Option<&mut crate::cart::Cart>> {
+        (self.reg(NFCONTROL) & NFBANK != 0).then_some(self.cart.as_mut())
+    }
+
     fn nand_command(&mut self, cmd: u8) {
+        if let Some(cart) = self.cart_bank() {
+            return cart.into_iter().for_each(|c| c.command(cmd));
+        }
         let c = &mut self.chip;
         match cmd {
             // 0x00 starts a read's address, and also switches the data port
@@ -369,6 +393,9 @@ impl Bus {
     }
 
     fn nand_read_byte(&mut self) -> u8 {
+        if let Some(cart) = self.cart_bank() {
+            return cart.map_or(0xFF, |c| c.read_byte());
+        }
         let c = &mut self.chip;
         match c.cmd {
             0x70 => c.status,
@@ -389,6 +416,9 @@ impl Bus {
     }
 
     fn nand_write_byte(&mut self, b: u8) {
+        if let Some(cart) = self.cart_bank() {
+            return cart.into_iter().for_each(|c| c.write_byte(b));
+        }
         let c = &mut self.chip;
         if c.cmd == 0x80 {
             c.out.push(b);
@@ -435,7 +465,10 @@ impl Bus {
         if let Some(port) = Self::nand_port(addr) {
             match port {
                 NFCMD => self.nand_command(v as u8),
-                NFADDR => self.chip.addr.push(v as u8),
+                NFADDR => match self.cart_bank() {
+                    Some(cart) => cart.into_iter().for_each(|c| c.address(v as u8)),
+                    None => self.chip.addr.push(v as u8),
+                },
                 NFDATA => {
                     for i in 0..size {
                         self.nand_write_byte((v >> (8 * i)) as u8);
@@ -472,6 +505,11 @@ impl Bus {
             PWRMODE => v & !CHGPLL,
             ALIVEGPIORSTREG if v & VDDPWRONSET != 0 => {
                 self.powered_off = true;
+                v
+            }
+            ALIVESCRATCHRST | ALIVESCRATCHSET => {
+                let s = self.reg(ALIVESCRATCHREAD);
+                self.regs.insert(ALIVESCRATCHREAD, if addr == ALIVESCRATCHSET { s | v } else { s & !v });
                 v
             }
             ADCCON if v & ADEN != 0 => {
@@ -615,6 +653,7 @@ impl Didj {
             code: CodeWatch::default(),
             nand: flash,
             chip: NandChip::default(),
+            cart: None,
             timers: Timers::new(),
             spi: Spi::default(),
             dma: Default::default(),

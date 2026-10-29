@@ -171,6 +171,24 @@ A `.lfp` is a plain zip with a `meta.inf` (`Device="Didj"`). IDs are `DIDJ-0x000
 Cartridge dumps are 69206016 bytes: small-page NAND, 512 + 16 bytes per page, 32 pages per 16 KiB block, 4096
 blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
 
+### Cartridges (VERIFIED in Ribbit with Star Wars: The Clone Wars, unless marked)
+
+- The cartridge is a second chip on the NAND controller: NFCONTROL bit 0 (NFBANK) selects it
+  (`lf1000_select_cart`); the data, command and address ports are the internal chip's. Small-page commands:
+  0x00 / 0x01 / 0x50 point at the first half, second half or spare area, then one column and three row
+  bytes, and the page can be read at once (no 0x30). The ID read is 0x98 0x76 (Toshiba, 64 MiB).
+- Detect: GPIO port A pin 18 low. Type: port B pins 2-5 (pin 5 high bit), which lightning-boot keeps in the
+  Alive scratch register (bits 10-13; set/reset/read registers at 0xC0019010/14/18) for the kernel. 0x7 is
+  production (OTP, ECC off), 0xF development. Ribbit answers 0x7 (GUESS: retail cartridges are production).
+  The kernel prints "cart type read=7, used=7"; before Ribbit kept the scratch register it printed "read=0,
+  used=7" (the shipped kernel then still took 7).
+- The dump's spare areas carry software ECC (nand_oob_16, bytes 0-3 and 6-7), unused with ECC off.
+- UBI attaches it as ubi2 (PEB 16 KiB, LEB 15360, VID header 0x200, data 0x400) and `rcS` ("Configuring
+  Cartridge") mounts the FAT32 volume read-only at /Cart. The game is in /Cart/jdi (folder = ShortName), with
+  meta.inf (Name, ProductID 0x000F0007, PreviewImage Description.png, Icon IconNormal.png) and App.so.
+- The kernel probes the slot only at start-up; what the console does when a cartridge goes in or out while on
+  is UNKNOWN (Ribbit puts it in before power-on).
+
 ## Display (VERIFIED in Ribbit unless marked)
 
 The MLC (0xC000_4000, kernel drivers/lf1000/mlc) composes the 320 x 240 picture over a background colour

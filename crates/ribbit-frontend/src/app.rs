@@ -744,6 +744,25 @@ impl App {
     /// Plays a game on the console chosen in the library's console menu
     /// (unless a BIOS was given on the command line).
     fn open_cart(&mut self, path: PathBuf) {
+        // A Didj cartridge: the Didj from the library, with it in the slot.
+        if let Some(cart) = crate::didj::read_cart(&path) {
+            // Before the library is scanned: packages beside the cartridge.
+            let beside = || std::fs::read_dir(path.parent()?).ok()?.flatten().map(|e| e.path()).find(|p| crate::didj::is_package(p));
+            let system = self.library.games.iter().find(|g| g.family == crate::library::Family::Didj && g.has_tag("System")).map(|g| g.path.clone());
+            let Some(package) = system.or_else(beside) else {
+                return self.ui.problem(
+                    "No Didj in the library",
+                    "A Didj cartridge plays in a Didj built from its firmware packages (DIDJ-0x….lfp files). Add the folder that holds them with \"Add games folder\".",
+                    "",
+                );
+            };
+            self.start_didj(package, Some(cart));
+            if let (Some(d), Some(g)) = (&mut self.didj, self.library.games.iter().find(|g| g.path == path)) {
+                d.title.clone_from(&g.title);
+                self.update_title();
+            }
+            return;
+        }
         // A LeapPad cartridge (or its base ROM): the LeapPad.
         match std::fs::read(&path).ok().and_then(|d| ribbit_leappad::identify(&d)) {
             Some(ribbit_leappad::Image::Cartridge) => return self.start_leappad(Some(path)),
@@ -755,7 +774,7 @@ impl App {
         }
         // A Didj package: the Didj, built from the packages beside it.
         if crate::didj::is_package(&path) {
-            return self.start_didj(path);
+            return self.start_didj(path, None);
         }
         // A console's built-in games: the Zippity's NAND, or a Leapster
         // BIOS's own games (that BIOS with no cartridge in).
@@ -939,13 +958,13 @@ impl App {
     }
 
     /// Plays a Didj built from the packages in the folder of `package` (the
-    /// one chosen in the library). It starts at its menu, whichever package
-    /// was chosen.
-    fn start_didj(&mut self, package: PathBuf) {
+    /// one chosen in the library), with `cart` in its slot. It starts at its
+    /// menu, whichever package was chosen.
+    fn start_didj(&mut self, package: PathBuf, cart: Option<Vec<u8>>) {
         self.end_session();
         let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match crate::didj::DidjSession::start(&dir, &self.save_dir(), sink) {
+        match crate::didj::DidjSession::start(&dir, &self.save_dir(), cart, sink) {
             Ok(mut d) => {
                 self.fit_window = FIT_TRIES;
                 if let Some(g) = self.library.games.iter().find(|g| g.path == package) {

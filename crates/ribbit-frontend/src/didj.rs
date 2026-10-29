@@ -5,6 +5,11 @@
 //! settings, players, progress) is kept in the save folder as the erase
 //! blocks that differ from the freshly built image.
 //!
+//! A cartridge dump (the raw NAND with its spare areas) is played in a Didj
+//! built from the packages of the Didj found in the library; the menu
+//! starts the game on it. The cartridge is read-only (Brio mounts it so),
+//! so nothing on it is saved.
+//!
 //! Controls: the D-pad, A and B as they are; the shoulder buttons L and R on
 //! the Leapster's volume buttons (LB and RB on a gamepad); Home is the Didj's
 //! Menu button, Hint and Pause its own, and Brightness Up its brightness
@@ -71,7 +76,8 @@ pub struct DidjSession {
 
 impl DidjSession {
     /// Powers on a Didj built from the packages in `dir`.
-    pub fn start(dir: &Path, save_dir: &Path, sink: Option<AudioSink>) -> anyhow::Result<Self> {
+    pub fn start(dir: &Path, save_dir: &Path, cart: Option<Vec<u8>>, sink: Option<AudioSink>) -> anyhow::Result<Self> {
+        let cart = cart.map(ribbit_didj::cart::Cart::new).transpose().map_err(anyhow::Error::msg)?;
         let original = ribbit_didj::nand_from_packages(dir, true).map_err(anyhow::Error::msg)?;
         let save_path = save_file(dir, save_dir);
         let mut flash = original.clone();
@@ -81,8 +87,10 @@ impl DidjSession {
             tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
             flash = original.clone();
         }
+        let mut didj = Didj::new(flash);
+        didj.bus.cart = cart;
         let shared = Arc::new(Shared {
-            didj: Mutex::new(Didj::new(flash)),
+            didj: Mutex::new(didj),
             frame: Mutex::new(vec![0; SCREEN_W * SCREEN_H]),
             running: AtomicBool::new(true),
             quit: AtomicBool::new(false),
@@ -135,8 +143,9 @@ impl DidjSession {
     /// Restarts the console (keeping what it has saved).
     pub fn reset(&self) {
         let mut d = self.shared.didj.lock().unwrap();
-        let flash = std::mem::take(&mut d.bus.nand);
+        let (flash, cart) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take());
         *d = Didj::new(flash);
+        d.bus.cart = cart;
     }
 
     /// Keeps what the system has saved to its NAND.
@@ -298,6 +307,55 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
         key: format!("didj-{id}"),
         art: Art::Missing,
     })
+}
+
+/// A Didj cartridge dump in the library, titled from the meta.inf of the
+/// game on it, its preview image as the art.
+pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
+    use crate::library::{Art, Family, Game};
+    use ribbit_core::fatfs;
+    let volume = ribbit_didj::cart::volume(data)?;
+    let (folder, meta) = fatfs::list(&volume, "")?.into_iter().filter(|e| e.is_dir).find_map(|e| {
+        let m = fatfs::read_file(&volume, &format!("{}/meta.inf", e.name))?;
+        Some((e.name, ribbit_didj::package::Meta::parse(&String::from_utf8_lossy(&m))))
+    })?;
+    let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let title = meta.get("Name").map_or(stem, str::to_string);
+    let art = ["PreviewImage", "Icon"]
+        .iter()
+        .filter_map(|k| meta.get(k))
+        .find_map(|f| crate::manual::decode_png(&fatfs::read_file(&volume, &format!("{folder}/{f}"))?))
+        .map_or(Art::Missing, Art::Image);
+    let mut details = vec![("System", "Didj".to_string())];
+    for (label, key) in [("Name", "Name"), ("Version", "Version"), ("Product", "ProductID"), ("Publisher", "Publisher"), ("Developer", "Developer")] {
+        if let Some(v) = meta.get(key) {
+            details.push((label, v.to_string()));
+        }
+    }
+    details.push(("Status", "early emulation: starts at the Didj's menu with the cartridge in".to_string()));
+    details.push(("File", path.display().to_string()));
+    let id = meta.get("ProductID").unwrap_or("").to_string();
+    Some(Game {
+        path: path.to_path_buf(),
+        family: Family::Didj,
+        title,
+        subtitle: format!("Cartridge  ·  {}", meta.get("Version").map_or(String::new(), |v| format!("version {v}"))),
+        details,
+        tags: vec!["Cartridge".into()],
+        key: format!("didj-cart-{id}"),
+        art,
+    })
+}
+
+/// The dump at `path` if it is a Didj cartridge (zipped or not).
+pub fn read_cart(path: &Path) -> Option<Vec<u8>> {
+    let raw = path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("zip"));
+    let len = std::fs::metadata(path).ok()?.len() as usize;
+    if raw && len % (ribbit_didj::cart::PAGE_RAW * ribbit_didj::cart::PAGES_PER_BLOCK) != 0 {
+        return None;
+    }
+    let data = ribbit_core::read_image(path).ok()?;
+    ribbit_didj::cart::Cart::looks_like(&data).then_some(data)
 }
 
 /// Whether `path` is a Didj package (by its name), listed or not.

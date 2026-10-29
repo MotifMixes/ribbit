@@ -20,6 +20,7 @@
 //! * `mlc`: the display's layer compositor (the RGB layers; not video yet).
 
 pub mod brio;
+pub mod cart;
 pub mod dma;
 pub mod ga3d;
 pub mod machine;
