@@ -20,7 +20,7 @@
 
 pub mod content;
 pub mod disk;
-pub mod fat;
+pub use ribbit_core::fatfs as fat;
 pub mod image;
 pub mod input;
 pub mod machine;

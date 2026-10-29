@@ -8,12 +8,12 @@ publish.workspace = true
 
 [dependencies]
 ribbit-arm.workspace = true
+# fatfs for its FAT32 volume; zip for the packages in the examples.
+ribbit-core.workspace = true
 # Save states (as the Zippity's).
 serde.workspace = true
 bincode = "1.3"
 
 [dev-dependencies]
-# The probe example reads system packages (.lfp, zip archives).
-ribbit-core.workspace = true
 # The run example writes screenshots of emulated memory.
 png = "0.18"

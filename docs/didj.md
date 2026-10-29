@@ -62,12 +62,38 @@ What it took to get past the kernel (each a hardware behaviour Linux relies on):
   bits 4-7). The kernel's printk polls, but user space's console writes wait for this interrupt, so `rcS`
   hung on its first `echo` without it.
 
-Now: BusyBox init runs `/etc/init.d/rcS`, which formats the empty Brio partition ("UBI device is empty.
-Formatting", then `mkfs.vfat`), starts monitord and `launch_main`, and gives a `#` shell on ttyS0.
-`launch_main` finds no AppManager because Brio is empty.
+- Cartridge detect: GPIO port A pin 18, low when a cartridge is in (nand.h `NAND_CART_DETECT_LEVEL`;
+  `launch_main` reads it with `gpio-control /dev/gpio invalue 0 18`). Reading low, the kernel probed the
+  internal NAND as a cartridge and `launch_main` stopped at REINSERT_CART_STATE. Ribbit reads it high
+  (empty slot): "lf1000-mtd: cartridge not inserted".
+- UART0 receive: RX byte at 0x12, data ready in TRSTATUS bit 0 / FSR bits 0-3, interrupt pending bit 1 and
+  enable bit 5 of 0x18 (8250-lf1000.c). `didjboot` types commands into the shell with it.
 
-Known gaps: the cartridge chip select reaches the internal NAND ("Cart insert detected but no /Cart
-mount"; the slot should be empty); no LCD (SPI0 ID 0x96), audio codec (I2C0), display or sound yet.
+Now: BusyBox init runs `/etc/init.d/rcS`, which mounts the Brio volume Ribbit built (below) as `/Didj`,
+starts monitord and `launch_main`, and gives a `#` shell on ttyS0. `launch_main` finds and starts
+AppManager, which opens the audio driver (32000 Hz) and then waits on DMA ("HW is not busy, but fifo is
+not empty": no DMA or I2S model yet).
+
+Known gaps: no LCD (SPI0 ID 0x96), audio codec (I2C0), DMA, display, sound or buttons yet. The buttons are
+GPIO port C pins 0-4 and 7-13 with edge interrupts (lf1000-keypad.c); headphones port B pin 10.
+
+`didjboot` options (environment): `DIDJ_TYPE="ps;ls /Didj"` types one command at each new shell prompt;
+`DIDJ_NAND=<file>` saves the Brio partition (pages with spare bytes); `DIDJ_NO_BRIO=1` leaves Brio
+erased (the console then formats it itself); `DIDJ_DUMP=<file>` saves SDRAM.
+
+## Brio partition (VERIFIED: what the kernel and rcS write to an empty one, in Ribbit)
+
+- UBI version 1: EC header at byte 0 of each 128 KiB block, VID header at 512 (512-byte subpages), data
+  from 2048, so a LEB is 129024 bytes. 1776 blocks: 2 for the layout volume, 1 for wear-levelling,
+  17 (1%) for bad blocks, 1756 for the one user volume, id 0, dynamic, named `ubi_Brio`
+  (`ubimkvol --maxavsize`). Volume table: 128 records of 172 bytes.
+- In it, through gluebi/mtdblock, FAT16 from `mkfs.vfat -n Didj -S 512`: 442512 sectors, 8 per cluster,
+  1 reserved, 2 FATs of 216 sectors, 512 root entries, boot sector OEM "mkdosfs", the label also as the
+  root's first entry.
+- Ribbit builds the same (crates/ribbit-didj/src/ubi.rs, brio.rs; FAT writing in ribbit-core fatfs.rs)
+  and installs every package that isn't raw firmware: system packages and the avatar under
+  `/Didj/Base/<folder>`, applications under `/Didj/<folder>` (GUESS). Each package is copied whole,
+  meta.inf and .md5 lists too (what LeapFrog Connect copies is UNKNOWN).
 
 ## Root file system (VERIFIED: erootfs.jffs2 in 1.35.2.4222)
 
@@ -97,7 +123,7 @@ its error flag. Whether the kernel checks ECC is UNKNOWN.
 | 0x00400000 | Linux_RFS0         | 14 MiB    | erootfs.jffs2                                |
 | 0x01200000 | Kernel1            | 2 MiB     | kernel.bin                                   |
 | 0x01400000 | Linux_RFS1         | 14 MiB    | erootfs.jffs2                                |
-| 0x02200000 | Brio               | 222 MiB   | erased; the other packages go here (not yet) |
+| 0x02200000 | Brio               | 222 MiB   | UBI + FAT16 with the other packages          |
 
 `kernel.bin` uses lightning-boot's "table file system". Its first block is a summary: `0x12345678`, a file
 count, then a 64-byte name and a block count for each file. The files follow block by block, skipping bad
@@ -133,7 +159,8 @@ blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
 
 1. **M1 (done):** these notes, the package reader, and the NAND image.
 2. **M2 (done):** boot lightning-boot and the kernel to its UART log (ARM926EJ-S from `ribbit-arm`, SDRAM, NAND
-   controller, UART, timers, interrupt controller).
+   controller, UART, timers, interrupt controller). Since then: user space, the Brio partition, AppManager
+   starting.
 3. **M3:** interrupts, timers, GPIO and the NAND controller, enough for the kernel to mount its file systems.
 4. **M4:** display (MLC/DPC).
 5. **M5:** audio and buttons.

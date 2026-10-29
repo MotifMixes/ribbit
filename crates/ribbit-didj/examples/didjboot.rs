@@ -4,6 +4,7 @@
 //!   cargo run -p ribbit-didj --example didjboot -- <folder of .lfp files> [million instructions]
 
 use ribbit_core::zip;
+use ribbit_didj::brio;
 use ribbit_didj::machine::Didj;
 use ribbit_didj::nand::Nand;
 use ribbit_didj::package::{self, Firmware};
@@ -14,17 +15,32 @@ fn main() {
     let millions: u64 = args.get(1).map_or(50, |s| s.parse().expect("not a number"));
 
     let mut fw = Firmware::default();
+    let mut brio_files = Vec::new();
     for e in std::fs::read_dir(dir).expect("can't read the folder").flatten() {
         let path = e.path();
         if package::package_id(&path.to_string_lossy()).is_none() {
             continue;
         }
         let data = std::fs::read(&path).expect("can't read a package");
+        let mut rest = Vec::new();
+        let mut firmware = false;
         for entry in zip::entries(&data).expect("not a zip archive") {
-            fw.add(&entry.name, zip::read_entry(&data, &entry).unwrap());
+            let bytes = zip::read_entry(&data, &entry).unwrap();
+            if fw.add(&entry.name, bytes.clone()) {
+                firmware = true;
+            }
+            rest.push((entry.name, bytes));
+        }
+        // DIDJ_NO_BRIO=1 leaves Brio erased (the console then formats it).
+        if !firmware && std::env::var_os("DIDJ_NO_BRIO").is_none() {
+            brio_files.extend(brio::package_files(rest));
         }
     }
-    let flash = Nand::from_firmware(&fw).unwrap_or_else(|e| panic!("{e}"));
+    let mut flash = Nand::from_firmware(&fw).unwrap_or_else(|e| panic!("{e}"));
+    if !brio_files.is_empty() {
+        brio::install(&mut flash, &brio_files).unwrap_or_else(|e| panic!("Brio: {e}"));
+        println!("Brio: {} files and folders", brio_files.len());
+    }
 
     let mut didj = Didj::new(flash);
     let mut ran = 0;
@@ -32,7 +48,22 @@ fn main() {
     let mut same = 0;
     // Where the CPU is, sampled once per million instructions: 4 KB page -> count.
     let mut samples = std::collections::HashMap::<u32, u32>::new();
+    // DIDJ_TYPE="ps;ls /Didj": shell commands, typed one per "# " prompt on UART0.
+    let typed = std::env::var("DIDJ_TYPE").unwrap_or_default();
+    let mut commands = typed.split(';').filter(|c| !c.is_empty()).map(|c| format!("{c}
+"));
+    let (mut prompts, mut len, mut quiet) = (0, 0, 0);
     for _ in 0..millions {
+        let out = didj.bus.uart.first().map_or("", |s| s.as_str());
+        (quiet, len) = if out.len() == len { (quiet + 1, len) } else { (0, out.len()) };
+        let seen = out.matches("# ").count();
+        // A new prompt, then 50 million instructions without output.
+        if seen > prompts && quiet >= 50 {
+            prompts = seen;
+            if let Some(c) = commands.next() {
+                didj.bus.uart_rx.extend(c.bytes());
+            }
+        }
         let n = didj.run(1_000_000);
         ran += n;
         *samples.entry(didj.cpu.r[15] & !0xFFF).or_default() += 1;
@@ -72,6 +103,13 @@ fn main() {
     // DIDJ_DUMP=<file> saves SDRAM, to disassemble the kernel.
     if let Ok(path) = std::env::var("DIDJ_DUMP") {
         std::fs::write(&path, &didj.bus.sdram).expect("can't write the dump");
+    }
+    // DIDJ_NAND=<file> saves the Brio partition, each page with its spare area.
+    if let Ok(path) = std::env::var("DIDJ_NAND") {
+        let p = ribbit_didj::nand::partition("Brio").unwrap();
+        let first = p.offset / ribbit_didj::nand::PAGE;
+        let pages = (first..first + p.size / ribbit_didj::nand::PAGE).flat_map(|n| didj.bus.nand.page(n).to_vec());
+        std::fs::write(&path, pages.collect::<Vec<u8>>()).expect("can't write the NAND");
     }
     for (pc, word) in didj.cpu.undefined_log.iter().take(10) {
         println!("undefined {word:#010x} at {pc:#010x}");

@@ -6,6 +6,7 @@
 //! not emulate the Leapster as a whole.
 
 pub mod config;
+pub mod fatfs;
 pub mod hd;
 pub mod idle_timer;
 pub mod io;

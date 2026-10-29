@@ -1,8 +1,9 @@
-//! Just enough FAT32 to prepare the console's internal storage: the
-//! Firmware-Bulk package's `FileSys` image is the volume as the factory
-//! writes it (VERIFIED: the base firmware mounts it at sector 0 of the
-//! eMMC, with no partition table, and reads it as F:).
+//! Just enough FAT16 and FAT32 to prepare a console's internal storage:
+//! read, list and add files on a volume image.
 //!
+//! Twist: the Firmware-Bulk package's `FileSys` image is the FAT32 volume
+//! as the factory writes it (VERIFIED: the base firmware mounts it at
+//! sector 0 of the eMMC, with no partition table, and reads it as F:).
 //! That image carries a `FIRMWARE_UPGRADE` marker in its root directory,
 //! which sends the firmware into its update mode (it loads
 //! `system/Firmware_Update_USeng.bin` and waits for LeapFrog Connect). A
@@ -18,7 +19,12 @@ pub struct Volume {
     pub data: usize,
     /// Byte offset of the first FAT.
     pub fat: usize,
+    /// The root directory's first cluster; 0 on FAT16, whose root is the
+    /// fixed area at `root` (`root_entries` slots) instead.
     pub root_cluster: u32,
+    pub fat16: bool,
+    pub root: usize,
+    pub root_entries: usize,
     /// The number of FATs, and the bytes in each.
     pub fats: usize,
     pub fat_bytes: usize,
@@ -35,28 +41,41 @@ fn u32_at(d: &[u8], at: usize) -> Option<u32> {
 }
 
 impl Volume {
-    /// The layout of the FAT32 volume starting at `d[0]`, if it is one.
+    /// The layout of the FAT16 or FAT32 volume starting at `d[0]`, if it
+    /// is one.
     pub fn parse(d: &[u8]) -> Option<Self> {
-        if d.get(0x52..0x57)? != b"FAT32" {
-            return None;
-        }
+        let fat16 = match (d.get(0x36..0x3B)?, d.get(0x52..0x57)?) {
+            (_, b"FAT32") => false,
+            (b"FAT16", _) => true,
+            _ => return None,
+        };
         let bps = u16_at(d, 11)? as usize;
         let spc = *d.get(13)? as usize;
         let reserved = u16_at(d, 14)? as usize;
         let fats = *d.get(16)? as usize;
-        let per_fat = u32_at(d, 36)? as usize;
-        let total = u32_at(d, 32)? as usize;
-        let data_sectors = total.checked_sub(reserved + fats * per_fat)?;
+        let root_entries = if fat16 { u16_at(d, 17)? as usize } else { 0 };
+        let per_fat = if fat16 { u16_at(d, 22)? as usize } else { u32_at(d, 36)? as usize };
+        let total = match u16_at(d, 19)? {
+            0 => u32_at(d, 32)? as usize,
+            n => n as usize,
+        };
+        let root = (reserved + fats * per_fat) * bps;
+        let root_sectors = (root_entries * 32).div_ceil(bps.max(1));
+        let data_sectors = total.checked_sub(reserved + fats * per_fat + root_sectors)?;
+        let entry = if fat16 { 2 } else { 4 };
         Some(Self {
             bytes_per_sector: bps,
             sectors_per_cluster: spc,
-            data: (reserved + fats * per_fat) * bps,
+            data: root + root_sectors * bps,
             fat: reserved * bps,
-            root_cluster: u32_at(d, 44)?,
+            root_cluster: if fat16 { 0 } else { u32_at(d, 44)? },
+            fat16,
+            root,
+            root_entries,
             fats,
             fat_bytes: per_fat * bps,
             // Never more than the FAT can number.
-            clusters: (data_sectors / spc.max(1)).min(per_fat * bps / 4 - 2) as u32,
+            clusters: (data_sectors / spc.max(1)).min(per_fat * bps / entry - 2) as u32,
         })
     }
 
@@ -68,17 +87,50 @@ impl Volume {
         self.bytes_per_sector * self.sectors_per_cluster
     }
 
+    /// The FAT entry for cluster `c` (None past the image's end).
+    fn next(&self, d: &[u8], c: u32) -> Option<u32> {
+        if self.fat16 {
+            u16_at(d, self.fat + 2 * c as usize).map(u32::from)
+        } else {
+            u32_at(d, self.fat + 4 * c as usize).map(|n| n & 0x0FFF_FFFF)
+        }
+    }
+
+    /// The end-of-chain mark this FAT uses.
+    fn end_mark(&self) -> u32 {
+        if self.fat16 { 0xFFFF } else { 0x0FFF_FFFF }
+    }
+
     /// The clusters of a chain, in order (stopping at the image's end).
     fn chain(&self, d: &[u8], mut c: u32) -> Vec<u32> {
         let mut out = Vec::new();
-        while (2..0x0FFF_FFF8).contains(&c) && out.len() < 1 << 20 {
+        let end = if self.fat16 { 0xFFF8 } else { 0x0FFF_FFF8 };
+        while (2..end).contains(&c) && out.len() < 1 << 20 {
             out.push(c);
-            match u32_at(d, self.fat + 4 * c as usize) {
-                Some(next) => c = next & 0x0FFF_FFFF,
+            match self.next(d, c) {
+                Some(next) => c = next,
                 None => break,
             }
         }
         out
+    }
+
+    fn is_fixed_root(&self, dir: u32) -> bool {
+        self.fat16 && dir == 0
+    }
+
+    /// The byte offsets of the directory's entry slots, in order.
+    fn slots(&self, d: &[u8], dir: u32) -> Vec<usize> {
+        if self.is_fixed_root(dir) {
+            return (0..self.root_entries).map(|i| self.root + 32 * i).collect();
+        }
+        self.chain(d, dir)
+            .into_iter()
+            .flat_map(|c| {
+                let start = self.cluster_at(c);
+                (start..start + self.cluster_bytes()).step_by(32)
+            })
+            .collect()
     }
 }
 
@@ -90,13 +142,13 @@ pub fn delete_root_entry(d: &mut [u8], name: &str) -> bool {
         return false;
     };
     let want = name.to_ascii_uppercase();
-    for c in v.chain(d, v.root_cluster) {
-        let start = v.data + (c as usize - 2) * v.cluster_bytes();
-        let end = (start + v.cluster_bytes()).min(d.len());
-        let mut lfn = String::new();
-        let mut lfn_at: Vec<usize> = Vec::new();
-        let mut at = start;
-        while at + 32 <= end {
+    let mut lfn = String::new();
+    let mut lfn_at: Vec<usize> = Vec::new();
+    for at in v.slots(d, v.root_cluster) {
+        if at + 32 > d.len() {
+            break;
+        }
+        {
             let e = &d[at..at + 32];
             match e[0] {
                 0 => return false,
@@ -129,7 +181,6 @@ pub fn delete_root_entry(d: &mut [u8], name: &str) -> bool {
                     lfn_at.clear();
                 }
             }
-            at += 32;
         }
     }
     false
@@ -159,9 +210,8 @@ impl Volume {
     fn list(&self, d: &[u8], cluster: u32) -> Vec<(Entry, usize)> {
         let mut out = Vec::new();
         let mut lfn = String::new();
-        for c in self.chain(d, cluster) {
-            let start = self.cluster_at(c);
-            for at in (start..start + self.cluster_bytes()).step_by(32) {
+        {
+            for at in self.slots(d, cluster) {
                 let Some(e) = d.get(at..at + 32) else {
                     return out;
                 };
@@ -227,7 +277,7 @@ pub fn read_file(d: &[u8], path: &str) -> Option<Vec<u8>> {
 /// Why a file could not be added.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
-    NotFat32,
+    NotFat,
     /// No room left on the volume.
     Full,
     /// A file is in the way of a folder, or a folder of a file.
@@ -238,7 +288,7 @@ pub enum WriteError {
 impl std::fmt::Display for WriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            WriteError::NotFat32 => write!(f, "the volume is not FAT32"),
+            WriteError::NotFat => write!(f, "the volume is not FAT16 or FAT32"),
             WriteError::Full => write!(f, "the console's storage is full"),
             WriteError::NotAFolder(p) => write!(f, "{p} is a file where a folder is needed"),
             WriteError::TooBig(p) => write!(f, "{p} is larger than FAT32 allows (4 GB)"),
@@ -264,7 +314,7 @@ const FAT_DATE: u16 = (2019 - 1980) << 9 | 1 << 5 | 1;
 
 impl<'a> Writer<'a> {
     pub fn new(d: &'a mut Vec<u8>) -> Result<Self, WriteError> {
-        let v = Volume::parse(d).ok_or(WriteError::NotFat32)?;
+        let v = Volume::parse(d).ok_or(WriteError::NotFat)?;
         Ok(Self { d, v, hint: 2 })
     }
 
@@ -275,11 +325,17 @@ impl<'a> Writer<'a> {
     }
 
     fn fat_get(&self, c: u32) -> u32 {
-        u32_at(self.d, self.v.fat + 4 * c as usize).unwrap_or(0) & 0x0FFF_FFFF
+        self.v.next(self.d, c).unwrap_or(0)
     }
 
     fn fat_set(&mut self, c: u32, next: u32) {
         for f in 0..self.v.fats {
+            if self.v.fat16 {
+                let at = self.v.fat + f * self.v.fat_bytes + 2 * c as usize;
+                self.grow_to(at + 2);
+                self.d[at..at + 2].copy_from_slice(&(next as u16).to_le_bytes());
+                continue;
+            }
             let at = self.v.fat + f * self.v.fat_bytes + 4 * c as usize;
             self.grow_to(at + 4);
             let keep = u32_at(self.d, at).unwrap_or(0) & 0xF000_0000;
@@ -296,7 +352,7 @@ impl<'a> Writer<'a> {
                 c = 2;
             }
             if self.fat_get(c) == 0 {
-                self.fat_set(c, 0x0FFF_FFFF);
+                self.fat_set(c, self.v.end_mark());
                 self.hint = c + 1;
                 let at = self.v.cluster_at(c);
                 let n = self.v.cluster_bytes();
@@ -358,12 +414,8 @@ impl<'a> Writer<'a> {
         let (b, e) = (clean(base), clean(ext));
         let used: Vec<[u8; 11]> = self
             .v
-            .chain(self.d, dir)
+            .slots(self.d, dir)
             .into_iter()
-            .flat_map(|c| {
-                let start = self.v.cluster_at(c);
-                (start..start + self.v.cluster_bytes()).step_by(32).collect::<Vec<_>>()
-            })
             .filter_map(|at| self.d.get(at..at + 11).map(|s| s.try_into().unwrap()))
             .collect();
         for k in 1u32.. {
@@ -380,24 +432,24 @@ impl<'a> Writer<'a> {
     }
 
     /// Byte offsets of `n` consecutive free entry slots in the directory,
-    /// growing it by a cluster if needed.
+    /// growing it by a cluster if needed (FAT16's root can't grow).
     fn free_slots(&mut self, dir: u32, n: usize) -> Result<Vec<usize>, WriteError> {
-        let chain = self.v.chain(self.d, dir);
         let mut run = Vec::new();
-        for &c in &chain {
-            let start = self.v.cluster_at(c);
-            for at in (start..start + self.v.cluster_bytes()).step_by(32) {
-                match self.d.get(at).copied().unwrap_or(0) {
-                    0 | 0xE5 => {
-                        run.push(at);
-                        if run.len() == n {
-                            return Ok(run);
-                        }
+        for at in self.v.slots(self.d, dir) {
+            match self.d.get(at).copied().unwrap_or(0) {
+                0 | 0xE5 => {
+                    run.push(at);
+                    if run.len() == n {
+                        return Ok(run);
                     }
-                    _ => run.clear(),
                 }
+                _ => run.clear(),
             }
         }
+        if self.v.is_fixed_root(dir) {
+            return Err(WriteError::Full);
+        }
+        let chain = self.v.chain(self.d, dir);
         // A run may carry on into the new cluster.
         let c = self.alloc()?;
         self.fat_set(*chain.last().expect("a directory has a cluster"), c);
@@ -513,6 +565,9 @@ impl<'a> Writer<'a> {
     /// The FSInfo sector's free count and hint become "unknown", so the
     /// firmware recounts instead of trusting stale numbers.
     pub fn finish(self) {
+        if self.v.fat16 {
+            return;
+        }
         let at = u16_at(self.d, 48).unwrap_or(1) as usize * self.v.bytes_per_sector;
         if self.d.get(at..at + 4) == Some(b"RRaA") {
             self.d[at + 488..at + 496].copy_from_slice(&[0xFF; 8]);

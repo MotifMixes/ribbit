@@ -146,8 +146,8 @@ impl Nand {
 
     /// The flash as LeapFrog Connect leaves it after a firmware install:
     /// lightning-boot, the boot flags, both kernel and root file system
-    /// copies, and an erased Brio partition (its file system and the other
-    /// packages are not built yet). Manufacturing_Data stays erased: what it
+    /// copies, and an erased Brio partition (brio::install writes it with the
+    /// other packages). Manufacturing_Data stays erased: what it
     /// holds on a real console is UNKNOWN.
     pub fn from_firmware(fw: &Firmware) -> Result<Self, String> {
         let missing = fw.missing();

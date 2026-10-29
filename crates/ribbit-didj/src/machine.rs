@@ -114,12 +114,24 @@ const MLC_DIRTY: [(u32, u32); 4] = [(MLC, 1 << 3), (MLC + 0x24, 1 << 4), (MLC + 
 /// not modelled yet).
 const FRAME_HZ: u64 = 60;
 
+/// GPIO port A's input levels (gpio_hal.h GPIOAPAD). Pin 18 is the
+/// cartridge detect, low when a cartridge is in (nand.h
+/// NAND_CART_DETECT_LEVEL; launch_main reads it with gpio-control): high
+/// here, an empty slot. The other pins read low (UNKNOWN).
+const GPIOAPAD: u32 = 0xC000_A018;
+const CART_DETECT: u32 = 1 << 18;
+
 /// UART 0-5 (uart.h); the transmit holding register and the status.
 const UARTS: [u32; 6] = [0xC001_6000, 0xC001_6080, 0xC001_6800, 0xC001_6880, 0xC001_7000, 0xC001_7080];
 const TRSTATUS: u32 = 0x08;
+/// FIFO status: receive FIFO count in bits 0-3, transmit count in 4-7.
+const FSR: u32 = 0x0C;
 const THB: u32 = 0x10;
+/// The receive buffer (read as a byte by 8250-lf1000.c).
+const RHB: u32 = 0x12;
 /// Transmit buffer empty, transmitter empty; nothing received.
 const TRSTATUS_IDLE: u32 = 0b110;
+const TRSTATUS_DR: u32 = 1 << 0;
 /// INTSTATUSREG (serial_reg-lf1000.h): pending flags in bits 0-3 (bit 0
 /// transmit holding register empty), their enables in bits 4-7. Bytes go
 /// out at once here, so "transmit empty" is always pending; Linux's console
@@ -127,6 +139,9 @@ const TRSTATUS_IDLE: u32 = 0b110;
 const INTSTATUS: u32 = 0x18;
 const THRI_PENDING: u32 = 1 << 0;
 const THRI_ENABLE: u32 = 1 << 4;
+/// Received data waiting (UART_IIR_RDI) and its enable (UART_IER_RDI).
+const RDI_PENDING: u32 = 1 << 1;
+const RDI_ENABLE: u32 = 1 << 5;
 /// UART0's interrupt (the others are UNKNOWN use on the Didj).
 const UART0_IRQ: u32 = 10;
 
@@ -155,6 +170,8 @@ pub struct Bus {
     /// The last unmodelled accesses, oldest first: (address, PC, write).
     pub recent: std::collections::VecDeque<(u32, u32, bool)>,
     pub uart: Vec<String>,
+    /// Bytes waiting to be received on UART0 (the console's serial port).
+    pub uart_rx: std::collections::VecDeque<u8>,
     /// The PC of the instruction being run (for the access log).
     pub pc: u32,
     /// Cycles since the last frame.
@@ -264,16 +281,21 @@ impl Bus {
         match addr {
             NFCONTROL => return self.regs.get(&addr).copied().unwrap_or(0) | RNB,
             NFECCSTATUS => return NFECCDECDONE,
+            GPIOAPAD => return CART_DETECT,
             _ => {}
         }
         if (timer::TIMER_BASE..timer::TIMER_END).contains(&addr) || (timer::IC_BASE..timer::IC_END).contains(&addr) {
             return self.timers.read(addr);
         }
         if let Some(&u) = UARTS.iter().find(|&&u| addr.wrapping_sub(u) < 0x80) {
+            let rx = u == UARTS[0] && !self.uart_rx.is_empty();
             match addr - u {
-                TRSTATUS => return TRSTATUS_IDLE,
+                TRSTATUS => return TRSTATUS_IDLE | if rx { TRSTATUS_DR } else { 0 },
+                FSR => return if u == UARTS[0] { self.uart_rx.len().min(15) as u32 } else { 0 },
                 THB => return 0,
-                INTSTATUS => return self.regs.get(&addr).copied().unwrap_or(0) | THRI_PENDING,
+                INTSTATUS => {
+                    return self.regs.get(&addr).copied().unwrap_or(0) | THRI_PENDING | if rx { RDI_PENDING } else { 0 };
+                }
                 _ => {}
             }
         }
@@ -351,6 +373,9 @@ impl Bus {
         if let Some(v) = addr.checked_sub(SPI0).filter(|&o| o < 8).and_then(|o| self.spi.read(o)) {
             return v;
         }
+        if addr == UARTS[0] + RHB {
+            return self.uart_rx.pop_front().unwrap_or(0) as u32;
+        }
         let shift = 8 * (addr & 3);
         let mask = if size == 4 { u32::MAX } else { (1 << (8 * size)) - 1 };
         (self.io_read(addr & !3) >> shift) & mask
@@ -426,6 +451,7 @@ impl Didj {
             touched: BTreeMap::new(),
             recent: Default::default(),
             uart: Vec::new(),
+            uart_rx: Default::default(),
             pc: 0,
             frame_cycles: 0,
         };
@@ -473,7 +499,8 @@ impl Didj {
             if self.bus.adc_pending && self.bus.regs.get(&ADCINTENB).is_some_and(|v| v & 1 != 0) {
                 self.bus.timers.raise(ADC_IRQ);
             }
-            if self.bus.regs.get(&(UARTS[0] + INTSTATUS)).is_some_and(|v| v & THRI_ENABLE != 0) {
+            let rx = !self.bus.uart_rx.is_empty();
+            if self.bus.regs.get(&(UARTS[0] + INTSTATUS)).is_some_and(|v| v & THRI_ENABLE != 0 || rx && v & RDI_ENABLE != 0) {
                 self.bus.timers.raise(UART0_IRQ);
             }
             if self.bus.spi.irq() {

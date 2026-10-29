@@ -8,7 +8,6 @@ publish.workspace = true
 
 [dependencies]
 ribbit-arm.workspace = true
-
-[dev-dependencies]
-# The didjnand example reads system packages (.lfp zip archives).
+# fatfs for the Brio volume; zip for the packages in the examples.
 ribbit-core.workspace = true
+crc32fast.workspace = true
