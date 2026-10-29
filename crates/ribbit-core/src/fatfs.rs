@@ -307,6 +307,21 @@ pub struct Writer<'a> {
     v: Volume,
     /// Where to look for a free cluster next.
     hint: u32,
+    /// The directories touched so far, by first cluster.
+    dirs: std::collections::HashMap<u32, DirIndex>,
+}
+
+/// What the writer knows of a directory, so that adding a file doesn't
+/// read the whole directory again (Didj's Brio volume, 6121 files: 3.4 s).
+#[derive(Default)]
+struct DirIndex {
+    /// The entries by ASCII lower-case name (the first of a name), with the
+    /// byte offset of each one's short entry.
+    names: std::collections::HashMap<String, (Entry, usize)>,
+    /// The first 11 bytes of every slot written, as `short_name` avoids.
+    shorts: std::collections::HashSet<[u8; 11]>,
+    /// The slots before this index are in use.
+    free_from: usize,
 }
 
 /// 2019-01-01 00:00, in FAT's date format (time 0).
@@ -315,7 +330,24 @@ const FAT_DATE: u16 = (2019 - 1980) << 9 | 1 << 5 | 1;
 impl<'a> Writer<'a> {
     pub fn new(d: &'a mut Vec<u8>) -> Result<Self, WriteError> {
         let v = Volume::parse(d).ok_or(WriteError::NotFat)?;
-        Ok(Self { d, v, hint: 2 })
+        Ok(Self { d, v, hint: 2, dirs: Default::default() })
+    }
+
+    fn index(&mut self, dir: u32) -> &mut DirIndex {
+        if !self.dirs.contains_key(&dir) {
+            let mut ix = DirIndex::default();
+            for (e, at) in self.v.list(self.d, dir) {
+                ix.names.entry(e.name.to_ascii_lowercase()).or_insert((e, at));
+            }
+            ix.shorts = self
+                .v
+                .slots(self.d, dir)
+                .into_iter()
+                .filter_map(|at| self.d.get(at..at + 11).map(|s| s.try_into().unwrap()))
+                .collect();
+            self.dirs.insert(dir, ix);
+        }
+        self.dirs.get_mut(&dir).unwrap()
     }
 
     fn grow_to(&mut self, end: usize) {
@@ -384,7 +416,7 @@ impl<'a> Writer<'a> {
     /// A short name for `long` not used in the directory: kept as is if it
     /// already is a valid upper-case 8.3 name (then no long name is
     /// needed: the bool is false), else "BASE~N.EXT".
-    fn short_name(&self, dir: u32, long: &str) -> ([u8; 11], bool) {
+    fn short_name(&mut self, dir: u32, long: &str) -> ([u8; 11], bool) {
         let valid = |c: char| c.is_ascii_alphanumeric() || "$%'-_@~`!(){}^#&".contains(c);
         let (base, ext) = match long.rsplit_once('.') {
             Some((b, e)) if !b.is_empty() => (b, e),
@@ -412,12 +444,7 @@ impl<'a> Writer<'a> {
                 .collect()
         };
         let (b, e) = (clean(base), clean(ext));
-        let used: Vec<[u8; 11]> = self
-            .v
-            .slots(self.d, dir)
-            .into_iter()
-            .filter_map(|at| self.d.get(at..at + 11).map(|s| s.try_into().unwrap()))
-            .collect();
+        let used = &self.index(dir).shorts;
         for k in 1u32.. {
             let tail = format!("~{k}");
             let keep = 8 - tail.len();
@@ -434,18 +461,27 @@ impl<'a> Writer<'a> {
     /// Byte offsets of `n` consecutive free entry slots in the directory,
     /// growing it by a cluster if needed (FAT16's root can't grow).
     fn free_slots(&mut self, dir: u32, n: usize) -> Result<Vec<usize>, WriteError> {
+        let from = self.index(dir).free_from;
+        let slots = self.v.slots(self.d, dir);
         let mut run = Vec::new();
-        for at in self.v.slots(self.d, dir) {
+        let (mut first_free, mut run_start) = (None, 0);
+        for (i, &at) in slots.iter().enumerate().skip(from) {
             match self.d.get(at).copied().unwrap_or(0) {
                 0 | 0xE5 => {
+                    let first = *first_free.get_or_insert(i);
+                    if run.is_empty() {
+                        run_start = i;
+                    }
                     run.push(at);
                     if run.len() == n {
+                        self.index(dir).free_from = if first == run_start { run_start + n } else { first };
                         return Ok(run);
                     }
                 }
                 _ => run.clear(),
             }
         }
+        self.index(dir).free_from = first_free.unwrap_or(slots.len());
         if self.v.is_fixed_root(dir) {
             return Err(WriteError::Full);
         }
@@ -483,6 +519,7 @@ impl<'a> Writer<'a> {
             }
             self.grow_to(at + 32);
             self.d[at..at + 32].copy_from_slice(&e);
+            self.index(dir).shorts.insert(e[..11].try_into().unwrap());
         }
         let mut e = [0u8; 32];
         e[..11].copy_from_slice(&short);
@@ -496,6 +533,10 @@ impl<'a> Writer<'a> {
         let at = *slots.last().unwrap();
         self.grow_to(at + 32);
         self.d[at..at + 32].copy_from_slice(&e);
+        let ix = self.index(dir);
+        ix.shorts.insert(short);
+        let entry = Entry { name: name.to_string(), is_dir: attr & 0x10 != 0, cluster, size };
+        ix.names.entry(name.to_ascii_lowercase()).or_insert((entry, at));
         Ok(())
     }
 
@@ -506,7 +547,7 @@ impl<'a> Writer<'a> {
         for part in path.split(['/', '\\']).filter(|p| !p.is_empty()) {
             so_far.push('/');
             so_far.push_str(part);
-            match self.v.list(self.d, dir).into_iter().find(|(e, _)| e.name.eq_ignore_ascii_case(part)) {
+            match self.index(dir).names.get(&part.to_ascii_lowercase()).cloned() {
                 Some((e, _)) if e.is_dir => dir = e.cluster,
                 Some(_) => return Err(WriteError::NotAFolder(so_far)),
                 None => {
@@ -537,10 +578,13 @@ impl<'a> Writer<'a> {
         let trimmed = path.trim_start_matches(['/', '\\']);
         let (dir_path, name) = trimmed.rsplit_once(['/', '\\']).unwrap_or(("", trimmed));
         let dir = self.folder(dir_path)?;
-        if let Some((old, at)) = self.v.list(self.d, dir).into_iter().find(|(e, _)| e.name.eq_ignore_ascii_case(name)) {
+        if let Some((old, at)) = self.index(dir).names.get(&name.to_ascii_lowercase()).cloned() {
             if old.is_dir {
                 return Err(WriteError::NotAFolder(path.to_string()));
             }
+            let ix = self.index(dir);
+            ix.names.remove(&name.to_ascii_lowercase());
+            ix.free_from = 0;
             // Delete it: free its clusters, mark its records unused.
             for c in self.v.chain(self.d, old.cluster) {
                 self.fat_set(c, 0);
@@ -681,6 +725,21 @@ mod tests {
         assert_eq!(after, before + 2, "three clusters freed, one used");
         assert_eq!(read_file(&d, "Applications/Bundle/main.bin").as_deref(), Some(&b"short"[..]));
         assert_eq!(list(&d, "Applications/Bundle").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn one_writer_replaces_what_it_wrote() {
+        let mut d = volume(&[]);
+        {
+            let mut w = Writer::new(&mut d).unwrap();
+            w.file("a/long name.txt", b"one").unwrap();
+            w.file("a/other.txt", b"x").unwrap();
+            w.file("A/Long Name.TXT", b"two").unwrap();
+            w.file("a/long name.txt", b"three").unwrap();
+        }
+        let a = list(&d, "a").unwrap();
+        assert_eq!(a.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["long name.txt", "other.txt"], "the freed slots are reused");
+        assert_eq!(read_file(&d, "a/long name.txt").as_deref(), Some(&b"three"[..]));
     }
 
     #[test]

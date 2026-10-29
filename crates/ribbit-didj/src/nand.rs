@@ -35,10 +35,23 @@ pub const ECC_POS: usize = 40;
 pub fn soft_ecc(data: &[u8; 256]) -> [u8; 3] {
     // Column parities: bits 0,2,4,6 / 1,3,5,7 / 0,1,4,5 / 2,3,6,7 /
     // 0-3 / 4-7, and (bit 6) the byte's parity: nand_ecc_precalc_table.
-    const GROUPS: [u8; 7] = [0x55, 0xAA, 0x33, 0xCC, 0x0F, 0xF0, 0xFF];
+    const TABLE: [u8; 256] = {
+        const GROUPS: [u8; 7] = [0x55, 0xAA, 0x33, 0xCC, 0x0F, 0xF0, 0xFF];
+        let mut t = [0u8; 256];
+        let mut b = 0;
+        while b < 256 {
+            let mut k = 0;
+            while k < 7 {
+                t[b] |= (((b as u8 & GROUPS[k]).count_ones() & 1) as u8) << k;
+                k += 1;
+            }
+            b += 1;
+        }
+        t
+    };
     let (mut reg1, mut reg2, mut reg3) = (0u8, 0u8, 0u8);
     for (i, &b) in data.iter().enumerate() {
-        let idx = GROUPS.iter().enumerate().fold(0u8, |a, (k, g)| a | (((b & g).count_ones() & 1) as u8) << k);
+        let idx = TABLE[b as usize];
         reg1 ^= idx & 0x3F;
         if idx & 0x40 != 0 {
             reg3 ^= i as u8;
