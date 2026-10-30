@@ -366,6 +366,8 @@ pub struct Machine {
     pub restart_straps: Option<u32>,
     /// Leapster 2: restarts the BIOS requested (0x0180_B000 bit 8).
     pub restarts: u64,
+    /// Times cached RAM code was written and the cache started over.
+    pub ram_code_flushes: u64,
     /// The BIOS's idle timer, once found.
     idle_timer: Option<idle_timer::IdleTimer>,
     firmware: Firmware,
@@ -449,6 +451,11 @@ impl Machine {
             rom.push((map::CART_BASE, map::CART_BASE.saturating_add(c.rom().len() as u32)));
         }
         cpu.icache.set_rom_ranges(&rom);
+        // RAM code is cached too: the bus watches writes to it and the cache
+        // drops it when one comes (`ram_code_check`). RIBBIT_RAM_CODE=0: not cached.
+        if std::env::var("RIBBIT_RAM_CODE").as_deref() != Ok("0") {
+            cpu.icache.set_ram_code_range(map::RAM_BASE, map::RAM_BASE + firmware.ram_size());
+        }
         let mut m = Self {
             cpu,
             bus,
@@ -470,6 +477,7 @@ impl Machine {
             keep_awake: false,
             restart_straps: None,
             restarts: 0,
+            ram_code_flushes: 0,
             idle_timer: None,
             firmware,
             cartridge,
@@ -678,6 +686,7 @@ impl Machine {
     pub fn reset(&mut self) {
         self.bus = SystemBus::new(&self.firmware, self.cartridge.as_ref());
         self.cpu.reset();
+        self.cpu.icache.forget_ram_code();
         self.trace_tail = TraceRing::new(TRACE_TAIL);
         self.interrupt_counts = [0; 64];
         self.first_cart_pc = None;
@@ -771,6 +780,7 @@ impl Machine {
         }
         // Devices only change interrupt lines at an event or after a register
         // access, so outside those the per-step update can be skipped.
+        self.ram_code_check();
         if self.io.sync_needed || self.io.deferred >= self.io.horizon {
             if self.io.deferred >= self.io.horizon {
                 self.io.event_syncs += 1;
@@ -782,6 +792,18 @@ impl Machine {
             self.io.sync_needed = false;
         }
         result
+    }
+
+    /// Cached RAM code was written (`SystemBus::code_written`): everything
+    /// cached is dropped before the next instruction runs, and pages whose
+    /// code keeps changing stay uncached from now on.
+    #[inline]
+    fn ram_code_check(&mut self) {
+        if self.bus.code_written {
+            self.bus.take_code_written();
+            self.cpu.icache.ram_code_written(self.bus.volatile_code_pages());
+            self.ram_code_flushes += 1;
+        }
     }
 
     /// Records `Cpu::last_instr` (the instruction just executed).
@@ -1032,6 +1054,7 @@ impl Machine {
             self.io.deliver_pcm_irq();
         }
         self.io.deferred += ticks;
+        self.ram_code_check();
         if self.io.sync_needed || self.io.deferred >= self.io.horizon {
             if self.io.deferred >= self.io.horizon {
                 self.io.event_syncs += 1;
@@ -1319,6 +1342,8 @@ impl Machine {
         let icache = std::mem::take(&mut self.cpu.icache);
         self.cpu = s.cpu;
         self.cpu.icache = icache;
+        // (RAM changed: its cached code goes.)
+        self.cpu.icache.forget_ram_code();
         self.buttons = s.buttons;
         self.io = s.io;
         self.io.sync_needed = true;

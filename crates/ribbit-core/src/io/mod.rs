@@ -578,6 +578,8 @@ impl MachineBus<'_> {
             self.io.deliver_pcm_irq();
         }
         self.io.catch_up();
+        // (A device that wrote cached code ends the batch too.)
+        self.io.sync_needed |= self.sys.code_written;
     }
 
     fn access(&mut self, addr: u32, width: u8, write: bool, value: u32, modelled: bool) {
@@ -649,12 +651,15 @@ impl Bus for MachineBus<'_> {
         let regions = self.sys.jit_regions();
         debug_assert!(regions.iter().all(|r| r.len == 0 || !(is_mmio(r.base) || is_mmio(r.base + r.len - 1))));
         let (timing, armed, stall, code_tags, data_tags) = self.io.mem.jit_parts();
-        Some(ribbit_memory::JitView { regions, timing, armed, stall, code_tags, data_tags, exit: &self.io.sync_needed })
+        let ram_code = self.sys.ram_code_mask();
+        Some(ribbit_memory::JitView { regions, timing, armed, stall, code_tags, data_tags, exit: &self.io.sync_needed, ram_code })
     }
 
     #[inline(always)]
     fn fetch16(&mut self, addr: u32) -> u16 {
         if !is_mmio(addr) {
+            // RAM code may be cached from now on: its writes are watched.
+            self.sys.note_code(addr);
             return self.sys.read16(addr);
         }
         self.read16_mmio(addr)
@@ -697,7 +702,10 @@ impl Bus for MachineBus<'_> {
     fn write8(&mut self, addr: u32, value: u8) {
         if !is_mmio(addr) {
             self.io.mem.data(addr, true);
-            return self.sys.write8(addr, value);
+            self.sys.write8(addr, value);
+            // Cached code was written: end the batch before it can run.
+            self.io.sync_needed |= self.sys.code_written;
+            return;
         }
         self.io.mem.device();
         self.write8_mmio(addr, value)
@@ -707,7 +715,9 @@ impl Bus for MachineBus<'_> {
     fn write16(&mut self, addr: u32, value: u16) {
         if !is_mmio(addr) {
             self.io.mem.data(addr, true);
-            return self.sys.write16(addr, value);
+            self.sys.write16(addr, value);
+            self.io.sync_needed |= self.sys.code_written;
+            return;
         }
         self.io.mem.device();
         self.write16_mmio(addr, value)
@@ -717,7 +727,9 @@ impl Bus for MachineBus<'_> {
     fn write32(&mut self, addr: u32, value: u32) {
         if !is_mmio(addr) {
             self.io.mem.data(addr, true);
-            return self.sys.write32(addr, value);
+            self.sys.write32(addr, value);
+            self.io.sync_needed |= self.sys.code_written;
+            return;
         }
         self.io.mem.device();
         self.write32_mmio(addr, value)

@@ -3,6 +3,38 @@
 LeapLoader (an SD-card loader for the Leapster 2) is tested in Ribbit. Fixes found there are made in
 Ribbit directly and listed here.
 
+## 2026-10-29: code in RAM is cached and compiled (the JIT), with its writes watched
+
+* **Why:** LeapLoader's emulator apps (NES, SNES, Game Boy, GBA) are native code loaded from the SD card into
+  RAM, and they keep the CPU busy. Only ROM code was cached and compiled, so they ran interpreted: Ribbit
+  managed ~59% of real time on the user's PC, and all their sound played slow.
+* **Change:** RAM is cacheable like ROM (`ICache::set_ram_code_range`; `RIBBIT_RAM_CODE=0` turns it off).
+  `SystemBus` keeps a state per 1 KiB of RAM: every decode read (`Bus::fetch16` -> `SystemBus::note_code`)
+  marks its page as holding cached code; a write to a marked page (CPU, JIT slow path, devices, `poke8`)
+  sets `code_written`, which ends the batch (`sync_needed`) before the next instruction. At the sync
+  (`Machine::ram_code_check`) everything cached is dropped (`ICache::ram_code_written`: the generation
+  moves, so blocks and compiled code go) and no page is marked any more. A page written 3 times while its
+  code was cached is volatile: never cached again (code that keeps changing, like the GBA port's own
+  dynarec). Save states, restarts and resets forget it all (`forget_code`, `forget_ram_code`). The JIT
+  never writes a 64 KiB RAM page holding cached code itself (`JitView::ram_code`; `Pages::update`
+  leaves its write pointer 0), so those writes reach the bus.
+* **Verified (EMU):** identical results with it off and on: the GBA port (Super Mario Advance 2, 53 s
+  emulated: frame counters and screenshot) and the NES, SNES and Game Boy test scripts (149 screenshots);
+  the SNES script under `RIBBIT_JIT_CHECK=1` (1.5 G compiled instructions checked) without a mismatch.
+  Speed (research/sdboot-emu, batches on): GBA 98 s -> 16 s, Game Boy 84 -> 15 s, SNES 57 -> 13 s.
+  Unit tests of ribbit-memory, ribbit-cpu, ribbit-jit and ribbit-core pass.
+
+## 2026-10-29: the code cache can be emptied (IC_IVIC) from outside
+
+* **Why:** LeapLoader's cycle benchmark (research/snesbench, Ribbit's CPU and `MemTiming`) runs a GBA
+  dynarec that writes IC_IVIC (aux 0x10) after translating code. Ribbit ignores that write (it is logged
+  as an unmodelled aux register), so the timing never showed the refills that follow on the console.
+* **Change:** `MemTiming::invalidate_code` empties the modelled code cache. Nothing in Ribbit calls it
+  yet; snesbench calls it on a write to aux 0x10. Ribbit's own machines still ignore IC_IVIC (UNVERIFIED
+  whether any Leapster software writes it often enough to matter).
+* **Verified (EMU):** snesbench with six GBA games: ~150 extra instruction-cache misses per IC_IVIC, as
+  expected for a refill of the hot code.
+
 ## 2026-10-26: an optional high-capacity (SDHC) card
 
 * **Why:** real Leapster 2 owners mostly use SDHC cards, and Ribbit's card is standard capacity (byte

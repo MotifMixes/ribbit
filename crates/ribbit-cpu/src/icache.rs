@@ -555,7 +555,15 @@ const EMPTY: Hot = Hot {
 pub struct ICache {
     /// Half-open address ranges whose contents never change.
     ranges: Vec<(u32, u32)>,
-    /// Per 64 KiB page: every instruction starting in it lies inside one range.
+    /// RAM whose code is cached too (`set_ram_code_range`): the bus watches
+    /// writes to the code it holds, and the machine drops everything cached
+    /// from it when one comes (`ram_code_written`). (0, 0): none.
+    ram: (u32, u32),
+    /// Per 1 KiB page of `ram` (bit n of word n / 64): code that kept
+    /// changing, no longer cached.
+    volatile: Vec<u64>,
+    /// Per 64 KiB page: every instruction starting in it lies inside one
+    /// range, or inside `ram` and no volatile page.
     pages: Vec<bool>,
     /// Per slot: the pre-digested form (tag included) and the full decode.
     hot: Vec<Hot>,
@@ -594,12 +602,77 @@ impl ICache {
         self.ranges = ranges.to_vec();
         self.generation = self.generation.wrapping_add(1);
         let blank = crate::decode::decode_with(0, |_| 0);
-        (self.hot, self.instrs) =
-            if ranges.is_empty() { (Vec::new(), Vec::new()) } else { (vec![EMPTY; SETS], vec![blank; SETS]) };
+        (self.hot, self.instrs) = if ranges.is_empty() && self.ram == (0, 0) {
+            (Vec::new(), Vec::new())
+        } else {
+            (vec![EMPTY; SETS], vec![blank; SETS])
+        };
+        self.rebuild_pages();
+    }
+
+    /// Caches code in RAM `[start, end)` as well (the machine's bus watches
+    /// it: `ram_code_written`). Clears the cache.
+    pub fn set_ram_code_range(&mut self, start: u32, end: u32) {
+        self.ram = (start, end);
+        self.volatile = vec![0; ((end - start) as usize).div_ceil(1 << 10).div_ceil(64)];
+        let ranges = std::mem::take(&mut self.ranges);
+        self.set_rom_ranges(&ranges);
+    }
+
+    /// Cached RAM code was written: drops everything cached (blocks and
+    /// compiled code follow the generation), and from now on leaves
+    /// `volatile` pages (bit n of word n / 64: the 1 KiB page n of the RAM
+    /// range) uncached.
+    pub fn ram_code_written(&mut self, volatile: Vec<u64>) {
+        if self.ram == (0, 0) {
+            return;
+        }
+        self.volatile = volatile;
+        self.volatile.resize(((self.ram.1 - self.ram.0) as usize).div_ceil(1 << 10).div_ceil(64), 0);
+        self.rebuild_pages();
+        self.clear();
+    }
+
+    /// RAM was replaced (a save state, a restart): drops everything cached
+    /// and caches every RAM page again.
+    pub fn forget_ram_code(&mut self) {
+        if self.ram == (0, 0) {
+            return;
+        }
+        self.volatile.iter_mut().for_each(|w| *w = 0);
+        self.rebuild_pages();
+        self.clear();
+    }
+
+    /// Whether the 1 KiB page of RAM holding `addr` is volatile.
+    #[inline]
+    fn volatile_at(&self, addr: u32) -> bool {
+        let p = (addr.wrapping_sub(self.ram.0) >> 10) as usize;
+        self.volatile.get(p / 64).is_some_and(|w| w >> (p % 64) & 1 != 0)
+    }
+
+    /// Whether an instruction at `pc` lies inside `ram`, off volatile pages.
+    #[inline]
+    fn in_ram_code(&self, pc: u32) -> bool {
+        let (s, e) = self.ram;
+        pc >= s
+            && pc.checked_add(MAX_LEN).is_some_and(|end| end <= e)
+            && !self.volatile_at(pc)
+            && !self.volatile_at(pc + MAX_LEN - 1)
+    }
+
+    fn rebuild_pages(&mut self) {
         self.pages = (0..1u32 << 16)
             .map(|p| {
                 let (start, last) = (p << 16, (p << 16) | 0xFFFF);
-                self.ranges.iter().any(|&(s, e)| start >= s && last.checked_add(MAX_LEN).is_some_and(|end| end <= e))
+                let rom = self.ranges.iter().any(|&(s, e)| start >= s && last.checked_add(MAX_LEN).is_some_and(|end| end <= e));
+                let (s, e) = self.ram;
+                // (An instruction at the page's end may reach into the next page's first.)
+                let ram = start >= s
+                    && last.checked_add(MAX_LEN).is_some_and(|end| end <= e)
+                    && (start..=last.saturating_add(MAX_LEN)).step_by(1 << 10).all(|a| !self.volatile_at(a))
+                    && !self.volatile_at(last + MAX_LEN - 1);
+                rom || ram
             })
             .collect();
     }
@@ -628,6 +701,7 @@ impl ICache {
     #[inline(never)]
     fn cacheable_slow(&self, pc: u32) -> bool {
         self.ranges.iter().any(|&(s, e)| pc >= s && pc.checked_add(MAX_LEN).is_some_and(|end| end <= e))
+            || self.in_ram_code(pc)
     }
 
     /// The cache slot holding `pc`, filled with `decode` on a miss; None if

@@ -98,7 +98,24 @@ pub struct JitView {
     pub data_tags: *mut u32,
     /// `block_exit`'s flag.
     pub exit: *const bool,
+    /// The 64 KiB pages of `regions[0]` (RAM), bit n of word n / 64 for the
+    /// page at `regions[0].base + n * 64 KiB`, holding code the CPU cached
+    /// (`SystemBus::note_code`): a JIT must not write them itself (the bus
+    /// watches those writes), whatever `writable` says.
+    pub ram_code: [u64; RAM_CODE_WORDS],
 }
+
+/// Words of `JitView::ram_code` (64 KiB pages: RAM up to 64 MiB).
+pub const RAM_CODE_WORDS: usize = 16;
+
+/// RAM code pages (`SystemBus::note_code`): 1 KiB.
+pub const CODE_PAGE_SHIFT: u32 = 10;
+/// A page's state: code from it is cached (this flag), and how many times it
+/// was written while it was (the low bits).
+const CODE_CACHED: u8 = 0x80;
+/// Written this many times while its code was cached, a page is volatile:
+/// its code is no longer cached (code that keeps changing, like a JIT's).
+const CODE_VOLATILE_AFTER: u8 = 3;
 
 impl JitRegion {
     pub const NONE: JitRegion = JitRegion { base: 0, len: 0, ptr: std::ptr::null_mut(), writable: false };
@@ -169,6 +186,13 @@ pub struct SystemBus {
     /// When set, every RAM/VRAM byte written is logged with its old value
     /// (idle-loop detection).
     pub write_log: Option<Vec<(u32, u8)>>,
+    /// Per 1 KiB of RAM (`CODE_PAGE_SHIFT`): `CODE_CACHED` and a write count.
+    code_pages: Vec<u8>,
+    /// 64 KiB pages with a `CODE_CACHED` page (`JitView::ram_code`).
+    code_mask: [u64; RAM_CODE_WORDS],
+    /// A write hit a page whose code is cached: the CPU's cached forms of RAM
+    /// code must be dropped before the next instruction (`take_code_written`).
+    pub code_written: bool,
 }
 
 impl SystemBus {
@@ -191,7 +215,74 @@ impl SystemBus {
             cart_read_buckets: vec![0; cart.map_or(0, |c| c.rom().len().div_ceil(0x1_0000))],
             last_cart_read: None,
             write_log: None,
+            code_pages: vec![0; (firmware.ram_size() as usize).div_ceil(1 << CODE_PAGE_SHIFT)],
+            code_mask: [0; RAM_CODE_WORDS],
+            code_written: false,
         }
+    }
+
+    /// The CPU decoded an instruction half-word at `addr` (`Bus::fetch16`):
+    /// a RAM page's code may now be cached, so writes to it are watched.
+    #[inline(always)]
+    pub fn note_code(&mut self, addr: u32) {
+        let o = addr.wrapping_sub(RAM_BASE) as usize;
+        if let Some(p) = self.code_pages.get_mut(o >> CODE_PAGE_SHIFT)
+            && *p & CODE_CACHED == 0
+            && *p < CODE_VOLATILE_AFTER
+        {
+            *p |= CODE_CACHED;
+            let big = o >> 16;
+            if big < RAM_CODE_WORDS * 64 {
+                self.code_mask[big / 64] |= 1 << (big % 64);
+            }
+        }
+    }
+
+    /// A write to RAM at offset `o`, in a page whose code is cached.
+    #[cold]
+    #[inline(never)]
+    fn code_write(&mut self, o: usize) {
+        let p = &mut self.code_pages[o >> CODE_PAGE_SHIFT];
+        *p = (*p & !CODE_CACHED).saturating_add(1);
+        self.code_written = true;
+    }
+
+    /// Whether code was written (`code_written`), clearing it: then nothing
+    /// is cached any more (the CPU drops its RAM code), so no page is
+    /// watched until code is decoded from it again.
+    pub fn take_code_written(&mut self) -> bool {
+        if !self.code_written {
+            return false;
+        }
+        self.code_written = false;
+        self.code_pages.iter_mut().for_each(|p| *p &= !CODE_CACHED);
+        self.code_mask = [0; RAM_CODE_WORDS];
+        true
+    }
+
+    /// The 1 KiB pages of RAM (bit n of word n / 64) whose code is no longer
+    /// cached because it kept changing.
+    pub fn volatile_code_pages(&self) -> Vec<u64> {
+        let mut bits = vec![0u64; self.code_pages.len().div_ceil(64)];
+        for (i, p) in self.code_pages.iter().enumerate() {
+            if p & !CODE_CACHED >= CODE_VOLATILE_AFTER {
+                bits[i / 64] |= 1 << (i % 64);
+            }
+        }
+        bits
+    }
+
+    /// Forgets which pages hold code and which changed (memory replaced:
+    /// a save state, a restart); the CPU must drop its RAM code as well.
+    pub fn forget_code(&mut self) {
+        self.code_pages.iter_mut().for_each(|p| *p = 0);
+        self.code_mask = [0; RAM_CODE_WORDS];
+        self.code_written = false;
+    }
+
+    /// `JitView::ram_code`.
+    pub fn ram_code_mask(&self) -> [u64; RAM_CODE_WORDS] {
+        self.code_mask
     }
 
     #[inline(always)]
@@ -249,6 +340,7 @@ impl SystemBus {
         self.ram.copy_from_slice(ram);
         self.vram.copy_from_slice(vram);
         self.sram.copy_from_slice(sram);
+        self.forget_code();
         true
     }
 
@@ -286,7 +378,13 @@ impl SystemBus {
     pub fn poke8(&mut self, addr: u32, value: u8) -> bool {
         let region = self.decode(addr);
         match region {
-            Region::Ram(o) => self.ram.get_mut(o).map(|b| *b = value).is_some(),
+            Region::Ram(o) if o < self.ram.len() => {
+                if self.code_pages[o >> CODE_PAGE_SHIFT] & CODE_CACHED != 0 {
+                    self.code_write(o);
+                }
+                self.ram[o] = value;
+                true
+            }
             Region::Vram(o) => self.vram.get_mut(o).map(|b| *b = value).is_some(),
             Region::Sram(o) => self.sram.get_mut(o).map(|b| *b = value).is_some(),
             _ => false,
@@ -388,7 +486,13 @@ impl SystemBus {
             let w = width as usize;
             let bytes = &value.to_le_bytes()[..w];
             match self.decode(addr) {
-                Region::Ram(o) if o + w <= self.ram.len() => return self.ram[o..o + w].copy_from_slice(bytes),
+                Region::Ram(o) if o + w <= self.ram.len() => {
+                    // (Aligned accesses never span two code pages.)
+                    if self.code_pages[o >> CODE_PAGE_SHIFT] & CODE_CACHED != 0 {
+                        self.code_write(o);
+                    }
+                    return self.ram[o..o + w].copy_from_slice(bytes);
+                }
                 Region::Vram(o) if o + w <= self.vram.len() => return self.vram[o..o + w].copy_from_slice(bytes),
                 _ => {}
             }
@@ -409,6 +513,9 @@ impl SystemBus {
                     self.vram[o + i] = byte
                 }
                 Region::Ram(o) if o + i < self.ram.len() => {
+                    if self.code_pages[(o + i) >> CODE_PAGE_SHIFT] & CODE_CACHED != 0 {
+                        self.code_write(o + i);
+                    }
                     if let Some(log) = &mut self.write_log {
                         log.push((addr.wrapping_add(i as u32), self.ram[o + i]));
                     }

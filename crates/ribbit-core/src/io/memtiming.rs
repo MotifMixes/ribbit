@@ -145,6 +145,11 @@ impl MemTiming {
         }
     }
 
+    /// Empties the code cache (IC_IVIC, "invalidate instruction cache").
+    pub fn invalidate_code(&mut self) {
+        self.code = Cache::default();
+    }
+
     #[inline(always)]
     fn fetch(&mut self, addr: u32) {
         if self.code.find(addr).is_none() {

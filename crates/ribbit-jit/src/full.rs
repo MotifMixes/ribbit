@@ -194,21 +194,28 @@ pub struct Pages {
     /// Read pointers, then write pointers (`PAGES` each), as addresses.
     table: Box<[usize]>,
     /// The regions the table was built from (base, length, pointer,
-    /// writable).
+    /// writable), and the RAM pages holding cached code (`JitView::ram_code`).
     built: [(u32, u32, usize, bool); 3],
+    ram_code: [u64; ribbit_memory::RAM_CODE_WORDS],
 }
 
 impl Default for Pages {
     fn default() -> Self {
-        Pages { table: vec![0; 2 * PAGES].into_boxed_slice(), built: [(0, 0, 0, false); 3] }
+        Pages {
+            table: vec![0; 2 * PAGES].into_boxed_slice(),
+            built: [(0, 0, 0, false); 3],
+            ram_code: [0; ribbit_memory::RAM_CODE_WORDS],
+        }
     }
 }
 
 impl Pages {
-    /// Rebuilt when the regions changed since the last time.
-    pub fn update(&mut self, regions: &[ribbit_memory::JitRegion; 3]) {
+    /// Rebuilt when the regions or the RAM code pages changed since the
+    /// last time. RAM pages (`regions[0]`) holding cached code get no write
+    /// pointer: their writes go through the bus, which watches them.
+    pub fn update(&mut self, regions: &[ribbit_memory::JitRegion; 3], ram_code: &[u64; ribbit_memory::RAM_CODE_WORDS]) {
         let now = regions.map(|r| (r.base, r.len, r.ptr as usize, r.writable));
-        if now == self.built {
+        if now == self.built && *ram_code == self.ram_code {
             return;
         }
         for (base, len, _, _) in self.built {
@@ -217,16 +224,19 @@ impl Pages {
                 self.table[PAGES + page] = 0;
             }
         }
-        for (base, len, ptr, writable) in now {
+        for (i, (base, len, ptr, writable)) in now.into_iter().enumerate() {
             for page in Self::whole_pages(base, len) {
                 let host = ptr + ((page << PAGE_SHIFT) - base as usize);
                 self.table[page] = host;
-                if writable {
+                let n = page - (base as usize >> PAGE_SHIFT);
+                let code = i == 0 && ram_code.get(n / 64).is_some_and(|w| w >> (n % 64) & 1 != 0);
+                if writable && !code {
                     self.table[PAGES + page] = host;
                 }
             }
         }
         self.built = now;
+        self.ram_code = *ram_code;
     }
 
     /// The pages wholly inside `[base, base + len)`.
@@ -1040,7 +1050,7 @@ impl<B: Bus> BlockRunner<B> for Jit {
         let mut ctx = JitCtx::new(cpu, bus, now, end);
         if let Some(v) = &view {
             ctx.set_view(v);
-            self.pages.update(&v.regions);
+            self.pages.update(&v.regions, &v.ram_code);
             ctx.pages = self.pages.as_ptr();
         }
         ctx.fence = fence;
@@ -1447,7 +1457,7 @@ mod tests {
             // 1.5 pages: only the first is plain memory.
             JitRegion { base: 0x4000_0000, len: 0x1_8000, ptr: rom.as_mut_ptr(), writable: false },
             JitRegion::NONE,
-        ]);
+        ], &[0; ribbit_memory::RAM_CODE_WORDS]);
         let page = |a: u32| (a >> PAGE_SHIFT) as usize;
         assert_eq!(p.table[page(0x3C00_0000)], base);
         assert_eq!(p.table[page(0x3C01_0000)], base + 0x1_0000);
@@ -1456,12 +1466,23 @@ mod tests {
         assert_eq!(p.table[page(0x4000_0000)], rom.as_mut_ptr() as usize);
         assert_eq!(p.table[PAGES + page(0x4000_0000)], 0, "read-only");
         assert_eq!(p.table[page(0x4001_0000)], 0, "a page only half inside");
+        // RAM holding cached code: read in place, written through the bus.
+        let mut code = [0; ribbit_memory::RAM_CODE_WORDS];
+        code[0] = 0b10;
+        p.update(&[
+            JitRegion { base: 0x3C00_0000, len: 0x2_0000, ptr: ram.as_mut_ptr(), writable: true },
+            JitRegion { base: 0x4000_0000, len: 0x1_8000, ptr: rom.as_mut_ptr(), writable: false },
+            JitRegion::NONE,
+        ], &code);
+        assert_eq!(p.table[page(0x3C01_0000)], base + 0x1_0000);
+        assert_eq!(p.table[PAGES + page(0x3C01_0000)], 0, "code: no write pointer");
+        assert_eq!(p.table[PAGES + page(0x3C00_0000)], base, "no code: writable");
         // A write log makes RAM read-only to the code: rebuilt.
         p.update(&[
             JitRegion { base: 0x3C00_0000, len: 0x2_0000, ptr: ram.as_mut_ptr(), writable: false },
             JitRegion::NONE,
             JitRegion::NONE,
-        ]);
+        ], &[0; ribbit_memory::RAM_CODE_WORDS]);
         assert_eq!(p.table[PAGES + page(0x3C00_0000)], 0);
         assert_eq!(p.table[page(0x3C00_0000)], base);
         assert_eq!(p.table[page(0x4000_0000)], 0, "the old region is gone");
