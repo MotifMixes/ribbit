@@ -758,7 +758,8 @@ impl App {
             };
             // Titled from the cartridge itself (the library may not be scanned yet).
             let title = crate::didj::describe_cart(&path, &cart).map(|g| g.title);
-            self.start_didj(package, Some(cart));
+            let art = crate::didj::menu_art(&path, Some(&cart));
+            self.start_didj(package, Some(cart), art);
             if let (Some(d), Some(t)) = (&mut self.didj, title) {
                 d.title = t;
                 self.update_title();
@@ -776,7 +777,8 @@ impl App {
         }
         // A Didj package: the Didj, built from the packages beside it.
         if crate::didj::is_package(&path) {
-            return self.start_didj(path, None);
+            let art = crate::didj::menu_art(&path, None);
+            return self.start_didj(path, None, art);
         }
         // A console's built-in games: the Zippity's NAND, or a Leapster
         // BIOS's own games (that BIOS with no cartridge in).
@@ -961,12 +963,12 @@ impl App {
 
     /// Plays a Didj built from the packages in the folder of `package` (the
     /// one chosen in the library), with `cart` in its slot. It starts at its
-    /// menu, whichever package was chosen.
-    fn start_didj(&mut self, package: PathBuf, cart: Option<Vec<u8>>) {
+    /// menu; with `art` (a game chosen), Ribbit then starts that game there.
+    fn start_didj(&mut self, package: PathBuf, cart: Option<Vec<u8>>, art: Option<ribbit_didj::autostart::Art>) {
         self.end_session();
         let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match crate::didj::DidjSession::start(&dir, &self.save_dir(), cart, sink) {
+        match crate::didj::DidjSession::start(&dir, &self.save_dir(), cart, sink, art) {
             Ok(mut d) => {
                 self.fit_window = FIT_TRIES;
                 if let Some(g) = self.library.games.iter().find(|g| g.path == package) {

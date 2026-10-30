@@ -4,6 +4,44 @@
 //!   cargo run -p ribbit-didj --example didjboot -- <folder of .lfp files> [million instructions]
 
 use ribbit_didj::machine::Didj;
+use ribbit_didj::package::Meta;
+
+/// The menu art of the game on the cartridge dump at `path`.
+fn cart_art(path: &str) -> Vec<u8> {
+    use ribbit_core::fatfs;
+    let volume = ribbit_didj::cart::volume(&std::fs::read(path).expect("can't read the cartridge")).expect("no cartridge volume");
+    fatfs::list(&volume, "")
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.is_dir)
+        .find_map(|e| {
+            let meta = Meta::parse(&String::from_utf8_lossy(&fatfs::read_file(&volume, &format!("{}/meta.inf", e.name))?));
+            let file = meta.get("LargeIcon").or(meta.get("PreviewImage"))?.to_string();
+            fatfs::read_file(&volume, &format!("{}/{file}", e.name))
+        })
+        .expect("no art on the cartridge")
+}
+
+/// A PNG as ARGB pixels.
+fn read_art(png: &[u8]) -> ribbit_didj::autostart::Art {
+    let mut dec = png::Decoder::new(std::io::Cursor::new(png));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info().expect("not a PNG");
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let info = r.next_frame(&mut buf).expect("bad PNG");
+    let n = info.color_type.samples();
+    let pixels = buf[..info.buffer_size()]
+        .chunks(n)
+        .map(|c| match c {
+            [r, g, b, a] => u32::from_be_bytes([*a, *r, *g, *b]),
+            [r, g, b] => u32::from_be_bytes([0xFF, *r, *g, *b]),
+            [l, a] => u32::from_be_bytes([*a, *l, *l, *l]),
+            [l] => u32::from_be_bytes([0xFF, *l, *l, *l]),
+            _ => 0,
+        })
+        .collect();
+    ribbit_didj::autostart::Art { width: info.width as usize, pixels }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -71,8 +109,29 @@ fn main() {
             (at.parse().expect("bad DIDJ_KEYS time"), bit)
         })
         .collect();
+    // DIDJ_START=<png>: start the game with this art (its meta.inf
+    // LargeIcon or PreviewImage) from the menu, as the app does; "cart":
+    // the cartridge's game.
+    let mut auto = std::env::var("DIDJ_START").ok().map(|p| {
+        let png = if p == "cart" { cart_art(&std::env::var("DIDJ_CART").expect("DIDJ_START=cart needs DIDJ_CART")) } else { std::fs::read(&p).expect("can't read the art") };
+        ribbit_didj::autostart::AutoStart::new(read_art(&png))
+    });
+    let per_frame = (didj.cpu_hz() / 60 / 1_000_000).max(1);
+    let mut auto_buttons = 0;
     for m in 0..millions {
         didj.bus.buttons = keys.iter().filter(|&&(at, _)| (at..at + 30).contains(&m)).fold(0, |b, &(_, k)| b | k);
+        if let Some(a) = &mut auto
+            && m % per_frame == 0
+            && !a.done()
+        {
+            let (w, _, px) = didj.bus.frame();
+            let b = a.frame(if w == 320 { &px } else { &[] }, 0);
+            if b != 0 && auto_buttons == 0 {
+                println!("autostart: buttons {b:#x} at {m} million");
+            }
+            auto_buttons = b;
+        }
+        didj.bus.buttons |= auto_buttons;
         let out = didj.bus.uart.first().map_or("", |s| s.as_str());
         (quiet, len) = if out.len() == len { (quiet + 1, len) } else { (0, out.len()) };
         let seen = out.matches("# ").count();

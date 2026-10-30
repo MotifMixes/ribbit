@@ -3490,6 +3490,7 @@ dependencies = [
  "bincode",
  "crc32fast",
  "miniz_oxide 0.8.9",
+ "png",
  "ribbit-arm",
  "ribbit-armjit",
  "ribbit-core",

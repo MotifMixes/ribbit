@@ -19,6 +19,7 @@
 //! * `dma`: the DMA controller (audio out paced at the sample rate).
 //! * `mlc`: the display's layer compositor (the RGB layers; not video yet).
 
+pub mod autostart;
 pub mod brio;
 pub mod cart;
 pub mod dma;

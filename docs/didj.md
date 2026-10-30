@@ -252,6 +252,21 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
 `didjboot` with `DIDJ_FRAMES=<folder>` saves the screen every 100 million instructions when it changed, and
 `DIDJ_FRAME=<file>` the last one (PPM).
 
+## Menu and starting a game (VERIFIED in Ribbit, firmware 1.35.2.4222, English)
+
+- AppManager always opens the menu (libLightningBase: `CGamesManager::PushApp("BLT/BLT.so")`); the menu
+  pushes the chosen game's App.so. No flag file or argument starts a game directly.
+- First start: Select your Country, "Is this OK?", name keyboard, grade wheel, confirmations, then an intro
+  video and the main wheel. Later starts: "Select a name" (profiles, then GUEST; the first highlighted),
+  then the main wheel at "My Didj"; DOWN is "My Games" ("Select a Game": the cartridge first, then JetPack
+  Heroes). A game's panel shows its meta.inf `LargeIcon` (else `PreviewImage`), a 256x128 texture drawn
+  unscaled. Once a profile has played, an animated avatar sits in the panel's corner.
+- Ribbit's library starts a chosen game (`ribbit_didj::autostart`): it recognises "Select a name", the
+  wheel's "My Didj"/"My Games" labels and "Select a Game" from white-text masks (`menu_masks.bin`, made from
+  Ribbit's own frames), and the game by its art; it presses A/DOWN only on a recognised, still screen and
+  gives up after two minutes or when the player presses a button. A console not yet set up stays at setup.
+  didjboot: `DIDJ_START=<art png>` or `DIDJ_START=cart`.
+
 ## Power off and unclean starts (VERIFIED in Ribbit; sources: hwmon-lf1000.c, monitord, launch_main, init.d/ubi)
 
 - Power button: GPIO port C pin 20, high while pressed, rising-edge interrupt; hwmon-lf1000 reports
