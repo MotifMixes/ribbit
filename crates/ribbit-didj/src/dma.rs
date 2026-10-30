@@ -199,6 +199,17 @@ impl Dma {
         }
     }
 
+    /// Processor cycles until a busy channel finishes (`u64::MAX` if none
+    /// is busy).
+    pub fn next_event(&self, cpu_hz: u64) -> u64 {
+        let rate = self.pcm_rate * 4;
+        if rate == 0 {
+            return u64::MAX;
+        }
+        // `tick` adds cycles * rate to acc and counts acc / cpu_hz.
+        self.ch.iter().filter(|c| c.busy).map(|c| (c.left * cpu_hz).saturating_sub(c.acc).div_ceil(rate)).min().unwrap_or(u64::MAX)
+    }
+
     pub fn irq(&self) -> bool {
         self.ch.iter().any(|c| c.intenb && c.intpend)
     }

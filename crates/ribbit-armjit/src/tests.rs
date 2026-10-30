@@ -169,6 +169,16 @@ fn machine(seed: u64) -> (Arm, Flat) {
 
 #[test]
 fn lockstep_random_programs() {
+    lockstep(false);
+}
+
+/// The same with blocks run one after another (`step`'s `chain`).
+#[test]
+fn lockstep_random_programs_chained() {
+    lockstep(true);
+}
+
+fn lockstep(chained: bool) {
     if !SUPPORTED {
         return;
     }
@@ -184,7 +194,7 @@ fn lockstep_random_programs() {
         }
         while b.cycles < END {
             let left = END - b.cycles;
-            jit.step(&mut b, &mut bbus, left);
+            jit.step(&mut b, &mut bbus, left, if chained { left } else { 0 });
         }
         blocks += jit.stats.blocks_run;
         assert_eq!(a.r, b.r, "seed {seed}: registers");
@@ -219,7 +229,7 @@ fn find_divergence() {
     jit.hot = 1;
     while b.cycles < 20_000 {
         let (pc, before) = (b.r[15], b.clone());
-        jit.step(&mut b, &mut bbus, u64::MAX);
+        jit.step(&mut b, &mut bbus, u64::MAX, 0);
         while a.cycles < b.cycles {
             a.step(&mut abus);
         }
@@ -259,7 +269,7 @@ fn ldm_in_a_block() {
     cpu.r[10] = 0x8000;
     let mut jit = ArmJit::new(RAM as u32);
     jit.hot = 1;
-    jit.step(&mut cpu, &mut bus, u64::MAX);
+    jit.step(&mut cpu, &mut bus, u64::MAX, 0);
     assert_eq!(jit.stats.blocks_run, 1);
     assert_eq!(&cpu.r[..5], &[1, 2, 3, 4, 3]);
 }
@@ -282,7 +292,7 @@ fn bench_loop() {
     let n = 100_000_000;
     let t = std::time::Instant::now();
     while cpu.cycles < n {
-        jit.step(&mut cpu, &mut bus, u64::MAX);
+        jit.step(&mut cpu, &mut bus, u64::MAX, 0);
     }
     let s = t.elapsed().as_secs_f64();
     println!("{} M instructions/s, {:.1} ns a block (r0 {})", (n as f64 / s / 1e6) as u64, s * 1e9 / jit.stats.blocks_run as f64, cpu.r[0]);

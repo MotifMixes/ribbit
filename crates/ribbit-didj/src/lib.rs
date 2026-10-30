@@ -17,13 +17,17 @@
 //!   UARTs, ADC, SPI0); every other register is logged.
 //! * `timer`: the timers and the interrupt controller.
 //! * `dma`: the DMA controller (audio out paced at the sample rate).
+//! * `enhanced`: Enhanced mode's fixes for the firmware's own faults.
+//! * `jffs2`: reading and writing files in the JFFS2 file systems.
 //! * `mlc`: the display's layer compositor (the RGB layers; not video yet).
 
 pub mod autostart;
 pub mod brio;
 pub mod cart;
 pub mod dma;
+pub mod enhanced;
 pub mod ga3d;
+pub mod jffs2;
 pub mod machine;
 pub mod mlc;
 pub mod nand;

@@ -54,9 +54,19 @@ fn main() {
     if let Ok(path) = std::env::var("DIDJ_SAVE") {
         flash.apply_changes(&std::fs::read(&path).expect("can't read the save")).unwrap_or_else(|e| panic!("{e}"));
     }
+    // Enhanced mode's fixes (ribbit_didj::enhanced); DIDJ_ORIGINAL=1 runs
+    // the firmware as shipped.
+    let original = ribbit_didj::nand_from_packages(dir.as_ref(), std::env::var_os("DIDJ_NO_BRIO").is_none()).unwrap_or_else(|e| panic!("{e}"));
+    let enhanced = std::env::var_os("DIDJ_ORIGINAL").is_none();
+    let fixed = ribbit_didj::enhanced::apply(&mut flash, &original, enhanced);
+    eprintln!("enhanced: {fixed} fixes; factory data added: {}", flash.add_factory_data());
 
     let base = flash.clone();
-    let mut didj = Didj::new(flash);
+    let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(enhanced));
+    // DIDJ_CPU_SCALE=<n>: the processor at n times its clock.
+    if let Some(n) = std::env::var("DIDJ_CPU_SCALE").ok().and_then(|v| v.parse().ok()) {
+        didj.set_cpu_scale(n);
+    }
     // DIDJ_CART=<file>: a cartridge dump in the slot.
     if let Ok(path) = std::env::var("DIDJ_CART") {
         let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));

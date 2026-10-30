@@ -86,6 +86,16 @@ pub const PARTITIONS: [Partition; 8] = [
     Partition { name: "Brio", offset: 0x0220_0000, size: 0x0DE0_0000 },
 ];
 
+/// The serial number a console leaves the factory with, in
+/// /mfgdata/UnitID.txt (the only file the firmware reads there). Its form is
+/// what init.d/mass_storage checks: 16 hex digits, starting "00000E" and the
+/// board revision (Ribbit's board_id reads 0). The last 8 digits are a
+/// GUESS. Without it, a start with /flags/needs_repair set dies in
+/// mass_storage (`set -e`, then "echo > /Didj/brd.rev" on the unmounted
+/// /Didj), the USB driver never loads, launch_main drops the flag and shows
+/// "Download Failed" where a real console shows the tune-up screen.
+pub const UNIT_ID: &str = "00000E0000000001\n";
+
 pub fn partition(name: &str) -> Option<Partition> {
     PARTITIONS.iter().copied().find(|p| p.name == name)
 }
@@ -120,6 +130,23 @@ impl Nand {
     pub fn page_mut(&mut self, n: usize) -> &mut [u8] {
         let b = self.blocks[n / PAGES_PER_BLOCK].get_or_insert_with(|| vec![0xFF; PAGE_RAW * PAGES_PER_BLOCK].into());
         &mut b[n % PAGES_PER_BLOCK * PAGE_RAW..][..PAGE_RAW]
+    }
+
+    /// Writes the factory's serial number (`UNIT_ID`) to an empty
+    /// Manufacturing_Data partition, as a JFFS2 file /mfgdata/UnitID.txt.
+    /// Returns whether it was written.
+    pub fn add_factory_data(&mut self) -> bool {
+        let p = partition("Manufacturing_Data").unwrap();
+        if (p.offset / BLOCK..(p.offset + p.size) / BLOCK).any(|b| self.is_written(b)) {
+            return false;
+        }
+        self.write(p.offset, &crate::jffs2::new_file(2, "UnitID.txt", UNIT_ID.as_bytes(), 0));
+        true
+    }
+
+    /// Whether block `n` was written since it was last erased.
+    pub fn is_written(&self, n: usize) -> bool {
+        self.blocks[n].is_some()
     }
 
     /// Erases block `n` (to 0xFF, data and spare).
@@ -218,8 +245,9 @@ impl Nand {
     /// The flash as LeapFrog Connect leaves it after a firmware install:
     /// lightning-boot, the boot flags, both kernel and root file system
     /// copies, and an erased Brio partition (brio::install writes it with the
-    /// other packages). Manufacturing_Data stays erased: what it
-    /// holds on a real console is UNKNOWN.
+    /// other packages). Manufacturing_Data stays erased here; the factory's
+    /// serial number is added at power-on (`add_factory_data`), so saves
+    /// made before it keep matching this image.
     pub fn from_firmware(fw: &Firmware) -> Result<Self, String> {
         let missing = fw.missing();
         if !missing.is_empty() {

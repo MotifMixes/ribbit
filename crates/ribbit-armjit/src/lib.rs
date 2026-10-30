@@ -384,10 +384,12 @@ impl ArmJit {
         ran
     }
 
-    /// Runs a compiled block, or one instruction (or a pending interrupt)
+    /// Runs compiled blocks, or one instruction (or a pending interrupt)
     /// with the interpreter. A block runs only if its instruction count
-    /// fits in `budget` cycles. Returns false while waiting for an interrupt.
-    pub fn step<B: ArmBus>(&mut self, cpu: &mut Arm, bus: &mut B, budget: u64) -> bool {
+    /// fits in `budget` cycles; more blocks follow while fewer than `chain`
+    /// cycles have run (0: one block). Returns false while waiting for an
+    /// interrupt.
+    pub fn step<B: ArmBus>(&mut self, cpu: &mut Arm, bus: &mut B, budget: u64, chain: u64) -> bool {
         if !self.enabled
             || !self.start
             || cpu.waiting
@@ -442,9 +444,35 @@ impl ArmJit {
         if len as u64 > budget {
             return self.interpret(cpu, bus, true);
         }
-        self.run(cpu, bus, code, user);
-        self.stats.blocks_run += 1;
-        self.stats.jit_instructions += len as u64;
+        // Blocks found in the cache run one after another for up to `chain`
+        // cycles, without going back to the caller, while nothing it handles
+        // between blocks is needed: an interrupt, Thumb code, waiting,
+        // written code, a translation or privilege change.
+        let (first, mut code, mut len) = (cpu.cycles, code, len);
+        loop {
+            let exit = self.run(cpu, bus, code, user);
+            self.stats.blocks_run += 1;
+            self.stats.jit_instructions += len as u64;
+            let ran = cpu.cycles - first;
+            if exit != exit::DONE
+                || ran >= chain
+                || cpu.waiting
+                || cpu.cpsr & psr::T != 0
+                || cpu.fiq_line && cpu.cpsr & psr::F == 0
+                || cpu.irq_line && cpu.cpsr & psr::I == 0
+                || (cpu.mode() == mode::USR) != user
+                || cpu.cp15.generation != self.fast_for
+                || bus.code_watch().is_some_and(|w| !w.written.is_empty())
+            {
+                break;
+            }
+            let va = cpu.r[15];
+            let next = self.recent[user as usize * RECENT + (va >> 2) as usize % RECENT];
+            if next.va != va || next.len as u64 > budget.saturating_sub(ran) {
+                break;
+            }
+            (code, len) = (next.code, next.len);
+        }
         self.start = true;
         true
     }

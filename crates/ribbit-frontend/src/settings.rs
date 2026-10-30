@@ -10,6 +10,10 @@ use winit::keyboard::KeyCode;
 
 pub const MAX_RECENT: usize = 8;
 
+fn default_didj_cpu_scale() -> u32 {
+    2
+}
+
 fn default_true() -> bool {
     true
 }
@@ -191,6 +195,15 @@ pub struct Settings {
     /// library (save is always done first; skipped if a save state was loaded).
     #[serde(default = "default_true")]
     pub close_with_shutdown: bool,
+    /// Didj: Enhanced mode, the firmware's own faults fixed
+    /// (`ribbit_didj::enhanced`); off: Original, as LeapFrog shipped it.
+    /// From the next power-on.
+    #[serde(default = "default_true")]
+    pub didj_enhanced: bool,
+    /// Didj, Enhanced mode: the processor at this many times its 393 MHz
+    /// (1 = original). From the next power-on.
+    #[serde(default = "default_didj_cpu_scale")]
+    pub didj_cpu_scale: u32,
     /// Favorited games (paths), in the order they were starred.
     pub favorites: Vec<PathBuf>,
     /// Tabs where "Internal" (built-in) games are hidden; key is the tab name
@@ -264,6 +277,8 @@ impl Default for Settings {
             record_encoder: RecordEncoder::H264,
             record_folder: None,
             close_with_shutdown: false,
+            didj_enhanced: true,
+            didj_cpu_scale: default_didj_cpu_scale(),
             favorites: Vec::new(),
             hide_builtin_tabs: BTreeSet::new(),
             folders: Vec::new(),

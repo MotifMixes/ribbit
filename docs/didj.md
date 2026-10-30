@@ -283,6 +283,87 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
 rm -f /flags/needs_repair
 poweroff'.
 
+## Enhanced and Original modes (Ribbit; `ribbit_didj::enhanced`, Didj menu)
+
+Enhanced (the default) fixes faults in the Didj's own software; Original runs it as LeapFrog shipped it.
+Either applies from the next power-on (start or Reset; a loaded state keeps its NAND). didjboot:
+`DIDJ_ORIGINAL=1`, `DIDJ_CPU_SCALE=n`. Research (2026-10-30): no public list of Didj firmware bugs exists (LeapFrog's support
+pages only give "tune-up"/sync advice; the opendidj RELEASE-NOTES bugs are pre-release, fixed by 1.0.3).
+Players' reports (via the user): crashes when launching a game or while playing, sometimes ending at the
+tune-up screen; lag when files load, slow loading, a laggy menu, audio lag when buttons are mashed, slowdown
+with many files; pulling a cartridge out turns the console off. Found by reading firmware 1.35.2.4222:
+
+**The tune-up screen** ("Please Connect To Your Computer / Your Didj needs a tune up", ATTENTION_NEEDED.png)
+is launch_main's PENDING_REPAIR_STATE; only plugging in USB leaves it. launch_main enters it when
+/flags/needs_repair is set (kept in step with the USB driver's flag, `update_needs_repair`):
+
+1. At power-on, after a power-off without a shutdown (/flags/booted still there): init.d/ubi's file check
+   of /Didj found anything (or took over 30 s, or printed over 20 lines).
+2. After AppManager (the menu, and the game running in it) exits abnormally (any code but 0, 3, 42; e.g.
+   134 abort, 139 segmentation fault): `usbctl -a fsck` found anything. A crash leaves files half written.
+3. With /Didj/doom present (a package install from a cartridge, pkupdate-cart, or a LeapFrog Connect
+   transfer cut short) at power-on, or after a USB transfer: `usbctl -a fsck` found anything (else
+   "Download Failed").
+
+Every check is fsck_watch.sh -> fsck_vfat.sh -> `fsck.vfat -n` (dosfsck 2.11): look only. The repair step
+is commented out ("skipping fsck delete option on errors"); the repair came from the PC side.
+
+- **FIXED (Enhanced): checks repair first.** fsck_watch.sh runs `/sbin/fsck.vfat -a $DEVICE` (log
+  /tmp/fsck_repair.log) before its timed check. Covers all three paths.
+- **FIXED (Enhanced): a crash goes back to the menu.** Without a finding, launch_main turned the console
+  off after a crash (only a game's 139 with /tmp/appso restarted), although its comment says "Restart
+  AppManager instead of powering down". Enhanced restarts AppManager (removing /tmp/appso so the menu
+  comes up), at most 3 times per power-on.
+- **FIXED (both modes, Ribbit accuracy): the factory serial number.** A real console has
+  /mfgdata/UnitID.txt; Ribbit's Manufacturing_Data was empty. Then init.d/mass_storage (`set -e`) died on
+  `echo $BRD_REV > /Didj/brd.rev` whenever /Didj was not mounted (path 1), g_file_storage never loaded,
+  launch_main dropped needs_repair and showed "Download Failed" instead of the tune-up screen.
+  `Nand::add_factory_data` writes "00000E0000000001" (form from mass_storage's check; last 8 digits a
+  GUESS) at power-on when the partition is empty.
+- How Enhanced writes them: each edited file (`EDITS`) as newer uncompressed JFFS2 nodes (4 KiB each,
+  crates/ribbit-didj/src/jffs2.rs) in the first unused block after each root file system image
+  (read-only mount, so the kernel never writes there).
+- **VERIFIED in didjboot (2026-10-30):** an unclean save with 2 lost clusters: Original exit_code=1 then
+  the tune-up screen; Enhanced "Reclaimed 2 unused clusters", the menu. A lost cluster written to
+  /dev/mtdblock9, then `killall -ABRT AppManager`: Original "*** NEEDS REPAIR ***", tune-up screen;
+  Enhanced "Reclaimed 1 unused cluster", the menu again. ABRT with a clean volume: Original powers down;
+  Enhanced the menu again. A Ribbit power cut in the middle of an 80 MB write left the volume clean.
+- **FIXED (Enhanced): more memory.** Linux got `mem=18M` (lightning-boot board.h, CONFIG_MACH_LF_LF1000;
+  video and 3D memory at 18-32 MB, LF1000_MLC_FB_BASE 0x01200000 built into the kernel): ~16 MB for system
+  and game, no swap, MemFree ~3.5 MB at the menu, a small file cache (files re-read with software ECC).
+  Enhanced: 64 MB of SDRAM (`enhanced::SDRAM_SIZE`) and lightning-boot's four command lines start
+  `mem=32M@32M mem=18M` (in place of `mem=18M init=/sbin/init`, the default init): 50 MB, as LeapFrog's 64 MB
+  development board had (`mem=50M`, CONFIG_MACH_ME_LF1000, with the video memory moved, which this kernel
+  can't). The high bank comes FIRST: in order, mem_init frees the page structures of the gap, pfn_valid()
+  stays true for the video memory there, and AppManager's mapping of the screen oopsed (NULL pointer at
+  0x62); out of order the kernel says "MEM: unordered memory banks. Not freeing memmap." and keeps them.
+  VERIFIED: "Memory: 32MB 18MB = 50MB total", MemFree ~36 MB at the menu, the menu, Clone Wars' demo.
+- **FIXED (Enhanced): a faster processor.** `Didj::set_cpu_scale`: the processor runs n times its clock
+  (n x 393 MHz; Didj menu: original, 2x (default), 3x); timers, DMA sound and frames keep theirs (only
+  `clocks().0` is scaled), so time stays right and games get more instructions per frame. Start-up to the
+  menu: 12.7 s (1x) -> 11.2 s (2x) of Didj time. Host cost: the Clone Wars demo, 76 s of Didj time, 51.6 s
+  CPU at 1x, 58.5 s at 2x (one P-core): mostly idle, so a faster clock lengthens idle more than work.
+  Ribbit counts one cycle per instruction (a real ARM926 takes more: caches, memory), so its 1x already
+  gives games about as much as a real console or more.
+- **Ribbit speed (both modes):** waiting for an interrupt now skips to the next timer or DMA event, the
+  next frame or the end of the run (was 64 cycles at a time: 290 million interpreted waits in the demo);
+  the clocks and the GPIO detection are worked out again only after their registers (or the inputs)
+  change; `ArmJit::step` runs cached blocks one after another within the slice (`chain`; lockstep test
+  `lockstep_random_programs_chained`). Clone Wars demo, 30000 M cycles on one P-core: 71.4 s -> 50.5 s CPU.
+  The rest is the compiled code itself (~6.5 instructions and ~38 ns a block; register caching and direct
+  block links would be next): ~170 M instructions a second while the console is busy.
+- **Cartridges out or in while on:** AppManager exits 3, launch_main shows REINSERT_CART ("You will need to
+  restart your Didj") and powers off on the next change; arch_reset is empty on the LF1000 ("XXX: this
+  doesn't apply"), so the firmware can't restart itself, and the kernel probes the slot only at start-up.
+  Ribbit already swaps cartridges cleanly: choosing another one presses power, waits for the power cut and
+  starts again with it (and the game); no change made.
+- **By design, not changed:** the "Get connected!" reminder every 5 logins or 100 Bitz (BLT.so,
+  NumLoginsSinceLastConnect); power-off when a cartridge goes in while on (LeapFrog: "correct
+  functionality").
+- **Saves from before the .nandimage fingerprint (before fc0be81)** mix two FAT layouts when applied to
+  today's image: dosfsck 2.11 then runs for many minutes (more than 10 emulated) and fsck.fat 4.2 loops.
+  The app sets such saves aside; don't test with them.
+
 ## Plan
 
 1. **M1 (done):** these notes, the package reader, and the NAND image.
@@ -294,7 +375,7 @@ poweroff'.
 5. **M5:** audio and buttons.
 6. **M6:** 3D engine. The command processor, primitive processor, GTE, clipper, TSE and rasterizer draw the
    menu (2026-10-29).
-7. **M7:** frontend, saves, and an Enhanced/Original mode toggle.
+7. **M7:** frontend, saves, and an Enhanced/Original mode toggle (done 2026-10-30, see above).
 8. **M8:** speed (ARM JIT).
 
 ## Save states (Ribbit)

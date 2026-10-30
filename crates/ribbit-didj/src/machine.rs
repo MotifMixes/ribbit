@@ -15,6 +15,8 @@ use ribbit_armjit::ArmJit;
 use crate::nand::{self, Nand};
 use crate::timer::{self, Timers};
 
+/// The Didj's SDRAM (Linux gets the first 18 MB, `mem=18M`; video and 3D
+/// memory sit above). Enhanced mode adds a second 32 MB (`enhanced`).
 pub const SDRAM_SIZE: usize = 32 << 20;
 
 /// How much of the NAND the chip copies to SDRAM 0 before running it.
@@ -277,6 +279,20 @@ pub struct Bus {
     /// GPIO detected flags and the input levels last seen, per port.
     gpio_det: [u32; GPIO_PORTS],
     gpio_last: [u32; GPIO_PORTS],
+    /// `Didj::clocks` as last worked out; None after a clock register write.
+    #[serde(skip)]
+    clocks: Option<(u64, [Option<u64>; 2])>,
+    /// `gpio_tick` must look again: a GPIO register was written, or a run
+    /// started (the buttons and the cartridge change only between runs).
+    /// Otherwise its last answer (`gpio_irq`) still holds.
+    #[serde(skip, default = "yes")]
+    gpio_dirty: bool,
+    #[serde(skip)]
+    gpio_irq: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Bus {
@@ -307,6 +323,10 @@ impl Bus {
     /// Latches the GPIO detect flags from the input levels; true when an
     /// enabled one is set.
     fn gpio_tick(&mut self) -> bool {
+        if !self.gpio_dirty {
+            return self.gpio_irq;
+        }
+        self.gpio_dirty = false;
         let mut irq = false;
         for port in 0..GPIO_PORTS {
             let base = GPIO + port as u32 * 0x40;
@@ -320,6 +340,7 @@ impl Bus {
             self.gpio_last[port] = pad;
             irq |= self.gpio_det[port] & self.reg(base + GPIOINTENB) != 0;
         }
+        self.gpio_irq = irq;
         irq
     }
 
@@ -470,6 +491,12 @@ impl Bus {
     }
 
     fn io_write(&mut self, addr: u32, v: u32, size: u32) {
+        if addr == timer::CLKMODEREG || addr == timer::PLLSETREG0 || addr == timer::PLLSETREG0 + 4 {
+            self.clocks = None;
+        }
+        if (GPIO..GPIO + 0x40 * GPIO_PORTS as u32).contains(&addr) {
+            self.gpio_dirty = true;
+        }
         if let Some(port) = Self::nand_port(addr) {
             match port {
                 NFCMD => self.nand_command(v as u8),
@@ -539,7 +566,7 @@ impl Bus {
     fn read_n(&mut self, addr: u32, size: u32) -> u32 {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
         let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
-        if a + size as usize <= SDRAM_SIZE {
+        if a + size as usize <= self.sdram.len() {
             return match size {
                 4 => u32::from_le_bytes(self.sdram[a..a + 4].try_into().unwrap()),
                 2 => u16::from_le_bytes(self.sdram[a..a + 2].try_into().unwrap()) as u32,
@@ -577,7 +604,7 @@ impl Bus {
     fn write_n(&mut self, addr: u32, v: u32, size: u32) {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
         let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
-        if a + size as usize <= SDRAM_SIZE {
+        if a + size as usize <= self.sdram.len() {
             self.sdram[a..a + size as usize].copy_from_slice(&v.to_le_bytes()[..size as usize]);
             self.code.wrote(a);
             return;
@@ -651,10 +678,23 @@ pub struct Didj {
     /// Compiled blocks run only when they fit in the slice, so the results
     /// match the interpreter's exactly (for checking the JIT; slower).
     pub exact: bool,
+    /// The processor runs this many times its clock (Enhanced mode's faster
+    /// processor; 1 on a real console). Timers, sound and the screen keep
+    /// their own clocks. Set with `set_cpu_scale`.
+    #[serde(skip, default = "one")]
+    cpu_scale: u32,
+}
+
+fn one() -> u32 {
+    1
 }
 
 fn new_jit() -> ArmJit {
     ArmJit::new(SDRAM_SIZE as u32)
+}
+
+fn jit_for(sdram: usize) -> ArmJit {
+    ArmJit::new(sdram as u32)
 }
 
 /// Save states: this number, then the machine (bincode, deflated), then the
@@ -687,18 +727,26 @@ impl Didj {
         let machine = state.get(12..12usize.checked_add(len).ok_or_else(bad)?).ok_or_else(bad)?;
         let machine = miniz_oxide::inflate::decompress_to_vec(machine).map_err(|_| bad())?;
         let mut d: Didj = bincode::deserialize(&machine).map_err(|e| e.to_string())?;
+        d.jit = jit_for(d.bus.sdram.len());
         let mut nand = base.clone();
         nand.apply_changes(&state[12 + len..])?;
         d.bus.nand = nand;
         d.bus.cart = self.bus.cart.take();
         d.exact = self.exact;
+        d.cpu_scale = self.cpu_scale;
         *self = d;
         Ok(())
     }
 
     /// Powers on: the start of the NAND is copied to SDRAM 0 and run.
     pub fn new(flash: Nand) -> Self {
-        let mut sdram = vec![0; SDRAM_SIZE];
+        Self::with_sdram(flash, SDRAM_SIZE)
+    }
+
+    /// Powers on with `sdram` bytes of SDRAM (`SDRAM_SIZE` on a real
+    /// console; more in Enhanced mode).
+    pub fn with_sdram(flash: Nand, sdram: usize) -> Self {
+        let mut sdram = vec![0; sdram];
         sdram[..BOOT_COPY].copy_from_slice(&flash.read(0, BOOT_COPY));
         let bus = Bus {
             sdram,
@@ -715,6 +763,9 @@ impl Didj {
             powered_off: false,
             gpio_det: [0; GPIO_PORTS],
             gpio_last: [0; GPIO_PORTS],
+            clocks: None,
+            gpio_dirty: true,
+            gpio_irq: false,
             regs: Regs::default(),
             touched: BTreeMap::new(),
             recent: Default::default(),
@@ -723,23 +774,39 @@ impl Didj {
             pc: 0,
             frame_cycles: 0,
         };
-        Self { cpu: Arm::new(), bus, jit: new_jit(), exact: false }
+        let jit = jit_for(bus.sdram.len());
+        Self { cpu: Arm::new(), bus, jit, exact: false, cpu_scale: 1 }
     }
 
     /// The processor clock and the PLL outputs, from the clock registers.
     /// Before they are set: 393 MHz (GUESS: the boot ROM's setting is
     /// UNKNOWN).
-    fn clocks(&self) -> (u64, [Option<u64>; 2]) {
+    fn clocks(&mut self) -> (u64, [Option<u64>; 2]) {
+        if let Some(c) = self.bus.clocks {
+            return c;
+        }
+        let c = self.work_out_clocks();
+        self.bus.clocks = Some(c);
+        c
+    }
+
+    fn work_out_clocks(&self) -> (u64, [Option<u64>; 2]) {
         let reg = |a: u32| self.bus.regs.get(&a).copied().unwrap_or(0);
         let plls = [timer::pll_hz(reg(timer::PLLSETREG0)), timer::pll_hz(reg(timer::PLLSETREG0 + 4))];
         let mode = reg(timer::CLKMODEREG);
         let cpu = plls.get((mode >> 4 & 3) as usize).copied().flatten().map(|p| p / ((mode & 0xF) as u64 + 1));
-        (cpu.unwrap_or(393_000_000), plls)
+        (cpu.unwrap_or(393_000_000) * self.cpu_scale as u64, plls)
+    }
+
+    /// Runs the processor at `scale` times its clock (`cpu_scale`).
+    pub fn set_cpu_scale(&mut self, scale: u32) {
+        self.cpu_scale = scale.max(1);
+        self.bus.clocks = None;
     }
 
     /// The processor clock (Hz).
     pub fn cpu_hz(&self) -> u64 {
-        self.clocks().0
+        self.bus.clocks.unwrap_or_else(|| self.work_out_clocks()).0
     }
 
     /// Runs `n` processor cycles (one per instruction for now), the timers
@@ -748,6 +815,8 @@ impl Didj {
         const SLICE: u64 = 64;
         let start = self.cpu.instructions;
         let end = self.cpu.cycles + n;
+        // The buttons or the cartridge may have changed since the last run.
+        self.bus.gpio_dirty = true;
         while self.cpu.cycles < end && !self.bus.powered_off {
             let before = self.cpu.cycles;
             // Compiled blocks may end a slice up to 31 instructions late
@@ -755,9 +824,16 @@ impl Didj {
             while self.cpu.cycles - before < SLICE {
                 self.bus.pc = self.cpu.r[15];
                 let budget = if self.exact { SLICE - (self.cpu.cycles - before) } else { u64::MAX };
-                if !self.jit.step(&mut self.cpu, &mut self.bus, budget) {
-                    // Waiting for an interrupt: skip to the next slice.
-                    self.cpu.cycles += SLICE - 1;
+                let chain = SLICE - (self.cpu.cycles - before);
+                if !self.jit.step(&mut self.cpu, &mut self.bus, budget, chain) {
+                    // Waiting for an interrupt: skip to whichever comes
+                    // first of the next timer or DMA event, the next frame
+                    // and the end of the run (nothing else changes inside a
+                    // run), at least to the next slice.
+                    let (cpu_hz, plls) = self.clocks();
+                    let frame = (cpu_hz / FRAME_HZ).saturating_sub(self.bus.frame_cycles);
+                    let skip = self.bus.timers.next_event(cpu_hz, plls).min(self.bus.dma.next_event(cpu_hz)).min(frame).min(end.saturating_sub(self.cpu.cycles));
+                    self.cpu.cycles += skip.max(SLICE) - 1;
                     break;
                 }
             }

@@ -961,6 +961,13 @@ impl App {
         }
     }
 
+    /// The Didj's mode from the settings: Enhanced, and the processor's
+    /// clock multiplier (1 in Original mode).
+    fn didj_mode(&self) -> crate::didj::Mode {
+        let enhanced = self.settings.didj_enhanced;
+        crate::didj::Mode { enhanced, cpu_scale: if enhanced { self.settings.didj_cpu_scale.clamp(1, 3) } else { 1 } }
+    }
+
     /// Plays a Didj built from the packages in the folder of `package` (the
     /// one chosen in the library), with `cart` in its slot. It starts at its
     /// menu; with `art` (a game chosen), Ribbit then starts that game there.
@@ -968,7 +975,7 @@ impl App {
         self.end_session();
         let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match crate::didj::DidjSession::start(&dir, &self.save_dir(), cart, sink, art) {
+        match crate::didj::DidjSession::start(&dir, &self.save_dir(), cart, sink, art, self.didj_mode()) {
             Ok(mut d) => {
                 self.fit_window = FIT_TRIES;
                 if let Some(g) = self.library.games.iter().find(|g| g.path == package) {
@@ -2404,7 +2411,7 @@ impl App {
             self.ui.toast("Reset");
         }
         if let Some(d) = &self.didj {
-            d.reset();
+            d.reset(self.didj_mode());
             self.ui.toast("Reset");
         }
         if let Some(s) = &mut self.session {

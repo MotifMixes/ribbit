@@ -1100,6 +1100,42 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             }
             ui.label(egui::RichText::new("Open a LeapPad cartridge with Open Cartridge…").weak());
         });
+        sub_menu(ui, "Didj", |ui| {
+            let mut original = !settings.didj_enhanced;
+            let mut changed = ui
+                .radio_value(&mut original, false, "Enhanced")
+                .on_hover_text(
+                    "Fixes faults in the Didj's own software. After a crash or a power-off without a shutdown, \
+                     its file check only looked for faults and never repaired them, so even a harmless finding \
+                     locked the console on \"Your Didj needs a tune-up\" until LeapFrog Connect was used; and a \
+                     crash turned the console off. Enhanced repairs the files and goes back to the menu. It also \
+                     gives the system 50 MB of memory instead of 16 (fewer reloads and out-of-memory crashes) \
+                     and can run the processor faster. From the next power-on.",
+                )
+                .changed();
+            changed |= ui
+                .radio_value(&mut original, true, "Original")
+                .on_hover_text("The Didj's software, memory and processor as LeapFrog shipped them. From the next power-on.")
+                .changed();
+            ui.separator();
+            ui.label(egui::RichText::new("Processor (Enhanced)").weak());
+            ui.add_enabled_ui(!original, |ui| {
+                for (scale, label) in [(1, "393 MHz (original)"), (2, "2× (786 MHz)"), (3, "3× (1.2 GHz)")] {
+                    changed |= ui
+                        .radio_value(&mut settings.didj_cpu_scale, scale, label)
+                        .on_hover_text(
+                            "Games and the menu get more processor time for each frame, so loading, menus and busy \
+                             scenes lag less. Timers, sound and the screen keep their own speed. A faster setting \
+                             needs a faster PC while a game is busy. From the next power-on.",
+                        )
+                        .changed();
+                }
+            });
+            if changed {
+                settings.didj_enhanced = !original;
+                actions.push(Action::SettingsChanged);
+            }
+        });
         // The RockIt Twist's own items, in a menu of their own.
         sub_menu(ui, "RockIt Twist", |ui| {
             if ui

@@ -67,6 +67,15 @@ struct Shared {
     sink: Mutex<Option<AudioSink>>,
 }
 
+/// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
+/// firmware's faults fixed, 50 MB for Linux) or Original, and the
+/// processor's clock multiplier.
+#[derive(Clone, Copy)]
+pub struct Mode {
+    pub enhanced: bool,
+    pub cpu_scale: u32,
+}
+
 pub struct DidjSession {
     shared: Arc<Shared>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -84,8 +93,8 @@ pub struct DidjSession {
 impl DidjSession {
     /// Powers on a Didj built from the packages in `dir`.
     /// With `autostart`, the game with that art is then started from the
-    /// menu (`ribbit_didj::autostart`).
-    pub fn start(dir: &Path, save_dir: &Path, cart: Option<Vec<u8>>, sink: Option<AudioSink>, autostart: Option<Art>) -> anyhow::Result<Self> {
+    /// menu (`ribbit_didj::autostart`). `mode`: Enhanced or Original.
+    pub fn start(dir: &Path, save_dir: &Path, cart: Option<Vec<u8>>, sink: Option<AudioSink>, autostart: Option<Art>, mode: Mode) -> anyhow::Result<Self> {
         let cart = cart.map(ribbit_didj::cart::Cart::new).transpose().map_err(anyhow::Error::msg)?;
         let original = ribbit_didj::nand_from_packages(dir, true).map_err(anyhow::Error::msg)?;
         let save_path = save_file(dir, save_dir);
@@ -106,7 +115,9 @@ impl DidjSession {
             tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
             flash = original.clone();
         }
-        let mut didj = Didj::new(flash);
+        set_mode(&mut flash, &original, mode.enhanced);
+        let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced));
+        didj.set_cpu_scale(mode.cpu_scale);
         didj.bus.cart = cart;
         let shared = Arc::new(Shared {
             didj: Mutex::new(didj),
@@ -171,11 +182,13 @@ impl DidjSession {
         self.shared.didj.lock().unwrap().load_state(state, &self.original)
     }
 
-    /// Restarts the console (keeping what it has saved).
-    pub fn reset(&self) {
+    /// Restarts the console (keeping what it has saved), in `mode`.
+    pub fn reset(&self, mode: Mode) {
         let mut d = self.shared.didj.lock().unwrap();
-        let (flash, cart) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take());
-        *d = Didj::new(flash);
+        let (mut flash, cart) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take());
+        set_mode(&mut flash, &self.original, mode.enhanced);
+        *d = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced));
+        d.set_cpu_scale(mode.cpu_scale);
         d.bus.cart = cart;
     }
 
@@ -209,6 +222,18 @@ impl DidjSession {
 }
 
 /// Where the system's changes to the NAND built from `dir` are kept.
+/// Gives the NAND its factory serial if it has none, and writes Enhanced
+/// mode's fixes to it or erases them (Original),
+/// before a power-on. A state load keeps the NAND as it was saved: its kernel
+/// has read the root file system already.
+fn set_mode(flash: &mut Nand, original: &Nand, enhanced: bool) {
+    flash.add_factory_data();
+    let fixed = ribbit_didj::enhanced::apply(flash, original, enhanced);
+    if enhanced && fixed == 0 {
+        tracing::warn!(target: "ribbit::didj", "Enhanced mode: this firmware has none of the scripts it fixes");
+    }
+}
+
 pub fn save_file(dir: &Path, save_dir: &Path) -> PathBuf {
     let name = dir.file_name().map_or_else(|| "didj".into(), |s| s.to_string_lossy().into_owned());
     save_dir.join(format!("didj-{name}.nandblocks"))

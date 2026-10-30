@@ -162,6 +162,27 @@ impl Timers {
         }
     }
 
+    /// Processor cycles until a running timer with its interrupt enabled
+    /// reaches its match value (`u64::MAX` if none will).
+    pub fn next_event(&self, cpu_hz: u64, plls: [Option<u64>; 2]) -> u64 {
+        let mut next = u64::MAX;
+        for t in &self.t {
+            if t.control & (RUN | INTENB) != RUN | INTENB || t.matchv == 0 {
+                continue;
+            }
+            let Some(Some(pll)) = plls.get((t.clkgen >> 1 & 7) as usize) else { continue };
+            let rate = pll / ((t.clkgen >> 4 & 0xFF) as u64 + 1) / (1u64 << ((t.control + 1) & 3));
+            if rate == 0 {
+                continue;
+            }
+            // `tick` adds cycles * rate to acc and counts acc / cpu_hz.
+            let ticks = (t.matchv as u64).saturating_sub(t.count as u64).max(1);
+            let owed = (ticks * cpu_hz).saturating_sub(t.acc);
+            next = next.min(owed.div_ceil(rate));
+        }
+        next
+    }
+
     /// Raises interrupt source `irq` (a level that is still high).
     pub fn raise(&mut self, irq: u32) {
         self.pend |= 1 << irq;
