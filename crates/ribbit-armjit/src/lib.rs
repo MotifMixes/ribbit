@@ -46,8 +46,11 @@ pub(crate) mod exit {
     pub const CODE_WRITTEN: u32 = 3;
 }
 
+#[cfg(target_arch = "x86_64")]
 type Load = extern "sysv64" fn(*mut Ctx, u32, u32) -> u64;
+#[cfg(target_arch = "x86_64")]
 type Store = extern "sysv64" fn(*mut Ctx, u32, u32, u32) -> u32;
+#[cfg(target_arch = "x86_64")]
 type Exec = extern "sysv64" fn(*mut Ctx, u32, u32) -> u32;
 
 /// Entries in each fast-access table.
@@ -82,6 +85,7 @@ struct Recent {
 
 const NO_BLOCK: Recent = Recent { va: 1, len: 0, code: std::ptr::null() };
 
+#[cfg(target_arch = "x86_64")]
 /// What generated code reaches through `r12`.
 #[repr(C)]
 pub(crate) struct Ctx {
@@ -103,6 +107,7 @@ pub(crate) struct Ctx {
     exec: Exec,
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Loads for generated code: the value, or bit 32 set when it faulted (the
 /// data abort taken, with `current` the instruction's address).
 extern "sysv64" fn load32<B: ArmBus>(ctx: *mut Ctx, va: u32, pc: u32) -> u64 {
@@ -122,6 +127,7 @@ extern "sysv64" fn load32<B: ArmBus>(ctx: *mut Ctx, va: u32, pc: u32) -> u64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 extern "sysv64" fn load8<B: ArmBus>(ctx: *mut Ctx, va: u32, pc: u32) -> u64 {
     // SAFETY: as `load32`.
     let (cpu, bus) = unsafe { (&mut *(*ctx).cpu, &mut *((*ctx).bus as *mut B)) };
@@ -138,6 +144,7 @@ extern "sysv64" fn load8<B: ArmBus>(ctx: *mut Ctx, va: u32, pc: u32) -> u64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 extern "sysv64" fn load16<B: ArmBus>(ctx: *mut Ctx, va: u32, pc: u32) -> u64 {
     // SAFETY: as `load32`.
     let (cpu, bus) = unsafe { (&mut *(*ctx).cpu, &mut *((*ctx).bus as *mut B)) };
@@ -154,6 +161,7 @@ extern "sysv64" fn load16<B: ArmBus>(ctx: *mut Ctx, va: u32, pc: u32) -> u64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Stores for generated code: 0, `exit::FAULT` (abort taken), or
 /// `exit::CODE_WRITTEN`.
 extern "sysv64" fn store32<B: ArmBus>(ctx: *mut Ctx, va: u32, v: u32, pc: u32) -> u32 {
@@ -164,6 +172,7 @@ extern "sysv64" fn store32<B: ArmBus>(ctx: *mut Ctx, va: u32, v: u32, pc: u32) -
     stored(ctx, cpu, bus, va, r)
 }
 
+#[cfg(target_arch = "x86_64")]
 extern "sysv64" fn store8<B: ArmBus>(ctx: *mut Ctx, va: u32, v: u32, pc: u32) -> u32 {
     // SAFETY: as `load32`.
     let (cpu, bus) = unsafe { (&mut *(*ctx).cpu, &mut *((*ctx).bus as *mut B)) };
@@ -172,6 +181,7 @@ extern "sysv64" fn store8<B: ArmBus>(ctx: *mut Ctx, va: u32, v: u32, pc: u32) ->
     stored(ctx, cpu, bus, va, r)
 }
 
+#[cfg(target_arch = "x86_64")]
 extern "sysv64" fn store16<B: ArmBus>(ctx: *mut Ctx, va: u32, v: u32, pc: u32) -> u32 {
     // SAFETY: as `load32`.
     let (cpu, bus) = unsafe { (&mut *(*ctx).cpu, &mut *((*ctx).bus as *mut B)) };
@@ -180,10 +190,12 @@ extern "sysv64" fn store16<B: ArmBus>(ctx: *mut Ctx, va: u32, v: u32, pc: u32) -
     stored(ctx, cpu, bus, va, r)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cpu_store<B: ArmBus>(cpu: &mut Arm, bus: &mut B, va: u32, v: u32, byte: bool) -> Result<(), ribbit_arm::Fault> {
     if byte { cpu.store8(bus, va, v) } else { cpu.store32(bus, va, v) }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Runs instruction `w` at `pc` with the interpreter. Returns 1 when the
 /// block must stop after it (r15 then holds where to go on): it branched,
 /// took an exception, changed the mode, T, I or F, or wrote compiled code.
@@ -209,6 +221,7 @@ extern "sysv64" fn exec<B: ArmBus>(ctx: *mut Ctx, w: u32, pc: u32) -> u32 {
     stop as u32
 }
 
+#[cfg(target_arch = "x86_64")]
 fn stored<B: ArmBus>(ctx: *mut Ctx, cpu: &mut Arm, bus: &mut B, va: u32, r: Result<(), ribbit_arm::Fault>) -> u32 {
     match r {
         Err(f) => {
@@ -223,6 +236,7 @@ fn stored<B: ArmBus>(ctx: *mut Ctx, cpu: &mut Arm, bus: &mut B, va: u32, r: Resu
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// After an access at `va` that worked: when it is plain RAM (and for
 /// stores, holds no compiled code), lets generated code reach its page
 /// directly.
