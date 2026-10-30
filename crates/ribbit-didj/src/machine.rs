@@ -276,6 +276,20 @@ pub struct Bus {
     pub buttons: u32,
     /// Linux cut the power (after `poweroff`): the CPU no longer runs.
     pub powered_off: bool,
+    /// Frame skipping (asked for by the app while it runs behind): from the
+    /// next shown buffer, the 3D unit skips drawing, at most 2 frames in a
+    /// row. The game runs the same; only the picture updates less often.
+    #[serde(skip)]
+    pub skip_frames: bool,
+    /// The buffer on screen was one whose drawing was skipped (show the
+    /// last picture instead).
+    #[serde(skip)]
+    pub shown_skipped: bool,
+    #[serde(skip)]
+    skipped_in_row: u32,
+    /// Buffers shown (layer address changes).
+    #[serde(skip)]
+    pub flips: u64,
     /// GPIO detected flags and the input levels last seen, per port.
     gpio_det: [u32; GPIO_PORTS],
     gpio_last: [u32; GPIO_PORTS],
@@ -308,6 +322,15 @@ impl Bus {
             (0..n).fold(0, |v, i| v | (self.sdram.get((a + i) as usize).copied().unwrap_or(0) as u32) << (8 * i))
         };
         crate::mlc::compose(|a| self.reg(a), mem)
+    }
+
+    /// A game's frame is shown: whether it was drawn, and whether the next
+    /// one will be.
+    fn flip(&mut self) {
+        self.flips += 1;
+        self.shown_skipped = self.ga3d.skip;
+        self.skipped_in_row = if self.ga3d.skip { self.skipped_in_row + 1 } else { 0 };
+        self.ga3d.skip = self.skip_frames && self.skipped_in_row < 2;
     }
 
     fn gpio_pad(&self, port: usize) -> u32 {
@@ -491,6 +514,9 @@ impl Bus {
     }
 
     fn io_write(&mut self, addr: u32, v: u32, size: u32) {
+        if crate::mlc::is_layer_address(addr) && self.reg(addr) != v {
+            self.flip();
+        }
         if addr == timer::CLKMODEREG || addr == timer::PLLSETREG0 || addr == timer::PLLSETREG0 + 4 {
             self.clocks = None;
         }
@@ -762,6 +788,10 @@ impl Didj {
             adc_pending: false,
             buttons: 0,
             powered_off: false,
+            skip_frames: false,
+            shown_skipped: false,
+            skipped_in_row: 0,
+            flips: 0,
             gpio_det: [0; GPIO_PORTS],
             gpio_last: [0; GPIO_PORTS],
             clocks: None,

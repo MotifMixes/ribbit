@@ -204,6 +204,10 @@ pub struct Settings {
     /// (1 = original). From the next power-on.
     #[serde(default = "default_didj_cpu_scale")]
     pub didj_cpu_scale: u32,
+    /// Didj: skip drawing frames while the PC can't keep up (the game runs
+    /// the same; the picture updates less often). Off: every frame drawn.
+    #[serde(default)]
+    pub didj_frame_skip: bool,
     /// Favorited games (paths), in the order they were starred.
     pub favorites: Vec<PathBuf>,
     /// Tabs where "Internal" (built-in) games are hidden; key is the tab name
@@ -279,6 +283,7 @@ impl Default for Settings {
             close_with_shutdown: false,
             didj_enhanced: true,
             didj_cpu_scale: default_didj_cpu_scale(),
+            didj_frame_skip: false,
             favorites: Vec::new(),
             hide_builtin_tabs: BTreeSet::new(),
             folders: Vec::new(),

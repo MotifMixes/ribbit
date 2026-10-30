@@ -1143,6 +1143,13 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                         .changed();
                 }
             });
+            ui.separator();
+            changed |= ui
+                .checkbox(&mut settings.didj_frame_skip, "Skip frames when the PC is too slow")
+                .on_hover_text(
+                    "When your PC can't keep up, up to 2 of every 3 frames aren't drawn: the game runs at its                      real speed (sound, timing and play are the same) and the picture moves less smoothly.                      Off: every frame is drawn, and the game slows down instead. At once.",
+                )
+                .changed();
             if changed {
                 settings.didj_enhanced = !original;
                 actions.push(Action::SettingsChanged);

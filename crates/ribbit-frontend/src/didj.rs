@@ -70,16 +70,20 @@ struct Shared {
     /// The fastest the processor may run, in thousandths of its clock
     /// (`Mode::cpu_scale`); `run` uses what the PC has time for.
     cpu_max: AtomicU32,
+    /// Frame skipping while the PC can't keep up (`Mode::frame_skip`).
+    frame_skip: AtomicBool,
     sink: Mutex<Option<AudioSink>>,
 }
 
 /// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
 /// firmware's faults fixed, 50 MB for Linux) or Original, and the
-/// processor's clock multiplier.
+/// processor's clock multiplier; frame skipping (a setting that applies at
+/// once, through `DidjSession::set_frame_skip`).
 #[derive(Clone, Copy)]
 pub struct Mode {
     pub enhanced: bool,
     pub cpu_scale: u32,
+    pub frame_skip: bool,
 }
 
 pub struct DidjSession {
@@ -134,6 +138,7 @@ impl DidjSession {
             gain: AtomicU32::new(1f32.to_bits()),
             speed: AtomicU32::new(100f32.to_bits()),
             cpu_max: AtomicU32::new(mode.cpu_scale.max(1) * 1000),
+            frame_skip: AtomicBool::new(mode.frame_skip),
             sink: Mutex::new(sink),
         });
         let s = shared.clone();
@@ -198,6 +203,12 @@ impl DidjSession {
         d.set_cpu_scale(mode.cpu_scale);
         d.bus.cart = cart;
         self.shared.cpu_max.store(mode.cpu_scale.max(1) * 1000, Ordering::Relaxed);
+        self.set_frame_skip(mode.frame_skip);
+    }
+
+    /// Frame skipping on or off (from the game's next frame).
+    pub fn set_frame_skip(&self, on: bool) {
+        self.shared.frame_skip.store(on, Ordering::Relaxed);
     }
 
     /// Keeps what the system has saved to its NAND.
@@ -256,6 +267,8 @@ fn run(s: &Shared, art: Option<Art>) {
     let mut resample = Resampler::new(32000.0);
     let (mut stereo, mut mono) = (Vec::new(), Vec::new());
     let (mut counted_since, mut frames) = (Instant::now(), 0u32);
+    // Frame skipping: the game's buffer flips seen, and frames since one.
+    let (mut flips, mut since_flip) = (0u64, 0u32);
     while !s.quit.load(Ordering::Relaxed) {
         if !s.running.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
@@ -273,6 +286,8 @@ fn run(s: &Shared, art: Option<Art>) {
         if now < next {
             std::thread::sleep(next - now);
         }
+        // Behind: this frame starts late.
+        let behind = Instant::now() > next + Duration::from_millis(2);
         if Instant::now() > next + Duration::from_millis(100) {
             next = Instant::now();
         }
@@ -280,6 +295,16 @@ fn run(s: &Shared, art: Option<Art>) {
         let picture = {
             let mut d = s.didj.lock().unwrap();
             d.bus.buttons = s.held.load(Ordering::Relaxed) | auto_buttons;
+            // Frame skipping (a setting; not while the autostart reads the
+            // screen): asked for while behind, it starts at the game's next
+            // frame. A game that stops flipping buffers (a still screen drawn
+            // once) is drawn again after a few frames.
+            d.bus.skip_frames = auto.is_none() && behind && s.frame_skip.load(Ordering::Relaxed);
+            (flips, since_flip) = if d.bus.flips != flips { (d.bus.flips, 0) } else { (flips, since_flip + 1) };
+            if since_flip > 3 {
+                d.bus.ga3d.skip = false;
+                d.bus.shown_skipped = false;
+            }
             let cycles = d.cpu_hz() / FPS as u64;
             let t = Instant::now();
             d.run(cycles);
@@ -300,7 +325,7 @@ fn run(s: &Shared, art: Option<Art>) {
             let (took, cur) = (t.elapsed().as_secs_f64(), d.cpu_milli());
             let want = if took > BUSY {
                 (cur as f64 * BUSY / took) as u32
-            } else if took < BUSY * 0.75 {
+            } else if took < BUSY * 0.75 && !d.bus.skip_frames {
                 // Slowly (1x to 2x in about a second), so a busy frame after
                 // quiet ones doesn't find it too fast.
                 cur + cur / 64
@@ -319,21 +344,23 @@ fn run(s: &Shared, art: Option<Art>) {
             let pcm = &mut d.bus.dma.pcm;
             let bytes = pcm.len() & !3;
             stereo.extend(pcm.drain(..bytes).collect::<Vec<u8>>().as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)));
-            d.bus.frame()
+            // A buffer whose drawing was skipped: the last picture stays.
+            (!d.bus.shown_skipped).then(|| d.bus.frame())
         };
-        let (w, h, px) = picture;
-        if let Some(a) = &mut auto {
-            let screen = if (w, h) == (SCREEN_W, SCREEN_H) { &px[..] } else { &[] };
-            auto_buttons = a.frame(screen, s.held.load(Ordering::Relaxed));
-            // Its last press ends a frame later (done() is true on the
-            // press's last frame): dropped then, A stayed held for good, and
-            // the game never saw another press of it.
-            if a.done() && auto_buttons == 0 {
-                auto = None;
+        if let Some((w, h, px)) = picture {
+            if let Some(a) = &mut auto {
+                let screen = if (w, h) == (SCREEN_W, SCREEN_H) { &px[..] } else { &[] };
+                auto_buttons = a.frame(screen, s.held.load(Ordering::Relaxed));
+                // Its last press ends a frame later (done() is true on the
+                // press's last frame): dropped then, A stayed held for good,
+                // and the game never saw another press of it.
+                if a.done() && auto_buttons == 0 {
+                    auto = None;
+                }
             }
-        }
-        if w == SCREEN_W && h == SCREEN_H {
-            s.frame.lock().unwrap().copy_from_slice(&px);
+            if w == SCREEN_W && h == SCREEN_H {
+                s.frame.lock().unwrap().copy_from_slice(&px);
+            }
         }
         mono.clear();
         resample.push(&stereo, &mut mono);

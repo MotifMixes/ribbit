@@ -76,7 +76,8 @@ The Didj (2008) is LeapFrog's Linux handheld with NAND cartridges. Ribbit builds
 - Some cartridges install an update to the Didj the first time they are played, and the Didj then turns itself off. Ribbit turns it back on and starts the game again.
 - Closing the game presses the Didj's power button and waits for it to turn off, so its files are never left damaged.
 - **Emulation › Didj › Enhanced** (the default) fixes faults in the Didj's own software: after a crash it repairs its files and goes back to the menu instead of locking on "Your Didj needs a tune-up"; it gets 50 MB of memory instead of 16; and its processor runs faster, up to 2× (or 3×, in the same menu), as far as your PC keeps up: never slower than a real Didj. **Original** runs it as LeapFrog shipped it. Both apply from the next power-on.
-- It runs best on a Windows or Linux PC (or an Intel Mac): there Ribbit translates the Didj's processor code to the PC's own. Apple-silicon Macs and Android phones run it slower for now.
+- **Emulation › Didj › Skip frames when the PC is too slow** (off by default): when your PC can't keep up, up to 2 of every 3 frames aren't drawn. The game still runs at its real speed (sound, timing and play are the same); only the picture moves less smoothly. Off, every frame is drawn and the game slows down instead. It applies at once.
+- It runs best on a Windows or Linux PC (or an Intel Mac): there Ribbit translates the Didj's processor code to the PC's own. The Didj's 3D is drawn on up to 4 of the PC's cores. Apple-silicon Macs and Android phones run it slower for now.
 
 | Didj | Key |
 |---|---|

@@ -16,6 +16,8 @@ crc32fast.workspace = true
 serde.workspace = true
 bincode = "1.3"
 miniz_oxide = "0.8"
+# Big triangles' rows drawn on several threads.
+rayon = "1"
 
 [dev-dependencies]
 # didjboot's DIDJ_START reads the game's art.

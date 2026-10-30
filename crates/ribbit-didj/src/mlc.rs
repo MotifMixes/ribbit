@@ -145,6 +145,12 @@ fn video(reg: &impl Fn(u32) -> u32, mem: &impl Fn(u32, u32) -> u32, out: &mut [u
 
 /// The picture the MLC shows: (width, height, 0x00RRGGBB pixels). `mem`
 /// reads `size` bytes at a physical address (little-endian).
+/// Whether `addr` is a layer's ADDRESS register (a write that changes it
+/// shows another buffer: a game's frame is done).
+pub fn is_layer_address(addr: u32) -> bool {
+    LAYER.iter().any(|&l| addr == BASE + l + ADDRESS)
+}
+
 pub fn compose(reg: impl Fn(u32) -> u32, mem: impl Fn(u32, u32) -> u32) -> (usize, usize, Vec<u32>) {
     let size = reg(BASE + SCREENSIZE);
     let (w, h) = match ((size & 0xFFF) as usize + 1, (size >> 16 & 0xFFF) as usize + 1) {

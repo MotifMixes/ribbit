@@ -964,11 +964,15 @@ impl App {
         }
     }
 
-    /// The Didj's mode from the settings: Enhanced, and the processor's
-    /// clock multiplier (1 in Original mode).
+    /// The Didj's mode from the settings: Enhanced, the processor's clock
+    /// multiplier (1 in Original mode) and frame skipping.
     fn didj_mode(&self) -> crate::didj::Mode {
         let enhanced = self.settings.didj_enhanced;
-        crate::didj::Mode { enhanced, cpu_scale: if enhanced { self.settings.didj_cpu_scale.clamp(1, 3) } else { 1 } }
+        crate::didj::Mode {
+            enhanced,
+            cpu_scale: if enhanced { self.settings.didj_cpu_scale.clamp(1, 3) } else { 1 },
+            frame_skip: self.settings.didj_frame_skip,
+        }
     }
 
     /// Plays a Didj built from the packages in the folder of `package` (the
@@ -1858,6 +1862,9 @@ impl App {
                 }
                 if let Some(s) = &self.session {
                     s.emu.lock().keep_awake = !self.settings.turn_off_when_idle;
+                }
+                if let Some(d) = &self.didj {
+                    d.set_frame_skip(self.settings.didj_frame_skip);
                 }
             }
             Action::ResumeAfterIdle => self.resume_after_idle(),

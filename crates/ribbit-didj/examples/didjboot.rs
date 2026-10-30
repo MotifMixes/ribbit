@@ -99,6 +99,11 @@ fn main() {
     // DIDJ_WAV=<file> saves the sound sent to PCM out (16-bit stereo).
     let frames_dir = std::env::var("DIDJ_FRAMES").ok();
     let mut last_frame = Vec::new();
+    // DIDJ_SPEED=1: after each second of Didj time, how long it took (100%
+    // is as fast as a real Didj).
+    let speed = std::env::var_os("DIDJ_SPEED").is_some();
+    let skip_from: Option<u64> = std::env::var("DIDJ_SKIP").ok().and_then(|v| v.parse().ok());
+    let (mut lap, mut lap_m) = (std::time::Instant::now(), 0);
     let mut wav: Vec<u8> = Vec::new();
     // DIDJ_KEYS="50000:RIGHT 60000:A": at that many million cycles (the
     // run's count), hold a button for 30 million.
@@ -153,6 +158,9 @@ fn main() {
             }
         }
         didj.bus.buttons |= auto_buttons;
+        // DIDJ_SKIP=<millions>: frame skipping on from then (2 of every 3
+        // frames).
+        didj.bus.skip_frames = skip_from.is_some_and(|f| m >= f);
         let out = didj.bus.uart.first().map_or("", |s| s.as_str());
         (quiet, len) = if out.len() == len { (quiet + 1, len) } else { (0, out.len()) };
         let seen = out.matches("# ").count();
@@ -204,6 +212,11 @@ fn main() {
         }
         wav.extend(didj.bus.dma.pcm.drain(..));
         ran += n;
+        if speed && (m + 1 - lap_m) * 1_000_000 >= didj.cpu_hz() {
+            let pct = ((m + 1 - lap_m) * 1_000_000) as f64 / didj.cpu_hz() as f64 / lap.elapsed().as_secs_f64() * 100.0;
+            println!("speed at {} million: {pct:.0}%", m + 1);
+            (lap, lap_m) = (std::time::Instant::now(), m + 1);
+        }
         // DIDJ_FRAMES=<folder> saves the screen every 100 million
         // instructions when it has changed.
         if let Some(dir) = &frames_dir
@@ -283,7 +296,7 @@ fn main() {
     let g = &didj.bus.ga3d;
     println!("--- GA3D: {} register writes, {} invalid commands, {} triangles, starts (control: count) ---", g.trace.len(), g.invalid, g.triangles);
     println!("{}", g.starts.iter().map(|(c, n)| format!("{c:#x}:{n}")).collect::<Vec<_>>().join(" "));
-    println!("pixels (in, z fail, transparent, alpha fail, written): {:?}", g.pixels.get());
+    println!("pixels (in, z fail, transparent, alpha fail, written): {:?}", g.pixels);
     // DIDJ_GA3D=<file> saves the GA3D register writes (offset value).
     if let Ok(path) = std::env::var("DIDJ_GA3D") {
         let t: String = g.trace.iter().map(|(o, v)| format!("{o:04x} {v:08x}

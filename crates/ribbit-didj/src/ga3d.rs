@@ -16,6 +16,31 @@
 //! texture cache clear). Everything finishes at once (timing UNKNOWN).
 
 use crate::mlc::{BLOCK_BASE, BLOCK_END, block_sdram};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Pixels (the triangles' bounding boxes) from which a batch is drawn on
+/// several threads.
+const PARALLEL_PIXELS: i64 = 2048;
+/// Rows of the screen each thread takes at a time.
+const BAND: i32 = 8;
+/// The registers the pixel pipeline reads (up to ZSCALE), copied with each
+/// triangle.
+const PIX_REGS: usize = ZSCALE + 1;
+/// SDRAM tiles of the written-memory map: 64 bytes x 32 lines, 2 KB in both
+/// layouts (`block_sdram`).
+const TILE_SHIFT: usize = 11;
+
+/// The threads drawing batches: up to 4 (Clone Wars' gameplay on an i9
+/// P-core: 95% of real speed on one thread, 150% with 4, for a fifth more
+/// CPU time), one fewer than the PC has; none on a PC with 2 or fewer.
+/// Their own pool: rayon's global one spins 16 or more idle threads.
+fn pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::LazyLock<Option<rayon::ThreadPool>> = std::sync::LazyLock::new(|| {
+        let n = std::thread::available_parallelism().map_or(1, |n| n.get()).saturating_sub(1).min(4);
+        (n >= 2).then(|| rayon::ThreadPoolBuilder::new().num_threads(n).thread_name(|i| format!("ga3d-{i}")).build().ok()).flatten()
+    });
+    POOL.as_ref()
+}
 
 /// The register window (0xC001_A000 .. 0xC001_C000).
 pub const BASE: u32 = 0xC001_A000;
@@ -126,6 +151,34 @@ impl Mem<'_> {
     }
 }
 
+/// The SDRAM as the pixel pipeline sees it, shared by the threads drawing a
+/// triangle's rows: relaxed byte atomics, plain loads and stores on x86. A
+/// triangle's pixels are at different addresses, so the result doesn't
+/// depend on how its rows are split between threads.
+#[derive(Clone, Copy)]
+struct Shared<'a>(&'a [AtomicU8]);
+
+impl<'a> Shared<'a> {
+    fn new(mem: &'a mut Mem) -> Self {
+        // SAFETY: AtomicU8 has u8's size, alignment and bit validity, and
+        // the borrow is exclusive while the view lives.
+        Shared(unsafe { &*(&raw mut *mem.sdram as *const [AtomicU8]) })
+    }
+
+    fn read_as(self, a: u32, size: u32, texture: bool) -> u32 {
+        let o = Mem::offset(a, texture);
+        (0..size as usize).fold(0, |v, i| v | (self.0.get(o + i).map_or(0, |b| b.load(Ordering::Relaxed)) as u32) << (8 * i))
+    }
+
+    fn write16(self, a: u32, v: u16, texture: bool) {
+        let o = Mem::offset(a, texture);
+        if let Some(b) = self.0.get(o..o + 2) {
+            b[0].store(v as u8, Ordering::Relaxed);
+            b[1].store((v >> 8) as u8, Ordering::Relaxed);
+        }
+    }
+}
+
 /// A 24-bit float register (the low 8 bits of an IEEE single are dropped).
 fn f24(bits: u32) -> f32 {
     f32::from_bits(bits & 0xFFFF_FF00)
@@ -158,10 +211,39 @@ fn page_addr(seg: u32, page: u32, u: u32, v: u32) -> u32 {
     BLOCK_BASE | (seg & 0xFF) << 24 | ((pv + (v & 511)) & 0xFFF) << 12 | ((pu + (u & 1023)) & 0xFFF)
 }
 
+/// `i / (N - 1)` for each `i` (the same division, done at compile time).
+const fn units<const N: usize>() -> [f32; N] {
+    let mut t = [0.0; N];
+    let mut i = 0;
+    while i < N {
+        t[i] = i as f32 / (N - 1) as f32;
+        i += 1;
+    }
+    t
+}
+
+static UNIT1: [f32; 2] = units();
+static UNIT4: [f32; 16] = units();
+static UNIT5: [f32; 32] = units();
+static UNIT6: [f32; 64] = units();
+static UNIT8: [f32; 256] = units();
+
+/// A `bits`-bit channel `x` as 0..1: `x / (2^bits - 1)`, by table.
+fn unit(x: u32, bits: u32) -> f32 {
+    let x = x as usize;
+    match bits {
+        1 => UNIT1[x & 1],
+        4 => UNIT4[x & 15],
+        5 => UNIT5[x & 31],
+        6 => UNIT6[x & 63],
+        _ => UNIT8[x & 255],
+    }
+}
+
 /// A 16-bit colour of format `kind` (the low 3 bits of a colour mode) as
 /// R G B A, 0..1.
 fn decode16(kind: u32, v: u32) -> [f32; 4] {
-    let n = |x: u32, bits: u32| x as f32 / ((1 << bits) - 1) as f32;
+    let n = unit;
     match kind {
         0 => [n(v >> 11, 5), n(v >> 5 & 63, 6), n(v & 31, 5), 1.0],
         1 => [n(v >> 12, 4), n(v >> 8 & 15, 4), n(v >> 4 & 15, 4), n(v & 15, 4)],
@@ -171,6 +253,22 @@ fn decode16(kind: u32, v: u32) -> [f32; 4] {
         5 => [n(v >> 10 & 31, 5), n(v >> 5 & 31, 5), n(v & 31, 5), n(v >> 15, 1)],
         _ => [n(v >> 8 & 255, 8), n(v >> 8 & 255, 8), n(v >> 8 & 255, 8), n(v & 255, 8)],
     }
+}
+
+// x86-64's baseline (no SSE4.1) makes `round` and `floor` library calls,
+// a tenth of a game's time in the pixel pipeline. These are exact for every
+// input, saturation and NaN included: a float minus its truncation is exact.
+
+/// `x.round() as u32`.
+fn round_u32(x: f32) -> u32 {
+    let t = x as u32;
+    if x - t as f32 >= 0.5 { t.saturating_add(1) } else { t }
+}
+
+/// `x.floor() as i32`.
+fn floor_i32(x: f32) -> i32 {
+    let t = x as i32;
+    if t as f32 > x { t.saturating_sub(1) } else { t }
 }
 
 /// The depth and alpha test functions (NEVER, LESS, EQUAL, LESSEQUAL,
@@ -219,7 +317,94 @@ pub struct Ga3d {
     /// Pixels: (reached the pipeline, failed the depth test, dropped by
     /// the transparency colour, failed the alpha test, written).
     #[serde(skip)]
-    pub pixels: std::cell::Cell<[u64; 5]>,
+    pub pixels: [u64; 5],
+    /// Frame skipping: triangles and rectangles aren't drawn (the GTE still
+    /// runs, fills still happen). See `Bus::skip_frames`.
+    #[serde(skip)]
+    pub skip: bool,
+    /// Triangles set up and not drawn yet, in order (drawn before the CPU
+    /// goes on: everything still finishes at once).
+    #[serde(skip)]
+    batch: Vec<Tri>,
+    /// SDRAM tiles the batch may write (a bit per `TILE_SHIFT` tile).
+    #[serde(skip)]
+    written: Vec<u64>,
+    /// Per texture stage: the texture (TEXINFO pair, sub-segment) last
+    /// found clear of `written`, while no tile has been added.
+    #[serde(skip)]
+    clear: [Option<(u32, u32, u32)>; 2],
+}
+
+/// A triangle set up for drawing: its vertices, edges (b - a, a and the
+/// top-left rule's ownership), bounding box, the texture coordinates in use
+/// and its own copy of the pixel pipeline's registers.
+struct Tri {
+    v: [Vertex; 3],
+    area: f32,
+    edges: [(f32, f32, f32, f32, bool); 3],
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    uvs: usize,
+    st: State,
+    regs: [u32; PIX_REGS],
+}
+
+impl Tri {
+    /// Draws row `y` (in the bounding box); the pixel counts.
+    fn row(&self, lut: &[[u16; 256]; 2], y: i32, mem: Shared) -> [u64; 5] {
+        let (v, area, st) = (&self.v, self.area, &self.st);
+        let r = Raster { regs: &self.regs, lut };
+        let mut counts = [0; 5];
+        let fy = y as f32;
+        let rows = self.edges.map(|(dx, _, _, ay, _)| dx * (fy - ay));
+        for x in self.x0..=self.x1 {
+            let fx = x as f32;
+            let mut w = [0.0f32; 3];
+            let mut inside = true;
+            for (k, &(_, dy, ax, _, own)) in self.edges.iter().enumerate() {
+                let e = (rows[k] - dy * (fx - ax)) / area;
+                if e < 0.0 || e == 0.0 && !own {
+                    inside = false;
+                    break;
+                }
+                w[k] = e;
+            }
+            if !inside {
+                continue;
+            }
+            let lin = |i: usize| w[0] * v[0][i] + w[1] * v[1][i] + w[2] * v[2][i];
+            let mut p = [0.0; 12];
+            for i in 2..8 {
+                p[i] = lin(i);
+            }
+            if st.perspective {
+                let q = p[3];
+                for i in 8..self.uvs {
+                    p[i] = (w[0] * v[0][i] * v[0][3] + w[1] * v[1][i] * v[1][3] + w[2] * v[2][i] * v[2][3]) / q;
+                }
+            } else {
+                for i in 8..self.uvs {
+                    p[i] = lin(i);
+                }
+            }
+            counts[0] += 1;
+            counts[r.pixel(st, x as u32, y as u32, &p, mem)] += 1;
+        }
+        counts
+    }
+}
+
+/// What the pixel pipeline reads: a triangle's registers and the colour
+/// lookup tables (a LUT fill draws the batch first).
+struct Raster<'a> {
+    regs: &'a [u32; PIX_REGS],
+    lut: &'a [[u16; 256]; 2],
+}
+
+fn add(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+    std::array::from_fn(|k| a[k] + b[k])
 }
 
 impl Default for Ga3d {
@@ -237,6 +422,10 @@ impl Default for Ga3d {
             invalid: 0,
             triangles: 0,
             pixels: Default::default(),
+            skip: false,
+            batch: Vec::new(),
+            written: Vec::new(),
+            clear: [None; 2],
         }
     }
 }
@@ -278,6 +467,7 @@ impl Ga3d {
             }
             _ => self.set(i, v, mem),
         }
+        self.flush(mem);
     }
 
     /// Reads commands until the rear pointer meets the front one.
@@ -458,7 +648,11 @@ impl Ga3d {
 
     fn input(&self, v: u32) -> [f32; 4] {
         let b = GTECONST + 4 * v as usize;
-        std::array::from_fn(|c| self.regs.get(b + c).map_or(0.0, |&r| f24(r)))
+        // Whole (one load, not four stores the arithmetic must wait for).
+        match self.regs.get(b..b + 4) {
+            Some(r) => std::array::from_fn(|c| f24(r[c])),
+            None => std::array::from_fn(|c| self.regs.get(b + c).map_or(0.0, |&r| f24(r))),
+        }
     }
 
     /// Runs the GTE program (from instruction 0) for output vertex `vnum`.
@@ -498,7 +692,7 @@ impl Ga3d {
                         2 => invcull_in,
                         _ => !invcull_in,
                     };
-                    if id == 5 || render_in {
+                    if (id == 5 || render_in) && !self.skip {
                         self.clip_and_draw(inv, mem);
                     }
                 }
@@ -520,7 +714,10 @@ impl Ga3d {
         let b = src(self, w >> 12 & 31, self.page[1]);
         let modifier = SWIZZLE[(w >> 7 & 31) as usize];
         let dot = |n: usize| (0..n).map(|c| a[c] * b[c]).sum::<f32>();
-        let each = |f: &dyn Fn(f32, f32) -> f32| -> [f32; 4] { std::array::from_fn(|c| f(a[c], b[c])) };
+        fn pairs(a: [f32; 4], b: [f32; 4], f: impl Fn(f32, f32) -> f32) -> [f32; 4] {
+            std::array::from_fn(|c| f(a[c], b[c]))
+        }
+        let each = |f: fn(f32, f32) -> f32| pairs(a, b, f);
         let r: [f32; 4] = match id {
             6 => [1.0 / a[3].abs().sqrt(); 4],
             7 => [dot(4); 4],
@@ -528,14 +725,14 @@ impl Ga3d {
             9 => [dot(4).max(0.0); 4],
             10 => [dot(3).max(0.0); 4],
             11 => std::array::from_fn(|c| self.mul[c] + b[c]),
-            12 => each(&|x, y| x + y),
-            13 => each(&|x, y| x - y),
-            14 => each(&|x, y| if x >= y { 1.0 } else { 0.0 }),
-            15 => each(&|x, y| if x < y { 1.0 } else { 0.0 }),
-            16 => each(&|x, y| if x >= y { x } else { y }),
-            17 => each(&|x, y| if x < y { x } else { y }),
+            12 => each(|x, y| x + y),
+            13 => each(|x, y| x - y),
+            14 => each(|x, y| if x >= y { 1.0 } else { 0.0 }),
+            15 => each(|x, y| if x < y { 1.0 } else { 0.0 }),
+            16 => each(|x, y| if x >= y { x } else { y }),
+            17 => each(|x, y| if x < y { x } else { y }),
             18 => {
-                let m = each(&|x, y| x * y);
+                let m = each(|x, y| x * y);
                 self.mul = m;
                 m
             }
@@ -591,44 +788,50 @@ impl Ga3d {
             v[8..].copy_from_slice(&o[2]);
             v
         };
-        let mut poly: Vec<[f32; 12]> = self.out.iter().map(clipv).collect();
+        // At most 3 + 6 corners (one more per plane); no allocations, as
+        // this runs for every triangle.
+        const MAX: usize = 9;
+        let mut poly = [[0.0f32; 12]; MAX];
+        for (p, o) in poly.iter_mut().zip(&self.out) {
+            *p = clipv(o);
+        }
+        let mut len = 3;
         // Planes as (component, sign): d = w - c for upper ones, c for 0 <= c.
         for plane in 0..6 {
             let (c, upper) = (plane / 2, plane % 2 == 1);
             let d = |v: &[f32; 12]| if upper { v[3] - v[c] } else { v[c] };
-            let mut next = Vec::with_capacity(poly.len() + 2);
-            for k in 0..poly.len() {
-                let (p, q) = (poly[k], poly[(k + 1) % poly.len()]);
+            let mut next = [[0.0f32; 12]; MAX];
+            let mut n = 0;
+            for k in 0..len {
+                let (p, q) = (poly[k], poly[(k + 1) % len]);
                 let (dp, dq) = (d(&p), d(&q));
                 if dp >= 0.0 {
-                    next.push(p);
+                    next[n] = p;
+                    n += 1;
                 }
                 if (dp >= 0.0) != (dq >= 0.0) {
                     let t = dp / (dp - dq);
-                    next.push(std::array::from_fn(|i| p[i] + (q[i] - p[i]) * t));
+                    next[n] = std::array::from_fn(|i| p[i] + (q[i] - p[i]) * t);
+                    n += 1;
                 }
             }
-            poly = next;
-            if poly.len() < 3 {
+            (poly, len) = (next, n);
+            if len < 3 {
                 return;
             }
         }
         let f = |i: usize| f24(self.regs[VPORTBOT + i]);
         let (bottom, height, left, width) = (f(0), f(1), f(2), f(3));
-        let screen: Vec<Vertex> = poly
-            .iter()
-            .map(|v| {
-                let q = 1.0 / v[3];
-                let mut s = [0.0; 12];
-                s[0] = left + width * v[0] * q;
-                s[1] = bottom - height * v[1] * q;
-                s[2] = v[2] * q;
-                s[3] = q;
-                s[4..].copy_from_slice(&v[4..]);
-                s
-            })
-            .collect();
-        for k in 1..screen.len() - 1 {
+        let mut screen = [[0.0f32; 12]; MAX];
+        for (s, v) in screen.iter_mut().zip(&poly[..len]) {
+            let q = 1.0 / v[3];
+            s[0] = left + width * v[0] * q;
+            s[1] = bottom - height * v[1] * q;
+            s[2] = v[2] * q;
+            s[3] = q;
+            s[4..].copy_from_slice(&v[4..]);
+        }
+        for k in 1..len - 1 {
             self.triangle(&[screen[0], screen[k], screen[k + 1]], invcull, mem);
         }
     }
@@ -636,6 +839,9 @@ impl Ga3d {
     /// The TSE run directly or from the primitive processor in TSE mode:
     /// its input registers already hold screen-space vertices.
     fn tse(&mut self, triangle: bool, invcull: bool, mem: &mut Mem) {
+        if self.skip {
+            return;
+        }
         let v: [Vertex; 3] = std::array::from_fn(|n| std::array::from_fn(|c| f24(self.regs[TSEINPUT + n * 16 + c])));
         if triangle {
             self.triangle(&v, invcull, mem);
@@ -649,7 +855,12 @@ impl Ga3d {
     fn rectangle(&mut self, a: &Vertex, b: &Vertex, mem: &mut Mem) {
         let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
         let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+        self.flush(mem);
         let st = self.state();
+        let regs: [u32; PIX_REGS] = self.regs[..PIX_REGS].try_into().unwrap();
+        let r = Raster { regs: &regs, lut: &self.lut };
+        let mem = Shared::new(mem);
+        let mut counts = [0; 5];
         for y in st.clip[1]..=st.clip[3] {
             let fy = y as f32;
             if fy < y0 || fy >= y1 {
@@ -666,8 +877,16 @@ impl Ga3d {
                     p[k] = a[k] + (b[k] - a[k]) * tx;
                     p[k + 1] = a[k + 1] + (b[k + 1] - a[k + 1]) * ty;
                 }
-                self.pixel(&st, x as u32, y as u32, &p, mem);
+                counts[0] += 1;
+                counts[r.pixel(&st, x as u32, y as u32, &p, mem)] += 1;
             }
+        }
+        self.count(counts);
+    }
+
+    fn count(&mut self, counts: [u64; 5]) {
+        for (total, n) in self.pixels.iter_mut().zip(counts) {
+            *total += n;
         }
     }
 
@@ -695,45 +914,120 @@ impl Ga3d {
         if x0 > x1 || y0 > y1 {
             return;
         }
-        let edge = |a: &Vertex, b: &Vertex, x: f32, y: f32| (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
         // Top-left rule: an edge owns its pixels if it's a top or left one.
         let owns = |a: &Vertex, b: &Vertex| {
             let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
             if area > 0.0 { dy < 0.0 || dy == 0.0 && dx > 0.0 } else { dy > 0.0 || dy == 0.0 && dx < 0.0 }
         };
-        let edges = [(1, 2, owns(&v[1], &v[2])), (2, 0, owns(&v[2], &v[0])), (0, 1, owns(&v[0], &v[1]))];
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let (fx, fy) = (x as f32, y as f32);
-                let mut w = [0.0f32; 3];
-                let mut inside = true;
-                for (k, &(a, b, own)) in edges.iter().enumerate() {
-                    let e = edge(&v[a], &v[b], fx, fy) / area;
-                    if e < 0.0 || e == 0.0 && !own {
-                        inside = false;
-                        break;
-                    }
-                    w[k] = e;
+        // Edge k (from vertex a to b): (b - a) and a, for the edge function
+        // (bx - ax) * (y - ay) - (by - ay) * (x - ax), its terms in that order.
+        let edges = [(1, 2), (2, 0), (0, 1)].map(|(a, b)| (v[b][0] - v[a][0], v[b][1] - v[a][1], v[a][0], v[a][1], owns(&v[a], &v[b])));
+        // The pixel pipeline reads z, q, the colour and the texture
+        // coordinates of the stages in use, not x and y.
+        let rs = self.regs[RENDERSTATE];
+        let uvs = if rs >> 1 & 1 == 0 { 8 } else if rs >> 2 & 1 == 0 { 10 } else { 12 };
+        let regs: [u32; PIX_REGS] = self.regs[..PIX_REGS].try_into().unwrap();
+        let tri = Tri { v: *v, area, edges, x0, x1, y0, y1, uvs, st, regs };
+        // On one thread, at once.
+        if pool().is_none() {
+            self.batch.push(tri);
+            return self.flush(mem);
+        }
+        // A texture the batch may have drawn into: the batch first.
+        if self.reads_written(&regs, mem.sdram.len()) {
+            self.flush(mem);
+        }
+        self.mark_written(&st, [x0, y0, x1, y1], mem.sdram.len());
+        self.batch.push(tri);
+    }
+
+    /// Draws the batch: on several threads when it's big, each taking bands
+    /// of rows and drawing every triangle's part in them in order, so each
+    /// pixel sees the triangles in the order they came.
+    fn flush(&mut self, mem: &mut Mem) {
+        if self.batch.is_empty() {
+            return;
+        }
+        let batch = std::mem::take(&mut self.batch);
+        let (lut, mem) = (&self.lut, Shared::new(mem));
+        let band = |top: i32, bottom: i32| {
+            let mut counts = [0; 5];
+            for t in &batch {
+                for y in t.y0.max(top)..=t.y1.min(bottom) {
+                    counts = add(counts, t.row(lut, y, mem));
                 }
-                if !inside {
-                    continue;
-                }
-                let lin = |i: usize| w[0] * v[0][i] + w[1] * v[1][i] + w[2] * v[2][i];
-                let mut p = [0.0; 12];
-                p[..8].iter_mut().enumerate().for_each(|(i, p)| *p = lin(i));
-                if st.perspective {
-                    let q = p[3];
-                    for i in 8..12 {
-                        p[i] = (w[0] * v[0][i] * v[0][3] + w[1] * v[1][i] * v[1][3] + w[2] * v[2][i] * v[2][3]) / q;
+            }
+            counts
+        };
+        let top = batch.iter().map(|t| t.y0).min().unwrap_or(0);
+        let bottom = batch.iter().map(|t| t.y1).max().unwrap_or(0);
+        let pixels: i64 = batch.iter().map(|t| (t.x1 - t.x0 + 1) as i64 * (t.y1 - t.y0 + 1) as i64).sum();
+        let counts = match pool() {
+            Some(pool) if pixels >= PARALLEL_PIXELS => {
+                use rayon::prelude::*;
+                pool.install(|| (top / BAND..=bottom / BAND).into_par_iter().map(|b| band(b * BAND, b * BAND + BAND - 1)).reduce(|| [0; 5], add))
+            }
+            _ => band(top, bottom),
+        };
+        self.count(counts);
+        self.batch = batch;
+        self.batch.clear();
+        self.written.fill(0);
+        self.clear = [None; 2];
+    }
+
+    /// Marks the tiles of the render target and (when written) the Z
+    /// buffer under a bounding box (left, top, right, bottom): a point in
+    /// every 32-pixel column and 32-line row of tiles.
+    fn mark_written(&mut self, st: &State, [x0, y0, x1, y1]: [i32; 4], len: usize) {
+        self.written.resize(len.div_ceil(64 << TILE_SHIFT), 0);
+        let steps = |a: i32, b: i32| (a..=b).filter(move |&i| i == a || i == b || i % 32 == 0);
+        let mut added = false;
+        for info in [Some(st.rt), (st.rs >> 9 & 1 != 0).then_some(st.zb)].into_iter().flatten() {
+            for y in steps(y0, y1) {
+                for x in steps(x0, x1) {
+                    let tile = Mem::offset(pixel_addr(info >> 16 & 0x7FF, info & 0xFF, info >> 8 & 0xFF, x as u32, y as u32), false) >> TILE_SHIFT;
+                    if let Some(w) = self.written.get_mut(tile / 64) {
+                        added |= *w & 1 << (tile % 64) == 0;
+                        *w |= 1 << (tile % 64);
                     }
-                } else {
-                    for i in 8..12 {
-                        p[i] = lin(i);
-                    }
                 }
-                self.pixel(&st, x as u32, y as u32, &p, mem);
             }
         }
+        if added {
+            self.clear = [None; 2];
+        }
+    }
+
+    /// Whether a texture the triangle reads may lie in a tile the batch
+    /// writes: a point in every 32 bytes and 16 lines of each stage's
+    /// texture (tiles are 64 x 32).
+    fn reads_written(&mut self, regs: &[u32; PIX_REGS], len: usize) -> bool {
+        let rs = regs[RENDERSTATE];
+        if rs >> 1 & 1 == 0 || self.written.iter().all(|&w| w == 0) {
+            return false;
+        }
+        let stages = if rs >> 2 & 1 != 0 { 2 } else { 1 };
+        for s in 0..stages {
+            let (i0, i1) = (regs[TEXINFO[s]], regs[TEXINFO[s] + 1]);
+            let sub = regs[TEXSUBSEGMENT] >> (16 * (i0 >> 27 & 1)) & 0x7FF;
+            if self.clear[s] == Some((i0, i1, sub)) {
+                continue;
+            }
+            let page = (sub & 7) << 2 | (i0 >> 25 & 3);
+            let (ou, ov) = ((i1 & 0xFF) * 4, (i1 >> 8 & 0xFF) * 2);
+            let (bytes, lines) = (((i1 >> 16 & 0xFF) + 1) * 4, ((i1 >> 24) + 1) * 2);
+            for v in (0..lines).step_by(16).chain([lines - 1]) {
+                for u in (0..bytes).step_by(32).chain([bytes - 1]) {
+                    let tile = Mem::offset(page_addr(sub >> 3, page, ou + u, ov + v), true) >> TILE_SHIFT;
+                    if tile < len >> TILE_SHIFT && self.written.get(tile / 64).is_some_and(|w| w & 1 << (tile % 64) != 0) {
+                        return true;
+                    }
+                }
+            }
+            self.clear[s] = Some((i0, i1, sub));
+        }
+        false
     }
 
     fn state(&self) -> State {
@@ -752,21 +1046,18 @@ impl Ga3d {
         }
     }
 
+}
+
+impl Raster<'_> {
     /// The pixel pipeline: depth test, texture blending, alpha test, alpha
     /// blending, writing (R5G6B5). Fog and dithering aren't modelled yet.
-    fn pixel(&self, st: &State, x: u32, y: u32, p: &Vertex, mem: &mut Mem) {
-        let count = |k: usize| {
-            let mut c = self.pixels.get();
-            c[k] += 1;
-            self.pixels.set(c);
-        };
-        count(0);
+    /// The outcome, as an index into `pixels`.
+    fn pixel(&self, st: &State, x: u32, y: u32, p: &Vertex, mem: Shared) -> usize {
         let rs = st.rs;
         let zaddr = pixel_addr(st.zb >> 16 & 0x7FF, st.zb & 0xFF, st.zb >> 8 & 0xFF, x, y);
         let z = (p[2] * st.zscale).clamp(0.0, 65535.0) as u32;
         if rs >> 8 & 1 != 0 && !test(st.zb >> 28, z, mem.read_as(zaddr, 2, st.zb >> 27 & 1 != 0)) {
-            count(1);
-            return;
+            return 1;
         }
         let shade = [p[5] / 255.0, p[6] / 255.0, p[7] / 255.0, p[4] / 255.0].map(|c| c.clamp(0.0, 1.0));
         let mut colour = shade;
@@ -775,8 +1066,7 @@ impl Ga3d {
             let mut prev = shade;
             for s in 0..stages {
                 let Some(t) = self.texel(s, p[8 + 2 * s], p[9 + 2 * s], rs >> 5 & 1 != 0, rs >> 3 & 1 != 0, mem) else {
-                    count(2);
-                    return;
+                    return 2;
                 };
                 prev = self.blend_stage(s, t, shade, prev);
             }
@@ -784,9 +1074,8 @@ impl Ga3d {
         }
         if rs >> 14 & 1 != 0 {
             let at = self.regs[ALPHATEST];
-            if !test(at, (colour[3] * 255.0).round() as u32, at >> 8 & 0xFF) {
-                count(3);
-                return;
+            if !test(at, round_u32(colour[3] * 255.0), at >> 8 & 0xFF) {
+                return 3;
             }
         }
         let addr = pixel_addr(st.rt >> 16 & 0x7FF, st.rt & 0xFF, st.rt >> 8 & 0xFF, x, y);
@@ -808,17 +1097,17 @@ impl Ga3d {
                 colour[c] = (src[c] * factor(ab & 31, c) + dst[c] * factor(ab >> 5 & 31, c)).clamp(0.0, 1.0);
             }
         }
-        let q = |c: f32, bits: u32| (c * ((1 << bits) - 1) as f32).round() as u32;
-        count(4);
+        let q = |c: f32, bits: u32| round_u32(c * ((1 << bits) - 1) as f32);
         mem.write16(addr, (q(colour[0], 5) << 11 | q(colour[1], 6) << 5 | q(colour[2], 5)) as u16, st.rt >> 27 & 1 != 0);
         if rs >> 9 & 1 != 0 {
             mem.write16(zaddr, z as u16, st.zb >> 27 & 1 != 0);
         }
+        4
     }
 
     /// Texture stage `s`'s colour at texel (u, v) as R G B A, or None when
     /// the transparency colour check drops the pixel.
-    fn texel(&self, s: usize, u: f32, v: f32, bilinear: bool, tp: bool, mem: &Mem) -> Option<[f32; 4]> {
+    fn texel(&self, s: usize, u: f32, v: f32, bilinear: bool, tp: bool, mem: Shared) -> Option<[f32; 4]> {
         let (i0, i1) = (self.regs[TEXINFO[s]], self.regs[TEXINFO[s] + 1]);
         let mode = i0 >> 19 & 0x3F;
         let bpp = match mode {
@@ -831,7 +1120,13 @@ impl Ga3d {
         let sub = self.regs[TEXSUBSEGMENT] >> (16 * (i0 >> 27 & 1)) & 0x7FF;
         let page = (sub & 7) << 2 | (i0 >> 25 & 3);
         let (ou, ov) = ((i1 & 0xFF) * 4, (i1 >> 8 & 0xFF) * 2);
-        let wrap = |c: i32, size: i32, clamp: bool| if clamp { c.clamp(0, size - 1) } else { c.rem_euclid(size) };
+        // A power-of-two size (most textures) wraps by a mask, without a
+        // division; the same for negative coordinates.
+        let wrap = |c: i32, size: i32, clamp: bool| match () {
+            _ if clamp => c.clamp(0, size - 1),
+            _ if size & (size - 1) == 0 => c & (size - 1),
+            _ => c.rem_euclid(size),
+        };
         let fetch = |tu: i32, tv: i32| -> (u32, [f32; 4]) {
             let tu = wrap(tu, width, i0 & 1 != 0) as u32;
             let tv = wrap(tv, height, i0 >> 1 & 1 != 0) as u32;
@@ -841,7 +1136,7 @@ impl Ga3d {
                 8 => at(tu, 1),
                 _ => at(tu * 2, 2),
             };
-            let n = |x: u32, bits: u32| x as f32 / ((1 << bits) - 1) as f32;
+            let n = unit;
             let rgba = match mode {
                 0..=6 => decode16(mode, self.lut[s][(raw & 15) as usize] as u32),
                 16..=22 => decode16(mode - 16, self.lut[s][raw as usize] as u32),
@@ -855,19 +1150,19 @@ impl Ga3d {
                 _ => [1.0, 0.0, 1.0, 1.0],
             };
             // The R5G6B5 value the transparency check compares (GUESS:
-            // the colour as decoded, before filtering).
-            let key = ((rgba[0] * 31.0).round() as u32) << 11 | ((rgba[1] * 63.0).round() as u32) << 5 | (rgba[2] * 31.0).round() as u32;
+            // the colour as decoded, before filtering); only when it's on.
+            let key = if tp { round_u32(rgba[0] * 31.0) << 11 | round_u32(rgba[1] * 63.0) << 5 | round_u32(rgba[2] * 31.0) } else { 0 };
             (key, rgba)
         };
         if !bilinear {
-            let (key, c) = fetch(u.floor() as i32, v.floor() as i32);
+            let (key, c) = fetch(floor_i32(u), floor_i32(v));
             if tp && key == self.regs[TPCOLOR] & 0xFFFF {
                 return None;
             }
             return Some(c);
         }
         let (fu, fv) = (u - 0.5, v - 0.5);
-        let (iu, iv) = (fu.floor() as i32, fv.floor() as i32);
+        let (iu, iv) = (floor_i32(fu), floor_i32(fv));
         let (du, dv) = (fu - iu as f32, fv - iv as f32);
         let mut c = [0.0; 4];
         for (dx, dy, wgt) in [(0, 0, (1.0 - du) * (1.0 - dv)), (1, 0, du * (1.0 - dv)), (0, 1, (1.0 - du) * dv), (1, 1, du * dv)] {
@@ -888,7 +1183,7 @@ impl Ga3d {
     fn blend_stage(&self, s: usize, tex: [f32; 4], frag: [f32; 4], prev: [f32; 4]) -> [f32; 4] {
         let tb = self.regs[TEXBLEND[s]];
         let k = self.regs[TEXCONST];
-        let cc = [(k >> 16 & 0xFF) as f32 / 255.0, (k >> 8 & 0xFF) as f32 / 255.0, (k & 0xFF) as f32 / 255.0, (k >> 24) as f32 / 255.0];
+        let cc = [unit(k >> 16, 8), unit(k >> 8, 8), unit(k, 8), unit(k >> 24, 8)];
         // Stage 0's code 12/14 is the texture again, stage 1's the previous
         // stage.
         let p = if s == 0 { tex } else { prev };
@@ -939,11 +1234,15 @@ impl Ga3d {
         out.map(|c| c.clamp(0.0, 1.0))
     }
 
+}
+
+impl Ga3d {
     /// Memory fill: a rectangle of a sub-segment (no tables, no clipping)
     /// with a 16-bit value. GUESS: the value is bits 0-15 (the data book
     /// says 8-15; the menu clears its Z buffer with 0xFFFF and its screen
     /// with 0x319E), coordinates in 16-bit pixels.
     fn memory_fill(&mut self, mem: &mut Mem) {
+        self.flush(mem);
         let (p0, p1, p2) = (self.regs[MFILLPARAM0], self.regs[MFILLPARAM0 + 1], self.regs[MFILLPARAM0 + 2]);
         let sub = p0 >> 16 & 0x7FF;
         let data = (p0 & 0xFFFF) as u16;
@@ -958,6 +1257,7 @@ impl Ga3d {
     /// LUT fill: 256 colours (8 x 32 16-bit pixels) or one bank of 16 (8 x 2)
     /// from texture sub-segment 0's page into a stage's table.
     fn lut_fill(&mut self, mem: &mut Mem) {
+        self.flush(mem);
         let p = self.regs[LUTPARAM];
         let sub = self.regs[TEXSUBSEGMENT] & 0x7FF;
         let page = (sub & 7) << 2 | (p >> 25 & 3);
@@ -996,6 +1296,7 @@ mod lut_serde {
     }
 }
 
+#[derive(Clone, Copy)]
 struct State {
     rs: u32,
     cull: bool,

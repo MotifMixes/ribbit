@@ -358,6 +358,22 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   `lockstep_random_programs_chained`). Clone Wars demo, 30000 M cycles on one P-core: 71.4 s -> 50.5 s CPU.
   The rest is the compiled code itself (~6.5 instructions and ~38 ns a block; register caching and direct
   block links would be next): ~170 M instructions a second while the console is busy.
+- **Gameplay speed (1.7.1):** in 3D gameplay GA3D took ~70% of the time, not the CPU (guest registers kept
+  in host registers, write-through, measured no gain and were dropped). GA3D now: triangles are set up
+  into a batch (`Tri`: vertices, edges, bounding box and a copy of registers 0..ZSCALE), drawn when the CPU
+  write that started them ends, before a memory or LUT fill or a rectangle, and before a triangle whose
+  texture lies in a 2 KB SDRAM tile the batch writes (render target and Z buffer marked per triangle). A
+  pool of up to 4 threads (one fewer than the PC's) draws 8-row bands, each taking every triangle in order,
+  so every pixel sees the same order: frames and pixel counts are bit-identical to drawing one by one on all
+  15 cartridges. Also exact: inline round/floor (no SSE4.1 library calls), colour decoding by table,
+  power-of-two texture wrap by mask, the transparency key only when used, no x/y or unused texture
+  coordinates interpolated, allocation-free clipping, GTE inputs loaded whole. Clone Wars demo at 1x on
+  P-cores 90% -> 182%, Didji Racing 96% -> 152%. Frame skipping (`Bus::skip_frames`, a setting, off by
+  default): decided at layer-address flips, at most 2 in a row; the GTE still runs, so the game runs the
+  same (same instruction count and PC after 24000 M cycles); 4 E-cores: Didji Racing 71% -> 115%. Left:
+  Linux's boot runs at ~75% for a second or two (CPU-bound; caching the timer rate and UART status in the
+  run loop measured no gain). `didjboot` DIDJ_SPEED=1 prints the speed for every second of Didj time,
+  DIDJ_SKIP=<millions> skips frames from then.
 - **Cartridges out or in while on:** AppManager exits 3, launch_main shows REINSERT_CART ("You will need to
   restart your Didj") and powers off on the next change; arch_reset is empty on the LF1000 ("XXX: this
   doesn't apply"), so the firmware can't restart itself, and the kernel probes the slot only at start-up.
