@@ -9,15 +9,18 @@ use ribbit_didj::package::Meta;
 /// The menu art of the game on the cartridge dump at `path`.
 fn cart_art(path: &str) -> Vec<u8> {
     use ribbit_core::fatfs;
-    let volume = ribbit_didj::cart::volume(&std::fs::read(path).expect("can't read the cartridge")).expect("no cartridge volume");
+    let data = std::fs::read(path).expect("can't read the cartridge");
+    let volume = if ribbit_didj::cart::is_volume(&data) { data } else { ribbit_didj::cart::volume(&data).expect("no cartridge volume") };
     fatfs::list(&volume, "")
         .unwrap()
         .into_iter()
         .filter(|e| e.is_dir)
         .find_map(|e| {
             let meta = Meta::parse(&String::from_utf8_lossy(&fatfs::read_file(&volume, &format!("{}/meta.inf", e.name))?));
-            let file = meta.get("LargeIcon").or(meta.get("PreviewImage"))?.to_string();
-            fatfs::read_file(&volume, &format!("{}/{file}", e.name))
+            // LargeIcon when panel-sized (`menu_art` in the app).
+            let read = |k: &str| fatfs::read_file(&volume, &format!("{}/{}", e.name, meta.get(k)?));
+            let large = read("LargeIcon").filter(|p| p.len() > 24 && u32::from_be_bytes(p[16..20].try_into().unwrap()) >= 256);
+            large.or_else(|| read("PreviewImage")).or_else(|| read("LargeIcon"))
         })
         .expect("no art on the cartridge")
 }
@@ -67,9 +70,13 @@ fn main() {
     if let Some(n) = std::env::var("DIDJ_CPU_SCALE").ok().and_then(|v| v.parse().ok()) {
         didj.set_cpu_scale(n);
     }
-    // DIDJ_CART=<file>: a cartridge dump in the slot.
+    // DIDJ_CART=<file>: a cartridge dump in the slot (or an image of its
+    // FAT volume).
     if let Ok(path) = std::env::var("DIDJ_CART") {
-        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let mut data = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        if ribbit_didj::cart::is_volume(&data) {
+            data = ribbit_didj::cart::from_volume(&data).unwrap_or_else(|e| panic!("{e}"));
+        }
         didj.bus.cart = Some(ribbit_didj::cart::Cart::new(data).unwrap_or_else(|e| panic!("{e}")));
     }
     // DIDJ_JIT=0 runs the interpreter alone; DIDJ_JIT=exact runs blocks only
@@ -122,17 +129,17 @@ fn main() {
     // DIDJ_START=<png>: start the game with this art (its meta.inf
     // LargeIcon or PreviewImage) from the menu, as the app does; "cart":
     // the cartridge's game.
-    let mut auto = std::env::var("DIDJ_START").ok().map(|p| {
+    let art = std::env::var("DIDJ_START").ok().map(|p| {
         let png = if p == "cart" { cart_art(&std::env::var("DIDJ_CART").expect("DIDJ_START=cart needs DIDJ_CART")) } else { std::fs::read(&p).expect("can't read the art") };
-        ribbit_didj::autostart::AutoStart::new(read_art(&png))
+        read_art(&png)
     });
+    let mut auto = art.clone().map(ribbit_didj::autostart::AutoStart::new);
     let per_frame = (didj.cpu_hz() / 60 / 1_000_000).max(1);
     let mut auto_buttons = 0;
     for m in 0..millions {
         didj.bus.buttons = keys.iter().filter(|&&(at, _)| (at..at + 30).contains(&m)).fold(0, |b, &(_, k)| b | k);
         if let Some(a) = &mut auto
             && m % per_frame == 0
-            && !a.done()
         {
             let (w, _, px) = didj.bus.frame();
             let b = a.frame(if w == 320 { &px } else { &[] }, 0);
@@ -140,6 +147,10 @@ fn main() {
                 println!("autostart: buttons {b:#x} at {m} million");
             }
             auto_buttons = b;
+            // Dropped once its last press has ended (as the app does).
+            if a.done() && b == 0 {
+                auto = None;
+            }
         }
         didj.bus.buttons |= auto_buttons;
         let out = didj.bus.uart.first().map_or("", |s| s.as_str());
@@ -180,7 +191,16 @@ fn main() {
         let n = didj.run(1_000_000);
         if didj.bus.powered_off {
             println!("powered off after {m} million");
-            break;
+            // DIDJ_POWER_ON=1: turned on again, as the app does (after a
+            // cartridge's update).
+            if std::env::var_os("DIDJ_POWER_ON").is_none() {
+                break;
+            }
+            let (flash, cart, sdram, milli) = (std::mem::take(&mut didj.bus.nand), didj.bus.cart.take(), didj.bus.sdram.len(), didj.cpu_milli());
+            didj = Didj::with_sdram(flash, sdram);
+            didj.set_cpu_milli(milli);
+            didj.bus.cart = cart;
+            auto = art.clone().map(ribbit_didj::autostart::AutoStart::new);
         }
         wav.extend(didj.bus.dma.pcm.drain(..));
         ran += n;
@@ -197,6 +217,7 @@ fn main() {
 ").into_bytes();
                 f.extend(px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
                 std::fs::write(format!("{dir}/frame_{:06}.ppm", ran / 1_000_000), f).expect("can't write a frame");
+                println!("frame {} at {m} million cycles", ran / 1_000_000);
                 last_frame = px;
             }
         }

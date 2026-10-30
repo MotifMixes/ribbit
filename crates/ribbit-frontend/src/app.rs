@@ -1818,9 +1818,9 @@ impl App {
                     t.restart(self.audio.as_ref());
                 }
                 self.ui.toast(if on {
-                    "RockIt Twist on USB: run  usbip attach -r 127.0.0.1 -b 1-1  (usbip-win2) to plug it in"
+                    format!("RockIt Twist on USB: run  {}  to plug it in", crate::ui::USBIP_ATTACH)
                 } else {
-                    "RockIt Twist unplugged from USB"
+                    "RockIt Twist unplugged from USB".to_string()
                 });
             }
             Action::SetLeapster2Usb(on) => {
@@ -1829,7 +1829,7 @@ impl App {
                 self.apply_leapster2_usb();
                 if on {
                     self.ui.toast(
-                        "Leapster 2 plugged in. Wait about 7 seconds, then run: usbip attach -r 127.0.0.1 -b 1-1",
+                        format!("Leapster 2 plugged in. Wait about 7 seconds, then run: {}", crate::ui::USBIP_ATTACH),
                     );
                 } else {
                     self.ui.toast("Leapster 2 unplugged from USB");

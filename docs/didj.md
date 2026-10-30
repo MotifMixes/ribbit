@@ -261,6 +261,12 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
   then the main wheel at "My Didj"; DOWN is "My Games" ("Select a Game": the cartridge first, then JetPack
   Heroes). A game's panel shows its meta.inf `LargeIcon` (else `PreviewImage`), a 256x128 texture drawn
   unscaled. Once a profile has played, an animated avatar sits in the panel's corner.
+- The panel's art is `LargeIcon` only when it is 256x128; Hannah Montana, Indiana Jones, Nicktoons, SpongeBob
+  and Wolverine name a 64x64 `IconSelected.png` there, and their panel shows `PreviewImage` (VERIFIED in Ribbit).
+- The autostart's last press must end before it is dropped: kept held, the kernel auto-repeated KEY_A forever
+  (`od -x /dev/input/event2` showed value 2 events and no release), so no game ever saw another A press.
+- A cartridge whose `updates/` hold a newer package (Tinker Bell, Clone Wars, HSM, Wolverine: fwpatch 1.33.5)
+  installs it at power-on and powers off ("Power down."); Ribbit powers it on again.
 - Ribbit's library starts a chosen game (`ribbit_didj::autostart`): it recognises "Select a name", the
   wheel's "My Didj"/"My Games" labels and "Select a Game" from white-text masks (`menu_masks.bin`, made from
   Ribbit's own frames), and the game by its art; it presses A/DOWN only on a recognised, still screen and

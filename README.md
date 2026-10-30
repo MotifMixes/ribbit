@@ -3,7 +3,7 @@
 # Ribbit
 
 An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leapster (the main target), the
-Leapster L-MAX, Leapster TV and Leapster 2, the Zippity, the RockIt Twist and the original LeapPad. Written in Rust, for **Windows, macOS,
+Leapster L-MAX, Leapster TV and Leapster 2, the Zippity, the RockIt Twist, the Didj and the original LeapPad. Written in Rust, for **Windows, macOS,
 Linux and Android** (the Android app is new and has not been tested on real devices yet).
 
 ## Download and play
@@ -58,8 +58,8 @@ Linux.
 > labelled with how sure it is (VERIFIED, EVIDENCE, HYPOTHESIS, UNKNOWN) and where it comes from, and the tests are
 > there to check the behaviour.
 >
-> Ribbit is not affiliated with or endorsed by LeapFrog Enterprises. LeapFrog, Leapster, LeapPad, Zippity and
-> RockIt Twist are their trademarks.
+> Ribbit is not affiliated with or endorsed by LeapFrog Enterprises. LeapFrog, Leapster, LeapPad, Zippity,
+> RockIt Twist and Didj are their trademarks.
 
 ## You need your own dumps
 
@@ -85,6 +85,10 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 * **Zippity** (ARM9 TV console): system menu, built-in games and cartridges, dance mat and bopper controls, sound.
 * **RockIt Twist** (early): the real bootloader and firmware, menu, built-in games, MPEG-4 videos, sound, dials,
   spinner and slider, saves.
+* **Didj** (2008 Linux handheld, early): built from its own firmware packages; the menu, the built-in JetPack
+  Heroes and cartridges play with picture, 3D engine and sound. An ARM JIT speeds it up on x86-64 PCs (Windows, Linux,
+  Intel Macs); Apple-silicon Macs and Android run it slower for now. Enhanced mode
+  repairs its files after a crash instead of locking on the tune-up screen.
 * **LeapPad** (1999 book-and-pen pad, early): the real base ROM and book cartridges, including the first "Classic"
   books. Cartridges hold no page pictures, so Ribbit draws each page from the cartridge's own touch layout (its spots,
   GO circle, stop sign and sentence buttons); click with the mouse as the pen. Its music and speech match a recording

@@ -17,7 +17,7 @@ use ribbit_memory::known::Hardware;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-const EXTENSIONS: [&str; 7] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3"];
+const EXTENSIONS: [&str; 8] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img"];
 /// Folder depth scanned below each ROM folder.
 const MAX_DEPTH: usize = 3;
 /// Art: emulated time searched for the title card, and how often to look.
@@ -869,10 +869,17 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+            || p.extension().is_none() && didj_volume_size(&p)
         {
             out.push(p);
         }
     }
+}
+
+/// A file with no extension the size of a Didj cartridge's FAT volume
+/// (players' dumps of the volume often have none).
+fn didj_volume_size(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| (1 << 20..=70 << 20).contains(&m.len()) && m.len() % 15360 == 0)
 }
 
 /// What a file in the games folders is.
@@ -915,7 +922,7 @@ fn classify(path: &Path) -> Option<Found> {
     if data.len() < 0x1_0000 {
         return None;
     }
-    if ribbit_didj::cart::Cart::looks_like(&data) {
+    if ribbit_didj::cart::Cart::looks_like(&data) || ribbit_didj::cart::is_volume(&data) {
         return crate::didj::describe_cart(path, &data).map(Found::Didj);
     }
     use ribbit_memory::known;

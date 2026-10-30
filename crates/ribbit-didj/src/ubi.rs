@@ -48,12 +48,17 @@ pub fn available_blocks(blocks: usize) -> usize {
 /// An erase counter header. The kernel's own format leaves counts of 1
 /// and 2; the image uses 1.
 fn ec_header(ec: u64) -> [u8; 64] {
+    ec_header_at(ec, VID_OFFSET, DATA_OFFSET)
+}
+
+/// An erase counter header for a VID header and data at `vid` and `data`.
+fn ec_header_at(ec: u64, vid: usize, data: usize) -> [u8; 64] {
     let mut h = [0u8; 64];
     h[0..4].copy_from_slice(&EC_MAGIC.to_be_bytes());
     h[4] = VERSION;
     h[8..16].copy_from_slice(&ec.to_be_bytes());
-    h[16..20].copy_from_slice(&(VID_OFFSET as u32).to_be_bytes());
-    h[20..24].copy_from_slice(&(DATA_OFFSET as u32).to_be_bytes());
+    h[16..20].copy_from_slice(&(vid as u32).to_be_bytes());
+    h[20..24].copy_from_slice(&(data as u32).to_be_bytes());
     let c = crc(&h[..60]);
     h[60..64].copy_from_slice(&c.to_be_bytes());
     h
@@ -75,10 +80,11 @@ fn vid_header(vol_id: u32, compat: u8, lnum: u32, sqnum: u64) -> [u8; 64] {
     h
 }
 
-/// The volume table: record 0 is the volume, the other 127 are empty
-/// (zeroes with their CRC).
-fn volume_table(name: &str, reserved: usize) -> Vec<u8> {
-    let mut t = vec![0u8; MAX_VOLUMES * VTBL_RECORD];
+/// The volume table: record 0 is the volume, the others are empty (zeroes
+/// with their CRC). As many records as fit a LEB, at most 128 (vtbl.c
+/// `vtbl_slots`: 89 on a cartridge).
+fn volume_table(name: &str, reserved: usize, leb: usize) -> Vec<u8> {
+    let mut t = vec![0u8; MAX_VOLUMES.min(leb / VTBL_RECORD) * VTBL_RECORD];
     for (i, r) in t.chunks_mut(VTBL_RECORD).enumerate() {
         if i == 0 {
             r[0..4].copy_from_slice(&(reserved as u32).to_be_bytes());
@@ -118,7 +124,7 @@ pub fn write_volume(flash: &mut Nand, part: Partition, name: &str, data: &[u8]) 
         flash.write(at, &page0);
         flash.write(at + DATA_OFFSET, contents);
     };
-    let table = volume_table(name, reserved);
+    let table = volume_table(name, reserved, LEB);
     for copy in 0..LAYOUT_BLOCKS {
         put(flash, copy, vid_header(LAYOUT_VOL_ID, COMPAT_REJECT, copy as u32, sqnum), &table);
         sqnum += 1;
@@ -131,6 +137,47 @@ pub fn write_volume(flash: &mut Nand, part: Partition, name: &str, data: &[u8]) 
         sqnum += 1;
     }
     Ok(())
+}
+
+/// UBI as a cartridge holds it (VERIFIED against a retail Star Wars: The
+/// Clone Wars dump): `blocks` erase blocks of `peb` bytes, the VID header
+/// at 512 and the data from 1024, the layout volume in the first two and
+/// the volume "ubi_Cartridge" reserving every available block (4053 of
+/// 4096). Returns the blocks' data areas, unmapped LEBs left erased.
+pub fn cart_image(peb: usize, blocks: usize, data: &[u8]) -> Result<Vec<u8>, String> {
+    const VID: usize = 512;
+    const DATA: usize = 1024;
+    let leb = peb - DATA;
+    let reserved = available_blocks(blocks);
+    if data.len() > reserved * leb {
+        return Err(format!("{} bytes don't fit a cartridge volume ({} bytes)", data.len(), reserved * leb));
+    }
+    let mut out = vec![0xFFu8; peb * blocks];
+    let ec = ec_header_at(1, VID, DATA);
+    for b in out.chunks_mut(peb) {
+        b[..64].copy_from_slice(&ec);
+    }
+    let mut put = |block: usize, vid: [u8; 64], contents: &[u8]| {
+        let b = &mut out[block * peb..][..peb];
+        b[VID..VID + 64].copy_from_slice(&vid);
+        b[DATA..DATA + contents.len()].copy_from_slice(contents);
+    };
+    // The rest of the LEB zeroed, as on the retail cartridge.
+    let mut table = volume_table("ubi_Cartridge", reserved, leb);
+    table.resize(leb, 0);
+    let mut sqnum = 0;
+    for copy in 0..LAYOUT_BLOCKS {
+        put(copy, vid_header(LAYOUT_VOL_ID, COMPAT_REJECT, copy as u32, sqnum), &table);
+        sqnum += 1;
+    }
+    for (lnum, l) in data.chunks(leb).enumerate() {
+        if l.iter().all(|&b| b == 0xFF) {
+            continue;
+        }
+        put(LAYOUT_BLOCKS + lnum, vid_header(0, 0, lnum as u32, sqnum), l);
+        sqnum += 1;
+    }
+    Ok(out)
 }
 
 /// The volume's contents read back (unmapped LEBs as 0xFF), `len` bytes:
@@ -178,7 +225,9 @@ mod tests {
         let vid = vid_header(LAYOUT_VOL_ID, COMPAT_REJECT, 0, 3);
         assert_eq!(vid[..16], [0x55, 0x42, 0x49, 0x21, 1, 1, 0, 5, 0x7f, 0xff, 0xef, 0xff, 0, 0, 0, 0]);
         assert_eq!(vid[60..], [0x05, 0xef, 0x08, 0x66]);
-        let t = volume_table("ubi_Brio", 1756);
+        // A retail cartridge's (Star Wars: The Clone Wars, block 0).
+        assert_eq!(ec_header_at(2, 512, 1024)[60..], [0x3e, 0x08, 0x18, 0x80]);
+        let t = volume_table("ubi_Brio", 1756, LEB);
         assert_eq!(t[168..172], [0x25, 0xbd, 0x3b, 0xd8]);
         assert_eq!(t[172 + 168..172 * 2], [0xf1, 0x16, 0xc3, 0x6b]);
     }

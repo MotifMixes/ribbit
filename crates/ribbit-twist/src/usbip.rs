@@ -99,7 +99,15 @@ impl Server {
         let (r, p) = (replies.clone(), pending.clone());
         std::thread::Builder::new().name("usbip".into()).spawn(move || {
             for stream in listener.incoming().flatten() {
-                let _ = serve(stream, &info, &ev_tx, &r, &p);
+                // Only a connection that imported the device unplugs it when
+                // it ends; a device list (`usbip list`) was taken as a
+                // cable pulled for a moment, and the RockIt Twist then
+                // missed its bus reset and never answered the attach after.
+                let mut imported = false;
+                let _ = serve(stream, &info, &ev_tx, &r, &p, &mut imported);
+                if !imported {
+                    continue;
+                }
                 *r.lock().unwrap() = None;
                 p.lock().unwrap().clear();
                 if ev_tx.send(Event::Detached).is_err() {
@@ -164,6 +172,7 @@ fn serve(
     events: &Sender<Event>,
     replies: &Arc<Mutex<Option<Sender<Reply>>>>,
     pending: &Arc<Mutex<HashSet<u32>>>,
+    imported: &mut bool,
 ) -> std::io::Result<()> {
     s.set_nodelay(true)?;
     let mut op = [0u8; 8];
@@ -197,6 +206,7 @@ fn serve(
             if !ok {
                 return Ok(());
             }
+            *imported = true;
             let _ = events.send(Event::Attached);
             urbs(s, events, replies, pending)
         }
@@ -298,6 +308,22 @@ mod tests {
             interfaces: vec![(8, 6, 0x50)],
             speed: 3,
         }
+    }
+
+    #[test]
+    fn a_device_list_is_not_an_unplug() {
+        let server = Server::start(info(), 0).unwrap();
+        let mut c = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        c.write_all(&[0x01, 0x11, 0x80, 0x05, 0, 0, 0, 0]).unwrap();
+        let mut r = Vec::new();
+        c.read_to_end(&mut r).unwrap();
+        drop(c);
+        // The server has taken the connection's end once a second one is
+        // answered.
+        let mut c = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        c.write_all(&[0x01, 0x11, 0x80, 0x05, 0, 0, 0, 0]).unwrap();
+        c.read_to_end(&mut r).unwrap();
+        assert!(server.next_event().is_none(), "no Detached after `usbip list`");
     }
 
     #[test]

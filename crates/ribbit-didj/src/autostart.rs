@@ -29,8 +29,8 @@ const LABEL: (usize, usize, usize, usize) = (150, 150, 110, 16);
 /// Differing pixels allowed (the other screens differ by 140 or more).
 const MASK_SLACK: usize = 50;
 
-/// The panel draws the game's art texture (meta.inf `LargeIcon`, else
-/// `PreviewImage`; 256x128) unscaled with its top-left near here.
+/// The panel draws the game's art texture (meta.inf `LargeIcon` when it is
+/// 256x128, else `PreviewImage`) unscaled with its top-left near here.
 const ART_AT: (usize, usize) = (129, 62);
 /// The part of the art compared: the picture above the name bar.
 const ART_PART: (usize, usize, usize, usize) = (4, 4, 170, 70);
@@ -57,6 +57,7 @@ enum Step {
 }
 
 /// The game's art (ARGB, `width` wide): its texture as the menu loads it.
+#[derive(Clone)]
 pub struct Art {
     pub width: usize,
     pub pixels: Vec<u32>,

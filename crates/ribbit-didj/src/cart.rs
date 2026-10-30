@@ -164,6 +164,33 @@ fn data(raw: &[u8]) -> Vec<u8> {
     raw.chunks(PAGE_RAW).flat_map(|p| &p[..PAGE.min(p.len())]).copied().collect()
 }
 
+/// The blocks of a 64 MB cartridge chip.
+const BLOCKS: usize = 4096;
+
+/// True for an image of a cartridge's FAT volume alone (as players dump
+/// them from /dev/mtdblock or a mounted cart): a FAT boot sector labelled
+/// "Cartridge" that fits a 64 MB chip's volume.
+pub fn is_volume(data: &[u8]) -> bool {
+    data.len() >= 512
+        && data.len() % 512 == 0
+        && data[510..512] == [0x55, 0xAA]
+        && (&data[71..82] == b"Cartridge  " || &data[43..54] == b"Cartridge  ")
+        && data.len() <= crate::ubi::available_blocks(BLOCKS) * (PAGE * PAGES_PER_BLOCK - 1024)
+}
+
+/// A raw dump made from an image of the FAT volume (`is_volume`): UBI as
+/// on a retail cartridge, spare areas erased (production cartridges run
+/// with ECC off).
+pub fn from_volume(fat: &[u8]) -> Result<Vec<u8>, String> {
+    let blocks = crate::ubi::cart_image(PAGE * PAGES_PER_BLOCK, BLOCKS, fat)?;
+    let mut raw = Vec::with_capacity(BLOCKS * PAGES_PER_BLOCK * PAGE_RAW);
+    for page in blocks.chunks(PAGE) {
+        raw.extend_from_slice(page);
+        raw.extend_from_slice(&[0xFF; OOB]);
+    }
+    Ok(raw)
+}
+
 /// The cartridge's UBI volume 0 ("ubi_Cartridge", a FAT32 volume): each
 /// erase block's VID header names the logical block it holds; where two
 /// hold the same one, the higher sequence number wins (ubi-media.h).
@@ -215,6 +242,20 @@ mod tests {
             c.address(b);
         }
         (0..n).map(|_| c.read_byte()).collect()
+    }
+
+    #[test]
+    fn a_volume_image_becomes_a_dump() {
+        let mut fat = vec![0u8; 15360 * 3 + 512];
+        fat[71..82].copy_from_slice(b"Cartridge  ");
+        fat[510..512].copy_from_slice(&[0x55, 0xAA]);
+        fat[15360 * 2 + 7] = 9;
+        assert!(is_volume(&fat));
+        let raw = from_volume(&fat).unwrap();
+        assert!(Cart::looks_like(&raw));
+        assert_eq!(raw.len(), 69206016);
+        let v = volume(&raw).unwrap();
+        assert_eq!(v[..fat.len()], fat[..]);
     }
 
     #[test]

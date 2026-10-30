@@ -28,8 +28,8 @@ DIST = ROOT / 'target' / 'dist'
 # Packaged name: built name.
 PROGRAMS = {'Ribbit.exe': 'ribbit-gui.exe'}
 
-README = """Ribbit {version} - an emulator for the LeapFrog Leapster (and the Zippity
-and RockIt Twist)
+README = """Ribbit {version} - an emulator for the LeapFrog Leapster (and the Zippity,
+RockIt Twist, Didj and LeapPad)
 =====================================================================
 
 Ribbit includes no firmware and no games. You need a dump of the BIOS from
@@ -82,6 +82,12 @@ Choose the console in the library's console menu.
     are not run. Keys: WASD/arrows = D-pad, Q/E = Switch, number pad = button
     grid, U/J I/K O/L = dials, number pad * and - = spinner, Page Up/Down =
     slider, Enter = check mark, Home = Home, Shift/Tab = Hint.
+  * LeapFrog Didj (early emulation): put its firmware packages
+    (DIDJ-0x....lfp files) in one folder and add it with Add games folder;
+    the Didj and your cartridge dumps then show on the Didj tab. Its own
+    keys are the Leapster's; L/R = the volume buttons, Menu = Home.
+    Emulation > Didj > Enhanced (default) repairs its files after a crash
+    instead of locking on the tune-up screen.
 
 Discord
 -------

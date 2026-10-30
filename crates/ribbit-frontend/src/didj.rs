@@ -51,6 +51,9 @@ pub const CONTROLS: [(Button, u32, &str); 11] = [
 
 /// Frames a second.
 const FPS: f64 = 60.0;
+/// Emulation time a frame may take before the faster processor slows down
+/// (of the 16.7 ms a frame lasts; the rest is for drawing and the PC).
+const BUSY: f64 = 0.012;
 
 struct Shared {
     didj: Mutex<Didj>,
@@ -64,6 +67,9 @@ struct Shared {
     gain: AtomicU32,
     /// Speed over the last second, percent of real time (f32 bits).
     speed: AtomicU32,
+    /// The fastest the processor may run, in thousandths of its clock
+    /// (`Mode::cpu_scale`); `run` uses what the PC has time for.
+    cpu_max: AtomicU32,
     sink: Mutex<Option<AudioSink>>,
 }
 
@@ -127,12 +133,13 @@ impl DidjSession {
             held: AtomicU32::new(0),
             gain: AtomicU32::new(1f32.to_bits()),
             speed: AtomicU32::new(100f32.to_bits()),
+            cpu_max: AtomicU32::new(mode.cpu_scale.max(1) * 1000),
             sink: Mutex::new(sink),
         });
         let s = shared.clone();
         let thread = std::thread::Builder::new().name("ribbit-didj".into()).spawn(move || {
             crate::perf::raise_thread_priority();
-            run(&s, autostart.map(AutoStart::new))
+            run(&s, autostart)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image })
@@ -190,6 +197,7 @@ impl DidjSession {
         *d = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced));
         d.set_cpu_scale(mode.cpu_scale);
         d.bus.cart = cart;
+        self.shared.cpu_max.store(mode.cpu_scale.max(1) * 1000, Ordering::Relaxed);
     }
 
     /// Keeps what the system has saved to its NAND.
@@ -240,7 +248,8 @@ pub fn save_file(dir: &Path, save_dir: &Path) -> PathBuf {
 }
 
 /// The emulation thread: a frame every 1/60 s of wall time while running.
-fn run(s: &Shared, mut auto: Option<AutoStart>) {
+fn run(s: &Shared, art: Option<Art>) {
+    let mut auto = art.clone().map(AutoStart::new);
     let mut auto_buttons = 0;
     let mut next = Instant::now();
     let mut rate = 0;
@@ -272,7 +281,36 @@ fn run(s: &Shared, mut auto: Option<AutoStart>) {
             let mut d = s.didj.lock().unwrap();
             d.bus.buttons = s.held.load(Ordering::Relaxed) | auto_buttons;
             let cycles = d.cpu_hz() / FPS as u64;
+            let t = Instant::now();
             d.run(cycles);
+            if d.bus.powered_off {
+                // The system turned itself off (after installing a
+                // cartridge's update, as a real Didj does): on again, as its
+                // owner would, and the game started again.
+                tracing::info!(target: "ribbit::didj", "the Didj turned itself off; turning it on again");
+                let (flash, cart, sdram, milli) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take(), d.bus.sdram.len(), d.cpu_milli());
+                *d = Didj::with_sdram(flash, sdram);
+                d.set_cpu_milli(milli);
+                d.bus.cart = cart;
+                auto = art.clone().map(AutoStart::new);
+            }
+            // A faster processor (Enhanced) only as far as the PC keeps up:
+            // slower when a frame took too long, never below the Didj's own
+            // speed, back up while there is time to spare.
+            let (took, cur) = (t.elapsed().as_secs_f64(), d.cpu_milli());
+            let want = if took > BUSY {
+                (cur as f64 * BUSY / took) as u32
+            } else if took < BUSY * 0.75 {
+                // Slowly (1x to 2x in about a second), so a busy frame after
+                // quiet ones doesn't find it too fast.
+                cur + cur / 64
+            } else {
+                cur
+            };
+            let want = want.clamp(1000, s.cpu_max.load(Ordering::Relaxed).max(1000));
+            if want.abs_diff(cur) >= 10 {
+                d.set_cpu_milli(want);
+            }
             if d.bus.dma.pcm_rate != rate {
                 rate = d.bus.dma.pcm_rate;
                 resample = Resampler::new(rate as f64);
@@ -287,7 +325,10 @@ fn run(s: &Shared, mut auto: Option<AutoStart>) {
         if let Some(a) = &mut auto {
             let screen = if (w, h) == (SCREEN_W, SCREEN_H) { &px[..] } else { &[] };
             auto_buttons = a.frame(screen, s.held.load(Ordering::Relaxed));
-            if a.done() {
+            // Its last press ends a frame later (done() is true on the
+            // press's last frame): dropped then, A stayed held for good, and
+            // the game never saw another press of it.
+            if a.done() && auto_buttons == 0 {
                 auto = None;
             }
         }
@@ -380,16 +421,17 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
 }
 
 /// The art the menu shows for the game in an application package, or on
-/// the cartridge `cart` (meta.inf `LargeIcon`, else `PreviewImage`), for
-/// `AutoStart`. None for the system packages.
+/// the cartridge `cart` (meta.inf `LargeIcon` when it is panel-sized, else
+/// `PreviewImage`: Hannah Montana's LargeIcon is a 64x64 icon and its
+/// panel shows the PreviewImage), for `AutoStart`. None for the system
+/// packages.
 pub fn menu_art(path: &Path, cart: Option<&[u8]>) -> Option<Art> {
     use ribbit_didj::package::Meta;
-    let pick = |meta: &Meta| meta.get("LargeIcon").or(meta.get("PreviewImage")).map(str::to_string);
-    let png = if let Some(data) = cart {
+    let image = if let Some(data) = cart {
         let volume = ribbit_didj::cart::volume(data)?;
         ribbit_core::fatfs::list(&volume, "")?.into_iter().filter(|e| e.is_dir).find_map(|e| {
             let meta = Meta::parse(&String::from_utf8_lossy(&ribbit_core::fatfs::read_file(&volume, &format!("{}/meta.inf", e.name))?));
-            ribbit_core::fatfs::read_file(&volume, &format!("{}/{}", e.name, pick(&meta)?))
+            panel_art(&meta, |f| ribbit_core::fatfs::read_file(&volume, &format!("{}/{f}", e.name)))
         })?
     } else {
         let data = std::fs::read(path).ok()?;
@@ -401,12 +443,17 @@ pub fn menu_art(path: &Path, cart: Option<&[u8]>) -> Option<Art> {
         if meta.get("Type").map(str::trim) != Some("Application") {
             return None;
         }
-        let want = format!("{dir}/{}", pick(&meta)?);
-        ribbit_core::zip::read_entry(&data, entries.iter().find(|e| e.name == want)?).ok()?
+        panel_art(&meta, |f| ribbit_core::zip::read_entry(&data, entries.iter().find(|e| e.name == format!("{dir}/{f}"))?).ok())?
     };
-    let image = crate::manual::decode_png(&png)?;
     let pixels = image.pixels.iter().map(|c| u32::from_be_bytes([c.a(), c.r(), c.g(), c.b()])).collect();
     Some(Art { width: image.size[0], pixels })
+}
+
+/// The picture a game's panel shows (`menu_art`), read with `read`.
+fn panel_art(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Vec<u8>>) -> Option<egui::ColorImage> {
+    let mut found = ["LargeIcon", "PreviewImage"].into_iter().filter_map(|k| crate::manual::decode_png(&read(meta.get(k)?)?));
+    let first = found.next()?;
+    if first.size[0] >= 256 { Some(first) } else { found.next().or(Some(first)) }
 }
 
 /// A Didj cartridge dump in the library, titled from the meta.inf of the
@@ -414,7 +461,8 @@ pub fn menu_art(path: &Path, cart: Option<&[u8]>) -> Option<Art> {
 pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
     use crate::library::{Art, Family, Game};
     use ribbit_core::fatfs;
-    let volume = ribbit_didj::cart::volume(data)?;
+    // A raw dump, or an image of its FAT volume alone.
+    let volume = if ribbit_didj::cart::is_volume(data) { std::borrow::Cow::Borrowed(data) } else { std::borrow::Cow::Owned(ribbit_didj::cart::volume(data)?) };
     let (folder, meta) = fatfs::list(&volume, "")?.into_iter().filter(|e| e.is_dir).find_map(|e| {
         let m = fatfs::read_file(&volume, &format!("{}/meta.inf", e.name))?;
         Some((e.name, ribbit_didj::package::Meta::parse(&String::from_utf8_lossy(&m))))
@@ -447,15 +495,20 @@ pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
     })
 }
 
-/// The dump at `path` if it is a Didj cartridge (zipped or not).
+/// The dump at `path` if it is a Didj cartridge (zipped or not): the raw
+/// flash, or an image of its FAT volume alone, made into the raw flash.
 pub fn read_cart(path: &Path) -> Option<Vec<u8>> {
+    use ribbit_didj::cart;
     let raw = path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("zip"));
     let len = std::fs::metadata(path).ok()?.len() as usize;
-    if raw && len % (ribbit_didj::cart::PAGE_RAW * ribbit_didj::cart::PAGES_PER_BLOCK) != 0 {
+    if raw && len % (cart::PAGE_RAW * cart::PAGES_PER_BLOCK) != 0 && len % 15360 != 0 {
         return None;
     }
     let data = ribbit_core::read_image(path).ok()?;
-    ribbit_didj::cart::Cart::looks_like(&data).then_some(data)
+    if cart::Cart::looks_like(&data) {
+        return Some(data);
+    }
+    cart::is_volume(&data).then(|| cart::from_volume(&data).ok()).flatten()
 }
 
 /// Whether `path` is a Didj package (by its name), listed or not.

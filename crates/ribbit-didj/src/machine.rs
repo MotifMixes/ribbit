@@ -678,15 +678,16 @@ pub struct Didj {
     /// Compiled blocks run only when they fit in the slice, so the results
     /// match the interpreter's exactly (for checking the JIT; slower).
     pub exact: bool,
-    /// The processor runs this many times its clock (Enhanced mode's faster
-    /// processor; 1 on a real console). Timers, sound and the screen keep
-    /// their own clocks. Set with `set_cpu_scale`.
+    /// The processor runs at this many thousandths of its clock (Enhanced
+    /// mode's faster processor; 1000 on a real console). Timers, sound and
+    /// the screen keep their own clocks, so it may change between runs. Set
+    /// with `set_cpu_scale` or `set_cpu_milli`.
     #[serde(skip, default = "one")]
-    cpu_scale: u32,
+    cpu_milli: u32,
 }
 
 fn one() -> u32 {
-    1
+    1000
 }
 
 fn new_jit() -> ArmJit {
@@ -733,7 +734,7 @@ impl Didj {
         d.bus.nand = nand;
         d.bus.cart = self.bus.cart.take();
         d.exact = self.exact;
-        d.cpu_scale = self.cpu_scale;
+        d.cpu_milli = self.cpu_milli;
         *self = d;
         Ok(())
     }
@@ -775,7 +776,7 @@ impl Didj {
             frame_cycles: 0,
         };
         let jit = jit_for(bus.sdram.len());
-        Self { cpu: Arm::new(), bus, jit, exact: false, cpu_scale: 1 }
+        Self { cpu: Arm::new(), bus, jit, exact: false, cpu_milli: 1000 }
     }
 
     /// The processor clock and the PLL outputs, from the clock registers.
@@ -795,13 +796,23 @@ impl Didj {
         let plls = [timer::pll_hz(reg(timer::PLLSETREG0)), timer::pll_hz(reg(timer::PLLSETREG0 + 4))];
         let mode = reg(timer::CLKMODEREG);
         let cpu = plls.get((mode >> 4 & 3) as usize).copied().flatten().map(|p| p / ((mode & 0xF) as u64 + 1));
-        (cpu.unwrap_or(393_000_000) * self.cpu_scale as u64, plls)
+        (cpu.unwrap_or(393_000_000) * self.cpu_milli as u64 / 1000, plls)
     }
 
-    /// Runs the processor at `scale` times its clock (`cpu_scale`).
+    /// Runs the processor at `scale` times its clock (`cpu_milli`).
     pub fn set_cpu_scale(&mut self, scale: u32) {
-        self.cpu_scale = scale.max(1);
+        self.set_cpu_milli(scale.max(1) * 1000);
+    }
+
+    /// Runs the processor at `milli` thousandths of its clock, at least its
+    /// own speed (`cpu_milli`).
+    pub fn set_cpu_milli(&mut self, milli: u32) {
+        self.cpu_milli = milli.max(1000);
         self.bus.clocks = None;
+    }
+
+    pub fn cpu_milli(&self) -> u32 {
+        self.cpu_milli
     }
 
     /// The processor clock (Hz).

@@ -125,6 +125,18 @@ pub enum Action {
     RemoveFromFolder { folder: usize, game: PathBuf },
 }
 
+/// What plugging a console into this PC through USB/IP needs here, and the
+/// command that does it (Linux has the client in its kernel: vhci-hcd).
+#[cfg(target_os = "linux")]
+pub const USBIP_NEEDS: &str = "Needs the usbip tool (Ubuntu/Debian: sudo apt install linux-tools-generic; Fedora: \
+                               sudo dnf install usbip) and its kernel module: sudo modprobe vhci-hcd.";
+#[cfg(target_os = "linux")]
+pub const USBIP_ATTACH: &str = "sudo usbip attach -r 127.0.0.1 -b 1-1";
+#[cfg(not(target_os = "linux"))]
+pub const USBIP_NEEDS: &str = "Needs usbip-win2 (winget install usbip-win2).";
+#[cfg(not(target_os = "linux"))]
+pub const USBIP_ATTACH: &str = "usbip attach -r 127.0.0.1 -b 1-1";
+
 pub const STATE_SLOTS: u8 = 5;
 
 /// What the UI shows (read-only snapshot).
@@ -982,12 +994,11 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             } else {
                 egui::RichText::new("🔌  Leapster 2: plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
             })
-            .on_hover_text(
+            .on_hover_text(format!(
                 "Experimental. Connects the emulated Leapster 2 to this PC as a USB cable would, so programs such as \
-                 LeapLoader can use its two drives. Needs usbip-win2 (winget install usbip-win2). A running Leapster 2 \
-                 restarts once when plugged in, as a real one does. Wait about 7 seconds, then run: \
-                 usbip attach -r 127.0.0.1 -b 1-1",
-            )
+                 LeapLoader can use its two drives. A running Leapster 2 restarts once when plugged in, as a real \
+                 one does. {USBIP_NEEDS} Wait about 7 seconds, then run: {USBIP_ATTACH}"
+            ))
             .clicked()
         {
             actions.push(Action::SetLeapster2Usb(!usb));
@@ -1110,7 +1121,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                      locked the console on \"Your Didj needs a tune-up\" until LeapFrog Connect was used; and a \
                      crash turned the console off. Enhanced repairs the files and goes back to the menu. It also \
                      gives the system 50 MB of memory instead of 16 (fewer reloads and out-of-memory crashes) \
-                     and can run the processor faster. From the next power-on.",
+                     and runs the processor faster when your PC has time to spare. From the next power-on.",
                 )
                 .changed();
             changed |= ui
@@ -1120,13 +1131,14 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             ui.separator();
             ui.label(egui::RichText::new("Processor (Enhanced)").weak());
             ui.add_enabled_ui(!original, |ui| {
-                for (scale, label) in [(1, "393 MHz (original)"), (2, "2× (786 MHz)"), (3, "3× (1.2 GHz)")] {
+                for (scale, label) in [(1, "393 MHz (original)"), (2, "Up to 2× (786 MHz)"), (3, "Up to 3× (1.2 GHz)")] {
                     changed |= ui
                         .radio_value(&mut settings.didj_cpu_scale, scale, label)
                         .on_hover_text(
                             "Games and the menu get more processor time for each frame, so loading, menus and busy \
-                             scenes lag less. Timers, sound and the screen keep their own speed. A faster setting \
-                             needs a faster PC while a game is busy. From the next power-on.",
+                             scenes lag less. Timers, sound and the screen keep their own speed. The processor runs \
+                             as fast as your PC keeps up with, up to this, and never slower than a real Didj. \
+                             From the next power-on.",
                         )
                         .changed();
                 }
@@ -1185,11 +1197,11 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 } else {
                     egui::RichText::new("🔌  Plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
                 })
-                .on_hover_text(
+                .on_hover_text(format!(
                     "Offers the emulated RockIt Twist as a USB device to this PC through USB/IP (port 3240), \
-                     so LeapFrog Connect can talk to it. Needs usbip-win2 (winget install usbip-win2); then: \
-                     usbip attach -r 127.0.0.1 -b 1-1. Restarts a running RockIt Twist.",
-                )
+                     so LeapFrog Connect can talk to it. {USBIP_NEEDS} Then run: {USBIP_ATTACH}. Restarts a \
+                     running RockIt Twist."
+                ))
                 .clicked()
             {
                 actions.push(Action::SetTwistUsb(!usb));
