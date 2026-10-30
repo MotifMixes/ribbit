@@ -71,13 +71,14 @@ pub(crate) struct Fast {
 const EMPTY: Fast = Fast { tag: NO_PAGE, delta: 0 };
 
 /// Entries in the cache of blocks by virtual address.
-const RECENT: usize = 4096;
+pub(crate) const RECENT: usize = 4096;
 
 /// A compiled block by its virtual address (1 = empty: ARM code is word
 /// aligned). Valid while the translation stays as it was
 /// (`ArmJit::fast_for`), so it needs no lookup through the MMU.
+#[repr(C)]
 #[derive(Clone, Copy)]
-struct Recent {
+pub(crate) struct Recent {
     va: u32,
     len: u32,
     code: *const u8,
@@ -105,6 +106,17 @@ pub(crate) struct Ctx {
     store8: Store,
     store16: Store,
     exec: Exec,
+    /// The block cache (`RECENT` entries, this privilege's): a block that
+    /// ends normally jumps to the next one found there while `dirty` is 0,
+    /// T is clear, the cycle count is below `limit` and the next block's
+    /// instruction count keeps it at or below `budget_end`.
+    recent: *const Recent,
+    limit: u64,
+    budget_end: u64,
+    /// Set by the helpers: something the run loop checks between blocks
+    /// (an interrupt line, waiting, the mode, the translation, written
+    /// code) may have changed.
+    dirty: u32,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -202,6 +214,7 @@ fn cpu_store<B: ArmBus>(cpu: &mut Arm, bus: &mut B, va: u32, v: u32, byte: bool)
 extern "sysv64" fn exec<B: ArmBus>(ctx: *mut Ctx, w: u32, pc: u32) -> u32 {
     // SAFETY: as `load32`.
     let (cpu, bus) = unsafe { (&mut *(*ctx).cpu, &mut *((*ctx).bus as *mut B)) };
+    unsafe { (*ctx).dirty = 1 };
     const KEPT: u32 = 0x1F | psr::T | psr::I | psr::F;
     let next = pc.wrapping_add(4);
     cpu.current = pc;
@@ -242,7 +255,8 @@ fn stored<B: ArmBus>(ctx: *mut Ctx, cpu: &mut Arm, bus: &mut B, va: u32, r: Resu
 /// directly.
 fn fill<B: ArmBus>(ctx: *mut Ctx, cpu: &mut Arm, bus: &mut B, va: u32, write: bool) {
     // SAFETY: as `load32`; the tables hold `FAST` entries.
-    let ctx = unsafe { &*ctx };
+    let ctx = unsafe { &mut *ctx };
+    ctx.dirty = 1;
     unsafe {
         if write {
             (*ctx.stats).slow_stores += 1;
@@ -313,6 +327,8 @@ pub struct Stats {
     /// Instructions compiled code ran with the interpreter: LDM, STM,
     /// MSR, coprocessor, other.
     pub execs: [u64; 5],
+    /// Blocks generated code went on to by itself (`Ctx::recent`).
+    pub linked: u64,
 }
 
 /// The block cache and run loop step: `step` replaces `Arm::step`.
@@ -462,9 +478,12 @@ impl ArmJit {
         // cycles, without going back to the caller, while nothing it handles
         // between blocks is needed: an interrupt, Thumb code, waiting,
         // written code, a translation or privilege change.
+        // Generated code also goes straight on to the next block while it
+        // can (`Ctx::recent`); it counts those blocks itself.
         let (first, mut code, mut len) = (cpu.cycles, code, len);
+        let (limit, budget_end) = (first.saturating_add(chain), first.saturating_add(budget));
         loop {
-            let exit = self.run(cpu, bus, code, user);
+            let exit = self.run(cpu, bus, code, user, limit, budget_end);
             self.stats.blocks_run += 1;
             self.stats.jit_instructions += len as u64;
             let ran = cpu.cycles - first;
@@ -563,7 +582,7 @@ impl ArmJit {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn run<B: ArmBus>(&mut self, cpu: &mut Arm, bus: &mut B, code: *const u8, user: bool) -> u32 {
+    fn run<B: ArmBus>(&mut self, cpu: &mut Arm, bus: &mut B, code: *const u8, user: bool, limit: u64, budget_end: u64) -> u32 {
         let side = user as usize * FAST;
         let (ram, ram_size) = bus.ram().unwrap_or((std::ptr::null_mut(), 0));
         let mut ctx = Ctx {
@@ -581,6 +600,10 @@ impl ArmJit {
             store8: store8::<B>,
             store16: store16::<B>,
             exec: exec::<B>,
+            recent: self.recent[user as usize * RECENT..].as_ptr(),
+            limit,
+            budget_end,
+            dirty: 0,
         };
         // SAFETY: `code` is a function `x64::emit` generated, in the arena.
         let f: extern "sysv64" fn(*mut Ctx) -> u32 = unsafe { std::mem::transmute(code) };
@@ -588,7 +611,7 @@ impl ArmJit {
     }
 
     #[cfg(not(target_arch = "x86_64"))]
-    fn run<B: ArmBus>(&mut self, _: &mut Arm, _: &mut B, _: *const u8, _: bool) -> u32 {
+    fn run<B: ArmBus>(&mut self, _: &mut Arm, _: &mut B, _: *const u8, _: bool, _: u64, _: u64) -> u32 {
         unreachable!("nothing is compiled on this host")
     }
 }

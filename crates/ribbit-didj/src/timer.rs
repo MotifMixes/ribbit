@@ -142,11 +142,11 @@ impl Timers {
             // TMRCONTROL SETCLK divider: 1 << ((SETCLK + 1) & 3).
             let Some(Some(pll)) = plls.get((t.clkgen >> 1 & 7) as usize) else { continue };
             let div = (t.clkgen >> 4 & 0xFF) as u64 + 1;
-            let setclk = 1u64 << ((t.control + 1) & 3);
-            t.acc += cycles * (pll / div / setclk);
-            let ticks = t.acc / cpu_hz;
-            t.acc %= cpu_hz;
-            if ticks > 0 {
+            // (This runs every few dozen cycles: divide only when a tick is due.)
+            t.acc += cycles * (pll / div >> ((t.control + 1) & 3));
+            if t.acc >= cpu_hz {
+                let ticks = t.acc / cpu_hz;
+                t.acc %= cpu_hz;
                 let next = t.count as u64 + ticks;
                 let m = t.matchv as u64;
                 if m != 0 && next >= m {

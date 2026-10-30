@@ -8,14 +8,17 @@
 //! | `r12` | the `Ctx` |
 //! | `rbx` | the `Arm` (guest rN at `[rbx + R + 4*N]`, the CPSR and the counters at fixed offsets) |
 //! | `r13d` | a load/store's written-back base, across the helper call |
+//! | `r15d` | the CPSR (read from `[rbx + CPSR]` on entry and after the interpreter ran an instruction; every change is stored there too) |
 //!
-//! All three are callee-saved in the System V ABI, so they survive the
+//! All four are callee-saved in the System V ABI, so they survive the
 //! helpers; everything else is scratch. Each instruction computes exactly
 //! what `arm::execute` computes; the NZCV flags are stored to the CPSR after
-//! every flag-setting instruction.
+//! every flag-setting instruction. (The CPSR in a register keeps its reads
+//! off the store-to-load path: flag-setting and conditional instructions
+//! follow each other closely.)
 
 use crate::decode::{Instr, Operand};
-use crate::{Ctx, FAST, exit};
+use crate::{Ctx, FAST, RECENT, Recent, Stats, exit};
 use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use ribbit_arm::{Arm, psr};
@@ -40,6 +43,19 @@ const EXEC: i32 = offset_of!(Ctx, exec) as i32;
 const RAM: i32 = offset_of!(Ctx, ram) as i32;
 const READS: i32 = offset_of!(Ctx, reads) as i32;
 const WRITES: i32 = offset_of!(Ctx, writes) as i32;
+const STATS: i32 = offset_of!(Ctx, stats) as i32;
+const RECENTS: i32 = offset_of!(Ctx, recent) as i32;
+const LIMIT: i32 = offset_of!(Ctx, limit) as i32;
+const BUDGET_END: i32 = offset_of!(Ctx, budget_end) as i32;
+const DIRTY: i32 = offset_of!(Ctx, dirty) as i32;
+const BLOCKS_RUN: i32 = offset_of!(Stats, blocks_run) as i32;
+const JIT_INSTRUCTIONS: i32 = offset_of!(Stats, jit_instructions) as i32;
+const LINKED: i32 = offset_of!(Stats, linked) as i32;
+const RECENT_LEN: i32 = offset_of!(Recent, len) as i32;
+const RECENT_CODE: i32 = offset_of!(Recent, code) as i32;
+/// Bytes of the prologue every block starts with: a block going straight
+/// on to the next jumps past it, with the registers and stack already set.
+const PROLOGUE: i32 = 31;
 
 /// Access sizes for `Gen::mem`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -125,7 +141,7 @@ pub(crate) fn emit(va: u32, instrs: &[Instr]) -> Option<Vec<u8>> {
     let mut ops = Asm::new(0);
     let (done, ret) = (ops.new_dynamic_label(), ops.new_dynamic_label());
     let mut g = Gen { ops, done, faults: Vec::new(), stores: Vec::new(), execs: Vec::new(), afters: Vec::new() };
-    // Four pushes and 72 bytes after the return address leave rsp 16-byte
+    // Five pushes and 64 bytes after the return address leave rsp 16-byte
     // aligned for the helper calls; [rsp] holds 16 words for LDM.
     dynasm!(g.ops
         ; .arch x64
@@ -133,10 +149,13 @@ pub(crate) fn emit(va: u32, instrs: &[Instr]) -> Option<Vec<u8>> {
         ; push r12
         ; push r13
         ; push r14
-        ; sub rsp, 72
+        ; push r15
+        ; sub rsp, 64
         ; mov r12, rdi
         ; mov rbx, QWORD [r12 + CPU]
+        ; mov r15d, DWORD [rbx + CPSR]
     );
+    assert_eq!(g.ops.offset().0, PROLOGUE as usize);
     let n = instrs.len() as u32;
     for (i, ins) in instrs.iter().enumerate() {
         let pc = va.wrapping_add(4 * i as u32);
@@ -157,9 +176,14 @@ pub(crate) fn emit(va: u32, instrs: &[Instr]) -> Option<Vec<u8>> {
         ; add QWORD [rbx + CYCLES], n as i32
         ; add QWORD [rbx + INSTRUCTIONS], n as i32
         ; mov DWORD [rbx + CURRENT], last as i32
+    );
+    g.next_block();
+    dynasm!(g.ops
+        ; .arch x64
         ; mov eax, code as i32
         ; =>ret
-        ; add rsp, 72
+        ; add rsp, 64
+        ; pop r15
         ; pop r14
         ; pop r13
         ; pop r12
@@ -227,11 +251,49 @@ pub(crate) fn emit(va: u32, instrs: &[Instr]) -> Option<Vec<u8>> {
 }
 
 impl Gen {
+    /// After a block that ran to its end: jumps to the next block when the
+    /// cache has it and nothing needs the run loop (`Ctx::recent`), else
+    /// falls through to return.
+    fn next_block(&mut self) {
+        const _: () = assert!(RECENT.is_power_of_two() && size_of::<Recent>() == 16);
+        let out = self.ops.new_dynamic_label();
+        dynasm!(self.ops
+            ; .arch x64
+            ; cmp DWORD [r12 + DIRTY], 0
+            ; jne =>out
+            ; test r15d, psr::T as i32
+            ; jnz =>out
+            ; mov rax, QWORD [rbx + CYCLES]
+            ; cmp rax, QWORD [r12 + LIMIT]
+            ; jae =>out
+            ; mov ecx, DWORD [rbx + R15]
+            ; mov edx, ecx
+            ; shr edx, 2
+            ; and edx, (RECENT - 1) as i32
+            ; shl rdx, 4
+            ; add rdx, QWORD [r12 + RECENTS]
+            ; cmp DWORD [rdx], ecx
+            ; jne =>out
+            ; mov ecx, DWORD [rdx + RECENT_LEN]
+            ; add rax, rcx
+            ; cmp rax, QWORD [r12 + BUDGET_END]
+            ; ja =>out
+            ; mov rax, QWORD [r12 + STATS]
+            ; add QWORD [rax + BLOCKS_RUN], 1
+            ; add QWORD [rax + JIT_INSTRUCTIONS], rcx
+            ; add QWORD [rax + LINKED], 1
+            ; mov rax, QWORD [rdx + RECENT_CODE]
+            ; add rax, PROLOGUE
+            ; jmp rax
+            ; =>out
+        );
+    }
+
     /// Jumps to `skip` unless condition `c` holds.
     fn cond(&mut self, c: u32, skip: DynamicLabel) {
         dynasm!(self.ops
             ; .arch x64
-            ; mov eax, DWORD [rbx + CPSR]
+            ; mov eax, r15d
             ; shr eax, 28
             ; mov ecx, cond_table(c) as i32
             ; bt ecx, eax
@@ -289,7 +351,7 @@ impl Gen {
                     (2, _) => dynasm!(self.ops ; .arch x64 ; sar ecx, n),
                     (_, 0) => {
                         // RRX
-                        dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + CPSR] ; bt eax, 29 ; rcr ecx, 1);
+                        dynasm!(self.ops ; .arch x64 ; bt r15d, 29 ; rcr ecx, 1);
                     }
                     _ => dynasm!(self.ops ; .arch x64 ; ror ecx, n),
                 }
@@ -350,6 +412,7 @@ impl Gen {
             ; mov esi, w as i32
             ; mov edx, pc as i32
             ; call QWORD [r12 + EXEC]
+            ; mov r15d, DWORD [rbx + CPSR]
             ; test eax, eax
             ; jnz =>label
         );
@@ -366,20 +429,19 @@ impl Gen {
             ; movzx r8d, r8b
             ; shl r8d, 30
             ; or edx, r8d
-            ; mov r9d, DWORD [rbx + CPSR]
-            ; and r9d, !(psr::N | psr::Z) as i32
-            ; or r9d, edx
-            ; mov DWORD [rbx + CPSR], r9d
+            ; and r15d, !(psr::N | psr::Z) as i32
+            ; or r15d, edx
+            ; mov DWORD [rbx + CPSR], r15d
         );
     }
 
     fn c_to_edx(&mut self) {
-        dynasm!(self.ops ; .arch x64 ; mov edx, DWORD [rbx + CPSR] ; shr edx, 29 ; and edx, 1);
+        dynasm!(self.ops ; .arch x64 ; mov edx, r15d ; shr edx, 29 ; and edx, 1);
     }
 
     /// CF = the guest's C flag.
     fn c_to_cf(&mut self) {
-        dynasm!(self.ops ; .arch x64 ; mov r9d, DWORD [rbx + CPSR] ; bt r9d, 29);
+        dynasm!(self.ops ; .arch x64 ; bt r15d, 29);
     }
 
     fn instr(&mut self, ins: &Instr, pc: u32, count: u32) {
@@ -457,7 +519,7 @@ impl Gen {
                 );
             }
             Instr::Mrs { rd, .. } => {
-                dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + CPSR] ; mov DWORD [rbx + reg(rd)], eax);
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + reg(rd)], r15d);
             }
             Instr::Exec { w, .. } => self.exec(w, pc, count),
             Instr::Nop => {}
@@ -484,7 +546,8 @@ impl Gen {
                         ; .arch x64
                         ; add eax, DWORD [rbx + reg(rn)]
                         ; jno =>ok
-                        ; or DWORD [rbx + CPSR], psr::Q as i32
+                        ; or r15d, psr::Q as i32
+                        ; mov DWORD [rbx + CPSR], r15d
                         ; =>ok
                     );
                 }
@@ -500,7 +563,7 @@ impl Gen {
                 let (slow, after) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
                 dynasm!(self.ops
                     ; .arch x64
-                    ; mov eax, DWORD [rbx + CPSR]
+                    ; mov eax, r15d
                     ; mov edx, eax
                     ; and edx, 0x1F
                     ; mov r8d, mask as i32
@@ -515,6 +578,7 @@ impl Gen {
                     ; xor edx, eax
                     ; test edx, 0x1F
                     ; jnz =>slow
+                    ; mov r15d, ecx
                     ; mov DWORD [rbx + CPSR], ecx
                     // I or F cleared: an interrupt may be taken now.
                     ; and edx, eax
@@ -574,26 +638,25 @@ impl Gen {
             let keep = if logical { !(psr::N | psr::Z | psr::C) } else { !(psr::N | psr::Z | psr::C | psr::V) };
             dynasm!(self.ops
                 ; .arch x64
-                ; mov r9d, DWORD [rbx + CPSR]
-                ; and r9d, keep as i32
+                ; and r15d, keep as i32
                 ; movzx edx, dl
                 ; shl edx, 29
-                ; or r9d, edx
+                ; or r15d, edx
             );
             if !logical {
-                dynasm!(self.ops ; .arch x64 ; movzx r8d, r8b ; shl r8d, 28 ; or r9d, r8d);
+                dynasm!(self.ops ; .arch x64 ; movzx r8d, r8b ; shl r8d, 28 ; or r15d, r8d);
             }
             dynasm!(self.ops
                 ; .arch x64
                 ; mov edx, eax
                 ; and edx, psr::N as i32
-                ; or r9d, edx
+                ; or r15d, edx
                 ; test eax, eax
                 ; setz dl
                 ; movzx edx, dl
                 ; shl edx, 30
-                ; or r9d, edx
-                ; mov DWORD [rbx + CPSR], r9d
+                ; or r15d, edx
+                ; mov DWORD [rbx + CPSR], r15d
             );
         }
         if write {
@@ -660,7 +723,8 @@ impl Gen {
             ; .arch x64
             ; test al, 1
             ; jz =>arm
-            ; or DWORD [rbx + CPSR], psr::T as i32
+            ; or r15d, psr::T as i32
+            ; mov DWORD [rbx + CPSR], r15d
             ; and eax, !1
             ; jmp =>set
             ; =>arm

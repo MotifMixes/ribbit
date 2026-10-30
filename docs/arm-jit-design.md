@@ -20,7 +20,13 @@ written; MCR, SWI and the cond-0xF space end the block. Loads and stores
 reach SDRAM directly through two 1024-entry tables (virtual 4 KB page ->
 physical, privileged and User mode each), filled by the helpers, emptied
 when `Cp15::generation` changes; pages with compiled code are never in the
-store table. Not done: Thumb, flags kept in host flags, block linking.
+store table. Blocks go straight on to the next block in the cache by
+themselves (2026-10-30: 77% of blocks on the Clone Wars run) unless a
+helper ran, T was set or the slice's cycles are used up; the CPSR stays in
+a host register (stored through on every change). Clone Wars, first
+8000 M cycles, one P-core: 12.3 -> 10.7 s CPU, results identical; the
+generated code is then ~37% of the time, the run loop ~20%, GA3D ~14%.
+Not done: Thumb, guest registers in host registers.
 
 Found on the way: CP15 flushed the TLB on every c1 write; Linux wrote c1
 474 K times in the first 3000 M cycles (~60 000 a second), so only M/S/R
