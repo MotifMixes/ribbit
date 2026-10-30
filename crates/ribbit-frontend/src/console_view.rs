@@ -18,9 +18,13 @@
 //! * Leapster: from the 2005 Parent Guide's diagram (Pause, Hint and Home
 //!   above the D-pad on the left, brightness and contrast at the bottom
 //!   left, A and B on the right, volume at the bottom right); proportions
-//!   APPROXIMATE (no measured drawing). Used for the Leapster, L-MAX and
-//!   Leapster 2, whose cases differ: the arrangement, not the case, is
-//!   what this shows for those.
+//!   APPROXIMATE (no measured drawing). Used for the Leapster and the
+//!   L-MAX, whose case differs: the arrangement, not the case, is what this
+//!   shows for it.
+//! * Leapster 2: from a product photo the project owner supplied (the case
+//!   about 1670 x 985 pixels there), measured in pixels: Home, Hint and
+//!   Pause in a row above the D-pad, a large A with B above and right of
+//!   it, the ring speaker at the bottom right.
 
 use egui::{Color32, Pos2, Rect, Stroke, Vec2, pos2, vec2};
 use ribbit_memory::known::Hardware;
@@ -142,6 +146,9 @@ pub enum Look {
     /// The Leapster's: wide wings over a narrower rounded bottom; the
     /// speaker as a round grille of slots.
     Leapster,
+    /// The Leapster 2's: round lobes at both ends joined by a narrower
+    /// waist, blue grips on the lobes; the speaker as rings.
+    Leapster2,
 }
 
 /// A recess in the face (a well a control sits in, a tray, an LED slot),
@@ -178,7 +185,8 @@ fn circle(c: Pos2, r: f32, aspect: f32) -> Rect {
 pub fn layout_for(hw: Hardware) -> Option<Layout> {
     match hw {
         Hardware::RockItTwist => Some(rockit_twist()),
-        Hardware::Leapster | Hardware::LeapsterLmax | Hardware::Leapster2 => Some(leapster()),
+        Hardware::Leapster | Hardware::LeapsterLmax => Some(leapster()),
+        Hardware::Leapster2 => Some(leapster2()),
         // TV consoles: no handheld to draw.
         Hardware::LeapsterTv | Hardware::Zippity => None,
         // The LeapPad draws itself (leappad.rs).
@@ -475,6 +483,104 @@ pub fn leapster() -> Layout {
         look: Look::Leapster,
         lcd: Some(160.0),
         prints: vec![(pos2(0.045, 0.235), "HOME"), (pos2(0.104, 0.175), "HINT"), (pos2(0.176, 0.19), "PAUSE")],
+    }
+}
+
+/// The Leapster 2 (green, blue grips), measured on the photo described at
+/// the top.
+pub fn leapster2() -> Layout {
+    use ribbit_input::Button as B;
+    let aspect = 1.70;
+    let l = |b| Target::Leapster(b);
+    let press = |b| Action::Press(Target::Leapster(b));
+    let silver = rgb(205, 208, 216);
+    let blue = rgb(52, 86, 176);
+    // The 160 x 160 LCD, in the middle of its panel.
+    let h = 0.578;
+    let screen = Rect::from_center_size(pos2(0.495, 0.482), vec2(h / aspect, h));
+    let small = |name, c: Pos2, glyph, b| Control {
+        name,
+        rect: circle(c, 0.032, aspect),
+        shape: Shape::Circle,
+        color: silver,
+        glyph,
+        cap_at: CapAt::Below,
+        action: press(b),
+    };
+    let dpad = pos2(0.126, 0.385);
+    let controls = vec![
+        small("Home", pos2(0.109, 0.117), "⌂", B::Home),
+        small("Hint", pos2(0.166, 0.156), "?", B::Hint),
+        small("Pause", pos2(0.210, 0.217), "II", B::Pause),
+        Control {
+            name: "D-pad",
+            rect: circle(dpad, 0.1, aspect),
+            shape: Shape::Cross,
+            color: silver,
+            glyph: "",
+            cap_at: CapAt::Center,
+            action: Action::Dpad([l(B::Up), l(B::Down), l(B::Left), l(B::Right)]),
+        },
+        Control {
+            name: "A",
+            rect: circle(pos2(0.837, 0.385), 0.078, aspect),
+            shape: Shape::Circle,
+            color: silver,
+            glyph: "A",
+            cap_at: CapAt::Left,
+            action: press(B::A),
+        },
+        Control {
+            name: "B",
+            rect: circle(pos2(0.913, 0.286), 0.044, aspect),
+            shape: Shape::Circle,
+            color: silver,
+            glyph: "B",
+            cap_at: CapAt::Below,
+            action: press(B::B),
+        },
+    ];
+    // The blue grips: the lobes' lower parts, under the D-pad and A.
+    let grip = |x0: f32, x1: f32| Housing {
+        rect: Rect::from_min_max(pos2(x0, 0.17), pos2(x1, 0.975)),
+        round: 0.5,
+        fill: blue,
+        glow: None,
+        tilt: 0.0,
+    };
+    Layout {
+        name: "Leapster 2",
+        aspect,
+        screen,
+        screen_aspect: 1.0,
+        body: rgb(152, 208, 42),
+        face: rgb(140, 198, 38),
+        face_rect: Rect::from_min_max(pos2(0.26, 0.137), pos2(0.731, 0.833)),
+        corner: 0.09,
+        bezel: rgb(160, 214, 58),
+        controls,
+        speaker: Some(pos2(0.762, 0.8)),
+        housings: vec![grip(0.012, 0.215), grip(0.79, 0.988)],
+        look: Look::Leapster2,
+        lcd: Some(160.0),
+        prints: Vec::new(),
+    }
+}
+
+/// The Leapster 2's outline in `shell`: a lobe at each end (as tall as
+/// the case) joined by a waist that dips at the top and bottom middle.
+fn leapster2_sdf(shell: Rect) -> impl Fn(Pos2) -> f32 {
+    let (w, h) = (shell.width(), shell.height());
+    let lobe = |cx: f32| rr_sdf(Rect::from_center_size(pos2(cx, shell.center().y), vec2(0.42 * w, h)), 0.42 * h);
+    let (left, right) = (lobe(shell.left() + 0.21 * w), lobe(shell.right() - 0.21 * w));
+    let waist = rr_sdf(Rect::from_center_size(shell.center(), vec2(0.7 * w, 0.9 * h)), 0.2 * h);
+    let k = 0.25 * h;
+    move |p| {
+        let blend = |a: f32, b: f32| {
+            let t = (k - (a - b).abs()).max(0.0) / k;
+            a.min(b) - t * t * k / 4.0
+        };
+        blend(blend(left(p), right(p)), waist(p))
     }
 }
 
@@ -1136,7 +1242,11 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     let h = shell.height();
     let unit = h / 700.0;
     // The Leapster's screen sits in a broad silver frame.
-    let bezel_pad = h * if layout.look == Look::Leapster { 0.055 } else { 0.025 };
+    let bezel_pad = h * match layout.look {
+        Look::Leapster => 0.055,
+        Look::Leapster2 => 0.035,
+        Look::Rounded => 0.025,
+    };
     let bezel = screen.expand(bezel_pad);
     let face = place(shell, layout.face_rect);
     let from = bezel.center();
@@ -1150,6 +1260,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     let silhouette: Option<Box<dyn Fn(Pos2) -> f32>> = match layout.look {
         Look::Rounded => None,
         Look::Leapster => Some(Box::new(leapster_sdf(shell))),
+        Look::Leapster2 => Some(Box::new(leapster2_sdf(shell))),
     };
     let reach = shell.size().length() * 1.5;
     // The case's outline grown by `d`, moved by `shift`.
@@ -1165,7 +1276,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     let hole = rim(bezel, bezel_pad, from, N);
     let lip = case_at(-unit * 9.0, Vec2::ZERO);
     // The Leapster's silver catches the light up and to the left.
-    let sheen = if layout.look == Look::Leapster { 0.07 } else { 0.0 };
+    let sheen = if layout.look == Look::Rounded { 0.0 } else { 0.07 };
     out.push(band(&lip, &hole, from, |d| shade(layout.body, 1.0 + sheen * lightness(d)), |_| layout.body));
     out.push(band(
         &case,
@@ -1184,7 +1295,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     // The screen's frame: raised, the screen set into it.
     // The Leapster's: a silver frame up to a thin dark edge round the LCD,
     // its corners as round as the opening it sits in (no gap at them).
-    let leap = layout.look == Look::Leapster;
+    let leap = layout.look != Look::Rounded;
     let frame_out = rim(bezel, bezel_pad * if leap { 1.0 } else { 1.4 }, from, N);
     let glass = rim(screen, 0.0, from, N);
     let frame_mid = if leap {
@@ -1206,7 +1317,13 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
     }
     // Ribbit's own mark: on the Leapster large, on the panel above the
     // frame (where its own name is); on the others, on the frame.
-    if leap {
+    if layout.look == Look::Leapster2 {
+        // Below the panel, where the Leapster 2 prints its name.
+        let at = pos2(bezel.center().x, (face.bottom() + shell.bottom()) / 2.0 - unit * 4.0);
+        let font = egui::FontId::proportional((h * 0.06).max(8.0));
+        out.push(text(ctx, at + vec2(0.0, unit * 1.2), egui::Align2::CENTER_CENTER, "RIBBIT", font.clone(), shade(layout.body, 1.2)));
+        out.push(text(ctx, at, egui::Align2::CENTER_CENTER, "RIBBIT", font, rgb(52, 86, 176)));
+    } else if leap {
         let at = pos2(bezel.center().x, (face.top() + bezel.top() - bezel_pad * 0.4) / 2.0);
         let font = egui::FontId::proportional((h * 0.055).max(8.0));
         out.push(text(ctx, at + vec2(0.0, unit * 1.2), egui::Align2::CENTER_CENTER, "RIBBIT", font.clone(), shade(layout.face, 1.2)));
@@ -1255,7 +1372,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
         }
     }
     // The Leapster's plastic: softer shadows, no bright edges.
-    let soft = layout.look == Look::Leapster;
+    let soft = layout.look != Look::Rounded;
     for hs in &layout.housings {
         housing(&mut out, hs, place(shell, hs.rect), unit, soft);
     }
@@ -1311,6 +1428,7 @@ fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Cont
                 let press = any * 0.5;
                 let cross: Box<dyn Fn(Pos2) -> f32> = match layout.look {
                     Look::Leapster => Box::new(leap_cross_sdf(rc)),
+                    Look::Leapster2 => Box::new(cross_sdf(rc, 0.17, w * 0.06)),
                     Look::Rounded => Box::new(cross_sdf(rc, DPAD_ARM, w * 0.1)),
                 };
                 let edge = outline(&cross, rc.center(), w, N);
@@ -1650,7 +1768,9 @@ fn edge_of(shape: Shape, r: Rect) -> Vec<Pos2> {
 
 /// The symbol on a control.
 fn glyph(out: &mut Vec<egui::Shape>, ctx: &egui::Context, c: &Control, r: Rect, unit: f32) {
-    let ink = Color32::from_white_alpha(230);
+    // Blue on light buttons (the Leapster 2's silver ones), else white.
+    let light = c.color.r() as u32 + c.color.g() as u32 + c.color.b() as u32 > 3 * 185;
+    let ink = if light { rgb(52, 86, 176) } else { Color32::from_white_alpha(230) };
     let s = r.height().min(r.width());
     let (cx, cy) = (r.center().x, r.center().y);
     match c.glyph {
