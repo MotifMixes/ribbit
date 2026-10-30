@@ -749,7 +749,10 @@ impl App {
             // Before the library is scanned: packages beside the cartridge.
             let beside = || std::fs::read_dir(path.parent()?).ok()?.flatten().map(|e| e.path()).find(|p| crate::didj::is_package(p));
             let system = self.library.games.iter().find(|g| g.family == crate::library::Family::Didj && g.has_tag("System")).map(|g| g.path.clone());
-            let Some(package) = system.or_else(beside) else {
+            // Or in the games folders (a cartridge opened at start-up, before
+            // the first scan has finished, found no Didj).
+            let folders = || self.settings.rom_folders.iter().find_map(|f| crate::didj::find_package(f, 3));
+            let Some(package) = system.or_else(beside).or_else(folders) else {
                 return self.ui.problem(
                     "No Didj in the library",
                     "A Didj cartridge plays in a Didj built from its firmware packages (DIDJ-0x….lfp files). Add the folder that holds them with \"Add games folder\".",

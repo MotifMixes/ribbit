@@ -515,3 +515,13 @@ pub fn read_cart(path: &Path) -> Option<Vec<u8>> {
 pub fn is_package(path: &Path) -> bool {
     path.file_name().is_some_and(|n| ribbit_didj::package::package_id(&n.to_string_lossy()).is_some())
 }
+
+/// The Didj's system package (the one the library lists as the console) in
+/// `dir` or up to `depth` folders below it, found by its name.
+pub fn find_package(dir: &Path, depth: u32) -> Option<PathBuf> {
+    let entries: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
+    let system = |p: &&PathBuf| is_package(p) && p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_uppercase().contains("0X000E0003"));
+    entries.iter().find(system).cloned().or_else(|| {
+        (depth > 0).then(|| entries.iter().filter(|p| p.is_dir()).find_map(|d| find_package(d, depth - 1))).flatten()
+    })
+}
