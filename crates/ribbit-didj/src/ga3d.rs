@@ -15,7 +15,10 @@
 //! TSE (triangle/rectangle setup) or the rasterizer (memory fill, LUT fill,
 //! texture cache clear). Everything finishes at once (timing UNKNOWN).
 
+use crate::hd::Hd;
 use crate::mlc::{BLOCK_BASE, BLOCK_END, block_sdram};
+use crate::texup::{Texel, UP, Upscaled};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Pixels (the triangles' bounding boxes) from which a batch is drawn on
@@ -193,6 +196,46 @@ impl<'a> Shared<'a> {
     }
 }
 
+/// Where the pixel pipeline reads and writes a pixel's colour and depth
+/// (console address `a`): the console's memory, or an HD pixel of it.
+trait Dest {
+    fn read(&self, a: u32, texture: bool, mem: Shared) -> u32;
+    fn write(&self, a: u32, v: u16, texture: bool, mem: Shared);
+}
+
+/// The console's memory, the HD store told what changes in it.
+struct Native<'a>(Option<&'a Hd>);
+
+impl Dest for Native<'_> {
+    fn read(&self, a: u32, texture: bool, mem: Shared) -> u32 {
+        mem.read_as(a, 2, texture)
+    }
+
+    fn write(&self, a: u32, v: u16, texture: bool, mem: Shared) {
+        if let Some(hd) = self.0 {
+            hd.note(a, mem.read_as(a, 2, texture) as u16, v);
+        }
+        mem.write16(a, v, texture);
+    }
+}
+
+/// HD pixel (j, k) of each console pixel.
+struct Sub<'a> {
+    hd: &'a Hd,
+    j: usize,
+    k: usize,
+}
+
+impl Dest for Sub<'_> {
+    fn read(&self, a: u32, texture: bool, mem: Shared) -> u32 {
+        self.hd.get(a, self.j, self.k, mem.read_as(a, 2, texture) as u16) as u32
+    }
+
+    fn write(&self, a: u32, v: u16, texture: bool, mem: Shared) {
+        self.hd.set(a, self.j, self.k, mem.read_as(a, 2, texture) as u16, v);
+    }
+}
+
 /// A 24-bit float register (the low 8 bits of an IEEE single are dropped).
 fn f24(bits: u32) -> f32 {
     f32::from_bits(bits & 0xFFFF_FF00)
@@ -366,7 +409,31 @@ pub struct Ga3d {
     /// calibrate).
     #[serde(default = "default_cycles_per_pixel")]
     pub cycles_per_pixel: u64,
+    /// HD drawing (`Hd::set_scale`).
+    #[serde(skip)]
+    pub hd: Hd,
+    /// HD textures (`texup`): upscaled textures by (stage, TEXINFO pair,
+    /// sub-segment, transparency colour), each with the `epoch` it was last
+    /// checked in, the hash of the memory (`Raster::raw_print`) and of the
+    /// texels it was made from.
+    #[serde(skip)]
+    up_cache: std::collections::HashMap<(usize, u32, u32, u32, u32), (u64, u64, u64, Arc<Upscaled>)>,
+    /// Bumped whenever texture memory may have changed (the CPU ran, the
+    /// engine drew or filled).
+    #[serde(skip)]
+    epoch: u64,
+    /// HD pixels read upscaled textures (with HD drawing on).
+    #[serde(skip)]
+    pub hd_textures: bool,
+    /// Text the font module drew lately (`fonthd`): textures holding it
+    /// are drawn again from its outlines.
+    #[serde(skip)]
+    pub text: crate::fonthd::TextStore,
 }
+
+/// The largest texture upscaled (texels), and the cache's size (bytes).
+const UP_TEXELS: i32 = 512 * 512;
+const UP_CACHE_BYTES: usize = 256 << 20;
 
 fn default_cycles_per_pixel() -> u64 {
     CYCLES_PER_PIXEL
@@ -383,6 +450,15 @@ struct Tri {
     x1: i32,
     y0: i32,
     y1: i32,
+    /// The HD pixels' box (in HD pixels; empty when HD is off).
+    hd: [i32; 4],
+    /// Per stage, the texture upscaled for the HD pixels, and the texels
+    /// drawn (`Ga3d::up_bounds`).
+    up: [Option<Arc<Upscaled>>; 2],
+    bounds: [[i32; 4]; 2],
+    /// Added to the HD pixels' texture coordinates (U0 V0 U1 V1): a texture
+    /// drawn 1:1 has each console pixel's texel centred on it.
+    snap: [f32; 4],
     uvs: usize,
     st: State,
     regs: [u32; PIX_REGS],
@@ -390,46 +466,102 @@ struct Tri {
 
 impl Tri {
     /// Draws row `y` (in the bounding box); the pixel counts.
-    fn row(&self, lut: &[[u16; 256]; 2], y: i32, mem: Shared) -> [u64; 5] {
-        let (v, area, st) = (&self.v, self.area, &self.st);
-        let r = Raster { regs: &self.regs, lut };
+    fn row(&self, lut: &[[u16; 256]; 2], y: i32, mem: Shared, hd: Option<&Hd>) -> [u64; 5] {
+        let r = Raster { regs: &self.regs, lut, up: [None; 2] };
         let mut counts = [0; 5];
-        let fy = y as f32;
-        let rows = self.edges.map(|(dx, _, _, ay, _)| dx * (fy - ay));
+        let rows = self.rows(y as f32);
         for x in self.x0..=self.x1 {
-            let fx = x as f32;
-            let mut w = [0.0f32; 3];
-            let mut inside = true;
-            for (k, &(_, dy, ax, _, own)) in self.edges.iter().enumerate() {
-                let e = (rows[k] - dy * (fx - ax)) / area;
-                if e < 0.0 || e == 0.0 && !own {
-                    inside = false;
-                    break;
-                }
-                w[k] = e;
+            if let Some(p) = self.cover(&rows, x as f32) {
+                counts[0] += 1;
+                counts[r.pixel(&self.st, x as u32, y as u32, &p, mem, &Native(hd))] += 1;
             }
-            if !inside {
-                continue;
-            }
-            let lin = |i: usize| w[0] * v[0][i] + w[1] * v[1][i] + w[2] * v[2][i];
-            let mut p = [0.0; 12];
-            for i in 2..8 {
-                p[i] = lin(i);
-            }
-            if st.perspective {
-                let q = p[3];
-                for i in 8..self.uvs {
-                    p[i] = (w[0] * v[0][i] * v[0][3] + w[1] * v[1][i] * v[1][3] + w[2] * v[2][i] * v[2][3]) / q;
-                }
-            } else {
-                for i in 8..self.uvs {
-                    p[i] = lin(i);
-                }
-            }
-            counts[0] += 1;
-            counts[r.pixel(st, x as u32, y as u32, &p, mem)] += 1;
         }
         counts
+    }
+
+    /// Draws HD row `hy`: HD pixel (j, k) of a console pixel is at
+    /// (x - 0.5 + (j + 0.5) / scale, y - 0.5 + (k + 0.5) / scale).
+    fn row_hd(&self, lut: &[[u16; 256]; 2], hy: i32, mem: Shared, hd: &Hd) {
+        let r = Raster { regs: &self.regs, lut, up: std::array::from_fn(|s| self.up[s].as_deref().map(|u| (u, self.bounds[s]))) };
+        let s = hd.scale as i32;
+        let at = |h: i32| (h as f32 + 0.5) / s as f32 - 0.5;
+        let rows = self.rows(at(hy));
+        let k = hy.rem_euclid(s) as usize;
+        for hx in self.hd[0]..=self.hd[2] {
+            if let Some(mut p) = self.cover(&rows, at(hx)) {
+                for i in 8..12 {
+                    p[i] += self.snap[i - 8];
+                }
+                let d = Sub { hd, j: hx.rem_euclid(s) as usize, k };
+                r.pixel(&self.st, hx.div_euclid(s) as u32, hy.div_euclid(s) as u32, &p, mem, &d);
+            }
+        }
+    }
+
+    /// `snap` for a texture drawn 1:1 (a texel per pixel across and down,
+    /// or turned a quarter): moves each stage's coordinates so the texel the
+    /// first covered console pixel takes is centred on that pixel.
+    fn snap(&self) -> [f32; 4] {
+        let mut snap = [0.0; 4];
+        if self.st.perspective {
+            return snap;
+        }
+        let v = &self.v;
+        // A coordinate's change per pixel across and down.
+        let grad = |i: usize| {
+            let (d1, d2) = (v[1][i] - v[0][i], v[2][i] - v[0][i]);
+            let dx = (d1 * (v[2][1] - v[0][1]) - d2 * (v[1][1] - v[0][1])) / self.area;
+            let dy = ((v[1][0] - v[0][0]) * d2 - (v[2][0] - v[0][0]) * d1) / self.area;
+            (dx, dy)
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let unit = |(dx, dy): (f32, f32)| near(dx.abs(), 1.0) && near(dy, 0.0) || near(dx, 0.0) && near(dy.abs(), 1.0);
+        let p = (self.y0..=self.y1).find_map(|y| {
+            let rows = self.rows(y as f32);
+            (self.x0..=self.x1).find_map(|x| self.cover(&rows, x as f32))
+        });
+        if let Some(p) = p {
+            for i in 8..self.uvs {
+                if unit(grad(i)) {
+                    snap[i - 8] = p[i].floor() + 0.5 - p[i];
+                }
+            }
+        }
+        snap
+    }
+
+    /// The edge functions' row terms at `fy`.
+    fn rows(&self, fy: f32) -> [f32; 3] {
+        self.edges.map(|(dx, _, _, ay, _)| dx * (fy - ay))
+    }
+
+    /// The interpolated vertex at (fx, the row's y), if it's inside.
+    fn cover(&self, rows: &[f32; 3], fx: f32) -> Option<Vertex> {
+        let (v, area) = (&self.v, self.area);
+        let mut w = [0.0f32; 3];
+        for (k, &(_, dy, ax, _, own)) in self.edges.iter().enumerate() {
+            let e = (rows[k] - dy * (fx - ax)) / area;
+            if e < 0.0 || e == 0.0 && !own {
+                return None;
+            }
+            w[k] = e;
+        }
+        let lin = |i: usize| w[0] * v[0][i] + w[1] * v[1][i] + w[2] * v[2][i];
+        let mut p = [0.0; 12];
+        for i in 2..8 {
+            p[i] = lin(i);
+        }
+        if self.st.perspective {
+            let q = p[3];
+            for i in 8..self.uvs {
+                p[i] = (w[0] * v[0][i] * v[0][3] + w[1] * v[1][i] * v[1][3] + w[2] * v[2][i] * v[2][3]) / q;
+            }
+        } else {
+            for i in 8..self.uvs {
+                p[i] = lin(i);
+            }
+        }
+        Some(p)
     }
 }
 
@@ -438,6 +570,22 @@ impl Tri {
 struct Raster<'a> {
     regs: &'a [u32; PIX_REGS],
     lut: &'a [[u16; 256]; 2],
+    /// Per stage, the texture upscaled (HD pixels only) and the texels
+    /// drawn (`up_bounds`).
+    up: [Option<(&'a Upscaled, [i32; 4])>; 2],
+}
+
+/// A texture stage's texture, from its registers.
+struct Tex {
+    i0: u32,
+    mode: u32,
+    bpp: u32,
+    width: i32,
+    height: i32,
+    sub: u32,
+    page: u32,
+    ou: u32,
+    ov: u32,
 }
 
 fn add(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
@@ -469,6 +617,11 @@ impl Default for Ga3d {
             drawing: Default::default(),
             tick_rest: 0,
             cycles_per_pixel: CYCLES_PER_PIXEL,
+            hd: Hd::default(),
+            up_cache: Default::default(),
+            epoch: 0,
+            hd_textures: true,
+            text: Default::default(),
         }
     }
 }
@@ -512,6 +665,7 @@ impl Ga3d {
 
     /// A CPU write.
     pub fn write(&mut self, addr: u32, v: u32, mem: &mut Mem) {
+        self.epoch += 1;
         let i = ((addr - BASE) / 4) as usize;
         if i <= CMDQREAR && self.trace.len() < TRACE_MAX {
             // CPU writes to the queue registers, marked by bit 16.
@@ -940,30 +1094,146 @@ impl Ga3d {
         self.flush(mem);
         let st = self.state();
         let regs: [u32; PIX_REGS] = self.regs[..PIX_REGS].try_into().unwrap();
-        let r = Raster { regs: &regs, lut: &self.lut };
+        let up = self.hd_up(mem).unwrap_or_default();
+        let bounds: [[i32; 4]; 2] = std::array::from_fn(|s| self.up_bounds(s, &[[a[8 + 2 * s], a[9 + 2 * s]], [b[8 + 2 * s], b[9 + 2 * s]]]));
+        let r = Raster { regs: &regs, lut: &self.lut, up: [None; 2] };
+        let hd = self.hd.on().then_some(&self.hd);
         let mem = Shared::new(mem);
+        let at = |fx: f32, fy: f32| {
+            if fx < x0 || fx >= x1 || fy < y0 || fy >= y1 {
+                return None;
+            }
+            let (tx, ty) = ((fx - a[0]) / (b[0] - a[0]), (fy - a[1]) / (b[1] - a[1]));
+            let mut p = *b;
+            for k in [8, 10] {
+                p[k] = a[k] + (b[k] - a[k]) * tx;
+                p[k + 1] = a[k + 1] + (b[k + 1] - a[k + 1]) * ty;
+            }
+            Some(p)
+        };
         let mut counts = [0; 5];
         for y in st.clip[1]..=st.clip[3] {
-            let fy = y as f32;
-            if fy < y0 || fy >= y1 {
-                continue;
-            }
             for x in st.clip[0]..=st.clip[2] {
-                let fx = x as f32;
-                if fx < x0 || fx >= x1 {
+                if let Some(p) = at(x as f32, y as f32) {
+                    counts[0] += 1;
+                    counts[r.pixel(&st, x as u32, y as u32, &p, mem, &Native(hd))] += 1;
+                }
+            }
+        }
+        if let Some(hd) = hd {
+            let r = Raster { up: std::array::from_fn(|s| up[s].as_deref().map(|u| (u, bounds[s]))), ..r };
+            // A texture drawn 1:1: each console pixel's texel centred on it.
+            let mut snap = [0.0; 4];
+            if up.iter().any(Option::is_some)
+                && let Some(p) = (st.clip[1]..=st.clip[3]).flat_map(|y| (st.clip[0]..=st.clip[2]).map(move |x| (x, y))).find_map(|(x, y)| at(x as f32, y as f32))
+            {
+                for k in 0..4 {
+                    let scale = (b[8 + k] - a[8 + k]) / (b[k & 1] - a[k & 1]);
+                    if (scale.abs() - 1.0).abs() < 1e-3 {
+                        snap[k] = p[8 + k].floor() + 0.5 - p[8 + k];
+                    }
+                }
+            }
+            let s = hd.scale as i32;
+            let f = |h: i32| (h as f32 + 0.5) / s as f32 - 0.5;
+            for hy in st.clip[1] * s..st.clip[3] * s + s {
+                let fy = f(hy);
+                if fy < y0 - 1.0 || fy >= y1 + 1.0 {
                     continue;
                 }
-                let (tx, ty) = ((fx - a[0]) / (b[0] - a[0]), (fy - a[1]) / (b[1] - a[1]));
-                let mut p = *b;
-                for k in [8, 10] {
-                    p[k] = a[k] + (b[k] - a[k]) * tx;
-                    p[k + 1] = a[k + 1] + (b[k + 1] - a[k + 1]) * ty;
+                for hx in st.clip[0] * s..st.clip[2] * s + s {
+                    if let Some(mut p) = at(f(hx), fy) {
+                        for k in 0..4 {
+                            p[8 + k] += snap[k];
+                        }
+                        let d = Sub { hd, j: hx.rem_euclid(s) as usize, k: hy.rem_euclid(s) as usize };
+                        r.pixel(&st, hx.div_euclid(s) as u32, hy.div_euclid(s) as u32, &p, mem, &d);
+                    }
                 }
-                counts[0] += 1;
-                counts[r.pixel(&st, x as u32, y as u32, &p, mem)] += 1;
             }
         }
         self.count(counts);
+    }
+
+    /// The textures upscaled for the HD pixels of what's drawn next, when
+    /// HD textures are on and it's textured and sampled nearest.
+    fn hd_up(&mut self, mem: &mut Mem) -> Option<[Option<Arc<Upscaled>>; 2]> {
+        let rs = self.regs[RENDERSTATE];
+        if !self.hd.on() || !self.hd_textures || rs >> 1 & 1 == 0 || rs >> 5 & 1 != 0 {
+            return None;
+        }
+        let stages = if rs >> 2 & 1 != 0 { 2 } else { 1 };
+        Some(std::array::from_fn(|s| if s < stages { self.upscaled(s, mem) } else { None }))
+    }
+
+    /// The texels (first and last, across and down) the vertices' texture
+    /// coordinates `uv` span in stage `s`'s texture, or all of them (as
+    /// far as can be) when they span its whole width or height.
+    fn up_bounds(&self, s: usize, uv: &[[f32; 2]]) -> [i32; 4] {
+        let regs: &[u32; PIX_REGS] = self.regs[..PIX_REGS].try_into().unwrap();
+        let t = Raster { regs, lut: &self.lut, up: [None; 2] }.tex(s);
+        let span = |k: usize, size: i32| {
+            let lo = uv.iter().map(|c| c[k]).fold(f32::INFINITY, f32::min);
+            let hi = uv.iter().map(|c| c[k]).fold(f32::NEG_INFINITY, f32::max);
+            let (first, last) = (floor_i32(lo + 1e-3), floor_i32(hi - 1e-3));
+            if !(last - first < size - 1) { (-(1 << 20), 1 << 20) } else { (first, last) }
+        };
+        let ((u0, u1), (v0, v1)) = (span(0, t.width), span(1, t.height));
+        [u0, v0, u1, v1]
+    }
+
+    /// Stage `s`'s texture upscaled: from the cache while the memory it's
+    /// in is unchanged (checked once an epoch), or its texels as decoded.
+    fn upscaled(&mut self, s: usize, mem: &mut Mem) -> Option<Arc<Upscaled>> {
+        let regs: [u32; PIX_REGS] = self.regs[..PIX_REGS].try_into().unwrap();
+        let tp = regs[RENDERSTATE] >> 3 & 1 != 0;
+        let r = Raster { regs: &regs, lut: &self.lut, up: [None; 2] };
+        let t = r.tex(s);
+        if t.width * t.height > UP_TEXELS {
+            return None;
+        }
+        let key = (s, t.i0, regs[TEXINFO[s] + 1], t.sub, if tp { 1 << 16 | regs[TPCOLOR] & 0xFFFF } else { 0 });
+        let entry = self.up_cache.get_mut(&key);
+        if let Some(e) = &entry
+            && e.0 == self.epoch
+        {
+            return Some(e.3.clone());
+        }
+        let raw = r.raw_print(s, &t, mem.sdram);
+        if let Some(e) = entry
+            && e.1 == raw
+        {
+            e.0 = self.epoch;
+            return Some(e.3.clone());
+        }
+        let mem = Shared::new(mem);
+        let q = |c: f32| round_u32(c * 255.0);
+        let colour: Vec<u32> = (0..t.height)
+            .flat_map(|v| (0..t.width).map(move |u| (u, v)))
+            .map(|(u, v)| match r.fetch(s, &t, u, v, tp, mem) {
+                // Transparent texels are all alike.
+                (key, _) if tp && key == regs[TPCOLOR] & 0xFFFF => 0,
+                (_, c) => q(c[3]) << 24 | q(c[2]) << 16 | q(c[1]) << 8 | q(c[0]),
+            })
+            .collect();
+        let hash = colour.iter().fold(0xCBF2_9CE4_8422_2325u64, |h, &c| (h ^ c as u64).wrapping_mul(0x0100_0000_01B3).rotate_left(5));
+        if let Some(e) = self.up_cache.get_mut(&key)
+            && e.2 == hash
+        {
+            (e.0, e.1) = (self.epoch, raw);
+            return Some(e.3.clone());
+        }
+        let (w, h) = (t.width as usize, t.height as usize);
+        let mut up = crate::texup::upscale(w, h, &colour);
+        if let Some(map) = self.text.render(w, h, &colour, |x, y| up.colour(x, y, &colour)) {
+            up = Upscaled::from_colours(w, h, map);
+        }
+        let up = Arc::new(up);
+        if self.up_cache.values().map(|e| e.3.bytes()).sum::<usize>() + up.bytes() > UP_CACHE_BYTES {
+            self.up_cache.clear();
+        }
+        self.up_cache.insert(key, (self.epoch, raw, hash, up.clone()));
+        Some(up)
     }
 
     fn count(&mut self, counts: [u64; 5]) {
@@ -994,7 +1264,17 @@ impl Ga3d {
         let y0 = (min(1).ceil() as i32).max(st.clip[1]);
         let y1 = (max(1).floor() as i32).min(st.clip[3]);
         self.cost += CYCLES_PER_TRIANGLE;
-        if x0 > x1 || y0 > y1 {
+        // HD pixels, at (h + 0.5) / scale - 0.5 in console pixels.
+        let hd = if self.hd.on() {
+            let s = self.hd.scale as f32;
+            let lo = |c: f32| ((c + 0.5) * s - 0.5).ceil() as i32;
+            let hi = |c: f32| ((c + 0.5) * s - 0.5).floor() as i32;
+            let si = self.hd.scale as i32;
+            [lo(min(0)).max(st.clip[0] * si), lo(min(1)).max(st.clip[1] * si), hi(max(0)).min(st.clip[2] * si + si - 1), hi(max(1)).min(st.clip[3] * si + si - 1)]
+        } else {
+            [0, 0, -1, -1]
+        };
+        if (x0 > x1 || y0 > y1) && (hd[0] > hd[2] || hd[1] > hd[3]) {
             return;
         }
         // The pixels covered: half the area, at most the clipped box.
@@ -1013,7 +1293,12 @@ impl Ga3d {
         let rs = self.regs[RENDERSTATE];
         let uvs = if rs >> 1 & 1 == 0 { 8 } else if rs >> 2 & 1 == 0 { 10 } else { 12 };
         let regs: [u32; PIX_REGS] = self.regs[..PIX_REGS].try_into().unwrap();
-        let tri = Tri { v: *v, area, edges, x0, x1, y0, y1, uvs, st, regs };
+        let mut tri = Tri { v: *v, area, edges, x0, x1, y0, y1, hd, up: [None, None], bounds: [[0; 4]; 2], snap: [0.0; 4], uvs, st, regs };
+        if let Some(up) = self.hd_up(mem) {
+            tri.up = up;
+            tri.bounds = std::array::from_fn(|s| self.up_bounds(s, &v.map(|v| [v[8 + 2 * s], v[9 + 2 * s]])));
+            tri.snap = tri.snap();
+        }
         // On one thread, at once.
         if pool().is_none() {
             self.batch.push(tri);
@@ -1034,20 +1319,32 @@ impl Ga3d {
         if self.batch.is_empty() {
             return;
         }
+        self.epoch += 1;
         let batch = std::mem::take(&mut self.batch);
         let (lut, mem) = (&self.lut, Shared::new(mem));
+        let hd = self.hd.on().then_some(&self.hd);
+        let si = self.hd.scale as i32;
+        // Each band draws its console rows, then their HD rows (each HD
+        // pixel lies in its console pixel's row, so the band owns it).
         let band = |top: i32, bottom: i32| {
             let mut counts = [0; 5];
             for t in &batch {
                 for y in t.y0.max(top)..=t.y1.min(bottom) {
-                    counts = add(counts, t.row(lut, y, mem));
+                    counts = add(counts, t.row(lut, y, mem, hd));
+                }
+            }
+            if let Some(hd) = hd {
+                for t in &batch {
+                    for hy in t.hd[1].max(top * si)..=t.hd[3].min(bottom * si + si - 1) {
+                        t.row_hd(lut, hy, mem, hd);
+                    }
                 }
             }
             counts
         };
-        let top = batch.iter().map(|t| t.y0).min().unwrap_or(0);
-        let bottom = batch.iter().map(|t| t.y1).max().unwrap_or(0);
-        let pixels: i64 = batch.iter().map(|t| (t.x1 - t.x0 + 1) as i64 * (t.y1 - t.y0 + 1) as i64).sum();
+        let top = batch.iter().map(|t| t.y0.min(t.hd[1].div_euclid(si))).min().unwrap_or(0);
+        let bottom = batch.iter().map(|t| t.y1.max(t.hd[3].div_euclid(si))).max().unwrap_or(0);
+        let pixels: i64 = batch.iter().map(|t| (t.x1 - t.x0 + 1) as i64 * (t.y1 - t.y0 + 1) as i64).sum::<i64>() * (si * si) as i64;
         let counts = match pool() {
             Some(pool) if pixels >= PARALLEL_PIXELS => {
                 use rayon::prelude::*;
@@ -1138,11 +1435,11 @@ impl Raster<'_> {
     /// The pixel pipeline: depth test, texture blending, alpha test, alpha
     /// blending, writing (R5G6B5). Fog and dithering aren't modelled yet.
     /// The outcome, as an index into `pixels`.
-    fn pixel(&self, st: &State, x: u32, y: u32, p: &Vertex, mem: Shared) -> usize {
+    fn pixel(&self, st: &State, x: u32, y: u32, p: &Vertex, mem: Shared, d: &impl Dest) -> usize {
         let rs = st.rs;
         let zaddr = pixel_addr(st.zb >> 16 & 0x7FF, st.zb & 0xFF, st.zb >> 8 & 0xFF, x, y);
         let z = (p[2] * st.zscale).clamp(0.0, 65535.0) as u32;
-        if rs >> 8 & 1 != 0 && !test(st.zb >> 28, z, mem.read_as(zaddr, 2, st.zb >> 27 & 1 != 0)) {
+        if rs >> 8 & 1 != 0 && !test(st.zb >> 28, z, d.read(zaddr, st.zb >> 27 & 1 != 0, mem)) {
             return 1;
         }
         let shade = [p[5] / 255.0, p[6] / 255.0, p[7] / 255.0, p[4] / 255.0].map(|c| c.clamp(0.0, 1.0));
@@ -1166,7 +1463,7 @@ impl Raster<'_> {
         }
         let addr = pixel_addr(st.rt >> 16 & 0x7FF, st.rt & 0xFF, st.rt >> 8 & 0xFF, x, y);
         if rs >> 7 & 1 != 0 {
-            let dst = decode16(0, mem.read_as(addr, 2, st.rt >> 27 & 1 != 0));
+            let dst = decode16(0, d.read(addr, st.rt >> 27 & 1 != 0, mem));
             let ab = self.regs[ALPHABLEND];
             let src = colour;
             let factor = |code: u32, c: usize| -> f32 {
@@ -1184,16 +1481,35 @@ impl Raster<'_> {
             }
         }
         let q = |c: f32, bits: u32| round_u32(c * ((1 << bits) - 1) as f32);
-        mem.write16(addr, (q(colour[0], 5) << 11 | q(colour[1], 6) << 5 | q(colour[2], 5)) as u16, st.rt >> 27 & 1 != 0);
+        d.write(addr, (q(colour[0], 5) << 11 | q(colour[1], 6) << 5 | q(colour[2], 5)) as u16, st.rt >> 27 & 1 != 0, mem);
         if rs >> 9 & 1 != 0 {
-            mem.write16(zaddr, z as u16, st.zb >> 27 & 1 != 0);
+            d.write(zaddr, z as u16, st.zb >> 27 & 1 != 0, mem);
         }
         4
     }
 
-    /// Texture stage `s`'s colour at texel (u, v) as R G B A, or None when
-    /// the transparency colour check drops the pixel.
-    fn texel(&self, s: usize, u: f32, v: f32, bilinear: bool, tp: bool, mem: Shared) -> Option<[f32; 4]> {
+    /// A hash of the memory stage `s`'s texture `t` is in: the 2 KB blocks
+    /// (64 bytes by 32 lines) its texels touch, and its colour table.
+    fn raw_print(&self, s: usize, t: &Tex, sdram: &[u8]) -> u64 {
+        let row = (t.width as u32 * t.bpp).div_ceil(8);
+        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        for v in (t.ov & !31..t.ov + t.height as u32).step_by(32) {
+            for u in (t.ou & !63..t.ou + row).step_by(64) {
+                let o = block_sdram(page_addr(t.sub >> 3, t.page, u, v), true) & !2047;
+                if let Some(b) = sdram.get(o..o + 2048) {
+                    h = b.chunks_exact(8).fold(h, |h, c| (h ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(23));
+                }
+            }
+        }
+        if matches!(t.mode, 0..=6 | 16..=22) {
+            h = self.lut[s].iter().fold(h, |h, &c| (h ^ c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(23));
+        }
+        h
+    }
+
+    /// Texture stage `s`'s texture as its registers give it.
+    #[inline(always)]
+    fn tex(&self, s: usize) -> Tex {
         let (i0, i1) = (self.regs[TEXINFO[s]], self.regs[TEXINFO[s] + 1]);
         let mode = i0 >> 19 & 0x3F;
         let bpp = match mode {
@@ -1201,11 +1517,25 @@ impl Raster<'_> {
             16..=31 => 8,
             _ => 16,
         };
-        let width = (((i1 >> 16 & 0xFF) + 1) * 32 / bpp) as i32;
-        let height = (((i1 >> 24) + 1) * 2) as i32;
         let sub = self.regs[TEXSUBSEGMENT] >> (16 * (i0 >> 27 & 1)) & 0x7FF;
-        let page = (sub & 7) << 2 | (i0 >> 25 & 3);
-        let (ou, ov) = ((i1 & 0xFF) * 4, (i1 >> 8 & 0xFF) * 2);
+        Tex {
+            i0,
+            mode,
+            bpp,
+            width: (((i1 >> 16 & 0xFF) + 1) * 32 / bpp) as i32,
+            height: (((i1 >> 24) + 1) * 2) as i32,
+            sub,
+            page: (sub & 7) << 2 | (i0 >> 25 & 3),
+            ou: (i1 & 0xFF) * 4,
+            ov: (i1 >> 8 & 0xFF) * 2,
+        }
+    }
+
+    /// Texel (tu, tv) of stage `s`'s texture `t` (wrapped or clamped): the
+    /// R5G6B5 value the transparency check compares (when `tp`), and
+    /// R G B A.
+    #[inline(always)]
+    fn fetch(&self, s: usize, t: &Tex, tu: i32, tv: i32, tp: bool, mem: Shared) -> (u32, [f32; 4]) {
         // A power-of-two size (most textures) wraps by a mask, without a
         // division; the same for negative coordinates.
         let wrap = |c: i32, size: i32, clamp: bool| match () {
@@ -1213,33 +1543,65 @@ impl Raster<'_> {
             _ if size & (size - 1) == 0 => c & (size - 1),
             _ => c.rem_euclid(size),
         };
-        let fetch = |tu: i32, tv: i32| -> (u32, [f32; 4]) {
-            let tu = wrap(tu, width, i0 & 1 != 0) as u32;
-            let tv = wrap(tv, height, i0 >> 1 & 1 != 0) as u32;
-            let at = |off: u32, n: u32| mem.read_as(page_addr(sub >> 3, page, ou + off, ov + tv), n, true);
-            let raw = match bpp {
-                4 => at(tu / 2, 1) >> if tu & 1 == 0 { 4 } else { 0 } & 15,
-                8 => at(tu, 1),
-                _ => at(tu * 2, 2),
-            };
-            let n = unit;
-            let rgba = match mode {
-                0..=6 => decode16(mode, self.lut[s][(raw & 15) as usize] as u32),
-                16..=22 => decode16(mode - 16, self.lut[s][raw as usize] as u32),
-                9 => [1.0, 1.0, 1.0, n(raw, 4)],
-                15 => [n(raw, 4), n(raw, 4), n(raw, 4), 1.0],
-                25 => [n(raw >> 4, 4), n(raw >> 4, 4), n(raw >> 4, 4), n(raw & 15, 4)],
-                27 => [n(raw, 8), n(raw, 8), n(raw, 8), 1.0],
-                30 => [1.0, 1.0, 1.0, n(raw, 8)],
-                31 => [n(raw & 15, 4), n(raw & 15, 4), n(raw & 15, 4), n(raw >> 4, 4)],
-                40..=46 => decode16(mode - 40, raw),
-                _ => [1.0, 0.0, 1.0, 1.0],
-            };
-            // The R5G6B5 value the transparency check compares (GUESS:
-            // the colour as decoded, before filtering); only when it's on.
-            let key = if tp { round_u32(rgba[0] * 31.0) << 11 | round_u32(rgba[1] * 63.0) << 5 | round_u32(rgba[2] * 31.0) } else { 0 };
-            (key, rgba)
+        let tu = wrap(tu, t.width, t.i0 & 1 != 0) as u32;
+        let tv = wrap(tv, t.height, t.i0 >> 1 & 1 != 0) as u32;
+        let at = |off: u32, n: u32| mem.read_as(page_addr(t.sub >> 3, t.page, t.ou + off, t.ov + tv), n, true);
+        let raw = match t.bpp {
+            4 => at(tu / 2, 1) >> if tu & 1 == 0 { 4 } else { 0 } & 15,
+            8 => at(tu, 1),
+            _ => at(tu * 2, 2),
         };
+        let n = unit;
+        let mode = t.mode;
+        let rgba = match mode {
+            0..=6 => decode16(mode, self.lut[s][(raw & 15) as usize] as u32),
+            16..=22 => decode16(mode - 16, self.lut[s][raw as usize] as u32),
+            9 => [1.0, 1.0, 1.0, n(raw, 4)],
+            15 => [n(raw, 4), n(raw, 4), n(raw, 4), 1.0],
+            25 => [n(raw >> 4, 4), n(raw >> 4, 4), n(raw >> 4, 4), n(raw & 15, 4)],
+            27 => [n(raw, 8), n(raw, 8), n(raw, 8), 1.0],
+            30 => [1.0, 1.0, 1.0, n(raw, 8)],
+            31 => [n(raw & 15, 4), n(raw & 15, 4), n(raw & 15, 4), n(raw >> 4, 4)],
+            40..=46 => decode16(mode - 40, raw),
+            _ => [1.0, 0.0, 1.0, 1.0],
+        };
+        // The R5G6B5 value the transparency check compares (GUESS: the
+        // colour as decoded, before filtering); only when it's on.
+        let key = if tp { round_u32(rgba[0] * 31.0) << 11 | round_u32(rgba[1] * 63.0) << 5 | round_u32(rgba[2] * 31.0) } else { 0 };
+        (key, rgba)
+    }
+
+    /// Texture stage `s`'s colour at texel (u, v) as R G B A, or None when
+    /// the transparency colour check drops the pixel. An HD pixel with the
+    /// texture upscaled (`up`, nearest sampling) takes the upscaled pixel
+    /// there: the texel it was made from, or its colour.
+    fn texel(&self, s: usize, u: f32, v: f32, bilinear: bool, tp: bool, mem: Shared) -> Option<[f32; 4]> {
+        let t = self.tex(s);
+        let fetch = |tu: i32, tv: i32| self.fetch(s, &t, tu, tv, tp, mem);
+        if !bilinear && let Some((up, [u0, v0, u1, v1])) = self.up[s] {
+            let n = UP as i32;
+            let (x, y) = if up.centred() {
+                // Upscaled pixel n * k is at texel k's centre, the ones
+                // after it between it and the next. Only the texels drawn:
+                // a texture's neighbour (in an atlas) isn't the picture's.
+                let at = |c: f32| floor_i32(c * UP as f32 - (UP as f32 / 2.0 - 0.5));
+                (at(u).clamp(u0 * n, u1 * n), at(v).clamp(v0 * n, v1 * n))
+            } else {
+                (floor_i32(u * UP as f32), floor_i32(v * UP as f32))
+            };
+            match up.at(x, y, t.i0 & 1 != 0, t.i0 >> 1 & 1 != 0) {
+                Texel::Source(tu, tv) => {
+                    let (key, c) = fetch(tu, tv);
+                    if tp && key == self.regs[TPCOLOR] & 0xFFFF {
+                        return None;
+                    }
+                    return Some(c);
+                }
+                // A painted texture's edge: transparent under half covered.
+                Texel::Colour(c) if tp && c[3] < 0.5 => return None,
+                Texel::Colour(c) => return Some(c),
+            }
+        }
         if !bilinear {
             let (key, c) = fetch(floor_i32(u), floor_i32(v));
             if tp && key == self.regs[TPCOLOR] & 0xFFFF {
@@ -1328,6 +1690,7 @@ impl Ga3d {
     /// says 8-15; the menu clears its Z buffer with 0xFFFF and its screen
     /// with 0x319E), coordinates in 16-bit pixels.
     fn memory_fill(&mut self, mem: &mut Mem) {
+        self.epoch += 1;
         self.flush(mem);
         let (p0, p1, p2) = (self.regs[MFILLPARAM0], self.regs[MFILLPARAM0 + 1], self.regs[MFILLPARAM0 + 2]);
         let sub = p0 >> 16 & 0x7FF;
@@ -1336,7 +1699,11 @@ impl Ga3d {
         self.cost += (right + 1).saturating_sub(left) as u64 * (bottom + 1).saturating_sub(top) as u64 * CYCLES_PER_FILL_PIXEL;
         for y in top..=bottom {
             for x in left..=right {
-                mem.write16(sub_addr(sub, 2 * x, y), data, p0 >> 27 & 1 != 0);
+                let a = sub_addr(sub, 2 * x, y);
+                mem.write16(a, data, p0 >> 27 & 1 != 0);
+                if self.hd.on() {
+                    self.hd.fill(a, data);
+                }
             }
         }
     }
@@ -1344,6 +1711,7 @@ impl Ga3d {
     /// LUT fill: 256 colours (8 x 32 16-bit pixels) or one bank of 16 (8 x 2)
     /// from texture sub-segment 0's page into a stage's table.
     fn lut_fill(&mut self, mem: &mut Mem) {
+        self.epoch += 1;
         self.flush(mem);
         let p = self.regs[LUTPARAM];
         let sub = self.regs[TEXSUBSEGMENT] & 0x7FF;

@@ -112,7 +112,8 @@ fn yuv(y: u8, cb: u8, cr: u8) -> u32 {
 }
 
 /// Draws the video layer into `out` (`w` across).
-fn video(reg: &impl Fn(u32) -> u32, mem: &impl Fn(u32, u32) -> u32, out: &mut [u32], w: usize, h: usize) {
+/// `s` HD pixels across and down per pixel (`w` is in pixels).
+fn video(reg: &impl Fn(u32) -> u32, mem: &impl Fn(u32, u32) -> u32, out: &mut [u32], w: usize, h: usize, s: usize) {
     let r = |off: u32| reg(BASE + off);
     if r(VIDEO_CONTROL) & LAYERENB == 0 {
         return;
@@ -138,7 +139,10 @@ fn video(reg: &impl Fn(u32) -> u32, mem: &impl Fn(u32, u32) -> u32, out: &mut [u
             let luma = mem(ya + sy * ys + sx, 1) as u8;
             let cb = mem(cba + (sy / 2) * cbs + sx / 2, 1) as u8;
             let cr = mem(cra + (sy / 2) * crs + sx / 2, 1) as u8;
-            out[y * w + x] = yuv(luma, cb, cr);
+            let c = yuv(luma, cb, cr);
+            for k in 0..s {
+                out[(y * s + k) * w * s + x * s..][..s].fill(c);
+            }
         }
     }
 }
@@ -152,6 +156,12 @@ pub fn is_layer_address(addr: u32) -> bool {
 }
 
 pub fn compose(reg: impl Fn(u32) -> u32, mem: impl Fn(u32, u32) -> u32) -> (usize, usize, Vec<u32>) {
+    compose_scaled(reg, mem, 1, |_, v, _, _| v)
+}
+
+/// The picture at `s` times the size: `sub(address, value, j, k)` is HD
+/// pixel (j, k) of a 16-bit layer pixel (`value` as `mem` read it).
+pub fn compose_scaled(reg: impl Fn(u32) -> u32, mem: impl Fn(u32, u32) -> u32, s: usize, sub: impl Fn(u32, u32, usize, usize) -> u32) -> (usize, usize, Vec<u32>) {
     let size = reg(BASE + SCREENSIZE);
     let (w, h) = match ((size & 0xFFF) as usize + 1, (size >> 16 & 0xFFF) as usize + 1) {
         (1, 1) => (WIDTH, HEIGHT),
@@ -159,18 +169,18 @@ pub fn compose(reg: impl Fn(u32) -> u32, mem: impl Fn(u32, u32) -> u32) -> (usiz
         // hold the last column and row.
         wh => wh,
     };
-    let mut out = vec![reg(BASE + BGCOLOR) & 0xFF_FFFF; w * h];
+    let mut out = vec![reg(BASE + BGCOLOR) & 0xFF_FFFF; w * h * s * s];
     if reg(BASE + CONTROLT) & MLCENB == 0 {
-        return (w, h, out);
+        return (w * s, h * s, out);
     }
     // The video layer's place among the others (CONTROLT bits 8-9).
     let video_under = (reg(BASE + CONTROLT) >> 8 & 3).min(2) as usize;
     if video_under == 2 {
-        video(&reg, &mem, &mut out, w, h);
+        video(&reg, &mem, &mut out, w, h, s);
     }
     for (i, &l) in LAYER.iter().enumerate().rev() {
         if i == 0 && video_under == 1 {
-            video(&reg, &mem, &mut out, w, h);
+            video(&reg, &mem, &mut out, w, h, s);
         }
         let r = |off: u32| reg(BASE + l + off);
         let control = r(CONTROL);
@@ -189,21 +199,26 @@ pub fn compose(reg: impl Fn(u32) -> u32, mem: impl Fn(u32, u32) -> u32) -> (usiz
         for y in top..=bottom.min(h - 1) {
             for x in left..=right.min(w - 1) {
                 let a = base.wrapping_add(((y - top) as u32).wrapping_mul(vs)).wrapping_add((x - left) as u32 * hs);
-                let v = mem(a, bytes);
-                let (rgb, pa) = decode(fmt, v, bytes);
-                if control & TPENB != 0 && rgb == tp & 0xFF_FFFF {
-                    continue;
+                let native = mem(a, bytes);
+                for k in 0..s {
+                    for j in 0..s {
+                        let v = if s > 1 && bytes == 2 { sub(a, native, j, k) } else { native };
+                        let (rgb, pa) = decode(fmt, v, bytes);
+                        if control & TPENB != 0 && rgb == tp & 0xFF_FFFF {
+                            continue;
+                        }
+                        let alpha = pa * layer_alpha / 255;
+                        let at = &mut out[(y * s + k) * w * s + x * s + j];
+                        *at = if alpha >= 255 { rgb } else { blend(*at, rgb, alpha) };
+                    }
                 }
-                let alpha = pa * layer_alpha / 255;
-                let at = &mut out[y * w + x];
-                *at = if alpha >= 255 { rgb } else { blend(*at, rgb, alpha) };
             }
         }
     }
     if video_under == 0 {
-        video(&reg, &mem, &mut out, w, h);
+        video(&reg, &mem, &mut out, w, h, s);
     }
-    (w, h, out)
+    (w * s, h * s, out)
 }
 
 #[cfg(test)]

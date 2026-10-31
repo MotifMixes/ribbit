@@ -366,7 +366,7 @@ pub struct ArmJit {
     /// Virtual addresses compiled code never runs or goes on to: `step`
     /// returns there, for the caller to handle (`set_stops`; u32::MAX for
     /// none).
-    pub stops: [u32; 4],
+    pub stops: [u32; 8],
 }
 
 // SAFETY: the code pointers point into `arena`, owned and only used here.
@@ -389,13 +389,13 @@ impl ArmJit {
             enabled: SUPPORTED,
             profile: false,
             stats: Stats::default(),
-            stops: [u32::MAX; 4],
+            stops: [u32::MAX; 8],
         }
     }
 
     /// Sets the stops (`stops`): what was compiled there is dropped, and
     /// blocks no longer go on to them by themselves.
-    pub fn set_stops(&mut self, stops: [u32; 4]) {
+    pub fn set_stops(&mut self, stops: [u32; 8]) {
         self.stops = stops;
         self.blocks.retain(|&key, _| !stops.contains(&(key as u32)));
         self.flush_fast();

@@ -10,6 +10,10 @@ use winit::keyboard::KeyCode;
 
 pub const MAX_RECENT: usize = 8;
 
+fn default_didj_hd() -> u32 {
+    1
+}
+
 fn default_didj_cpu_scale() -> u32 {
     2
 }
@@ -208,6 +212,10 @@ pub struct Settings {
     /// the same; the picture updates less often). Off: every frame drawn.
     #[serde(default)]
     pub didj_frame_skip: bool,
+    /// Didj: HD drawing, the 3D engine at this many times the resolution
+    /// with its textures upscaled (1 off; experimental).
+    #[serde(default = "default_didj_hd")]
+    pub didj_hd: u32,
     /// Didj: the system package (DIDJ-0x000E0003….lfp) last started, for a
     /// cartridge opened from a folder that doesn't hold the firmware.
     #[serde(default)]
@@ -288,6 +296,7 @@ impl Default for Settings {
             didj_enhanced: true,
             didj_cpu_scale: default_didj_cpu_scale(),
             didj_frame_skip: false,
+            didj_hd: default_didj_hd(),
             didj_package: None,
             favorites: Vec::new(),
             hide_builtin_tabs: BTreeSet::new(),

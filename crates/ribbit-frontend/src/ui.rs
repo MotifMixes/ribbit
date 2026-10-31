@@ -1166,6 +1166,18 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                     "When your PC can't keep up, up to 2 of every 3 frames aren't drawn: the game runs at its                      real speed (sound, timing and play are the same) and the picture moves less smoothly.                      Off: every frame is drawn, and the game slows down instead. At once.",
                 )
                 .changed();
+            ui.separator();
+            ui.label("HD drawing (experimental)");
+            for (scale, label) in [(1, "Off (original)"), (2, "2×"), (3, "3×"), (4, "4×")] {
+                changed |= ui
+                    .radio_value(&mut settings.didj_hd, scale, label)
+                    .on_hover_text(
+                        "Games' 3D engine also draws at this many times the Didj's resolution: sharper edges, and \
+                         each sprite, text and picture upscaled on its own (pixel art kept crisp, painted art \
+                         smoothed along its edges; no AI). Costs speed: 2× suits most PCs. At once.",
+                    )
+                    .changed();
+            }
             if changed {
                 settings.didj_enhanced = !original;
                 actions.push(Action::SettingsChanged);

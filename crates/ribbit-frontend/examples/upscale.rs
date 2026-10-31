@@ -20,7 +20,6 @@ fn main() {
     let chain: Vec<Network> =
         args[3].split(',').map(|n| Network::from_name(n).unwrap_or_else(|| panic!("unknown network {n}"))).collect();
     let (w, h, rgb) = read_ppm(&std::fs::read(&args[1]).unwrap());
-    assert_eq!(w, h, "square frames only");
 
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU adapter");
@@ -47,11 +46,12 @@ fn main() {
     let input_view = input.create_view(&Default::default());
     let mut up = Upscaler::default();
 
-    let side = w * chain.iter().map(|n| n.scale()).product::<u32>();
+    let times = chain.iter().map(|n| n.scale()).product::<u32>();
+    let (side, side_h) = (w * times, h * times);
     let bytes_per_row = side * 8;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: (bytes_per_row * side) as u64,
+        size: (bytes_per_row * side_h) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -80,12 +80,12 @@ fn main() {
         timings.push(start.elapsed());
     }
     timings.sort();
-    println!("{} -> {side}x{side}: {:.2} ms (median of 6, incl. submit)", args[3], timings[3].as_secs_f64() * 1e3);
+    println!("{} -> {side}x{side_h}: {:.2} ms (median of 6, incl. submit)", args[3], timings[3].as_secs_f64() * 1e3);
 
     readback.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let data = readback.slice(..).get_mapped_range().unwrap().to_vec();
-    let mut out = Vec::with_capacity((side * side * 3) as usize);
+    let mut out = Vec::with_capacity((side * side_h * 3) as usize);
     for px in data.chunks(8) {
         for c in 0..3 {
             let v = f16_to_f32(u16::from_le_bytes([px[c * 2], px[c * 2 + 1]]));
@@ -93,7 +93,7 @@ fn main() {
         }
     }
     let file = std::io::BufWriter::new(std::fs::File::create(&args[2]).unwrap());
-    let mut enc = png::Encoder::new(file, side, side);
+    let mut enc = png::Encoder::new(file, side, side_h);
     enc.set_color(png::ColorType::Rgb);
     enc.write_header().unwrap().write_image_data(&out).unwrap();
     println!("wrote {}", args[2]);

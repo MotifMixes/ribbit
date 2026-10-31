@@ -355,6 +355,20 @@ impl Bus {
         crate::mlc::compose(|a| self.reg(a), mem)
     }
 
+    /// The picture with the 3D engine's HD drawing (`ga3d.hd`), at its
+    /// scale; `frame` when HD is off.
+    pub fn frame_hd(&self) -> (usize, usize, Vec<u32>) {
+        let hd = &self.ga3d.hd;
+        if !hd.on() {
+            return self.frame();
+        }
+        let mem = |a: u32, n: u32| {
+            let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&a) { crate::mlc::block_sdram(a, false) as u32 } else { a.wrapping_sub(self.ram_base) };
+            (0..n).fold(0, |v, i| v | (self.sdram.get((a + i) as usize).copied().unwrap_or(0) as u32) << (8 * i))
+        };
+        crate::mlc::compose_scaled(|a| self.reg(a), mem, hd.scale, |a, v, j, k| hd.sample(a, j, k, v as u16) as u32)
+    }
+
     /// A game's frame is shown: whether it was drawn, and whether the next
     /// one will be.
     fn flip(&mut self) {
@@ -819,6 +833,9 @@ pub struct Didj {
     /// with the interpreter, which sees every return).
     #[serde(skip)]
     pub nand_check: Option<NandCheck>,
+    /// HD text: the font module's drawing, read (`fonthd`).
+    #[serde(skip)]
+    pub fonts: crate::fonthd::Fonts,
 }
 
 /// `Didj::nand_check`: calls compared, those that differed (bytes or
@@ -942,7 +959,7 @@ impl Didj {
             frame_cycles: 0,
         };
         let jit = jit_for(bus.sdram.len());
-        Self { cpu: Arm::new(), bus, jit, exact: false, cpu_milli: 1000, linux_nand: None, nand_check: None }
+        Self { cpu: Arm::new(), bus, jit, exact: false, cpu_milli: 1000, linux_nand: None, nand_check: None, fonts: Default::default() }
     }
 
     /// The processor clock and the PLL outputs, from the clock registers.
@@ -1091,15 +1108,30 @@ impl Didj {
         self.linux_nand = Some(crate::linux_nand::Found { ecc: None, read_buf: None });
     }
 
+    /// Where the JIT stops: Linux's NAND functions, the font module's.
+    fn set_stops(&mut self) {
+        let nand = self.linux_nand.as_ref().map_or([u32::MAX; 2], |f| f.stops());
+        let fonts = self.fonts.stops();
+        self.jit.set_stops(std::array::from_fn(|i| match i {
+            0..2 => nand[i],
+            2..7 => fonts[i - 2],
+            _ => u32::MAX,
+        }));
+    }
+
     /// Runs `n` processor cycles (one per instruction for now), the timers
     /// and interrupts with them. Returns the instructions run.
     pub fn run(&mut self, n: u64) -> u64 {
         const SLICE: u64 = 64;
         // Linux's NAND functions, once it runs (its text is in place).
         if self.linux_nand.is_none() && self.cpu.r[15] >= 0xC000_0000 && self.bus.ram_base == 0 {
-            let found = crate::linux_nand::find(&self.bus.sdram);
-            self.jit.set_stops(found.stops());
-            self.linux_nand = Some(found);
+            self.linux_nand = Some(crate::linux_nand::find(&self.bus.sdram));
+            self.set_stops();
+        }
+        // The font module, in the running game (HD text).
+        self.fonts.on = self.bus.ga3d.hd.on() && self.bus.ga3d.hd_textures;
+        if self.fonts.scan(&self.cpu, &self.bus) {
+            self.set_stops();
         }
         let start = self.cpu.instructions;
         let end = self.cpu.cycles + n;
@@ -1110,8 +1142,11 @@ impl Didj {
             // Compiled blocks may end a slice up to 31 instructions late
             // (unless `exact`); interrupts are taken between blocks.
             while self.cpu.cycles - before < SLICE {
-                if self.jit.stops.contains(&self.cpu.r[15]) && self.native_call() {
-                    continue;
+                if self.jit.stops.contains(&self.cpu.r[15]) {
+                    if self.native_call() {
+                        continue;
+                    }
+                    self.fonts.hook(&self.cpu, &mut self.bus);
                 }
                 if self.nand_check.is_some() {
                     self.check_native();

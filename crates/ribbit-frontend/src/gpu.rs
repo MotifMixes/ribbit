@@ -234,6 +234,9 @@ pub struct Gpu {
     /// A TV console's picture (the Zippity: 640x480), shown instead of the
     /// LCD while `show_tv` is set: its texture, size and bind group.
     tv: Option<(wgpu::Texture, (u32, u32), wgpu::BindGroup)>,
+    /// The TV picture last uploaded: the app redraws more often than the
+    /// console draws, and a new upload re-runs the AI upscale.
+    tv_pixels: Vec<u32>,
     pub show_tv: bool,
     pixel: wgpu::RenderPipeline,
     sharp: wgpu::RenderPipeline,
@@ -593,6 +596,7 @@ impl Gpu {
             linear,
             show_hd: false,
             tv: None,
+            tv_pixels: Vec::new(),
             show_tv: false,
             lcd_view: view,
             bgl,
@@ -689,7 +693,13 @@ impl Gpu {
                 ],
             });
             self.tv = Some((texture, (w, h), group));
+            self.tv_pixels.clear();
         }
+        if self.tv_pixels == pixels {
+            return;
+        }
+        self.tv_pixels.clear();
+        self.tv_pixels.extend_from_slice(pixels);
         let rgba: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 0xFF]).collect();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {

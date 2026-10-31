@@ -969,13 +969,14 @@ impl App {
     }
 
     /// The Didj's mode from the settings: Enhanced, the processor's clock
-    /// multiplier (1 in Original mode) and frame skipping.
+    /// multiplier (1 in Original mode), frame skipping and HD drawing.
     fn didj_mode(&self) -> crate::didj::Mode {
         let enhanced = self.settings.didj_enhanced;
         crate::didj::Mode {
             enhanced,
             cpu_scale: if enhanced { self.settings.didj_cpu_scale.clamp(1, 3) } else { 1 },
             frame_skip: self.settings.didj_frame_skip,
+            hd: self.settings.didj_hd.clamp(1, 4),
         }
     }
 
@@ -1881,6 +1882,7 @@ impl App {
                 }
                 if let Some(d) = &self.didj {
                     d.set_frame_skip(self.settings.didj_frame_skip);
+                    d.set_hd(self.settings.didj_hd.clamp(1, 4));
                 }
             }
             Action::ResumeAfterIdle => self.resume_after_idle(),
@@ -3184,9 +3186,7 @@ impl App {
         if let Some(z) = &self.zippity {
             z.frame(&mut self.tv_frame);
         }
-        if let Some(d) = &self.didj {
-            d.frame(&mut self.tv_frame);
-        }
+        let didj_size = self.didj.as_ref().map(|d| d.frame(&mut self.tv_frame));
         if let Some(t) = &self.twist {
             t.frame(&mut self.tv_frame);
         }
@@ -3200,8 +3200,8 @@ impl App {
             Some((ribbit_twist::SCREEN_W, ribbit_twist::SCREEN_H))
         } else if self.zippity.is_some() {
             Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
-        } else if self.didj.is_some() {
-            Some((crate::didj::SCREEN_W, crate::didj::SCREEN_H))
+        } else if let Some(size) = didj_size {
+            Some(size)
         } else {
             None
         };

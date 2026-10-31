@@ -57,8 +57,8 @@ const BUSY: f64 = 0.012;
 
 struct Shared {
     didj: Mutex<Didj>,
-    /// The latest picture, 0x00RRGGBB, SCREEN_W x SCREEN_H.
-    frame: Mutex<Vec<u32>>,
+    /// The latest picture (0x00RRGGBB): width, height, pixels.
+    frame: Mutex<(usize, usize, Vec<u32>)>,
     running: AtomicBool,
     quit: AtomicBool,
     /// Buttons held (`button` bits).
@@ -72,6 +72,8 @@ struct Shared {
     cpu_max: AtomicU32,
     /// Frame skipping while the PC can't keep up (`Mode::frame_skip`).
     frame_skip: AtomicBool,
+    /// HD drawing scale (1 off).
+    hd: AtomicU32,
     sink: Mutex<Option<AudioSink>>,
     /// The Didj kept turning itself off right after starting, so it was
     /// left off (`run`); the app tells the player once.
@@ -87,6 +89,8 @@ pub struct Mode {
     pub enhanced: bool,
     pub cpu_scale: u32,
     pub frame_skip: bool,
+    /// HD drawing: the 3D engine at this many times the resolution (1 off).
+    pub hd: u32,
 }
 
 pub struct DidjSession {
@@ -134,7 +138,7 @@ impl DidjSession {
         didj.bus.cart = cart;
         let shared = Arc::new(Shared {
             didj: Mutex::new(didj),
-            frame: Mutex::new(vec![0; SCREEN_W * SCREEN_H]),
+            frame: Mutex::new((SCREEN_W, SCREEN_H, vec![0; SCREEN_W * SCREEN_H])),
             running: AtomicBool::new(true),
             quit: AtomicBool::new(false),
             held: AtomicU32::new(0),
@@ -142,6 +146,7 @@ impl DidjSession {
             speed: AtomicU32::new(100f32.to_bits()),
             cpu_max: AtomicU32::new(mode.cpu_scale.max(1) * 1000),
             frame_skip: AtomicBool::new(mode.frame_skip),
+            hd: AtomicU32::new(mode.hd),
             sink: Mutex::new(sink),
             gave_up: AtomicBool::new(false),
         });
@@ -154,9 +159,12 @@ impl DidjSession {
         Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image })
     }
 
-    /// Copies the latest picture into `out` (SCREEN_W x SCREEN_H).
-    pub fn frame(&self, out: &mut Vec<u32>) {
-        out.clone_from(&self.shared.frame.lock().unwrap());
+    /// Copies the latest picture into `out`; its size (SCREEN_W x SCREEN_H,
+    /// times the HD scale).
+    pub fn frame(&self, out: &mut Vec<u32>) -> (usize, usize) {
+        let f = self.shared.frame.lock().unwrap();
+        out.clone_from(&f.2);
+        (f.0, f.1)
     }
 
     /// Processor time run in the last second, as a percentage of real time.
@@ -214,6 +222,13 @@ impl DidjSession {
         d.bus.cart = cart;
         self.shared.cpu_max.store(mode.cpu_scale.max(1) * 1000, Ordering::Relaxed);
         self.set_frame_skip(mode.frame_skip);
+        self.set_hd(mode.hd);
+    }
+
+    /// HD drawing at `scale` times the resolution (1 off), from the next
+    /// frame.
+    pub fn set_hd(&self, scale: u32) {
+        self.shared.hd.store(scale, Ordering::Relaxed);
     }
 
     /// Frame skipping on or off (from the game's next frame).
@@ -317,6 +332,11 @@ fn run(s: &Shared, art: Option<Art>) {
                 d.bus.ga3d.skip = false;
                 d.bus.shown_skipped = false;
             }
+            // HD drawing (also after a power-on, a new console).
+            let hd = s.hd.load(Ordering::Relaxed) as usize;
+            if d.bus.ga3d.hd.scale != hd.clamp(1, 4) {
+                d.bus.ga3d.hd.set_scale(hd);
+            }
             let cycles = d.cpu_hz() / FPS as u64;
             let t = Instant::now();
             d.run(cycles);
@@ -367,11 +387,13 @@ fn run(s: &Shared, art: Option<Art>) {
             let bytes = pcm.len() & !3;
             stereo.extend(pcm.drain(..bytes).collect::<Vec<u8>>().as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)));
             // A buffer whose drawing was skipped: the last picture stays.
-            (!d.bus.shown_skipped).then(|| d.bus.frame())
+            // The autostart reads the console's own picture.
+            (!d.bus.shown_skipped).then(|| (d.bus.frame_hd(), auto.is_some().then(|| d.bus.frame())))
         };
-        if let Some((w, h, px)) = picture {
+        if let Some(((w, h, px), console)) = picture {
             if let Some(a) = &mut auto {
-                let screen = if (w, h) == (SCREEN_W, SCREEN_H) { &px[..] } else { &[] };
+                let (cw, ch, cpx) = console.as_ref().unwrap();
+                let screen = if (*cw, *ch) == (SCREEN_W, SCREEN_H) { &cpx[..] } else { &[] };
                 auto_buttons = a.frame(screen, s.held.load(Ordering::Relaxed));
                 // Its last press ends a frame later (done() is true on the
                 // press's last frame): dropped then, A stayed held for good,
@@ -380,8 +402,8 @@ fn run(s: &Shared, art: Option<Art>) {
                     auto = None;
                 }
             }
-            if w == SCREEN_W && h == SCREEN_H {
-                s.frame.lock().unwrap().copy_from_slice(&px);
+            if w % SCREEN_W == 0 && h % SCREEN_H == 0 && w * h == px.len() {
+                *s.frame.lock().unwrap() = (w, h, px);
             }
         }
         mono.clear();

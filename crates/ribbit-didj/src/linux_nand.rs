@@ -48,8 +48,8 @@ pub struct Found {
 
 impl Found {
     /// Where the JIT must stop (`ArmJit::set_stops`).
-    pub fn stops(&self) -> [u32; 4] {
-        [self.ecc.map_or(u32::MAX, |e| e.0), self.read_buf.unwrap_or(u32::MAX), u32::MAX, u32::MAX]
+    pub fn stops(&self) -> [u32; 2] {
+        [self.ecc.map_or(u32::MAX, |e| e.0), self.read_buf.unwrap_or(u32::MAX)]
     }
 }
 

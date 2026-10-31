@@ -71,6 +71,16 @@ fn main() {
     if let Some(n) = std::env::var("DIDJ_GA3D_PIXEL").ok().and_then(|v| v.parse().ok()) {
         didj.bus.ga3d.cycles_per_pixel = n;
     }
+    // DIDJ_HD=<n>: the 3D engine also draws at n times the resolution;
+    // DIDJ_FRAME and DIDJ_FRAMES save that picture. DIDJ_HD_TEX=0: without
+    // upscaled textures.
+    if let Some(n) = std::env::var("DIDJ_HD").ok().and_then(|v| v.parse().ok()) {
+        didj.bus.ga3d.hd.set_scale(n);
+    }
+    didj.bus.ga3d.hd_textures = std::env::var("DIDJ_HD_TEX").map_or(true, |v| v != "0");
+    // DIDJ_FONT_LOG=1: prints each glyph the font module draws (HD on).
+    let font_log = std::env::var_os("DIDJ_FONT_LOG").is_some();
+    didj.fonts.log = font_log;
     // DIDJ_CPU_SCALE=<n>: the processor at n times its clock.
     if let Some(n) = std::env::var("DIDJ_CPU_SCALE").ok().and_then(|v| v.parse().ok()) {
         didj.set_cpu_scale(n);
@@ -228,7 +238,11 @@ fn main() {
                 break;
             }
             let (flash, cart, sdram, milli) = (std::mem::take(&mut didj.bus.nand), didj.bus.cart.take(), didj.bus.sdram.len(), didj.cpu_milli());
+            let (scale, textures) = (didj.bus.ga3d.hd.scale, didj.bus.ga3d.hd_textures);
             didj = Didj::with_sdram(flash, sdram);
+            didj.bus.ga3d.hd.set_scale(scale);
+            didj.bus.ga3d.hd_textures = textures;
+            didj.fonts.log = font_log;
             didj.set_cpu_milli(milli);
             didj.bus.cart = cart;
             auto = art.clone().map(ribbit_didj::autostart::AutoStart::new);
@@ -247,7 +261,7 @@ fn main() {
             && ran >= frames_from
             && ran / frame_every != (ran - n) / frame_every
         {
-            let (w, h, px) = didj.bus.frame();
+            let (w, h, px) = didj.bus.frame_hd();
             if px != last_frame {
                 let mut f = format!("P6
 {w} {h}
@@ -321,6 +335,9 @@ fn main() {
     println!("--- busiest pages (page:samples) ---
 {}", hot.join(" "));
     let g = &didj.bus.ga3d;
+    if font_log {
+        println!("fonts: {} glyphs, {} textures drawn from outlines", didj.fonts.glyphs, didj.bus.ga3d.text.matched);
+    }
     println!("--- GA3D: {} register writes, {} invalid commands, {} triangles, starts (control: count) ---", g.trace.len(), g.invalid, g.triangles);
     println!("{}", g.starts.iter().map(|(c, n)| format!("{c:#x}:{n}")).collect::<Vec<_>>().join(" "));
     println!("pixels (in, z fail, transparent, alpha fail, written): {:?}", g.pixels);
@@ -332,7 +349,7 @@ fn main() {
     }
     // DIDJ_FRAME=<file.ppm> saves the screen.
     if let Ok(path) = std::env::var("DIDJ_FRAME") {
-        let (w, h, px) = didj.bus.frame();
+        let (w, h, px) = didj.bus.frame_hd();
         let mut f = format!("P6
 {w} {h}
 255
