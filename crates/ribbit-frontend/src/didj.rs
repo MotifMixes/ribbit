@@ -73,6 +73,9 @@ struct Shared {
     /// Frame skipping while the PC can't keep up (`Mode::frame_skip`).
     frame_skip: AtomicBool,
     sink: Mutex<Option<AudioSink>>,
+    /// The Didj kept turning itself off right after starting, so it was
+    /// left off (`run`); the app tells the player once.
+    gave_up: AtomicBool,
 }
 
 /// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
@@ -140,6 +143,7 @@ impl DidjSession {
             cpu_max: AtomicU32::new(mode.cpu_scale.max(1) * 1000),
             frame_skip: AtomicBool::new(mode.frame_skip),
             sink: Mutex::new(sink),
+            gave_up: AtomicBool::new(false),
         });
         let s = shared.clone();
         let thread = std::thread::Builder::new().name("ribbit-didj".into()).spawn(move || {
@@ -158,6 +162,12 @@ impl DidjSession {
     /// Processor time run in the last second, as a percentage of real time.
     pub fn speed_percent(&self) -> f64 {
         f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64
+    }
+
+    /// True once after the Didj was left off because it kept turning
+    /// itself off right after starting (see `run`).
+    pub fn take_gave_up(&self) -> bool {
+        self.shared.gave_up.swap(false, Ordering::Relaxed)
     }
 
     pub fn set_running(&self, running: bool) {
@@ -269,6 +279,8 @@ fn run(s: &Shared, art: Option<Art>) {
     let (mut counted_since, mut frames) = (Instant::now(), 0u32);
     // Frame skipping: the game's buffer flips seen, and frames since one.
     let (mut flips, mut since_flip) = (0u64, 0u32);
+    // Power-offs in a row that came within a minute of starting.
+    let mut quick_offs = 0;
     while !s.quit.load(Ordering::Relaxed) {
         if !s.running.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
@@ -308,10 +320,20 @@ fn run(s: &Shared, art: Option<Art>) {
             let cycles = d.cpu_hz() / FPS as u64;
             let t = Instant::now();
             d.run(cycles);
-            if d.bus.powered_off {
-                // The system turned itself off (after installing a
-                // cartridge's update, as a real Didj does): on again, as its
-                // owner would, and the game started again.
+            // The system turned itself off (after installing a cartridge's
+            // update, as a real Didj does): on again, as its owner would, and
+            // the game started again. Not a third time in a row within a
+            // minute of starting: in Original mode the Didj also turns off
+            // when the game crashes, and starting it again looped for good
+            // (a player: health and safety, shutting down, again).
+            if d.bus.powered_off && !s.gave_up.load(Ordering::Relaxed) {
+                quick_offs = if d.cpu.cycles < 60 * d.cpu_hz() { quick_offs + 1 } else { 0 };
+                if quick_offs >= 3 {
+                    tracing::warn!(target: "ribbit::didj", "the Didj turned itself off 3 times in a row soon after starting; leaving it off");
+                    s.gave_up.store(true, Ordering::Relaxed);
+                }
+            }
+            if d.bus.powered_off && !s.gave_up.load(Ordering::Relaxed) {
                 tracing::info!(target: "ribbit::didj", "the Didj turned itself off; turning it on again");
                 let (flash, cart, sdram, milli) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take(), d.bus.sdram.len(), d.cpu_milli());
                 *d = Didj::with_sdram(flash, sdram);

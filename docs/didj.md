@@ -289,6 +289,11 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
   launch_main then finds no main app and shows DOWNLOAD_FAILED.png ("Download Failed / Please Try
   Again"), waiting for USB (LeapFrog Connect runs `usbctl -a fsck`). Ribbit used to stop the machine
   like pulling the batteries, which made this happen; it now presses power and waits for the cut.
+- The app turns a Didj that turned itself off on again (a cartridge's update powers off once: VERIFIED
+  2026-10-31 for Tinker Bell, Clone Wars, HSM and Wolverine, fresh console, both modes), but not after a
+  third power-off in a row within a minute of starting: it leaves it off and says so. A player saw a loop
+  (health and safety, shutting down, again), likely a game crashing in Original mode, where launch_main
+  powers down after a crash.
 - didjboot: DIDJ_KEYS=...:POWER, DIDJ_SAVE=<.nandblocks> (start from an app save), DIDJ_SAVE_OUT=<file>.
   A broken save is repaired by DIDJ_TYPE=$'fsck.vfat -a /dev/mtdblock9
 rm -f /flags/needs_repair

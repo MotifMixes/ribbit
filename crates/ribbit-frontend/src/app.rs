@@ -2732,6 +2732,14 @@ impl App {
             d.set_running(!halted);
             d.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
             self.speed_percent = d.speed_percent();
+            if d.take_gave_up() {
+                let explain = if self.settings.didj_enhanced {
+                    "It turned itself off 3 times in a row soon after starting, so Ribbit left it off. Try starting the Didj's menu without a game, or another cartridge."
+                } else {
+                    "It turned itself off 3 times in a row soon after starting, so Ribbit left it off. In Original mode a Didj turns itself off when a game crashes; Enhanced mode (Emulation > Didj) goes back to the menu instead."
+                };
+                self.ui.problem("The Didj keeps turning itself off", explain, "");
+            }
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
