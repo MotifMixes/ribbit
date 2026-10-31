@@ -48,6 +48,11 @@ pub struct Cp15 {
     /// page tables.
     #[serde(skip)]
     pub generation: u32,
+    /// Pages invalidated one by one (TLB invalidate by MVA) since a JIT
+    /// last looked: it drops what it keeps for them (`generation` covers
+    /// everything else).
+    #[serde(skip)]
+    pub invalidated: Vec<u32>,
 }
 
 fn empty_tlb() -> Vec<(u32, u32)> {
@@ -74,6 +79,7 @@ impl Default for Cp15 {
             tlb: empty_tlb(),
             sections: empty_sections(),
             generation: 0,
+            invalidated: Vec::new(),
         }
     }
 }
@@ -91,6 +97,29 @@ impl Cp15 {
         self.tlb.iter_mut().for_each(|e| *e = (0, 0));
         self.sections.iter_mut().for_each(|e| *e = (0, 0));
         self.generation = self.generation.wrapping_add(1);
+        self.invalidated.clear();
+    }
+
+    /// TLB invalidate by MVA (c8 c5/c6/c7 1): only that page's entry goes,
+    /// as on the ARM926. Linux's flush_tlb_range issues one per page; a
+    /// whole flush for each (and a JIT emptying its tables) made start-up
+    /// CPU-bound. The whole TLB goes when the address is in a cached section
+    /// (its other pages share the entry), with the FCSE in use, or when
+    /// many pages are waiting for the JIT.
+    fn invalidate_page(&mut self, mva: u32) {
+        let page = mva & !0xFFF;
+        let section = (page >> 20) as usize % SECTIONS;
+        if self.fcse_pid != 0 || self.sections[section].0 == (page & 0xFFF0_0000) | 1 || self.invalidated.len() >= 64 {
+            return self.flush_tlb();
+        }
+        let slot = (page >> 12) as usize % TLB;
+        if self.tlb[slot].0 == page | 1 {
+            if self.tlb[slot].1 & perm::PAGE == 0 {
+                return self.flush_tlb();
+            }
+            self.tlb[slot] = (0, 0);
+        }
+        self.invalidated.push(page);
     }
 
     /// MRC p15: the register's value.
@@ -145,6 +174,7 @@ impl Cp15 {
             (7, 8, 2) => return true,
             (7, _, _) => {}
             // TLB maintenance.
+            (8, 5..=7, 1) => self.invalidate_page(v),
             (8, _, _) => self.flush_tlb(),
             (13, _, 0) => {
                 self.fcse_pid = v & 0xFE00_0000;

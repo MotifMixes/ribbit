@@ -210,6 +210,10 @@ pub(crate) fn decode(w: u32, pc: u32) -> Instr {
         }
         // MRC only reads.
         7 if w & 0x0110_0010 == 0x0010_0010 => exec,
+        // MCR p15 c7 (cache maintenance, a no-op here) goes on with the
+        // block, but not c7 c0 4 and c7 c8 2 (wait for interrupt). Linux
+        // cleans the data cache a line at a time: ~10 M of these at start-up.
+        7 if w & 0x0F1F_0F10 == 0x0E07_0F10 && !matches!((w & 0xF, (w >> 5) & 7), (0, 4) | (8, 2)) => exec,
         // Other coprocessor instructions (CP15 may change the translation,
         // or wait for an interrupt) and SWI.
         _ => Instr::Exec { cond, w, ends: true },

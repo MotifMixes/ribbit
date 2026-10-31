@@ -334,6 +334,8 @@ pub struct Stats {
     pub execs: [u64; 5],
     /// Blocks generated code went on to by itself (`Ctx::recent`).
     pub linked: u64,
+    /// Time spent compiling (decoding and emitting), in microseconds.
+    pub compile_us: u64,
 }
 
 /// The block cache and run loop step: `step` replaces `Arm::step`.
@@ -407,6 +409,28 @@ impl ArmJit {
         self.recent.fill(NO_BLOCK);
     }
 
+    /// Drops what the fast tables and `recent` hold for the virtual pages
+    /// `pages` (invalidated one by one in the TLB, `Cp15::invalidated`).
+    fn flush_pages(&mut self, pages: &[u32]) {
+        for &page in pages {
+            for side in 0..2 {
+                let i = side * FAST + (page >> 12) as usize % FAST;
+                for table in [&mut self.reads, &mut self.writes] {
+                    if table[i].tag == page {
+                        table[i] = EMPTY;
+                    }
+                }
+                // A page's 1024 words fill 1024 consecutive slots.
+                for w in 0..1024 {
+                    let i = side * RECENT + ((page >> 2) as usize + w) % RECENT;
+                    if self.recent[i].va & !0xFFF == page {
+                        self.recent[i] = NO_BLOCK;
+                    }
+                }
+            }
+        }
+    }
+
     fn interpret(&mut self, cpu: &mut Arm, bus: &mut impl ArmBus, start_next: bool) -> bool {
         let pc = cpu.r[15];
         if self.profile {
@@ -449,6 +473,12 @@ impl ArmJit {
             self.stats.flushes += 1;
             self.flush_fast();
             self.fast_for = cpu.cp15.generation;
+        }
+        if !cpu.cp15.invalidated.is_empty() {
+            let pages = std::mem::take(&mut cpu.cp15.invalidated);
+            self.flush_pages(&pages);
+            cpu.cp15.invalidated = pages;
+            cpu.cp15.invalidated.clear();
         }
         let va = cpu.r[15];
         let slot = user as usize * RECENT + (va >> 2) as usize % RECENT;
@@ -500,6 +530,7 @@ impl ArmJit {
                 || cpu.irq_line && cpu.cpsr & psr::I == 0
                 || (cpu.mode() == mode::USR) != user
                 || cpu.cp15.generation != self.fast_for
+                || !cpu.cp15.invalidated.is_empty()
                 || bus.code_watch().is_some_and(|w| !w.written.is_empty())
             {
                 break;
@@ -531,6 +562,7 @@ impl ArmJit {
             self.blocks.insert(key, Block::Never);
             return None;
         }
+        let started = std::time::Instant::now();
         let mut instrs = Vec::new();
         for i in 0..MAX_BLOCK {
             let at = va.wrapping_add(4 * i);
@@ -561,6 +593,7 @@ impl ArmJit {
         let len = instrs.len() as u32;
         self.blocks.insert(key, Block::Code(code, len));
         self.stats.compiled += 1;
+        self.stats.compile_us += started.elapsed().as_micros() as u64;
         Some((code, len))
     }
 

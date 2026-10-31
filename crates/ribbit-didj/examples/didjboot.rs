@@ -96,6 +96,11 @@ fn main() {
     let mut same = 0;
     // Where the CPU is, sampled once per million instructions: 4 KB page -> count.
     let mut samples = std::collections::HashMap::<u32, u32>::new();
+    // DIDJ_SAMPLE_BITS=<n>: sample by 2^n-byte block (12, pages).
+    // DIDJ_SAMPLE_FROM/DIDJ_SAMPLE_TO=<millions>: only then.
+    let sample_from: u64 = std::env::var("DIDJ_SAMPLE_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let sample_to: u64 = std::env::var("DIDJ_SAMPLE_TO").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
+    let sample_mask = !((1u32 << std::env::var("DIDJ_SAMPLE_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(12)) - 1);
     // DIDJ_TYPE=$'ps\nls /Didj': shell commands, one per line, typed one per "# " prompt on UART0.
     let typed = std::env::var("DIDJ_TYPE").unwrap_or_default();
     let mut commands = typed.lines().filter(|c| !c.is_empty()).map(|c| format!("{c}
@@ -245,7 +250,9 @@ fn main() {
                 last_frame = px;
             }
         }
-        *samples.entry(didj.cpu.r[15] & !0xFFF).or_default() += 1;
+        if (sample_from..sample_to).contains(&m) {
+            *samples.entry(didj.cpu.r[15] & sample_mask).or_default() += 1;
+        }
         // A tight loop that never leaves one address range: report and stop.
         let pc = didj.cpu.r[15] & !0xFF;
         same = if pc == last_pc { same + 1 } else { 0 };

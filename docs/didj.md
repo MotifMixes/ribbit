@@ -375,9 +375,15 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   coordinates interpolated, allocation-free clipping, GTE inputs loaded whole. Clone Wars demo at 1x on
   P-cores 90% -> 182%, Didji Racing 96% -> 152%. Frame skipping (`Bus::skip_frames`, a setting, off by
   default): decided at layer-address flips, at most 2 in a row; the GTE still runs, so the game runs the
-  same (same instruction count and PC after 24000 M cycles); 4 E-cores: Didji Racing 71% -> 115%. Left:
-  Linux's boot runs at ~75% for a second or two (CPU-bound; caching the timer rate and UART status in the
-  run loop measured no gain). `didjboot` DIDJ_SPEED=1 prints the speed for every second of Didj time,
+  same (same instruction count and PC after 24000 M cycles); 4 E-cores: Didji Racing 71% -> 115%. Start-up
+  (after 1.7.2): a TLB invalidate by MVA (c8 c5/c6/c7 1) emptied the whole TLB and the JIT's fast tables
+  (~170 KB each time); Linux's flush_tlb_range issues one per page, 50739 in the first 2000 M cycles. Now only
+  that page goes (`Cp15::invalidated`, `ArmJit::flush_pages`; whole flush for sections and the FCSE): 5754
+  flushes, same instruction count and PC. MCR p15 c7 (cache maintenance, 10.8 M at start-up) no longer ends a
+  compiled block (exact mode still matches the interpreter). Boot seconds 2-5: 40/94/69/114% -> 88/135/88/128%,
+  the wait for the menu 370-890% -> 750-1600%, the menu 110-250% -> 330-550% (unpinned i9). Left in the slow
+  seconds: Linux's software ECC (`nand_calculate_ecc`, ~15% of second 2) and nand_read_buf's byte-at-a-time
+  data port reads (~7%). `didjboot` DIDJ_SPEED=1 prints the speed for every second of Didj time,
   DIDJ_SKIP=<millions> skips frames from then.
 - **Drawing time (GUESS, after 1.7.2):** GA3D used to finish every command queue at once (STATUS always idle),
   so games paced only by their 10 ms timer ran at 50-60 fps; a real Didj shows ~30 in menus and ~20 in Clone
