@@ -23,6 +23,7 @@
 
 pub mod autostart;
 pub mod brio;
+pub mod carry;
 pub mod cart;
 pub mod dma;
 pub mod enhanced;
@@ -59,6 +60,13 @@ pub fn nand_from_packages(dir: &std::path::Path, brio: bool) -> Result<nand::Nan
 /// As `nand_from_packages`, and the `package::EXTRAS` it was built without
 /// (the menu starts without them), as `package::missing_extras` names them.
 pub fn nand_and_extras_missing(dir: &std::path::Path, brio: bool) -> Result<(nand::Nand, Vec<String>), String> {
+    nand_with_files(dir, brio, &[])
+}
+
+/// As `nand_and_extras_missing`, with `extra` (paths on /Didj, contents)
+/// added to the Brio volume after the packages: a player's files carried
+/// over from a save made on another image (`carry::user_files`).
+pub fn nand_with_files(dir: &std::path::Path, brio: bool, extra: &[(String, Vec<u8>)]) -> Result<(nand::Nand, Vec<String>), String> {
     let mut fw = package::Firmware::default();
     let mut brio_files = Vec::new();
     let packages = package::packages_in(dir)?;
@@ -83,6 +91,7 @@ pub fn nand_and_extras_missing(dir: &std::path::Path, brio: bool) -> Result<(nan
     }
     let mut flash = nand::Nand::from_firmware(&fw)?;
     if !brio_files.is_empty() {
+        brio_files.extend(extra.iter().cloned());
         brio::install(&mut flash, &brio_files).map_err(|e| format!("Brio: {e}"))?;
     }
     Ok((flash, extras))

@@ -274,6 +274,53 @@ pub fn read_file(d: &[u8], path: &str) -> Option<Vec<u8>> {
     (out.len() == e.size as usize).then_some(out)
 }
 
+/// Every file on a volume of which only some bytes are `known` (a range
+/// is known if the call says so): those whose directory records, FAT
+/// entries and contents all are, with their paths ("/A/B.TXT", long names)
+/// and contents. A folder whose records aren't known is left out with what
+/// it holds. For files saved in pieces of a volume (a Didj save holds only
+/// the erase blocks the console changed).
+pub fn known_files(d: &[u8], known: &dyn Fn(std::ops::Range<usize>) -> bool) -> Vec<(String, Vec<u8>)> {
+    let Some(v) = Volume::parse(d) else { return Vec::new() };
+    let entry = |c: u32| if v.fat16 { v.fat + 2 * c as usize..v.fat + 2 * c as usize + 2 } else { v.fat + 4 * c as usize..v.fat + 4 * c as usize + 4 };
+    // A chain whose FAT entries and clusters are all known.
+    let whole = |chain: &[u32]| {
+        chain.iter().all(|&c| {
+            let at = v.cluster_at(c);
+            c >= 2 && at + v.cluster_bytes() <= d.len() && known(entry(c)) && known(at..at + v.cluster_bytes())
+        })
+    };
+    let mut out = Vec::new();
+    let mut folders = vec![(String::new(), v.root_cluster)];
+    while let Some((path, cluster)) = folders.pop() {
+        if !v.is_fixed_root(cluster) && !whole(&v.chain(d, cluster)) {
+            continue;
+        }
+        if v.is_fixed_root(cluster) && !known(v.root..v.root + 32 * v.root_entries) {
+            continue;
+        }
+        for (e, _) in v.list(d, cluster) {
+            let p = format!("{path}/{}", e.name);
+            if e.is_dir {
+                folders.push((p, e.cluster));
+                continue;
+            }
+            let chain = if e.size == 0 { Vec::new() } else { v.chain(d, e.cluster) };
+            if chain.len() != (e.size as usize).div_ceil(v.cluster_bytes()) || !whole(&chain) {
+                continue;
+            }
+            let mut data = Vec::with_capacity(e.size as usize);
+            for c in chain {
+                let at = v.cluster_at(c);
+                let n = (e.size as usize - data.len()).min(v.cluster_bytes());
+                data.extend_from_slice(&d[at..at + n]);
+            }
+            out.push((p, data));
+        }
+    }
+    out
+}
+
 /// Why a file could not be added.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {

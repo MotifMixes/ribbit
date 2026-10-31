@@ -1010,6 +1010,12 @@ impl App {
                 if let Some(g) = self.library.games.iter().find(|g| g.path == package) {
                     d.title.clone_from(&g.title);
                 }
+                if let Some(n) = d.carried {
+                    self.ui.toast_for(
+                        format!("This Didj's save was made on another memory image: {n} of your files (profiles, progress, settings) were carried over"),
+                        Duration::from_secs(8),
+                    );
+                }
                 if !d.extras_missing.is_empty() && self.settings.didj_extras_notice {
                     self.ui.toast(format!("Didj started without {}: add the .lfp to its folder to have it", d.extras_missing.join(" and ")));
                 }
@@ -1608,6 +1614,7 @@ impl App {
             Pick::LeapPadBook => self.leappad.as_ref().and_then(|l| l.cart.clone()),
             Pick::SdFolder => self.settings.leapster2_sd_folder.clone(),
             Pick::SdImage | Pick::SdExport => None,
+            Pick::DidjSave => Some(self.save_dir()),
         };
         #[cfg(target_os = "macos")]
         if self.sheet.is_none()
@@ -1658,6 +1665,7 @@ impl App {
             Pick::LeapPadBook => self.open_leappad_book(Some(path)),
             Pick::SdFolder => self.set_sd_folder(Some(path)),
             Pick::SdImage => self.sd_card(crate::sdcard::Job::LoadImage(path)),
+            Pick::DidjSave => self.import_didj_save(path),
             Pick::SdExport => self.sd_card(crate::sdcard::Job::Export(path)),
         }
     }
@@ -1880,6 +1888,7 @@ impl App {
                     self.ui.toast("Leapster 2 unplugged from USB");
                 }
             }
+            Action::ImportDidjSave(path) => self.import_didj_save(path),
             Action::SetDidjSerialTcp(on) => {
                 self.settings.didj_serial_tcp = on;
                 self.save_settings();
@@ -2543,6 +2552,29 @@ impl App {
             },
         }
         self.usb_server.clone()
+    }
+
+    /// Makes the Didj save at `from` this Didj's (`didj::import_save`) and
+    /// powers the Didj on again so its files are carried over.
+    fn import_didj_save(&mut self, from: PathBuf) {
+        let package = self.settings.didj_package.clone().filter(|p| p.is_file());
+        let Some(package) = package else {
+            self.ui.toast("Start the Didj once first, so Ribbit knows which Didj to import the save into");
+            return;
+        };
+        let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let running = self.didj.is_some();
+        if running {
+            // Its own save is written first (kept as .before-import).
+            self.end_session();
+        }
+        match crate::didj::import_save(&from, &dir, &self.save_dir()) {
+            Ok(_) => {
+                self.ui.toast("Didj save imported: its files are carried over as the Didj starts");
+                self.start_didj(package, None, None);
+            }
+            Err(e) => self.ui.problem("Couldn't import the Didj save", "Choose a Didj save: a didj-….nandblocks file from Ribbit's saves folder.", format!("{e:#}")),
+        }
     }
 
     /// Offers the Didj's serial console on TCP if so set, else stops.

@@ -180,20 +180,31 @@ pub fn cart_image(peb: usize, blocks: usize, data: &[u8]) -> Result<Vec<u8>, Str
     Ok(out)
 }
 
-/// The volume's contents read back (unmapped LEBs as 0xFF), `len` bytes:
-/// what gluebi presents as the block device.
-pub fn read_volume(flash: &Nand, part: Partition, len: usize) -> Vec<u8> {
+/// The erase block holding each of the user volume's first `count` LEBs
+/// (None: unmapped): of two copies, the one with the higher sequence
+/// number (UBI writes a changed LEB to another block).
+pub fn lebs(flash: &Nand, part: Partition, count: usize) -> Vec<Option<usize>> {
     let first = part.offset / nand::BLOCK;
-    let mut lebs: Vec<Option<usize>> = vec![None; len.div_ceil(LEB)];
+    let mut lebs: Vec<Option<(usize, u64)>> = vec![None; count];
     for b in first..first + part.size / nand::BLOCK {
         let vid = flash.read(b * nand::BLOCK + VID_OFFSET, 64);
         let word = |at: usize| u32::from_be_bytes(vid[at..at + 4].try_into().unwrap());
         if word(0) == VID_MAGIC && word(8) == 0 && crc(&vid[..60]) == word(60) {
-            if let Some(slot) = lebs.get_mut(word(12) as usize) {
-                *slot = Some(b);
+            let sqnum = u64::from_be_bytes(vid[40..48].try_into().unwrap());
+            if let Some(slot) = lebs.get_mut(word(12) as usize)
+                && slot.is_none_or(|(_, s)| sqnum >= s)
+            {
+                *slot = Some((b, sqnum));
             }
         }
     }
+    lebs.into_iter().map(|l| l.map(|(b, _)| b)).collect()
+}
+
+/// The volume's contents read back (unmapped LEBs as 0xFF), `len` bytes:
+/// what gluebi presents as the block device.
+pub fn read_volume(flash: &Nand, part: Partition, len: usize) -> Vec<u8> {
+    let lebs = lebs(flash, part, len.div_ceil(LEB));
     let mut out = Vec::with_capacity(len);
     for leb in lebs {
         let n = (len - out.len()).min(LEB);

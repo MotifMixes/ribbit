@@ -25,6 +25,8 @@ pub enum Pick {
     SdImage,
     /// A folder the Leapster 2's SD card files are copied into.
     SdExport,
+    /// A Didj save (.nandblocks) to import.
+    DidjSave,
 }
 
 impl Pick {
@@ -40,6 +42,7 @@ impl Pick {
             Pick::SdFolder => "Choose the Leapster 2's SD card folder",
             Pick::SdImage => "Load an SD card image into the Leapster 2",
             Pick::SdExport => "Choose a folder for the SD card's files",
+            Pick::DidjSave => "Import a Didj save (.nandblocks)",
         }
     }
 
@@ -48,6 +51,10 @@ impl Pick {
         matches!(self, Pick::RomFolder | Pick::TwistContent | Pick::RecordFolder | Pick::SdFolder | Pick::SdExport)
     }
 }
+
+/// Didj save extensions (set-aside saves end in other-image, numbered).
+#[cfg(not(target_os = "android"))]
+const DIDJ_SAVES: [&str; 3] = ["nandblocks", "other-image", "before-import"];
 
 /// SD card image extensions (Win32 Disk Imager, dd, Ribbit's own card files).
 #[cfg(not(target_os = "android"))]
@@ -84,6 +91,9 @@ pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
     if what == Pick::SdImage {
         return d.add_filter("SD card images", &SD_IMAGES).add_filter("All files", &["*"]).pick_file();
     }
+    if what == Pick::DidjSave {
+        return d.add_filter("Didj saves", &DIDJ_SAVES).add_filter("All files", &["*"]).pick_file();
+    }
     d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"]).add_filter("All files", &["*"]).pick_file()
 }
 
@@ -113,6 +123,8 @@ impl SheetPick {
             Box::pin(d.add_filter("LeapPad books", &["toml"]).add_filter("All files", &["*"]).pick_file())
         } else if what == Pick::SdImage {
             Box::pin(d.add_filter("SD card images", &SD_IMAGES).add_filter("All files", &["*"]).pick_file())
+        } else if what == Pick::DidjSave {
+            Box::pin(d.add_filter("Didj saves", &DIDJ_SAVES).add_filter("All files", &["*"]).pick_file())
         } else {
             Box::pin(
                 d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"])

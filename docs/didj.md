@@ -439,6 +439,22 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   today's image: dosfsck 2.11 then runs for many minutes (more than 10 emulated) and fsck.fat 4.2 loops.
   The app sets such saves aside; don't test with them.
 
+## Saves across images (Ribbit, `carry`, VERIFIED 2026-10-31)
+
+A save (`didj-<folder>.nandblocks`) holds the erase blocks that differ from the image built from the packages,
+and `.nandimage` that image's fingerprint. Until 1.8.1 a save made on another image (new packages, Ribbit
+building it differently as 1.8.1 did with micromods, a save from another PC) was set aside and the Didj
+started fresh (players: "updating resets the Didj", "it doesn't accept my NAND image"). Now its files are
+carried over: `carry::user_files` reads the Brio volume from the save's own blocks (the LEBs it holds, by
+UBI sequence number; the new image's boot sector), keeps the files whose folder records, FAT entries and
+clusters all lie in them (`fatfs::known_files`) and that the new image doesn't have, and the image is built
+again with them added (`nand_with_files`). What the console writes there: /Data/<n>/ (profile.dsc,
+profile.log, <game>/..., Backup/), /Data/GameIcons/, /Base/settings.cfg, /brd.rev. Its other changed blocks
+(boot flags, factory data, Enhanced mode's fixes) are written again at each start. VERIFIED: Ribbit's own
+save without its .nandimage, in the app: 14 files carried over, the Didj starts at "Select a name" with its
+profile; a save set aside in 1.8.0 gives back its profiles. Emulation > Didj > Import a Didj save... makes
+any save the Didj's (`didj::import_save`) and starts it. `examples/didjsave.rs` lists what a save holds.
+
 ## Serial console (Ribbit, VERIFIED 2026-10-31)
 
 UART0 is Linux's console (`console=ttyS0,115200`): its log and BusyBox's root shell. The app keeps what

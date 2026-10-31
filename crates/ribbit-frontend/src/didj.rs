@@ -116,6 +116,9 @@ pub struct DidjSession {
     /// The packages it came with that it was built without
     /// (`package::EXTRAS`: JetPack Heroes, an avatar), for the player.
     pub extras_missing: Vec<String>,
+    /// The save was made on another image: this many of the player's files
+    /// were carried over from it (`ribbit_didj::carry`).
+    pub carried: Option<usize>,
 }
 
 impl DidjSession {
@@ -127,23 +130,44 @@ impl DidjSession {
         let (original, extras_missing) = ribbit_didj::nand_and_extras_missing(dir, true).map_err(anyhow::Error::msg)?;
         let save_path = save_file(dir, save_dir);
         // The save holds blocks changed from the built image: on another
-        // image (new packages, or Ribbit building it differently) they
-        // would mix two file system layouts. Such a save is set aside.
+        // image (new packages, Ribbit building it differently, a save from
+        // another PC or imported) they would mix two file system layouts.
+        // The player's files in it are carried over to this image instead
+        // (`carry`), and the old save is kept beside it.
         let image = format!("{:08x}", original.fingerprint());
         let image_path = save_path.with_extension("nandimage");
-        if save_path.exists() && std::fs::read_to_string(&image_path).ok().as_deref() != Some(image.as_str()) {
-            let aside = save_path.with_extension("nandblocks.other-image");
-            tracing::warn!(target: "ribbit::saves", "{} was made on another NAND image; kept as {}, starting fresh", save_path.display(), aside.display());
-            let _ = std::fs::rename(&save_path, &aside);
-        }
         let mut flash = original.clone();
-        if let Ok(changes) = std::fs::read(&save_path)
+        let mut carried = None;
+        if save_path.exists() && std::fs::read_to_string(&image_path).ok().as_deref() != Some(image.as_str()) {
+            let aside = set_aside(&save_path);
+            let files = std::fs::read(&aside).map_err(|e| e.to_string()).and_then(|c| ribbit_didj::carry::user_files(&c, &original));
+            match files {
+                Ok(files) if !files.is_empty() => match ribbit_didj::nand_with_files(dir, true, &files) {
+                    Ok((with, _)) => {
+                        tracing::info!(target: "ribbit::saves", "{} was made on another NAND image: {} files carried over, the old save kept as {}", save_path.display(), files.len(), aside.display());
+                        flash = with;
+                        carried = Some(files.len());
+                    }
+                    Err(e) => tracing::warn!(target: "ribbit::saves", "carrying {}'s files over: {e}", aside.display()),
+                },
+                Ok(_) => tracing::warn!(target: "ribbit::saves", "{} was made on another NAND image and holds no files to carry over; kept as {}", save_path.display(), aside.display()),
+                Err(e) => tracing::warn!(target: "ribbit::saves", "{}: {e}", aside.display()),
+            }
+        } else if let Ok(changes) = std::fs::read(&save_path)
             && let Err(e) = flash.apply_changes(&changes)
         {
             tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
             flash = original.clone();
         }
         set_mode(&mut flash, &original, mode.enhanced);
+        if carried.is_some() {
+            // Written at once: the old save has been set aside.
+            if let Some(d) = save_path.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(&save_path, flash.changes_from(&original));
+            let _ = std::fs::write(&image_path, &image);
+        }
         let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced));
         didj.set_cpu_scale(mode.cpu_scale);
         didj.bus.cart = cart;
@@ -173,7 +197,7 @@ impl DidjSession {
             run(&s, autostart)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing })
+        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried })
     }
 
     /// Copies the latest picture into `out`; its size (SCREEN_W x SCREEN_H,
@@ -312,6 +336,39 @@ fn set_mode(flash: &mut Nand, original: &Nand, enhanced: bool) {
     if enhanced && fixed == 0 {
         tracing::warn!(target: "ribbit::didj", "Enhanced mode: this firmware has none of the scripts it fixes");
     }
+}
+
+/// Moves a save made on another image aside (`.nandblocks.other-image`,
+/// numbered if there is one already) and its `.nandimage` away; where it
+/// went.
+fn set_aside(save: &Path) -> PathBuf {
+    let mut aside = save.with_extension("nandblocks.other-image");
+    let mut n = 2;
+    while aside.exists() {
+        aside = save.with_extension(format!("nandblocks.other-image-{n}"));
+        n += 1;
+    }
+    let _ = std::fs::rename(save, &aside);
+    let _ = std::fs::remove_file(save.with_extension("nandimage"));
+    aside
+}
+
+/// Makes `from` (a Didj save: a `.nandblocks` file, perhaps renamed, from
+/// another PC or set aside) the save of the Didj in `dir`; the one there is
+/// kept as `.nandblocks.before-import`. Its files are carried over at the
+/// next power-on (no `.nandimage`: made on another image).
+pub fn import_save(from: &Path, dir: &Path, save_dir: &Path) -> anyhow::Result<PathBuf> {
+    let data = std::fs::read(from)?;
+    let mut check = ribbit_didj::nand::Nand::erased();
+    check.apply_changes(&data).map_err(|e| anyhow::anyhow!("{} is not a Didj save: {e}", from.display()))?;
+    let save = save_file(dir, save_dir);
+    std::fs::create_dir_all(save_dir)?;
+    if save.exists() {
+        std::fs::copy(&save, save.with_extension("nandblocks.before-import"))?;
+    }
+    std::fs::write(&save, &data)?;
+    let _ = std::fs::remove_file(save.with_extension("nandimage"));
+    Ok(save)
 }
 
 pub fn save_file(dir: &Path, save_dir: &Path) -> PathBuf {

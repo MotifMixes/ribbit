@@ -70,6 +70,7 @@ pub enum Action {
     /// Offer the Didj on the PC's USB, or stop.
     SetDidjUsb(bool),
     SetDidjSerialTcp(bool),
+    ImportDidjSave(PathBuf),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
     ImportTwistZip(PathBuf),
     /// Change the Leapster 2's SD card (Emulation › Leapster 2 SD card).
@@ -397,6 +398,7 @@ pub fn draw(
             Pick::SdFolder => Action::SetSdFolder(Some(path)),
             Pick::SdImage => Action::SdCard(crate::sdcard::Job::LoadImage(path)),
             Pick::SdExport => Action::SdCard(crate::sdcard::Job::Export(path)),
+            Pick::DidjSave => Action::ImportDidjSave(path),
         });
     }
     if phone {
@@ -1158,6 +1160,18 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 .clicked()
             {
                 st.show_serial = true;
+                ui.close();
+            }
+            if ui
+                .button("Import a Didj save…")
+                .on_hover_text(
+                    "A Didj save (didj-….nandblocks, in Ribbit's saves folder) from another PC, or one an update set \
+                     aside (….other-image). Its profiles, game progress and settings are copied into this Didj; the \
+                     save it had is kept as a .before-import file. Restarts a running Didj.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::DidjSave));
                 ui.close();
             }
             if ui
