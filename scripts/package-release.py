@@ -165,7 +165,7 @@ def main():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
     for exe, built in PROGRAMS.items():
-        src = ROOT / 'target' / 'release' / built
+        src = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target')) / 'release' / built
         if not src.exists():
             sys.exit(f'missing {src} (build first)')
         shutil.copy2(src, stage / exe)
