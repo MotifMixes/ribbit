@@ -118,33 +118,78 @@ pub fn product(id: &str) -> &str {
     &id[5..15]
 }
 
-/// The packages in `dir` as (file name, contents): its `.lfp` files and
-/// those in a `BUNDLE` there, one per product (the newest version; a loose
-/// file over the same one bundled), in name order.
+/// A package's top-level `meta.inf`, if `data` is a package (a zip).
+pub fn meta_of(data: &[u8]) -> Option<Meta> {
+    let entries = ribbit_core::zip::entries(data).ok()?;
+    let entry = entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with("meta.inf") && e.name.matches('/').count() <= 1)?;
+    let text = ribbit_core::zip::read_entry(data, entry).ok()?;
+    Some(Meta::parse(&String::from_utf8_lossy(&text)))
+}
+
+/// The package ID of the `.lfp` file `name` holding `data`: from its name,
+/// else from its meta.inf `PackageID` (a renamed file, such as players'
+/// "JetPack Heroes.lfp").
+pub fn identify(name: &str, data: &[u8]) -> Option<String> {
+    if let Some(id) = package_id(name) {
+        return Some(id.to_string());
+    }
+    if !name.to_ascii_lowercase().ends_with(".lfp") {
+        return None;
+    }
+    let meta = meta_of(data).filter(Meta::is_didj)?;
+    package_id(&format!("{}.lfp", meta.get("PackageID")?)).map(str::to_string)
+}
+
+/// Whether every version of the package is a package of its own: a
+/// micromod (`Type="MicroDownload"`) is numbered within its game's product
+/// (DIDJ-0x000F0012-000012 "The Play", -000015 "Happy Ending": Tinker
+/// Bell's cinematics), where for the rest the number is a version.
+fn each_version_kept(data: &[u8]) -> bool {
+    meta_of(data).is_some_and(|m| m.get("Type") == Some("MicroDownload"))
+}
+
+/// The packages in `dir` as (file name, contents): the `.lfp` files there
+/// and in its subfolders (players keep micromods in one), and those in a
+/// `BUNDLE` there; one per product (the newest version; a loose file over
+/// the same one bundled), but every micromod; in name order. A renamed
+/// `.lfp` is known by its meta.inf and named here by its package ID.
 pub fn packages_in(dir: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut found: std::collections::BTreeMap<String, (String, Vec<u8>)> = Default::default();
-    let mut keep = |name: String, data: Vec<u8>| {
-        let id = package_id(&name).unwrap();
-        let newer = found.get(product(id)).is_none_or(|(old, _)| package_id(old).unwrap()[16..] <= id[16..]);
+    let mut keep = |id: String, data: Vec<u8>| {
+        let key = if each_version_kept(&data) { id.clone() } else { product(&id).to_string() };
+        let newer = found.get(&key).is_none_or(|(old, _)| package_id(old).unwrap()[16..] <= id[16..]);
         if newer {
-            found.insert(product(id).to_string(), (name, data));
+            found.insert(key, (format!("{id}.lfp"), data));
         }
     };
-    let mut paths: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().map(|e| e.path()).collect();
-    paths.sort();
+    let list = |d: &std::path::Path| -> Result<Vec<std::path::PathBuf>, String> {
+        let mut v: Vec<_> = std::fs::read_dir(d).map_err(|e| format!("{}: {e}", d.display()))?.flatten().map(|e| e.path()).collect();
+        v.sort();
+        Ok(v)
+    };
+    let paths = list(dir)?;
+    let mut files: Vec<_> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+    for sub in paths.iter().filter(|p| p.is_dir()) {
+        files.extend(list(sub).unwrap_or_default().into_iter().filter(|p| p.is_file()));
+    }
     let read = |p: &std::path::Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     for path in paths.iter().filter(|p| is_bundle(&p.to_string_lossy())) {
         let data = read(path)?;
         let entries = ribbit_core::zip::entries(&data).map_err(|e| format!("{}: {e}", path.display()))?;
-        for entry in entries.iter().filter(|e| package_id(&e.name).is_some()) {
+        for entry in entries.iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".lfp")) {
             let bytes = ribbit_core::zip::read_entry(&data, entry).map_err(|e| format!("{}: {}: {e}", path.display(), entry.name))?;
-            keep(entry.name.rsplit('/').next().unwrap().to_string(), bytes);
+            if let Some(id) = identify(&entry.name, &bytes) {
+                keep(id, bytes);
+            }
         }
     }
-    for path in &paths {
+    for path in &files {
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        if package_id(&name).is_some() {
-            keep(name, read(path)?);
+        if name.to_ascii_lowercase().ends_with(".lfp") {
+            let data = read(path)?;
+            if let Some(id) = identify(&name, &data) {
+                keep(id, data);
+            }
         }
     }
     Ok(found.into_values().collect())

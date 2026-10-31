@@ -544,8 +544,8 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
     if ribbit_didj::package::is_bundle(&name) {
         return describe_bundle(path);
     }
-    let id = ribbit_didj::package::package_id(&name)?.to_string();
     let data = std::fs::read(path).ok()?;
+    let id = ribbit_didj::package::identify(&name, &data)?;
     let meta = ribbit_core::zip::entries(&data)
         .ok()?
         .into_iter()
@@ -714,8 +714,22 @@ pub fn read_cart(path: &Path) -> Option<Vec<u8>> {
 pub fn is_package(path: &Path) -> bool {
     path.file_name().is_some_and(|n| {
         let n = n.to_string_lossy();
-        ribbit_didj::package::package_id(&n).is_some() || ribbit_didj::package::is_bundle(&n)
+        ribbit_didj::package::package_id(&n).is_some() || ribbit_didj::package::is_bundle(&n) || renamed_package(path).is_some()
     })
+}
+
+/// The package ID of a Didj `.lfp` not named by it (players rename them:
+/// "JetPack Heroes.lfp"), from its meta.inf. RockIt Twist packages are
+/// `.lfp` files too; they say another device.
+fn renamed_package(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    // Another console's package by its own name (LSTR-0x..., PCKT-0x...)
+    // is not read.
+    let other = name.get(4..7) == Some("-0x");
+    if other || !name.to_ascii_lowercase().ends_with(".lfp") || std::fs::metadata(path).ok()?.len() > 256 << 20 {
+        return None;
+    }
+    ribbit_didj::package::identify(&name, &std::fs::read(path).ok()?)
 }
 
 /// The Didj's system package (the one the library lists as the console) in

@@ -155,6 +155,14 @@ Build and check the image: `cargo run -p ribbit-didj --example didjnand -- didj 
 A `.lfp` is a plain zip with a `meta.inf` (`Device="Didj"`). IDs are `DIDJ-0x000E....` for system packages and
 `DIDJ-0x000F....` for games.
 
+- Ribbit takes the `.lfp` files in the firmware folder and its subfolders, and those in `bios.didj`. A renamed
+  file ("JetPack Heroes.lfp") is known by its meta.inf `PackageID` (`package::identify`).
+- The last number is a version, and only the newest of a product is installed, except for micromods
+  (`Type="MicroDownload"`, `MDLType` Cinematic/Clothing/...): there it numbers the items of a game's product
+  (DIDJ-0x000F0012-000012 "The Play", -000015 "Happy Ending": Tinker Bell), and every one is installed, under
+  `/Didj/Data/MDL/<its folder>` (VERIFIED 2026-10-31: 189 micromods from players' archive, products
+  0x000F000D-0x000F0012, all listed there in Ribbit). Whether each game shows them is not checked yet.
+
 | ID         | Name                    | Contents                                         |
 |------------|-------------------------|--------------------------------------------------|
 | 0x000E0002 | Didj Device Bootstrap   | lightning-boot.bin, bootflags.jffs2              |
@@ -277,6 +285,17 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
   Ribbit's own frames), and the game by its art; it presses A/DOWN only on a recognised, still screen and
   gives up after two minutes or when the player presses a button. A console not yet set up stays at setup.
   didjboot: `DIDJ_START=<art png>` or `DIDJ_START=cart`.
+
+## Clock (VERIFIED in Ribbit 2026-10-31)
+
+- Linux's tick is TIMER0 matching every 10 ms (4.59375 MHz = PLL1 147 MHz / 32, match 45930; HZ 100). Its
+  handler always counts a tick (`do { timer_tick(); } while (intertick > TIMER_SYS_TICK)`), so a second
+  interrupt for the same match counts twice. Until 1.8.1 Ribbit raised the timer's interrupt as long as its
+  INTPEND was set; Linux clears the interrupt controller before INTPEND, so it took every tick twice and
+  the Didj's clock ran at double speed (/proc/uptime 40 s in 20 s of Didj time). Games that move by measured
+  time (players: Super Chicks) ran at double speed; sound and games that wait for the screen did not. The
+  controller now latches the match (an edge). Frame rates are unchanged (menu 33 fps, Clone Wars and Super
+  Chicks as before).
 
 ## Power off and unclean starts (VERIFIED in Ribbit; sources: hwmon-lf1000.c, monitord, launch_main, init.d/ubi)
 

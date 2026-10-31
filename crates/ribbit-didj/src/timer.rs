@@ -175,12 +175,18 @@ impl Timers {
                 if m != 0 && next >= m {
                     t.count = (next % m) as u32;
                     t.control |= INTPEND;
+                    // The interrupt controller latches the match (an edge),
+                    // not the timer's INTPEND level: Linux acknowledges the
+                    // controller before it clears INTPEND, and raising it
+                    // again in between made it take every tick twice (the
+                    // Didj's clock ran at double speed; VERIFIED: 40 s of
+                    // /proc/uptime in 20 s of Didj time).
+                    if t.control & INTENB != 0 {
+                        self.pend |= 1 << TIMER_IRQS[i];
+                    }
                 } else {
                     t.count = next as u32;
                 }
-            }
-            if t.control & (INTPEND | INTENB) == INTPEND | INTENB {
-                self.pend |= 1 << TIMER_IRQS[i];
             }
         }
     }
