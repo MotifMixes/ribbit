@@ -48,9 +48,34 @@ pub fn user_files(changes: &[u8], base: &Nand) -> Result<Vec<(String, Vec<u8>)>,
     Ok(files.into_iter().filter(|(p, _)| !built.contains(&p.to_ascii_lowercase())).collect())
 }
 
+/// Whether an avatar on `flash`'s volume (/Didj/Data/Avatars/<folder>/meta.inf)
+/// wants `package::fix_avatar_meta`: Didjis LeapFrog Connect sent to the
+/// console over USB. The image is then built again with the player's files
+/// (`user_files`), which fixes them.
+pub fn avatars_to_fix(flash: &Nand) -> bool {
+    let brio = nand::partition("Brio").unwrap();
+    let volume = ubi::read_volume(flash, brio, brio::volume_sectors(brio.size / nand::BLOCK) * 512);
+    fatfs::list(&volume, "Data/Avatars").unwrap_or_default().iter().filter(|e| e.is_dir).any(|e| {
+        fatfs::read_file(&volume, &format!("Data/Avatars/{}/meta.inf", e.name)).is_some_and(|m| crate::package::fix_avatar_meta(&m).is_some())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Didji synced over USB (no Device line) wants fixing; LeapFrog's
+    /// own avatar doesn't.
+    #[test]
+    fn synced_didjis_found() {
+        let mut flash = Nand::erased();
+        brio::install(&mut flash, &[("Data/Avatars/Avatar1/meta.inf".to_string(), b"Device=\"Didj\"
+".to_vec())]).unwrap();
+        assert!(!avatars_to_fix(&flash));
+        brio::install(&mut flash, &[("Data/Avatars/D/meta.inf".to_string(), b"DeviceTypes=\"DIDJ\"
+".to_vec())]).unwrap();
+        assert!(avatars_to_fix(&flash));
+    }
 
     /// A file the console wrote is carried over from a save made on
     /// another image; the packages' files are not.

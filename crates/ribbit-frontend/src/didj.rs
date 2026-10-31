@@ -153,11 +153,23 @@ impl DidjSession {
                 Ok(_) => tracing::warn!(target: "ribbit::saves", "{} was made on another NAND image and holds no files to carry over; kept as {}", save_path.display(), aside.display()),
                 Err(e) => tracing::warn!(target: "ribbit::saves", "{}: {e}", aside.display()),
             }
-        } else if let Ok(changes) = std::fs::read(&save_path)
-            && let Err(e) = flash.apply_changes(&changes)
-        {
-            tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
-            flash = original.clone();
+        } else if let Ok(changes) = std::fs::read(&save_path) {
+            if let Err(e) = flash.apply_changes(&changes) {
+                tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
+                flash = original.clone();
+            } else if ribbit_didj::carry::avatars_to_fix(&flash) {
+                // Didjis synced over USB: the menu takes them once their
+                // meta.inf says Device="Didj" (package::fix_avatar_meta).
+                let built = ribbit_didj::carry::user_files(&changes, &original).and_then(|files| ribbit_didj::nand_with_files(dir, true, &files));
+                match built {
+                    Ok((with, _)) => {
+                        tracing::info!(target: "ribbit::saves", "Didjis synced to the console made ready for its menu");
+                        flash = with;
+                        carried = Some(0);
+                    }
+                    Err(e) => tracing::warn!(target: "ribbit::saves", "making synced Didjis ready: {e}"),
+                }
+            }
         }
         set_mode(&mut flash, &original, mode.enhanced);
         if carried.is_some() {

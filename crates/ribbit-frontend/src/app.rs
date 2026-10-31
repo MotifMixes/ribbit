@@ -1010,7 +1010,7 @@ impl App {
                 if let Some(g) = self.library.games.iter().find(|g| g.path == package) {
                     d.title.clone_from(&g.title);
                 }
-                if let Some(n) = d.carried {
+                if let Some(n) = d.carried.filter(|&n| n > 0) {
                     self.ui.toast_for(
                         format!("This Didj's save was made on another memory image: {n} of your files (profiles, progress, settings) were carried over"),
                         Duration::from_secs(8),
