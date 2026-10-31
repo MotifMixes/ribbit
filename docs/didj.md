@@ -381,7 +381,7 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   P-cores 90% -> 182%, Didji Racing 96% -> 152%. Frame skipping (`Bus::skip_frames`, a setting, off by
   default): decided at layer-address flips, at most 2 in a row; the GTE still runs, so the game runs the
   same (same instruction count and PC after 24000 M cycles); 4 E-cores: Didji Racing 71% -> 115%. Start-up
-  (after 1.7.2): a TLB invalidate by MVA (c8 c5/c6/c7 1) emptied the whole TLB and the JIT's fast tables
+  (1.8.0): a TLB invalidate by MVA (c8 c5/c6/c7 1) emptied the whole TLB and the JIT's fast tables
   (~170 KB each time); Linux's flush_tlb_range issues one per page, 50739 in the first 2000 M cycles. Now only
   that page goes (`Cp15::invalidated`, `ArmJit::flush_pages`; whole flush for sections and the FCSE): 5754
   flushes, same instruction count and PC. MCR p15 c7 (cache maintenance, 10.8 M at start-up) no longer ends a
@@ -396,7 +396,7 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   results). Pinned to one P-core, boot seconds 1-5: 316/86/133/89/127% -> ~450/96/195/94/136%
   (DIDJ_NO_NATIVE=1 for the kernel's own code). A 4x larger recent-block table measured slower (flushes). `didjboot` DIDJ_SPEED=1 prints the speed for every second of Didj time,
   DIDJ_SKIP=<millions> skips frames from then.
-- **Drawing time (GUESS, after 1.7.2):** GA3D used to finish every command queue at once (STATUS always idle),
+- **Drawing time (GUESS, 1.8.0):** GA3D used to finish every command queue at once (STATUS always idle),
   so games paced only by their 10 ms timer ran at 50-60 fps; a real Didj shows ~30 in menus and ~20 in Clone
   Wars gameplay. Ribbit still draws at once but holds CMDQREAR back and STATUS busy until the time is up:
   22 cycles per pixel drawn (min of half the triangle's area and its clipped box), 64 per triangle, 1 per

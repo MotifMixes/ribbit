@@ -67,7 +67,7 @@ fn main() {
     let base = flash.clone();
     let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(enhanced));
     // DIDJ_GA3D_PIXEL=<n>: the 3D engine's cycles per pixel drawn (0: draws
-    // in no time, as before 1.7.2).
+    // in no time, as before 1.8.0).
     if let Some(n) = std::env::var("DIDJ_GA3D_PIXEL").ok().and_then(|v| v.parse().ok()) {
         didj.bus.ga3d.cycles_per_pixel = n;
     }
