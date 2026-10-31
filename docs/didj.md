@@ -439,6 +439,21 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   today's image: dosfsck 2.11 then runs for many minutes (more than 10 emulated) and fsck.fat 4.2 loops.
   The app sets such saves aside; don't test with them.
 
+## Didjis and Connect's Base folders (VERIFIED 2026-10-31, players' files)
+
+- Didjis are avatars (`Type="Avatar"`; the menu's CScreenSelectAvatar, "NO DIDJIS CREATED / Connect to your
+  computer to create a character"). The Didjerator's packages are named with the console's unit ID,
+  `DIDJ-0x000e000f-<UnitID>-<6 digits>` (product 0x000E000F, numbered per console), each a folder of that name
+  (audio/*.ogg, <name>.json, PNGs at 24-240 px); meta.inf says `DeviceTypes="DIDJ"` (no `Device`),
+  `ProfileAccess="0"`. Until 1.8.2 Ribbit read neither the name nor the meta.inf, so it left them out. Every
+  avatar package is installed (`each_version_kept`), to /Didj/Data/Avatars/<folder>, where a player's
+  LeapFrog Connect shows them (Mnt\<UnitID> \Data\Avatars beside Avatar1). VERIFIED: booted with two,
+  `ls /Didj/Data/Avatars` lists Avatar1 and both. Whether the menu lists them: UNVERIFIED here.
+- LeapFrog Connect stops with an error unless the Didj's /Didj/Base holds `bootstrap-LF_LF1000` and
+  `firmware-LF_LF1000` (a player: extracted into Connect's Mnt\<UnitID> \Base, it carries on). The
+  Bootstrap and Device Firmware packages are now installed there too, beside being written raw; the Didj
+  still starts to its menu.
+
 ## Saves across images (Ribbit, `carry`, VERIFIED 2026-10-31)
 
 A save (`didj-<folder>.nandblocks`) holds the erase blocks that differ from the image built from the packages,

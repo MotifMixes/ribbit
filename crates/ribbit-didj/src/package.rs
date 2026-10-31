@@ -32,8 +32,10 @@ impl Meta {
         self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 
+    /// A Didj package: `Device="Didj"`, or `DeviceTypes="DIDJ"` as the
+    /// Didjis LeapFrog Connect makes say.
     pub fn is_didj(&self) -> bool {
-        self.get("Device") == Some("Didj")
+        self.get("Device") == Some("Didj") || self.get("DeviceTypes").is_some_and(|t| t.split(',').any(|d| d.trim().eq_ignore_ascii_case("DIDJ")))
     }
 }
 
@@ -83,7 +85,16 @@ impl Firmware {
 /// "DIDJ-0x000E0003-000001").
 pub fn package_id(file_name: &str) -> Option<&str> {
     let stem = file_name.rsplit(['/', '\\']).next()?.strip_suffix(".lfp")?;
-    (stem.len() == 22 && stem.starts_with("DIDJ-0x")).then_some(stem)
+    let hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    // A Didji's carries the console's unit ID
+    // ("DIDJ-0x000e000f-00000E0000000001-000000": LeapFrog Connect's
+    // Didjerator, numbered per console).
+    let didji = || {
+        let p: Vec<&str> = stem.split('-').collect();
+        p.len() == 4 && p[2].len() == 16 && hex(p[2]) && p[3].len() == 6 && hex(p[3])
+    };
+    let ok = stem.len() >= 22 && stem[..7].eq_ignore_ascii_case("DIDJ-0x") && hex(&stem[7..15]) && stem.as_bytes()[15] == b'-';
+    (ok && (stem.len() == 22 && hex(&stem[16..]) || didji())).then_some(stem)
 }
 
 /// The system packages a Didj is built from (product, name), as firmware
@@ -233,6 +244,10 @@ mod tests {
         assert_eq!(m.get("Icon"), Some(""));
         assert_eq!(package_id("didj/DIDJ-0x000E0003-000001.lfp"), Some("DIDJ-0x000E0003-000001"));
         assert_eq!(package_id("swclonewrs.zip"), None);
+        let didji = "DIDJ-0x000e000f-00000E0000000001-000000";
+        assert_eq!(package_id(&format!("{didji}.lfp")), Some(didji));
+        assert_eq!(product(didji), "0x000e000f");
+        assert!(Meta::parse("DeviceTypes=\"DIDJ\"\r\nType=\"Avatar\"\r\n").is_didj());
     }
 
     #[test]

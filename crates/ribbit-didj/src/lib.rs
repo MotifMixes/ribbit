@@ -77,15 +77,16 @@ pub fn nand_with_files(dir: &std::path::Path, brio: bool, extra: &[(String, Vec<
     }
     for (name, data) in packages {
         let mut rest = Vec::new();
-        let mut firmware = false;
         for entry in ribbit_core::zip::entries(&data).map_err(|e| format!("{name}: {e}"))? {
             let bytes = ribbit_core::zip::read_entry(&data, &entry).map_err(|e| format!("{name}: {e}"))?;
-            if fw.add(&entry.name, bytes.clone()) {
-                firmware = true;
-            }
+            fw.add(&entry.name, bytes.clone());
             rest.push((entry.name, bytes));
         }
-        if !firmware && brio {
+        // The firmware packages too, beside being written raw: LeapFrog
+        // Connect wants /Didj/Base/bootstrap-LF_LF1000 and
+        // firmware-LF_LF1000 (a player: without them it stops with an
+        // error; extracted into its view of the Didj it carries on).
+        if brio {
             brio_files.extend(brio::package_files(rest));
         }
     }
