@@ -759,7 +759,7 @@ impl App {
             let Some(package) = system.or_else(beside).or_else(folders).or_else(last) else {
                 return self.ui.problem(
                     "No Didj in the library",
-                    "A Didj cartridge plays in a Didj built from its firmware packages (DIDJ-0x….lfp files). Add the folder that holds them with \"Add games folder\", or put the cartridge in that folder.",
+                    "A Didj cartridge plays in a Didj built from its firmware packages (DIDJ-0x….lfp files, or one bios.didj holding them). Add the folder that holds them with \"Add games folder\", or put the cartridge in that folder.",
                     "",
                 );
             };
@@ -1005,14 +1005,20 @@ impl App {
                 }
                 self.update_title();
             }
-            Err(e) => self.ui.problem(
-                "Couldn't start the Didj",
-                format!(
-                    "Ribbit builds the Didj's memory from its packages (DIDJ-0x….lfp files: Bootstrap, Device Firmware, Brio and the Base_ ones), all in one folder: \"{}\". One may be missing or damaged.",
-                    dir.display()
-                ),
-                format!("{e:#}"),
-            ),
+            Err(e) => {
+                let e = format!("{e:#}");
+                let explain = match e.strip_prefix("missing Didj packages: ") {
+                    Some(list) => format!(
+                        "These Didj packages are missing from \"{}\": {list}. Put them in that folder beside the others (DIDJ-0x….lfp files, or one bios.didj holding them all).",
+                        dir.display()
+                    ),
+                    None => format!(
+                        "Ribbit builds the Didj's memory from its packages (DIDJ-0x….lfp files, or one bios.didj holding them), all in one folder: \"{}\". One may be damaged.",
+                        dir.display()
+                    ),
+                };
+                self.ui.problem("Couldn't start the Didj", explain, e)
+            }
         }
     }
 

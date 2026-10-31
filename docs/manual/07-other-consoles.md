@@ -68,7 +68,7 @@ The menu, the built-in games, the videos and the sound work; the console keeps i
 
 ## Didj (early emulation)
 
-The Didj (2008) is LeapFrog's Linux handheld with NAND cartridges. Ribbit builds the console's internal memory from its firmware packages, the `DIDJ-0x….lfp` files LeapFrog Connect downloads (Bootstrap, Device Firmware, Brio and the `Base_` ones). Put them all in one folder and add it with **Add games folder**; the Didj then shows on the library's **Didj** tab, with your cartridge dumps beside it.
+The Didj (2008) is LeapFrog's Linux handheld with NAND cartridges. Ribbit builds the console's internal memory from its firmware packages, the `DIDJ-0x….lfp` files LeapFrog Connect downloads (Bootstrap, Device Firmware, Brio and the `Base_` ones). Put them all in one folder and add it with **Add games folder**; the Didj then shows on the library's **Didj** tab, with your cartridge dumps beside it. Ribbit needs all thirteen: `DIDJ-0x000E0002` to `0x000E000C`, `0x000E0010` (the AstroGuyHelmet avatar) and `0x000F0001` (JetPack Heroes); if any is missing, it says which. You can also keep them as one file: a zip of the `.lfp` files named `bios.didj`, in place of the loose packages.
 
 - The first start goes through the Didj's own setup (country, name, grade). After that, choosing a cartridge or a built-in game in the library starts it from the Didj's menu for you; press any button to take over.
 - What the console saves (players, progress, settings) is kept in the save folder. Save states work too.

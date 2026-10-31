@@ -403,6 +403,9 @@ fn power_off(s: &Shared) {
 pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
     use crate::library::{Art, Family, Game};
     let name = path.file_name()?.to_string_lossy().into_owned();
+    if ribbit_didj::package::is_bundle(&name) {
+        return describe_bundle(path);
+    }
     let id = ribbit_didj::package::package_id(&name)?.to_string();
     let data = std::fs::read(path).ok()?;
     let meta = ribbit_core::zip::entries(&data)
@@ -443,6 +446,36 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
         details,
         tags: vec![tag.into()],
         key: format!("didj-{id}"),
+        art: Art::Missing,
+    })
+}
+
+/// A bundle of the Didj's packages (`bios.didj`) in the library: the
+/// console, when it holds the Device Firmware package.
+fn describe_bundle(path: &Path) -> Option<crate::library::Game> {
+    use crate::library::{Art, Family, Game};
+    let data = std::fs::read(path).ok()?;
+    let names: Vec<String> = ribbit_core::zip::entries(&data).ok()?.into_iter().map(|e| e.name).collect();
+    let ids: Vec<&str> = names.iter().filter_map(|n| ribbit_didj::package::package_id(n)).collect();
+    if !ids.iter().any(|id| ribbit_didj::package::product(id).eq_ignore_ascii_case("0x000E0003")) {
+        return None;
+    }
+    let mut details = vec![("System", "Didj".to_string()), ("Packages", ids.len().to_string())];
+    let missing = ribbit_didj::package::missing(names.iter().map(String::as_str));
+    if !missing.is_empty() {
+        details.push(("Missing", missing.join(", ")));
+    }
+    details.push(("Status", "early emulation: starts at the Didj's menu, built from the packages in this bundle".to_string()));
+    details.push(("File", path.display().to_string()));
+    let mb = (data.len() as u64).div_ceil(1 << 20);
+    Some(Game {
+        path: path.to_path_buf(),
+        family: Family::Didj,
+        title: "Didj".to_string(),
+        subtitle: format!("{} packages  ·  {mb} MB", ids.len()),
+        details,
+        tags: vec!["System".into()],
+        key: "didj-bundle".to_string(),
         art: Art::Missing,
     })
 }
@@ -538,16 +571,22 @@ pub fn read_cart(path: &Path) -> Option<Vec<u8>> {
     cart::is_volume(&data).then(|| cart::from_volume(&data).ok()).flatten()
 }
 
-/// Whether `path` is a Didj package (by its name), listed or not.
+/// Whether `path` is a Didj package or a bundle of them (`bios.didj`), by
+/// its name, listed or not.
 pub fn is_package(path: &Path) -> bool {
-    path.file_name().is_some_and(|n| ribbit_didj::package::package_id(&n.to_string_lossy()).is_some())
+    path.file_name().is_some_and(|n| {
+        let n = n.to_string_lossy();
+        ribbit_didj::package::package_id(&n).is_some() || ribbit_didj::package::is_bundle(&n)
+    })
 }
 
 /// The Didj's system package (the one the library lists as the console) in
 /// `dir` or up to `depth` folders below it, found by its name.
 pub fn find_package(dir: &Path, depth: u32) -> Option<PathBuf> {
     let entries: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
-    let system = |p: &&PathBuf| is_package(p) && p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_uppercase().contains("0X000E0003"));
+    let system = |p: &&PathBuf| {
+        is_package(p) && p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_uppercase().contains("0X000E0003") || ribbit_didj::package::is_bundle(&n.to_string_lossy()))
+    };
     entries.iter().find(system).cloned().or_else(|| {
         (depth > 0).then(|| entries.iter().filter(|p| p.is_dir()).find_map(|d| find_package(d, depth - 1))).flatten()
     })

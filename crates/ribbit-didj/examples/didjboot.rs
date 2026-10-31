@@ -103,6 +103,10 @@ fn main() {
     let (mut prompts, mut len, mut quiet) = (0, 0, 0);
     // DIDJ_WAV=<file> saves the sound sent to PCM out (16-bit stereo).
     let frames_dir = std::env::var("DIDJ_FRAMES").ok();
+    // DIDJ_FRAME_EVERY=<millions>: how often DIDJ_FRAMES looks (100);
+    // DIDJ_FRAMES_FROM=<millions>: not before then.
+    let frame_every: u64 = std::env::var("DIDJ_FRAME_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(100) * 1_000_000;
+    let frames_from: u64 = std::env::var("DIDJ_FRAMES_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0) * 1_000_000;
     let mut last_frame = Vec::new();
     // DIDJ_SPEED=1: after each second of Didj time, how long it took (100%
     // is as fast as a real Didj).
@@ -226,7 +230,8 @@ fn main() {
         // DIDJ_FRAMES=<folder> saves the screen every 100 million
         // instructions when it has changed.
         if let Some(dir) = &frames_dir
-            && ran / 100_000_000 != (ran - n) / 100_000_000
+            && ran >= frames_from
+            && ran / frame_every != (ran - n) / frame_every
         {
             let (w, h, px) = didj.bus.frame();
             if px != last_frame {

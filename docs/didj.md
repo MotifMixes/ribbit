@@ -171,6 +171,11 @@ A `.lfp` is a plain zip with a `meta.inf` (`Device="Didj"`). IDs are `DIDJ-0x000
 | 0x000E0010 | AstroGuyHelmet          | an avatar                                        |
 | 0x000F0001 | JetPack Heroes 1.3.1.0  | the built-in game                                |
 
+Ribbit needs all of the packages above (`package::NEEDED`) and names the missing ones. `bios.didj` (Ribbit's idea,
+not LeapFrog's): a zip of the `.lfp` files, read as if they lay loose in its folder; per product the newest version
+wins, a loose file over the same one bundled (`package::packages_in`). VERIFIED: the NAND built from a bundle of the
+13 packages is byte-identical to the one built from the loose files.
+
 Cartridge dumps are 69206016 bytes: small-page NAND, 512 + 16 bytes per page, 32 pages per 16 KiB block, 4096
 blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
 

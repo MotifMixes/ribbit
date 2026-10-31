@@ -44,21 +44,22 @@ pub mod ubifs;
 /// The internal NAND as LeapFrog Connect leaves it with the packages in
 /// `dir` (the `DIDJ-0x...lfp` files): the firmware written raw, the rest
 /// installed on the Brio partition (left erased with `brio` false; the
-/// console then formats it).
+/// console then formats it). The packages may also be bundled in a
+/// `bios.didj` there (`package::packages_in`); any of `package::NEEDED`
+/// missing is an error naming them all.
 pub fn nand_from_packages(dir: &std::path::Path, brio: bool) -> Result<nand::Nand, String> {
     let mut fw = package::Firmware::default();
     let mut brio_files = Vec::new();
-    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for path in entries {
-        if package::package_id(&path.to_string_lossy()).is_none() {
-            continue;
-        }
-        let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let packages = package::packages_in(dir)?;
+    let missing = package::missing(packages.iter().map(|(n, _)| n.as_str()));
+    if !missing.is_empty() {
+        return Err(format!("missing Didj packages: {}", missing.join(", ")));
+    }
+    for (name, data) in packages {
         let mut rest = Vec::new();
         let mut firmware = false;
-        for entry in ribbit_core::zip::entries(&data).map_err(|e| format!("{}: {e}", path.display()))? {
-            let bytes = ribbit_core::zip::read_entry(&data, &entry).map_err(|e| format!("{}: {e}", path.display()))?;
+        for entry in ribbit_core::zip::entries(&data).map_err(|e| format!("{name}: {e}"))? {
+            let bytes = ribbit_core::zip::read_entry(&data, &entry).map_err(|e| format!("{name}: {e}"))?;
             if fw.add(&entry.name, bytes.clone()) {
                 firmware = true;
             }

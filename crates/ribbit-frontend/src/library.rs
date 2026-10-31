@@ -17,7 +17,7 @@ use ribbit_memory::known::Hardware;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-const EXTENSIONS: [&str; 8] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img"];
+const EXTENSIONS: [&str; 9] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img", "didj"];
 /// Folder depth scanned below each ROM folder.
 const MAX_DEPTH: usize = 3;
 /// Art: emulated time searched for the title card, and how often to look.

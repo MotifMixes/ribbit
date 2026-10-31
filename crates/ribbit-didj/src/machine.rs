@@ -826,8 +826,9 @@ pub(crate) fn jit_for(sdram: usize) -> ArmJit {
 
 /// Save states: this number, then the machine (bincode, deflated), then the
 /// NAND blocks that differ from the image the console was built from.
-/// Bump it when a saved field changes.
-const STATE_VERSION: u32 = 1;
+/// Bump it when a saved field changes (bincode: `serde(default)` doesn't
+/// make an old state load). 2: GA3D drawing time, Explorer devices.
+const STATE_VERSION: u32 = 2;
 
 impl Didj {
     /// The machine as it is now (a save state). The NAND goes in as its
