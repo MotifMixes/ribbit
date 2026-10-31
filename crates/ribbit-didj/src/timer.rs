@@ -44,6 +44,10 @@ struct Timer {
     clkgen: u32,
     /// Timer ticks owed, in units of 1/cpu_hz.
     acc: u64,
+    /// The tick rate worked out from (TMRCLKGEN, TMRCONTROL's SETCLK, the
+    /// PLL): (key, rate). Works out again when any of them changes.
+    #[serde(skip)]
+    rate: Option<((u32, u32, u64), u64)>,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -141,12 +145,31 @@ impl Timers {
             // TCLK = PLL (TMRCLKGEN bits 1-3) / (bits 4-11 + 1), then the
             // TMRCONTROL SETCLK divider: 1 << ((SETCLK + 1) & 3).
             let Some(Some(pll)) = plls.get((t.clkgen >> 1 & 7) as usize) else { continue };
-            let div = (t.clkgen >> 4 & 0xFF) as u64 + 1;
-            // (This runs every few dozen cycles: divide only when a tick is due.)
-            t.acc += cycles * (pll / div >> ((t.control + 1) & 3));
+            // (This runs every few dozen cycles: no division unless the
+            // clock changed or many ticks are due.)
+            let key = (t.clkgen, t.control & 3, *pll);
+            let rate = match t.rate {
+                Some((k, rate)) if k == key => rate,
+                _ => {
+                    let rate = pll / ((t.clkgen >> 4 & 0xFF) as u64 + 1) >> ((t.control + 1) & 3);
+                    t.rate = Some((key, rate));
+                    rate
+                }
+            };
+            t.acc += cycles * rate;
             if t.acc >= cpu_hz {
-                let ticks = t.acc / cpu_hz;
-                t.acc %= cpu_hz;
+                let ticks = if t.acc < 4 * cpu_hz {
+                    let mut n = 0;
+                    while t.acc >= cpu_hz {
+                        t.acc -= cpu_hz;
+                        n += 1;
+                    }
+                    n
+                } else {
+                    let n = t.acc / cpu_hz;
+                    t.acc %= cpu_hz;
+                    n
+                };
                 let next = t.count as u64 + ticks;
                 let m = t.matchv as u64;
                 if m != 0 && next >= m {

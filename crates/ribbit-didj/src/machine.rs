@@ -810,6 +810,36 @@ pub struct Didj {
     /// with `set_cpu_scale` or `set_cpu_milli`.
     #[serde(skip, default = "one")]
     cpu_milli: u32,
+    /// Linux's NAND functions run natively (`linux_nand`): not looked for
+    /// yet (None) or what was found.
+    #[serde(skip)]
+    linux_nand: Option<crate::linux_nand::Found>,
+    /// Checking `native_call` (didjboot): the kernel's code still runs, and
+    /// on its return its results are compared with the native ones (run
+    /// with the interpreter, which sees every return).
+    #[serde(skip)]
+    pub nand_check: Option<NandCheck>,
+}
+
+/// `Didj::nand_check`: calls compared, those that differed (bytes or
+/// registers), those of another length (an interrupt inside adds its
+/// handler's instructions), and the call being checked.
+#[derive(Default)]
+pub struct NandCheck {
+    pub calls: u64,
+    pub differed: u64,
+    pub other_length: u64,
+    pending: Option<Expected>,
+}
+
+/// A native call's results, for `NandCheck`: where it returns, the
+/// instruction count then, r0-r3, ip and lr (those `Some`), and the bytes
+/// it writes at an address.
+struct Expected {
+    ret: u32,
+    instructions: u64,
+    regs: [Option<u32>; 6],
+    bytes: Option<(u32, [u8; 3])>,
 }
 
 fn one() -> u32 {
@@ -912,7 +942,7 @@ impl Didj {
             frame_cycles: 0,
         };
         let jit = jit_for(bus.sdram.len());
-        Self { cpu: Arm::new(), bus, jit, exact: false, cpu_milli: 1000 }
+        Self { cpu: Arm::new(), bus, jit, exact: false, cpu_milli: 1000, linux_nand: None, nand_check: None }
     }
 
     /// The processor clock and the PLL outputs, from the clock registers.
@@ -956,10 +986,121 @@ impl Didj {
         self.bus.clocks.unwrap_or_else(|| self.work_out_clocks()).0
     }
 
+    /// Runs the kernel's `nand_calculate_ecc` or `nand_read_buf` natively
+    /// when the CPU has just called it (the JIT stops there:
+    /// `ArmJit::stops`). False (the code runs as usual) when its memory
+    /// isn't as expected.
+    fn native_call(&mut self) -> bool {
+        let Some(found) = &self.linux_nand else { return false };
+        if self.cpu.thumb() || self.cpu.mode() == ribbit_arm::mode::USR {
+            return false;
+        }
+        let pc = self.cpu.r[15];
+        let ret = self.cpu.r[14];
+        let (r0, r1, r2) = (self.cpu.r[0], self.cpu.r[1], self.cpu.r[2]);
+        if let Some((_, table)) = found.ecc.as_ref().filter(|e| e.0 == pc) {
+            let table = *table;
+            let Some(data) = self.kernel_bytes(r1, 256) else { return false };
+            let (ecc, [e1, e2, e3, ip]) = crate::linux_nand::calculate_ecc(&data, &table);
+            let n = crate::linux_nand::ECC_INSTRUCTIONS;
+            if let Some(check) = &mut self.nand_check {
+                let regs = [Some(0), Some(e1), Some(e2), Some(e3), Some(ip), Some(r1.wrapping_add(256))];
+                check.pending = Some(Expected { ret, instructions: self.cpu.instructions + n, regs, bytes: Some((r2, ecc)) });
+                return false;
+            }
+            for (i, b) in ecc.into_iter().enumerate() {
+                if self.cpu.store8(&mut self.bus, r2.wrapping_add(i as u32), b as u32).is_err() {
+                    return false;
+                }
+            }
+            let r = &mut self.cpu.r;
+            (r[0], r[1], r[2], r[3], r[12], r[14], r[15]) = (0, e1, e2, e3, ip, r1.wrapping_add(256), ret);
+            self.cpu.cycles += n;
+            self.cpu.instructions += n;
+            return true;
+        }
+        if found.read_buf != Some(pc) {
+            return false;
+        }
+        // nand_read_buf(mtd, buf, len): chip = mtd->priv, its IO_ADDR_R.
+        let len = r2 as i32;
+        let n = crate::linux_nand::read_buf_instructions(len);
+        let Ok(chip) = self.cpu.load32(&mut self.bus, r0.wrapping_add(0xAC)) else { return false };
+        let Ok(io) = self.cpu.load32(&mut self.bus, chip) else { return false };
+        if let Some(check) = &mut self.nand_check {
+            let regs = if len <= 0 { [Some(r0), None, None, None, Some(chip), Some(r2)] } else { [Some(r2), None, None, Some(io), Some(chip), Some(r2)] };
+            check.pending = Some(Expected { ret, instructions: self.cpu.instructions + n, regs, bytes: None });
+            return false;
+        }
+        let mut last = r2;
+        if len > 0 {
+            let cp15 = &mut self.cpu.cp15;
+            let Ok(port) = cp15.translate(&mut self.bus, io, false, false) else { return false };
+            // Every page of the buffer first: reading the port can't be undone.
+            let end = r1.wrapping_add(len as u32 - 1);
+            let pages: Option<Vec<u32>> = (r1 >> 12..=end >> 12).map(|p| cp15.translate(&mut self.bus, p << 12, true, false).ok()).collect();
+            let Some(pages) = pages else { return false };
+            for i in 0..len as u32 {
+                let va = r1.wrapping_add(i);
+                let b = self.bus.read8(port);
+                self.bus.write8(pages[((va >> 12) - (r1 >> 12)) as usize] | va & 0xFFF, b);
+                last = b as u32;
+            }
+        }
+        let r = &mut self.cpu.r;
+        if len > 0 {
+            (r[0], r[2], r[3]) = (r2, last, io);
+        }
+        (r[12], r[14], r[15]) = (chip, r2, ret);
+        self.cpu.cycles += n;
+        self.cpu.instructions += n;
+        true
+    }
+
+    /// `len` bytes of kernel memory at `va`, when they are in SDRAM.
+    fn kernel_bytes(&mut self, va: u32, len: u32) -> Option<Vec<u8>> {
+        let cp15 = &mut self.cpu.cp15;
+        let first = cp15.translate(&mut self.bus, va, false, false).ok()?;
+        let last = cp15.translate(&mut self.bus, va.wrapping_add(len - 1), false, false).ok()?;
+        let start = first.wrapping_sub(self.bus.ram_base) as usize;
+        if last != first.wrapping_add(len - 1) {
+            return None;
+        }
+        self.bus.sdram.get(start..start + len as usize).map(<[u8]>::to_vec)
+    }
+
+    /// Compares a checked call's results (`nand_check`) on its return.
+    fn check_native(&mut self) {
+        let Some(check) = &mut self.nand_check else { return };
+        let Some(e) = check.pending.take_if(|e| e.ret == self.cpu.r[15]) else { return };
+        check.calls += 1;
+        check.other_length += (self.cpu.instructions != e.instructions) as u64;
+        let r = &self.cpu.r;
+        let got = [r[0], r[1], r[2], r[3], r[12], r[14]];
+        let mut same = e.regs.iter().zip(got).all(|(want, got)| want.is_none_or(|w| w == got));
+        if let Some((at, bytes)) = e.bytes {
+            let cp15 = &mut self.cpu.cp15;
+            same &= (0..3).all(|i| cp15.translate(&mut self.bus, at + i, false, false).is_ok_and(|pa| self.bus.read8(pa) == bytes[i as usize]));
+        }
+        check.differed += !same as u64;
+    }
+
+    /// Lets the kernel's NAND functions run as its code (`linux_nand` off;
+    /// for measuring).
+    pub fn no_native_nand(&mut self) {
+        self.linux_nand = Some(crate::linux_nand::Found { ecc: None, read_buf: None });
+    }
+
     /// Runs `n` processor cycles (one per instruction for now), the timers
     /// and interrupts with them. Returns the instructions run.
     pub fn run(&mut self, n: u64) -> u64 {
         const SLICE: u64 = 64;
+        // Linux's NAND functions, once it runs (its text is in place).
+        if self.linux_nand.is_none() && self.cpu.r[15] >= 0xC000_0000 && self.bus.ram_base == 0 {
+            let found = crate::linux_nand::find(&self.bus.sdram);
+            self.jit.set_stops(found.stops());
+            self.linux_nand = Some(found);
+        }
         let start = self.cpu.instructions;
         let end = self.cpu.cycles + n;
         // The buttons or the cartridge may have changed since the last run.
@@ -969,6 +1110,12 @@ impl Didj {
             // Compiled blocks may end a slice up to 31 instructions late
             // (unless `exact`); interrupts are taken between blocks.
             while self.cpu.cycles - before < SLICE {
+                if self.jit.stops.contains(&self.cpu.r[15]) && self.native_call() {
+                    continue;
+                }
+                if self.nand_check.is_some() {
+                    self.check_native();
+                }
                 self.bus.pc = self.cpu.r[15];
                 let budget = if self.exact { SLICE - (self.cpu.cycles - before) } else { u64::MAX };
                 let chain = SLICE - (self.cpu.cycles - before);

@@ -33,6 +33,7 @@ pub mod jffs2;
 pub mod machine;
 pub mod mlc;
 pub mod nand;
+pub mod linux_nand;
 pub mod nor;
 pub mod package;
 pub mod tfs;

@@ -363,6 +363,10 @@ pub struct ArmJit {
     /// Fill `stats.classes` (slow).
     pub profile: bool,
     pub stats: Stats,
+    /// Virtual addresses compiled code never runs or goes on to: `step`
+    /// returns there, for the caller to handle (`set_stops`; u32::MAX for
+    /// none).
+    pub stops: [u32; 4],
 }
 
 // SAFETY: the code pointers point into `arena`, owned and only used here.
@@ -385,7 +389,16 @@ impl ArmJit {
             enabled: SUPPORTED,
             profile: false,
             stats: Stats::default(),
+            stops: [u32::MAX; 4],
         }
+    }
+
+    /// Sets the stops (`stops`): what was compiled there is dropped, and
+    /// blocks no longer go on to them by themselves.
+    pub fn set_stops(&mut self, stops: [u32; 4]) {
+        self.stops = stops;
+        self.blocks.retain(|&key, _| !stops.contains(&(key as u32)));
+        self.flush_fast();
     }
 
     /// Drops everything compiled (after a state is loaded, or a reset).
@@ -536,6 +549,9 @@ impl ArmJit {
                 break;
             }
             let va = cpu.r[15];
+            if self.stops.contains(&va) {
+                break;
+            }
             let next = self.recent[user as usize * RECENT + (va >> 2) as usize % RECENT];
             if next.va != va || next.len as u64 > budget.saturating_sub(ran) {
                 break;
@@ -558,7 +574,7 @@ impl ArmJit {
     /// Compiles the block at `va` (physical `pa`); marks it `Never` when it
     /// is not in RAM.
     fn compile<B: ArmBus>(&mut self, bus: &mut B, va: u32, pa: u32, key: u64) -> Option<(*const u8, u32)> {
-        if !SUPPORTED || pa >= self.ram_end {
+        if !SUPPORTED || pa >= self.ram_end || self.stops.contains(&va) {
             self.blocks.insert(key, Block::Never);
             return None;
         }

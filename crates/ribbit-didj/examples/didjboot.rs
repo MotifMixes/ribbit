@@ -89,6 +89,15 @@ fn main() {
     let jit_mode = std::env::var("DIDJ_JIT").unwrap_or_default();
     didj.jit.enabled &= jit_mode != "0";
     didj.exact = jit_mode == "exact";
+    // DIDJ_NAND_CHECK=1: compare the native NAND functions with the
+    // kernel's own code (use DIDJ_JIT=0).
+    // DIDJ_NO_NATIVE=1: the kernel's NAND functions run as its code.
+    if std::env::var_os("DIDJ_NO_NATIVE").is_some() {
+        didj.no_native_nand();
+    }
+    if std::env::var_os("DIDJ_NAND_CHECK").is_some() {
+        didj.nand_check = Some(Default::default());
+    }
     // DIDJ_JIT_PROFILE=1 counts the interpreted instructions by kind.
     didj.jit.profile = std::env::var_os("DIDJ_JIT_PROFILE").is_some();
     let mut ran = 0;
@@ -340,6 +349,9 @@ fn main() {
             }
         }
         println!("cpu_hz {}", didj.cpu_hz());
+    }
+    if let Some(c) = &didj.nand_check {
+        println!("NAND check: {} calls, {} differed, {} of another length", c.calls, c.differed, c.other_length);
     }
     // DIDJ_DUMP=<file> saves SDRAM, to disassemble the kernel.
     if let Ok(path) = std::env::var("DIDJ_DUMP") {

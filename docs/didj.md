@@ -383,7 +383,13 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   compiled block (exact mode still matches the interpreter). Boot seconds 2-5: 40/94/69/114% -> 88/135/88/128%,
   the wait for the menu 370-890% -> 750-1600%, the menu 110-250% -> 330-550% (unpinned i9). Left in the slow
   seconds: Linux's software ECC (`nand_calculate_ecc`, ~15% of second 2) and nand_read_buf's byte-at-a-time
-  data port reads (~7%). `didjboot` DIDJ_SPEED=1 prints the speed for every second of Didj time,
+  data port reads (~7%). Since then both run natively (`linux_nand`: found in the kernel by their code, the
+  same bytes and registers and the same instruction count; the JIT never runs or links into them,
+  `ArmJit::stops`). VERIFIED with didjboot DIDJ_NAND_CHECK=1 DIDJ_JIT=0 (the kernel's code runs and is
+  compared on return): 87633 calls in the first 2500 M cycles, 0 differed; exact mode still matches the
+  interpreter. The timers no longer divide every 64-cycle slice (rate cached, ticks by subtraction; same
+  results). Pinned to one P-core, boot seconds 1-5: 316/86/133/89/127% -> ~450/96/195/94/136%
+  (DIDJ_NO_NATIVE=1 for the kernel's own code). A 4x larger recent-block table measured slower (flushes). `didjboot` DIDJ_SPEED=1 prints the speed for every second of Didj time,
   DIDJ_SKIP=<millions> skips frames from then.
 - **Drawing time (GUESS, after 1.7.2):** GA3D used to finish every command queue at once (STATUS always idle),
   so games paced only by their 10 ms timer ran at 50-60 fps; a real Didj shows ~30 in menus and ~20 in Clone
