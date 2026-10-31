@@ -33,3 +33,4 @@ __pycache__/
 
 # Didj firmware packages and cartridge dumps (the user's own files).
 /didj/
+explorer/

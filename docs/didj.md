@@ -374,6 +374,14 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   Linux's boot runs at ~75% for a second or two (CPU-bound; caching the timer rate and UART status in the
   run loop measured no gain). `didjboot` DIDJ_SPEED=1 prints the speed for every second of Didj time,
   DIDJ_SKIP=<millions> skips frames from then.
+- **Drawing time (GUESS, after 1.7.2):** GA3D used to finish every command queue at once (STATUS always idle),
+  so games paced only by their 10 ms timer ran at 50-60 fps; a real Didj shows ~30 in menus and ~20 in Clone
+  Wars gameplay. Ribbit still draws at once but holds CMDQREAR back and STATUS busy until the time is up:
+  22 cycles per pixel drawn (min of half the triangle's area and its clipped box), 64 per triangle, 1 per
+  filled pixel, at 147.456 MHz (all GUESSES, no fill rate in the data book). Calibrated on a 120 fps film of
+  "Select a name" (30 fps; Ribbit 33) and a YouTube recording of Clone Wars (~20 fps while scrolling; Ribbit
+  18-20). Host speed rises (Clone Wars demo 175% -> ~440%) since fewer frames are drawn. `didjboot`
+  DIDJ_GA3D_PIXEL=<n> sets the per-pixel cost.
 - **Cartridges out or in while on:** AppManager exits 3, launch_main shows REINSERT_CART ("You will need to
   restart your Didj") and powers off on the next change; arch_reset is empty on the LF1000 ("XXX: this
   doesn't apply"), so the firmware can't restart itself, and the kernel probes the slot only at start-up.

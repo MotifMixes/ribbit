@@ -29,11 +29,16 @@ pub trait ArmBus {
     fn code_watch(&mut self) -> Option<&mut CodeWatch> {
         None
     }
-    /// Plain RAM from physical address 0 (pointer, size): reading and
+    /// Plain RAM from physical address `ram_base` (pointer, size): reading and
     /// writing it directly is the same as the access functions (writes
     /// still go through `CodeWatch` when it watches the page). For a JIT.
     fn ram(&mut self) -> Option<(*mut u8, usize)> {
         None
+    }
+    /// The physical address where `ram` starts (0 unless the machine puts
+    /// its RAM elsewhere: the Leapster Explorer's is at 0x8000_0000).
+    fn ram_base(&self) -> u32 {
+        0
     }
 }
 

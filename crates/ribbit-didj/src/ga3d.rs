@@ -85,6 +85,20 @@ const GTECONST: usize = 0x1000 / 4;
 /// Every sub-module idle, both FIFO flags as after reset (GRP3D_STATUS).
 const IDLE: u32 = 0x00BF_0000;
 
+/// Drawing time, in cycles of the 3D engine's clock (GUESS: the bus clock,
+/// PLL1's 147.456 MHz). Ribbit draws at once and reports the engine busy
+/// (the command reader's rear held back, STATUS not idle) until that time
+/// has passed, so software waits for it as on a Didj. The data book gives
+/// no fill rate: these are GUESSES calibrated on a real Didj's "Select a
+/// name" (filmed at 120 fps: a new picture every second refresh, 30 per
+/// second, while Ribbit drew 60 with the engine free) and Clone Wars
+/// gameplay (a YouTube recording: ~20 new pictures per second while
+/// scrolling). 22 cycles a pixel gives 33 and 18-20 fps; 26 gave 33 and 17.
+pub const GA3D_HZ: u64 = 147_456_000;
+pub const CYCLES_PER_PIXEL: u64 = 22;
+const CYCLES_PER_TRIANGLE: u64 = 64;
+const CYCLES_PER_FILL_PIXEL: u64 = 1;
+
 /// Words an optimized command writes, by CMDID (Table 22-7; 4..=13).
 const CMDSIZE: [usize; 16] = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 0, 0];
 
@@ -333,6 +347,29 @@ pub struct Ga3d {
     /// found clear of `written`, while no tile has been added.
     #[serde(skip)]
     clear: [Option<(u32, u32, u32)>; 2],
+    /// Drawing time: engine cycles of work given and done so far, the
+    /// queue's rear as shown and, per queue run still drawing, the rear it
+    /// reached and the work total it ends at.
+    #[serde(default)]
+    cost: u64,
+    #[serde(default)]
+    done: u64,
+    #[serde(default)]
+    shown_rear: u32,
+    #[serde(default)]
+    drawing: std::collections::VecDeque<(u32, u64)>,
+    /// CPU cycles left over from the last tick (a fraction of an engine
+    /// cycle, times the CPU clock).
+    #[serde(default)]
+    tick_rest: u64,
+    /// Engine cycles per pixel drawn (CYCLES_PER_PIXEL; didjboot sets it to
+    /// calibrate).
+    #[serde(default = "default_cycles_per_pixel")]
+    pub cycles_per_pixel: u64,
+}
+
+fn default_cycles_per_pixel() -> u64 {
+    CYCLES_PER_PIXEL
 }
 
 /// A triangle set up for drawing: its vertices, edges (b - a, a and the
@@ -426,15 +463,49 @@ impl Default for Ga3d {
             batch: Vec::new(),
             written: Vec::new(),
             clear: [None; 2],
+            cost: 0,
+            done: 0,
+            shown_rear: 0,
+            drawing: Default::default(),
+            tick_rest: 0,
+            cycles_per_pixel: CYCLES_PER_PIXEL,
         }
     }
 }
 
 impl Ga3d {
+    /// Still drawing what the command queue gave it.
+    fn busy(&self) -> bool {
+        !self.drawing.is_empty()
+    }
+
+    /// `cycles` of a CPU at `cpu_hz` have passed: the engine draws on.
+    pub fn tick(&mut self, cycles: u64, cpu_hz: u64) {
+        if self.done >= self.cost {
+            self.done = self.cost;
+            self.tick_rest = 0;
+            return;
+        }
+        let t = cycles as u128 * GA3D_HZ as u128 + self.tick_rest as u128;
+        self.done = (self.done + (t / cpu_hz as u128) as u64).min(self.cost);
+        self.tick_rest = (t % cpu_hz as u128) as u64;
+        while let Some(&(rear, end)) = self.drawing.front() {
+            if end > self.done {
+                break;
+            }
+            self.shown_rear = rear;
+            self.drawing.pop_front();
+        }
+    }
+
     pub fn read(&self, addr: u32) -> u32 {
         let i = ((addr - BASE) / 4) as usize;
         match i {
+            // Drawing: the command reader, processor, primitive unit and
+            // rasterizer busy, the rasterizer's FIFO not empty.
+            STATUS if self.busy() => IDLE & !0x00BC_0000,
             STATUS => IDLE,
+            CMDQREAR if self.busy() => self.shown_rear,
             _ => self.regs[i],
         }
     }
@@ -452,6 +523,7 @@ impl Ga3d {
                 self.regs[i] = v;
                 if v & 1 != 0 {
                     self.regs[CMDQREAR] = self.regs[CMDQSTART];
+                    self.drawing.clear();
                 }
             }
             CMDQSTART => {
@@ -460,10 +532,19 @@ impl Ga3d {
                 // Reader"; libopengles_lite writes CPCONTROL after this).
                 self.regs[i] = v;
                 self.regs[CMDQREAR] = v;
+                self.drawing.clear();
             }
             CMDQFRONT => {
                 self.regs[i] = v;
+                let rear = self.regs[CMDQREAR];
+                let cost = self.cost;
                 self.run_queue(mem);
+                if self.cost != cost {
+                    if !self.busy() {
+                        self.shown_rear = rear;
+                    }
+                    self.drawing.push_back((self.regs[CMDQREAR], self.cost));
+                }
             }
             _ => self.set(i, v, mem),
         }
@@ -855,6 +936,7 @@ impl Ga3d {
     fn rectangle(&mut self, a: &Vertex, b: &Vertex, mem: &mut Mem) {
         let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
         let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+        self.cost += CYCLES_PER_TRIANGLE + ((x1 - x0) * (y1 - y0)).clamp(0.0, 1e7) as u64 * self.cycles_per_pixel;
         self.flush(mem);
         let st = self.state();
         let regs: [u32; PIX_REGS] = self.regs[..PIX_REGS].try_into().unwrap();
@@ -911,9 +993,13 @@ impl Ga3d {
         let x1 = (max(0).floor() as i32).min(st.clip[2]);
         let y0 = (min(1).ceil() as i32).max(st.clip[1]);
         let y1 = (max(1).floor() as i32).min(st.clip[3]);
+        self.cost += CYCLES_PER_TRIANGLE;
         if x0 > x1 || y0 > y1 {
             return;
         }
+        // The pixels covered: half the area, at most the clipped box.
+        let boxed = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f32;
+        self.cost += (area.abs() / 2.0).min(boxed) as u64 * self.cycles_per_pixel;
         // Top-left rule: an edge owns its pixels if it's a top or left one.
         let owns = |a: &Vertex, b: &Vertex| {
             let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
@@ -1247,6 +1333,7 @@ impl Ga3d {
         let sub = p0 >> 16 & 0x7FF;
         let data = (p0 & 0xFFFF) as u16;
         let (left, top, right, bottom) = (p1 & 0x3FF, p1 >> 16 & 0x3FF, p2 & 0x3FF, p2 >> 16 & 0x3FF);
+        self.cost += (right + 1).saturating_sub(left) as u64 * (bottom + 1).saturating_sub(top) as u64 * CYCLES_PER_FILL_PIXEL;
         for y in top..=bottom {
             for x in left..=right {
                 mem.write16(sub_addr(sub, 2 * x, y), data, p0 >> 27 & 1 != 0);

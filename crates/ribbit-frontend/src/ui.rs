@@ -146,6 +146,8 @@ pub struct Info {
     pub game_settings: Option<bool>,
     /// The original LeapPad is running.
     pub leappad: bool,
+    /// The folder of the Didj's firmware packages (DIDJ-0x….lfp), if found.
+    pub didj_folder: Option<PathBuf>,
     pub paused: bool,
     pub title: String,
     pub speed: f64,
@@ -1112,6 +1114,20 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             ui.label(egui::RichText::new("Open a LeapPad cartridge with Open Cartridge…").weak());
         });
         sub_menu(ui, "Didj", |ui| {
+            match &info.didj_folder {
+                Some(dir) => {
+                    if ui.button("Open the Didj folder").on_hover_text(dir.display().to_string()).clicked() {
+                        actions.push(Action::OpenFolder(dir.clone()));
+                        ui.close();
+                    }
+                }
+                None => {
+                    ui.add_enabled(false, egui::Button::new("Open the Didj folder")).on_disabled_hover_text(
+                        "No Didj found: add the folder that holds its firmware packages (DIDJ-0x….lfp) with \"Add games folder\".",
+                    );
+                }
+            }
+            ui.separator();
             let mut original = !settings.didj_enhanced;
             let mut changed = ui
                 .radio_value(&mut original, false, "Enhanced")

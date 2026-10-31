@@ -14,6 +14,14 @@ const MAIN_ID: u32 = 0x4106_9265;
 const CACHE_TYPE: u32 = 0x1D15_2152;
 /// TLB entries cached (direct mapped by virtual page).
 const TLB: usize = 1024;
+/// Section (1 MB) entries cached, direct mapped by virtual megabyte. The
+/// ARM926's TLB keeps a section as one entry, so after an access anywhere
+/// in a section the whole megabyte translates until the next TLB flush,
+/// even if the table entry is cleared meanwhile. The Leapster Explorer's
+/// kernel relies on it: its map_io reads the NAND controller through the
+/// boot-time I/O section that paging_init has just cleared (the TLB still
+/// holds it from the early UART output).
+const SECTIONS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Cp15 {
@@ -33,6 +41,9 @@ pub struct Cp15 {
     /// (virtual page | 1, physical page | `Perm` bits) per slot; 0 = empty.
     #[serde(skip, default = "empty_tlb")]
     tlb: Vec<(u32, u32)>,
+    /// (virtual megabyte | 1, physical megabyte | `Perm` bits) per slot.
+    #[serde(skip, default = "empty_sections")]
+    sections: Vec<(u32, u32)>,
     /// Counts TLB flushes (every translation change), for a JIT's own
     /// page tables.
     #[serde(skip)]
@@ -41,6 +52,10 @@ pub struct Cp15 {
 
 fn empty_tlb() -> Vec<(u32, u32)> {
     vec![(0, 0); TLB]
+}
+
+fn empty_sections() -> Vec<(u32, u32)> {
+    vec![(0, 0); SECTIONS]
 }
 
 impl Default for Cp15 {
@@ -57,6 +72,7 @@ impl Default for Cp15 {
             context_id: 0,
             other: Default::default(),
             tlb: empty_tlb(),
+            sections: empty_sections(),
             generation: 0,
         }
     }
@@ -73,6 +89,7 @@ impl Cp15 {
 
     pub fn flush_tlb(&mut self) {
         self.tlb.iter_mut().for_each(|e| *e = (0, 0));
+        self.sections.iter_mut().for_each(|e| *e = (0, 0));
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -150,12 +167,19 @@ impl Cp15 {
         }
         let slot = (va >> 12) as usize % TLB;
         let (tag, entry) = self.tlb[slot];
+        let section = (va >> 20) as usize % SECTIONS;
         let (pa, entry) = if tag == (va & !0xFFF) | 1 {
             ((entry & !0xFFF) | (va & 0xFFF), entry & 0xFFF)
+        } else if self.sections[section].0 == (va & 0xFFF0_0000) | 1 {
+            let entry = self.sections[section].1;
+            ((entry & 0xFFF0_0000) | (va & 0x000F_FFFF), entry & 0xFFF)
         } else {
             let (pa, bits, cacheable) = self.walk(bus, va)?;
             if cacheable {
                 self.tlb[slot] = ((va & !0xFFF) | 1, (pa & !0xFFF) | bits);
+            }
+            if bits & perm::PAGE == 0 {
+                self.sections[section] = ((va & 0xFFF0_0000) | 1, (pa & 0xFFF0_0000) | bits);
             }
             (pa, bits)
         };

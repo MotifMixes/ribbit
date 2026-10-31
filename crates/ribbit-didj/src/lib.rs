@@ -26,15 +26,20 @@ pub mod brio;
 pub mod cart;
 pub mod dma;
 pub mod enhanced;
+pub mod explorer;
 pub mod ga3d;
+pub mod i2c;
 pub mod jffs2;
 pub mod machine;
 pub mod mlc;
 pub mod nand;
+pub mod nor;
 pub mod package;
 pub mod tfs;
 pub mod timer;
+pub mod touch;
 pub mod ubi;
+pub mod ubifs;
 
 /// The internal NAND as LeapFrog Connect leaves it with the packages in
 /// `dir` (the `DIDJ-0x...lfp` files): the firmware written raw, the rest

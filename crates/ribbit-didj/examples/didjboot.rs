@@ -66,6 +66,11 @@ fn main() {
 
     let base = flash.clone();
     let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(enhanced));
+    // DIDJ_GA3D_PIXEL=<n>: the 3D engine's cycles per pixel drawn (0: draws
+    // in no time, as before 1.7.2).
+    if let Some(n) = std::env::var("DIDJ_GA3D_PIXEL").ok().and_then(|v| v.parse().ok()) {
+        didj.bus.ga3d.cycles_per_pixel = n;
+    }
     // DIDJ_CPU_SCALE=<n>: the processor at n times its clock.
     if let Some(n) = std::env::var("DIDJ_CPU_SCALE").ok().and_then(|v| v.parse().ok()) {
         didj.set_cpu_scale(n);
@@ -103,7 +108,7 @@ fn main() {
     // is as fast as a real Didj).
     let speed = std::env::var_os("DIDJ_SPEED").is_some();
     let skip_from: Option<u64> = std::env::var("DIDJ_SKIP").ok().and_then(|v| v.parse().ok());
-    let (mut lap, mut lap_m) = (std::time::Instant::now(), 0);
+    let (mut lap, mut lap_m, mut lap_flips, mut lap_instr) = (std::time::Instant::now(), 0, 0, 0);
     let mut wav: Vec<u8> = Vec::new();
     // DIDJ_KEYS="50000:RIGHT 60000:A": at that many million cycles (the
     // run's count), hold a button for 30 million.
@@ -214,8 +219,9 @@ fn main() {
         ran += n;
         if speed && (m + 1 - lap_m) * 1_000_000 >= didj.cpu_hz() {
             let pct = ((m + 1 - lap_m) * 1_000_000) as f64 / didj.cpu_hz() as f64 / lap.elapsed().as_secs_f64() * 100.0;
-            println!("speed at {} million: {pct:.0}%", m + 1);
-            (lap, lap_m) = (std::time::Instant::now(), m + 1);
+            let busy = (didj.cpu.instructions - lap_instr) as f64 / ((m + 1 - lap_m) * 1_000_000) as f64 * 100.0;
+            println!("speed at {} million: {pct:.0}%, {} frames shown, {busy:.0}% busy", m + 1, didj.bus.flips - lap_flips);
+            (lap, lap_m, lap_flips, lap_instr) = (std::time::Instant::now(), m + 1, didj.bus.flips, didj.cpu.instructions);
         }
         // DIDJ_FRAMES=<folder> saves the screen every 100 million
         // instructions when it has changed.
@@ -312,6 +318,16 @@ fn main() {
 ").into_bytes();
         f.extend(px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(&path, f).expect("can't write the frame");
+    }
+    // DIDJ_DPC=1 prints the display controller's registers (non-zero).
+    if std::env::var_os("DIDJ_DPC").is_some() {
+        for a in (0xC000_3000..0xC000_3200).step_by(2) {
+            let v = didj.bus.reg(a);
+            if v != 0 {
+                println!("DPC {a:08X} = {v:08X}");
+            }
+        }
+        println!("cpu_hz {}", didj.cpu_hz());
     }
     // DIDJ_DUMP=<file> saves SDRAM, to disassemble the kernel.
     if let Ok(path) = std::env::var("DIDJ_DUMP") {

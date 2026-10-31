@@ -117,6 +117,8 @@ pub(crate) struct Ctx {
     /// (an interrupt line, waiting, the mode, the translation, written
     /// code) may have changed.
     dirty: u32,
+    /// The physical address of `ram` (`ArmBus::ram_base`).
+    ram_base: u32,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -269,12 +271,15 @@ fn fill<B: ArmBus>(ctx: *mut Ctx, cpu: &mut Arm, bus: &mut B, va: u32, write: bo
     }
     let Ok(pa) = cpu.cp15.translate(bus, va, write, cpu.mode() == mode::USR) else { return };
     let page = pa & !0xFFF;
-    if page as u64 + 0x1000 > ctx.ram_size || write && bus.code_watch().is_some_and(|w| w.watched_4k(page)) {
+    // The page's offset in `ram` (physical addresses below the base wrap
+    // past its size).
+    let offset = page.wrapping_sub(ctx.ram_base);
+    if offset as u64 + 0x1000 > ctx.ram_size || write && bus.code_watch().is_some_and(|w| w.watched_4k(page)) {
         return;
     }
     let table = if write { ctx.writes } else { ctx.reads };
     let vpage = va & !0xFFF;
-    unsafe { *table.add((va >> 12) as usize % FAST) = Fast { tag: vpage, delta: page.wrapping_sub(vpage) } };
+    unsafe { *table.add((va >> 12) as usize % FAST) = Fast { tag: vpage, delta: offset.wrapping_sub(vpage) } };
 }
 
 /// A multiplicative hash for the block keys (SipHash is slow here).
@@ -541,7 +546,7 @@ impl ArmJit {
         let page = pa >> CodeWatch::PAGE_SHIFT;
         bus.code_watch()?.watch(pa);
         // Stores into this page must now go through the watch.
-        let page4k = pa & !0xFFF;
+        let page4k = (pa & !0xFFF).wrapping_sub(bus.ram_base());
         for e in self.writes.iter_mut() {
             if e.tag.wrapping_add(e.delta) == page4k {
                 *e = EMPTY;
@@ -604,6 +609,7 @@ impl ArmJit {
             limit,
             budget_end,
             dirty: 0,
+            ram_base: bus.ram_base(),
         };
         // SAFETY: `code` is a function `x64::emit` generated, in the arena.
         let f: extern "sysv64" fn(*mut Ctx) -> u32 = unsafe { std::mem::transmute(code) };

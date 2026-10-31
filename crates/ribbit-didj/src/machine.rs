@@ -26,7 +26,9 @@ pub const BOOT_COPY: usize = nand::BLOCK;
 
 /// NAND data/command/address ports (static bus 7 and 11 in shadow mode; the
 /// kernel's nand.h picks one per board).
-const NAND_WINDOWS: [u32; 2] = [0x9C00_0000, 0xAC00_0000];
+/// The Explorer runs without shadow mode: its NAND is at 0x2C00_0000
+/// (/proc/iomem on eLinux.org).
+const NAND_WINDOWS: [u32; 3] = [0x9C00_0000, 0xAC00_0000, 0x2C00_0000];
 const NFDATA: u32 = 0x00;
 const NFCMD: u32 = 0x10;
 const NFADDR: u32 = 0x18;
@@ -157,10 +159,12 @@ fn even_bits(mut x: u64) -> u32 {
     x = (x | x >> 16) & 0x0000_0000_FFFF_FFFF;
     x as u32
 }
+const GPIOOUTENB: u32 = 0x04;
 const GPIODETMODE0: u32 = 0x08;
 const GPIOINTENB: u32 = 0x10;
 const GPIODET: u32 = 0x14;
 const GPIOPAD: u32 = 0x18;
+const GPIOPUENB: u32 = 0x1C;
 const GPIO_IRQ: u32 = 13;
 /// Port A pin 18 is the cartridge detect, low when a cartridge is in (nand.h
 /// NAND_CART_DETECT_LEVEL; launch_main reads it with gpio-control). The
@@ -186,6 +190,16 @@ pub mod button {
     pub const PAUSE: u32 = 1 << 12;
     pub const BRIGHTNESS: u32 = 1 << 13;
     pub const ALL: u32 = 0x3F9F;
+    /// The Explorer's volume buttons (no Didj pin).
+    pub const VOLUME_UP: u32 = 1 << 14;
+    pub const VOLUME_DOWN: u32 = 1 << 15;
+    /// The Explorer's port C pin for each button (gpio_map.h EMERALD_*;
+    /// MENU is Home, KEY_ENTER on both).
+    pub const EXPLORER: [(u32, u32); 14] = [
+        (DOWN, 0), (RIGHT, 1), (VOLUME_DOWN, 2), (A, 3), (PAUSE, 4), (HINT, 5), (R, 6),
+        (VOLUME_UP, 7), (LEFT, 8), (UP, 9), (BRIGHTNESS, 10), (B, 11), (MENU, 12), (L, 13),
+    ];
+    pub const EXPLORER_ALL: u32 = 0x3FFF;
     /// Pin 20, high while pressed (hwmon-lf1000.c: rising-edge interrupt,
     /// reported as KEY_POWER to monitord, which tells the app to shut down).
     pub const POWER: u32 = 1 << 20;
@@ -240,6 +254,20 @@ struct NandChip {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
     pub sdram: Vec<u8>,
+    /// The physical address of SDRAM: 0 on the Didj (shadow mode), 0x8000_0000
+    /// on the Leapster Explorer.
+    #[serde(default)]
+    pub ram_base: u32,
+    /// A Leapster Explorer: its buttons, touch screen and other pins
+    /// (gpio_map.h EMERALD_*).
+    #[serde(default)]
+    pub explorer: bool,
+    /// Where the touch screen is touched (screen pixels), on the Explorer.
+    #[serde(default)]
+    pub touch: Option<(f32, f32)>,
+    /// The Explorer's boot NOR flash at physical address 0.
+    #[serde(default)]
+    pub nor: Option<crate::nor::Nor>,
     /// SDRAM pages the JIT compiled code from.
     #[serde(skip)]
     code: CodeWatch,
@@ -254,6 +282,9 @@ pub struct Bus {
     pub dma: crate::dma::Dma,
     pub ga3d: crate::ga3d::Ga3d,
     adc_pending: bool,
+    /// I2C0 and the sound codec on it (Explorer only).
+    #[serde(default)]
+    pub i2c: crate::i2c::I2c,
     /// Registers with no model: the last value written.
     regs: Regs,
     /// Unmodelled addresses in order of first access: (address, first PC,
@@ -318,7 +349,7 @@ impl Bus {
     /// The picture on the screen: (width, height, 0x00RRGGBB pixels).
     pub fn frame(&self) -> (usize, usize, Vec<u32>) {
         let mem = |a: u32, n: u32| {
-            let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&a) { crate::mlc::block_sdram(a, false) as u32 } else { a };
+            let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&a) { crate::mlc::block_sdram(a, false) as u32 } else { a.wrapping_sub(self.ram_base) };
             (0..n).fold(0, |v, i| v | (self.sdram.get((a + i) as usize).copied().unwrap_or(0) as u32) << (8 * i))
         };
         crate::mlc::compose(|a| self.reg(a), mem)
@@ -333,7 +364,16 @@ impl Bus {
         self.ga3d.skip = self.skip_frames && self.skipped_in_row < 2;
     }
 
+    /// Sets a register as a boot loader leaves it (no side effects).
+    pub(crate) fn preset(&mut self, addr: u32, v: u32) {
+        self.regs.insert(addr, v);
+        self.clocks = None;
+    }
+
     fn gpio_pad(&self, port: usize) -> u32 {
+        if self.explorer {
+            return self.explorer_pad(port);
+        }
         match port {
             0 if self.cart.is_some() => 0,
             0 => CART_DETECT,
@@ -341,6 +381,34 @@ impl Bus {
             2 => button::ALL & !self.buttons | button::POWER & self.buttons,
             _ => 0,
         }
+    }
+
+    /// The Explorer's pins: port A the touch screen and the cartridge
+    /// detect, port C the buttons (low while pressed), the external power /
+    /// LFP100 interrupt (pin 14, high: GUESS, idle) and the headphone jack
+    /// (pin 18, low: nothing plugged in).
+    fn explorer_pad(&self, port: usize) -> u32 {
+        let base = GPIO + port as u32 * 0x40;
+        match port {
+            0 => {
+                let levels = crate::touch::levels(self.reg(base), self.reg(base + GPIOOUTENB), self.reg(base + GPIOPUENB), self.touch);
+                crate::touch::pad(levels) | if self.cart.is_some() { 0 } else { CART_DETECT }
+            }
+            2 => {
+                let pressed = button::EXPLORER.iter().filter(|&&(b, _)| self.buttons & b != 0).fold(0, |p, &(_, pin)| p | 1 << pin);
+                (button::EXPLORER_ALL | 1 << 14) & !pressed | button::POWER & self.buttons
+            }
+            _ => 0,
+        }
+    }
+
+    /// An ADC reading: the Explorer's channels 4-7 are the touch screen.
+    fn adc_reading(&self, ch: u32) -> u32 {
+        if self.explorer && ch >= crate::touch::FIRST_ADC {
+            let levels = crate::touch::levels(self.reg(GPIO), self.reg(GPIO + GPIOOUTENB), self.reg(GPIO + GPIOPUENB), self.touch);
+            return crate::touch::adc(levels[(ch - crate::touch::FIRST_ADC) as usize]);
+        }
+        ADC_READINGS[ch as usize]
     }
 
     /// Latches the GPIO detect flags from the input levels; true when an
@@ -411,14 +479,26 @@ impl Bus {
                 // Read: column (2 bytes), page (3 bytes).
                 let col = c.addr.first().copied().unwrap_or(0) as usize | (c.addr.get(1).copied().unwrap_or(0) as usize) << 8;
                 let page = row(&c.addr[2.min(c.addr.len())..]);
-                c.out = self.nand.page(page % (nand::SIZE / nand::PAGE)).to_vec();
+                c.out = self.nand.page(page % (self.nand.size() / nand::PAGE)).to_vec();
+                c.pos = col.min(nand::PAGE_RAW);
+                c.cmd = 0x30;
+            }
+            // Random data out: 0x05, a column (2 bytes), 0xE0 moves the read
+            // to that column of the page register (the Explorer's 2.6.31
+            // kernel reads a subpage's ECC bytes from the spare area so).
+            0x05 => {
+                c.addr.clear();
+                c.cmd = 0x05;
+            }
+            0xE0 => {
+                let col = c.addr.first().copied().unwrap_or(0) as usize | (c.addr.get(1).copied().unwrap_or(0) as usize) << 8;
                 c.pos = col.min(nand::PAGE_RAW);
                 c.cmd = 0x30;
             }
             0x10 => {
                 // Program: the bytes written since 0x80 go at the column.
                 let col = c.addr.first().copied().unwrap_or(0) as usize | (c.addr.get(1).copied().unwrap_or(0) as usize) << 8;
-                let page = row(&c.addr[2.min(c.addr.len())..]) % (nand::SIZE / nand::PAGE);
+                let page = row(&c.addr[2.min(c.addr.len())..]) % (self.nand.size() / nand::PAGE);
                 let data = std::mem::take(&mut c.out);
                 let p = self.nand.page_mut(page);
                 for (i, b) in data.iter().enumerate() {
@@ -430,7 +510,7 @@ impl Bus {
             }
             0xD0 => {
                 let block = row(&c.addr) / nand::PAGES_PER_BLOCK;
-                if block < nand::BLOCKS {
+                if block < self.nand.blocks() {
                     self.nand.erase(block);
                 }
                 c.cmd = 0;
@@ -452,9 +532,10 @@ impl Bus {
         match c.cmd {
             0x70 => c.status,
             0x90 => {
-                // GUESS: Samsung K9F2G08 (256 MB, 2 KiB pages); the real
-                // part is UNKNOWN.
-                let id = [0xEC, 0xDA, 0x10, 0x95, 0x44];
+                // GUESS: Samsung K9F2G08 (256 MB, 2 KiB pages) and, for the
+                // Explorer's 1 GB, K9K8G08 (8 Gbit SLC, 128 KiB blocks); the
+                // real parts are UNKNOWN.
+                let id = if self.nand.size() > nand::SIZE { [0xEC, 0xD3, 0x51, 0x95, 0x58] } else { [0xEC, 0xDA, 0x10, 0x95, 0x44] };
                 let b = id.get(c.pos).copied().unwrap_or(0);
                 c.pos += 1;
                 b
@@ -574,7 +655,7 @@ impl Bus {
                 v
             }
             ADCCON if v & ADEN != 0 => {
-                self.regs.insert(ADCDAT, ADC_READINGS[(v >> 3 & 7) as usize]);
+                self.regs.insert(ADCDAT, self.adc_reading(v >> 3 & 7));
                 self.adc_pending = true;
                 v & !ADEN
             }
@@ -591,13 +672,16 @@ impl Bus {
 
     fn read_n(&mut self, addr: u32, size: u32) -> u32 {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
-        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
+        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr.wrapping_sub(self.ram_base) as usize };
         if a + size as usize <= self.sdram.len() {
             return match size {
                 4 => u32::from_le_bytes(self.sdram[a..a + 4].try_into().unwrap()),
                 2 => u16::from_le_bytes(self.sdram[a..a + 2].try_into().unwrap()) as u32,
                 _ => self.sdram[a] as u32,
             };
+        }
+        if let Some(nor) = self.nor.as_ref().filter(|_| (addr as usize) < crate::nor::SIZE) {
+            return (0..size).fold(0, |v, i| v | (nor.read(addr + i) as u32) << (8 * i));
         }
         if Self::nand_port(addr) == Some(NFDATA) {
             let mut v = 0;
@@ -608,6 +692,9 @@ impl Bus {
         }
         if let Some(v) = addr.checked_sub(SPI0).filter(|&o| o < 8).and_then(|o| self.spi.read(o)) {
             return v;
+        }
+        if self.explorer && (crate::i2c::BASE..crate::i2c::END).contains(&addr) {
+            return self.i2c.read(addr - crate::i2c::BASE);
         }
         if (crate::ga3d::BASE..crate::ga3d::END).contains(&addr) {
             let shift = 8 * (addr & 3);
@@ -629,10 +716,17 @@ impl Bus {
 
     fn write_n(&mut self, addr: u32, v: u32, size: u32) {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
-        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr as usize };
+        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr.wrapping_sub(self.ram_base) as usize };
         if a + size as usize <= self.sdram.len() {
             self.sdram[a..a + size as usize].copy_from_slice(&v.to_le_bytes()[..size as usize]);
-            self.code.wrote(a);
+            self.code.wrote(a + self.ram_base as usize);
+            return;
+        }
+        if let Some(nor) = self.nor.as_mut().filter(|_| (addr as usize) < crate::nor::SIZE) {
+            // An 8-bit bus: wider writes go out a byte at a time.
+            for i in 0..size {
+                nor.write(addr + i, (v >> (8 * i)) as u8);
+            }
             return;
         }
         if Self::nand_port(addr).is_some() {
@@ -640,6 +734,9 @@ impl Bus {
         }
         if addr.checked_sub(SPI0).is_some_and(|o| o < 8 && self.spi.write(o, v)) {
             return;
+        }
+        if self.explorer && (crate::i2c::BASE..crate::i2c::END).contains(&addr) {
+            return self.i2c.write(addr - crate::i2c::BASE, v);
         }
         // Narrow writes merge into the register's 32-bit value.
         let base = addr & !3;
@@ -693,6 +790,9 @@ impl ArmBus for Bus {
     fn ram(&mut self) -> Option<(*mut u8, usize)> {
         Some((self.sdram.as_mut_ptr(), self.sdram.len()))
     }
+    fn ram_base(&self) -> u32 {
+        self.ram_base
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -720,7 +820,7 @@ fn new_jit() -> ArmJit {
     ArmJit::new(SDRAM_SIZE as u32)
 }
 
-fn jit_for(sdram: usize) -> ArmJit {
+pub(crate) fn jit_for(sdram: usize) -> ArmJit {
     ArmJit::new(sdram as u32)
 }
 
@@ -777,6 +877,10 @@ impl Didj {
         sdram[..BOOT_COPY].copy_from_slice(&flash.read(0, BOOT_COPY));
         let bus = Bus {
             sdram,
+            ram_base: 0,
+            explorer: false,
+            touch: None,
+            nor: None,
             code: CodeWatch::default(),
             nand: flash,
             chip: NandChip::default(),
@@ -786,6 +890,7 @@ impl Didj {
             dma: Default::default(),
             ga3d: Default::default(),
             adc_pending: false,
+            i2c: Default::default(),
             buttons: 0,
             powered_off: false,
             skip_frames: false,
@@ -881,6 +986,7 @@ impl Didj {
             let (cpu_hz, plls) = self.clocks();
             self.bus.timers.tick(self.cpu.cycles - before, cpu_hz, plls);
             self.bus.dma.tick(self.cpu.cycles - before, cpu_hz, &self.bus.sdram);
+            self.bus.ga3d.tick(self.cpu.cycles - before, cpu_hz);
             self.bus.frame_cycles += self.cpu.cycles - before;
             if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
                 self.bus.frame_cycles = 0;
@@ -902,6 +1008,9 @@ impl Didj {
             }
             if self.bus.spi.irq() {
                 self.bus.timers.raise(SPI_IRQ);
+            }
+            if self.bus.i2c.irq() {
+                self.bus.timers.raise(crate::i2c::IRQ);
             }
             if self.bus.gpio_tick() {
                 self.bus.timers.raise(GPIO_IRQ);

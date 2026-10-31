@@ -72,7 +72,7 @@ The Didj (2008) is LeapFrog's Linux handheld with NAND cartridges. Ribbit builds
 
 - The first start goes through the Didj's own setup (country, name, grade). After that, choosing a cartridge or a built-in game in the library starts it from the Didj's menu for you; press any button to take over.
 - What the console saves (players, progress, settings) is kept in the save folder. Save states work too.
-- Cartridge dumps can be the raw chip (69,206,016 bytes, with spare areas) or an image of the cartridge's FAT volume alone (about 62 MB, often with no file extension); both show on the Didj tab.
+- Cartridge dumps can be the raw chip (69,206,016 bytes, with spare areas) or an image of the cartridge's FAT volume alone (about 62 MB, often with no file extension); both show on the Didj tab. A cartridge opened from any other folder plays in the Didj from your games folders, or the one you played last.
 - Some cartridges install an update to the Didj the first time they are played, and the Didj then turns itself off. Ribbit turns it back on and starts the game again.
 - Closing the game presses the Didj's power button and waits for it to turn off, so its files are never left damaged.
 - **Emulation › Didj › Enhanced** (the default) fixes faults in the Didj's own software: after a crash it repairs its files and goes back to the menu instead of locking on "Your Didj needs a tune-up"; it gets 50 MB of memory instead of 16; and its processor runs faster, up to 2× (or 3×, in the same menu), as far as your PC keeps up: never slower than a real Didj. **Original** runs it as LeapFrog shipped it. Both apply from the next power-on.

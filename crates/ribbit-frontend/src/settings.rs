@@ -208,6 +208,10 @@ pub struct Settings {
     /// the same; the picture updates less often). Off: every frame drawn.
     #[serde(default)]
     pub didj_frame_skip: bool,
+    /// Didj: the system package (DIDJ-0x000E0003….lfp) last started, for a
+    /// cartridge opened from a folder that doesn't hold the firmware.
+    #[serde(default)]
+    pub didj_package: Option<PathBuf>,
     /// Favorited games (paths), in the order they were starred.
     pub favorites: Vec<PathBuf>,
     /// Tabs where "Internal" (built-in) games are hidden; key is the tab name
@@ -284,6 +288,7 @@ impl Default for Settings {
             didj_enhanced: true,
             didj_cpu_scale: default_didj_cpu_scale(),
             didj_frame_skip: false,
+            didj_package: None,
             favorites: Vec::new(),
             hide_builtin_tabs: BTreeSet::new(),
             folders: Vec::new(),

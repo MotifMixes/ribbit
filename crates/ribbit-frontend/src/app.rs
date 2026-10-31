@@ -746,16 +746,20 @@ impl App {
     fn open_cart(&mut self, path: PathBuf) {
         // A Didj cartridge: the Didj from the library, with it in the slot.
         if let Some(cart) = crate::didj::read_cart(&path) {
-            // Before the library is scanned: packages beside the cartridge.
-            let beside = || std::fs::read_dir(path.parent()?).ok()?.flatten().map(|e| e.path()).find(|p| crate::didj::is_package(p));
+            // Before the library is scanned: the system package beside the
+            // cartridge (not just any package: a reward add-on isn't a Didj).
+            let beside = || crate::didj::find_package(path.parent()?, 0);
             let system = self.library.games.iter().find(|g| g.family == crate::library::Family::Didj && g.has_tag("System")).map(|g| g.path.clone());
             // Or in the games folders (a cartridge opened at start-up, before
             // the first scan has finished, found no Didj).
             let folders = || self.settings.rom_folders.iter().find_map(|f| crate::didj::find_package(f, 3));
-            let Some(package) = system.or_else(beside).or_else(folders) else {
+            // Or the Didj last played (its firmware opened directly, in no
+            // games folder).
+            let last = || self.settings.didj_package.clone().filter(|p| p.is_file());
+            let Some(package) = system.or_else(beside).or_else(folders).or_else(last) else {
                 return self.ui.problem(
                     "No Didj in the library",
-                    "A Didj cartridge plays in a Didj built from its firmware packages (DIDJ-0x….lfp files). Add the folder that holds them with \"Add games folder\".",
+                    "A Didj cartridge plays in a Didj built from its firmware packages (DIDJ-0x….lfp files). Add the folder that holds them with \"Add games folder\", or put the cartridge in that folder.",
                     "",
                 );
             };
@@ -990,6 +994,12 @@ impl App {
                 }
                 self.didj = Some(d);
                 self.paused = false;
+                // Remembered for a cartridge opened from another folder.
+                let system = crate::didj::find_package(&dir, 0);
+                if system.is_some() && system != self.settings.didj_package {
+                    self.settings.didj_package = system;
+                    self.save_settings();
+                }
                 if let Some(a) = &mut self.audio {
                     a.clear();
                 }
@@ -3204,6 +3214,14 @@ impl App {
                 running: self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 leappad: self.leappad.is_some(),
+                didj_folder: self
+                    .library
+                    .games
+                    .iter()
+                    .find(|g| g.family == crate::library::Family::Didj && g.has_tag("System"))
+                    .map(|g| g.path.clone())
+                    .or_else(|| self.settings.didj_package.clone())
+                    .and_then(|p| p.parent().map(Path::to_path_buf)),
                 paused: halted,
                 background: !self.paused && halted,
                 idle_left: self.idle_left,

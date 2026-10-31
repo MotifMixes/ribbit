@@ -6,8 +6,11 @@
 //! same four at +0x10 queue a command while the channel is busy (the
 //! driver writes them there when CMDSPACE shows room); CMDWAIT 0x20,
 //! CMDSTOP 0x24 (empties the queue), CMDBUSY 0x28, CMDSPACE 0x2C (free
-//! queue slots, bits 0-2). Mode: RUN bit 19 starts the command, INTENB 18,
-//! INTPEND 17 (write 1 to clear), BUSY 16; the rest are the transfer flags.
+//! queue slots, bits 0-2). Mode: STOP bit 20 stops the channel (the
+//! 2.6.31 kernel's dma_stop, used by ALSA, then waits for RUN to clear,
+//! sleeping if it doesn't, even when called from an interrupt), RUN 19
+//! starts the command, INTENB 18, INTPEND 17 (write 1 to clear), BUSY 16;
+//! the rest are the transfer flags.
 //!
 //! Transfers to or from a peripheral run at that peripheral's pace: PCM
 //! out (request 24, the I2S audio) takes 4 bytes per sample at the
@@ -28,6 +31,7 @@ const CMDSTOP: u32 = 0x24;
 const CMDBUSY: u32 = 0x28;
 const CMDSPACE: u32 = 0x2C;
 
+const STOP: u32 = 1 << 20;
 const RUN: u32 = 1 << 19;
 const INTENB: u32 = 1 << 18;
 const INTPEND: u32 = 1 << 17;
@@ -68,11 +72,14 @@ pub struct Dma {
     /// Audio sent to PCM out (16-bit stereo, little-endian), oldest first,
     /// at most a second of it.
     pub pcm: std::collections::VecDeque<u8>,
+    /// The physical address of SDRAM (the bus's `ram_base`).
+    #[serde(default)]
+    pub ram_base: u32,
 }
 
 impl Default for Dma {
     fn default() -> Self {
-        Self { ch: Default::default(), pcm_rate: 32000, pcm: Default::default() }
+        Self { ch: Default::default(), pcm_rate: 32000, pcm: Default::default(), ram_base: 0 }
     }
 }
 
@@ -115,7 +122,11 @@ impl Dma {
                 if v & INTPEND != 0 {
                     ch.intpend = false;
                 }
-                if off == MODE {
+                if off == MODE && v & STOP != 0 {
+                    ch.current[3] = v & !(INTPEND | BUSY | RUN);
+                    ch.queue.clear();
+                    ch.busy = false;
+                } else if off == MODE {
                     ch.current[3] = v & !(INTPEND | BUSY);
                     if v & RUN != 0 && !ch.busy {
                         let cmd = ch.current;
@@ -162,7 +173,7 @@ impl Dma {
     fn finish(&mut self, c: usize, sdram: &[u8]) {
         let cmd = self.ch[c].current;
         if Self::paced(&cmd) && cmd[3] & SRC_IO == 0 {
-            let src = cmd[0] as usize;
+            let src = cmd[0].wrapping_sub(self.ram_base) as usize;
             if let Some(bytes) = sdram.get(src..src + len(&cmd) as usize) {
                 self.pcm.extend(bytes);
                 let max = self.pcm_rate as usize * 4;
@@ -227,6 +238,20 @@ mod tests {
         d.write(CH + off + 4, 0xC000_D800, ram);
         d.write(CH + off + 8, (n - 1) | PCMOUT << 16, ram);
         d.write(CH + off + 0xC, flags | INTENB | RUN, ram);
+    }
+
+    #[test]
+    fn stop_bit_stops_at_once() {
+        let ram = vec![0u8; 0x1000];
+        let mut d = Dma::default();
+        launch(&mut d, 0, 0, 0x100, &ram);
+        let m = d.read(CH + MODE);
+        assert!(m & RUN != 0);
+        d.write(CH + MODE, m | STOP, &ram);
+        let m = d.read(CH + MODE);
+        assert_eq!(m & (RUN | BUSY), 0);
+        d.write(CH + MODE, m & !STOP, &ram);
+        assert_eq!(d.read(CH + MODE) & RUN, 0, "clearing STOP doesn't restart");
     }
 
     #[test]

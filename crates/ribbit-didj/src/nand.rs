@@ -114,8 +114,23 @@ impl Default for Nand {
 }
 
 impl Nand {
+    /// The Didj's 256 MB, erased.
     pub fn erased() -> Self {
-        Self { blocks: (0..BLOCKS).map(|_| None).collect() }
+        Self::with_blocks(BLOCKS)
+    }
+
+    /// An erased flash of `blocks` blocks (the Leapster Explorer's is 1 GB).
+    pub fn with_blocks(blocks: usize) -> Self {
+        Self { blocks: (0..blocks).map(|_| None).collect() }
+    }
+
+    pub fn blocks(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// The data area's size in bytes.
+    pub fn size(&self) -> usize {
+        self.blocks.len() * BLOCK
     }
 
     /// Page `n` with its spare area (PAGE_RAW bytes).
@@ -193,7 +208,7 @@ impl Nand {
         while !changes.is_empty() {
             let bad = || "a damaged NAND save".to_string();
             let n = u32::from_le_bytes(changes.get(..4).ok_or_else(bad)?.try_into().unwrap()) as usize;
-            if n >= BLOCKS {
+            if n >= self.blocks.len() {
                 return Err(bad());
             }
             match changes.get(4) {
