@@ -69,6 +69,7 @@ pub enum Action {
     SetLeapster2Usb(bool),
     /// Offer the Didj on the PC's USB, or stop.
     SetDidjUsb(bool),
+    SetDidjSerialTcp(bool),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
     ImportTwistZip(PathBuf),
     /// Change the Leapster 2's SD card (Emulation › Leapster 2 SD card).
@@ -200,6 +201,10 @@ pub struct UiState {
     pub show_controls: bool,
     pub show_about: bool,
     pub show_status: bool,
+    /// The Didj's serial console window, its text and the line being typed.
+    pub show_serial: bool,
+    pub serial: std::sync::Arc<crate::serial::Serial>,
+    serial_line: String,
     /// Waiting for a key to bind to this button.
     pub capturing: Option<Button>,
     /// A RockIt Twist action waiting for its new key.
@@ -515,7 +520,7 @@ fn side_menu(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, inf
 
 /// How many of the UI's windows are open.
 fn open_windows(st: &UiState) -> usize {
-    [st.manual.open, st.show_updates, st.show_controls, st.show_about, st.show_bindings, st.show_status, st.browser.open.is_some()]
+    [st.manual.open, st.show_updates, st.show_controls, st.show_about, st.show_bindings, st.show_status, st.show_serial, st.browser.open.is_some()]
         .into_iter()
         .filter(|&o| o)
         .count()
@@ -1144,6 +1149,25 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             {
                 actions.push(Action::SetDidjUsb(!usb));
                 ui.close();
+            }
+            if ui
+                .button("Serial console…")
+                .on_hover_text(
+                    "The Didj's serial port (UART0): Linux's start-up log and a root shell (#) to type commands                      into, as on a real Didj's test pads. Can also be offered to telnet or PuTTY on this PC.",
+                )
+                .clicked()
+            {
+                st.show_serial = true;
+                ui.close();
+            }
+            if ui
+                .checkbox(&mut settings.didj_extras_notice, "Say which optional packages are missing")
+                .on_hover_text(
+                    "When the Didj starts without JetPack Heroes (DIDJ-0x000F0001) or the AstroGuyHelmet avatar                      (DIDJ-0x000E0010), a message names them. The Didj works without them.",
+                )
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
             }
             ui.separator();
             let mut original = !settings.didj_enhanced;
@@ -3362,6 +3386,7 @@ fn delete_save_prompt(ctx: &egui::Context, path: &std::path::Path, title: &str) 
 }
 
 fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info: &Info, actions: &mut Vec<Action>) {
+    serial_window(ctx, st, settings, actions);
     let mut open = st.show_bindings;
     egui::Window::new("Key bindings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.label("Click a key, then press the new key on your keyboard.");
@@ -3847,4 +3872,52 @@ fn cheat_window(ctx: &egui::Context, st: &mut UiState, info: &Info, actions: &mu
             }
         });
     st.show_cheat = open;
+}
+
+/// The Didj's serial console: what UART0 sent, and a line to type into it.
+/// The Didj's shell echoes what it gets, so nothing is echoed here.
+fn serial_window(ctx: &egui::Context, st: &mut UiState, settings: &Settings, actions: &mut Vec<Action>) {
+    if !st.show_serial {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Didj serial console").open(&mut open).resizable(true).default_size([640.0, 420.0]).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            let mut tcp = settings.didj_serial_tcp;
+            if ui
+                .checkbox(&mut tcp, format!("Offer to terminals (telnet 127.0.0.1 {})", crate::serial::PORT))
+                .on_hover_text(
+                    "For PuTTY (connection type Telnet) or `telnet 127.0.0.1 2323`: a real terminal, with arrow keys                      and copy and paste. Only programs on this PC can connect.",
+                )
+                .changed()
+            {
+                actions.push(Action::SetDidjSerialTcp(tcp));
+            }
+            if st.serial.connected() {
+                ui.label(egui::RichText::new("terminal connected").color(egui::Color32::from_rgb(80, 200, 110)));
+            }
+        });
+        ui.horizontal(|ui| {
+            let send = ui.add(egui::TextEdit::singleline(&mut st.serial_line).hint_text("command, then Enter").desired_width(ui.available_width() - 150.0));
+            if send.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                st.serial.type_bytes(format!("{}
+", st.serial_line).as_bytes());
+                st.serial_line.clear();
+                send.request_focus();
+            }
+            if ui.button("Ctrl+C").on_hover_text("Stops the command running in the shell.").clicked() {
+                st.serial.type_bytes(&[3]);
+            }
+            if ui.button("Clear").clicked() {
+                st.serial.clear();
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(st.serial.text()).monospace()).wrap());
+        });
+    });
+    st.show_serial = open;
+    // Output arrives while the window is open.
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
 }

@@ -86,9 +86,12 @@ pub fn package_id(file_name: &str) -> Option<&str> {
     (stem.len() == 22 && stem.starts_with("DIDJ-0x")).then_some(stem)
 }
 
-/// The packages a Didj is built from (product, name), as firmware
+/// The system packages a Didj is built from (product, name), as firmware
 /// 1.35.2.4222 has them: without any of them the system is incomplete.
-pub const NEEDED: [(&str, &str); 13] = [
+/// The avatar (0x000E0010 AstroGuyHelmet) and the built-in game
+/// (0x000F0001 JetPack Heroes) came with it too, but the menu starts
+/// without them (`EXTRAS`).
+pub const NEEDED: [(&str, &str); 11] = [
     ("0x000E0002", "Didj Device Bootstrap"),
     ("0x000E0003", "Didj Device Firmware"),
     ("0x000E0004", "Brio"),
@@ -100,9 +103,10 @@ pub const NEEDED: [(&str, &str); 13] = [
     ("0x000E000A", "Base_bin"),
     ("0x000E000B", "Base_lib"),
     ("0x000E000C", "BLT"),
-    ("0x000E0010", "AstroGuyHelmet"),
-    ("0x000F0001", "JetPack Heroes"),
 ];
+
+/// Packages a Didj came with that it starts without.
+pub const EXTRAS: [(&str, &str); 2] = [("0x000E0010", "AstroGuyHelmet"), ("0x000F0001", "JetPack Heroes")];
 
 /// A file bundling the packages: a zip of the `.lfp` files (Ribbit's own
 /// idea, not LeapFrog's), read as if they lay loose beside it.
@@ -198,8 +202,17 @@ pub fn packages_in(dir: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, Stri
 /// The `NEEDED` packages not among the file `names`, as
 /// "DIDJ-0x000E0006 (Base_LocalizedAudio)".
 pub fn missing<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    absent(&NEEDED, names)
+}
+
+/// The `EXTRAS` not among the file `names`, named as by `missing`.
+pub fn missing_extras<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    absent(&EXTRAS, names)
+}
+
+fn absent<'a>(list: &[(&str, &str)], names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let have: Vec<&str> = names.into_iter().filter_map(package_id).map(product).collect();
-    NEEDED.iter().filter(|(p, _)| !have.iter().any(|h| h.eq_ignore_ascii_case(p))).map(|(p, n)| format!("DIDJ-{p} ({n})")).collect()
+    list.iter().filter(|(p, _)| !have.iter().any(|h| h.eq_ignore_ascii_case(p))).map(|(p, n)| format!("DIDJ-{p} ({n})")).collect()
 }
 
 #[cfg(test)]

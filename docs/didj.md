@@ -180,7 +180,10 @@ A `.lfp` is a plain zip with a `meta.inf` (`Device="Didj"`). IDs are `DIDJ-0x000
 | 0x000E0010 | AstroGuyHelmet          | an avatar                                        |
 | 0x000F0001 | JetPack Heroes 1.3.1.0  | the built-in game                                |
 
-Ribbit needs all of the packages above (`package::NEEDED`) and names the missing ones. `bios.didj` (Ribbit's idea,
+Ribbit needs the system packages above (0x000E0002-0x000E000C, `package::NEEDED`) and names the missing ones.
+The avatar and JetPack Heroes (`package::EXTRAS`) are optional (until 1.8.1 they were required, and players
+without JetPack Heroes couldn't start): VERIFIED 2026-10-31, built without both the Didj starts to "Select your
+Country"; the app names the missing ones (a setting turns that off), and a bios.didj card lists them. `bios.didj` (Ribbit's idea,
 not LeapFrog's): a zip of the `.lfp` files, read as if they lay loose in its folder; per product the newest version
 wins, a loose file over the same one bundled (`package::packages_in`). VERIFIED: the NAND built from a bundle of the
 13 packages is byte-identical to the one built from the loose files.
@@ -435,6 +438,17 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
 - **Saves from before the .nandimage fingerprint (before fc0be81)** mix two FAT layouts when applied to
   today's image: dosfsck 2.11 then runs for many minutes (more than 10 emulated) and fsck.fat 4.2 loops.
   The app sets such saves aside; don't test with them.
+
+## Serial console (Ribbit, VERIFIED 2026-10-31)
+
+UART0 is Linux's console (`console=ttyS0,115200`): its log and BusyBox's root shell. The app keeps what
+the Didj sends (`serial.rs`: escape sequences dropped, backspaces applied, 256 KB kept) for its window
+(Emulation > Didj > Serial console), and types into `uart_rx` what the window or a terminal sends. With
+"Offer to terminals" a TCP server on 127.0.0.1:2323 (`serial::PORT`; one terminal at a time, a new one
+takes over) passes bytes both ways; telnet's commands are taken out (it is told the Didj echoes and sends
+characters as typed: IAC WILL ECHO, WILL SUPPRESS-GO-AHEAD) and its Enter (CR LF, CR NUL) becomes CR.
+VERIFIED: the ignored test `serial::tests::didj_shell_over_tcp` (RIBBIT_DIDJ_DIR=<packages>) boots a Didj, a
+TCP terminal types `uname -r` and gets `2.6.20.1-leapfrog`, about 4 s after power-on.
 
 ## USB (VERIFIED in Ribbit 2026-10-31, firmware 1.35.2.4222; sources: lf1000_udc.c, file_storage.c, init.d/mass_storage, usbctl)
 

@@ -33,9 +33,15 @@ pub const FPS: u32 = 60;
 pub const AUDIO_RATE: u32 = ribbit_audio::DAC_RATE_HZ;
 
 /// The game's picture, as recorded.
-const WIDTH: usize = 160;
-const HEIGHT: usize = 160;
-const FRAME_BYTES: usize = WIDTH * HEIGHT * 4;
+/// The Leapster's screen, the usual size of a recording (`Recorder::start`
+/// takes another console's).
+pub const LEAPSTER_SIZE: (usize, usize) = (160, 160);
+
+/// How many times larger the finished video is than the recording: up to
+/// 720 pixels doubled (each pixel a 2x2 block), larger as it is.
+fn upscale(w: usize, h: usize) -> usize {
+    if w.max(h) <= 720 { 2 } else { 1 }
+}
 
 /// Where recordings go unless a folder is chosen in the settings: the
 /// player's own Videos folder (Movies on macOS), where they look for videos;
@@ -101,6 +107,10 @@ pub struct Recorder {
     pub audio_rate: u32,
     video_path: PathBuf,
     audio_path: PathBuf,
+    /// The recording's picture size; frames of another size are scaled to
+    /// it (`add_frame`).
+    pub size: (usize, usize),
+    scaled: Vec<u32>,
     /// Where the finished recording will be written (the extension can
     /// change if FFmpeg isn't there: see `EncodeTask::run`).
     pub output_path: PathBuf,
@@ -110,7 +120,9 @@ pub struct Recorder {
 impl Recorder {
     /// Start a new recording into `dir`. The raw frames and sound go to
     /// `temp_dir` meanwhile (not the player's Videos folder).
-    pub fn start(dir: &Path, temp_dir: &Path, encoder: RecordEncoder) -> std::io::Result<Self> {
+    pub fn start(dir: &Path, temp_dir: &Path, encoder: RecordEncoder, size: (usize, usize)) -> std::io::Result<Self> {
+        // H.264 wants even sides.
+        let size = (size.0.max(2) & !1, size.1.max(2) & !1);
         let audio_rate = AUDIO_RATE;
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(temp_dir)?;
@@ -128,14 +140,33 @@ impl Recorder {
             audio_rate,
             video_path,
             audio_path,
+            size,
+            scaled: Vec::new(),
             output_path,
             started: Instant::now(),
         })
     }
 
-    /// Write one 160×160 BGRA frame (`0x00RRGGBB` u32 pixels, native-endian
-    /// bytes = BGRA on x86-64).
-    pub fn add_frame(&mut self, pixels: &[u32]) -> std::io::Result<()> {
+    /// Write one frame of `from` (width, height) `0x00RRGGBB` pixels
+    /// (native-endian bytes = BGRA on x86-64), scaled (nearest) to `size`
+    /// if it is another size (HD drawing, a console's other mode).
+    pub fn add_frame(&mut self, pixels: &[u32], from: (usize, usize)) -> std::io::Result<()> {
+        let (w, h) = self.size;
+        let pixels = if from == self.size && pixels.len() == w * h {
+            pixels
+        } else {
+            let (fw, fh) = from;
+            self.scaled.clear();
+            if fw == 0 || fh == 0 || pixels.len() < fw * fh {
+                self.scaled.resize(w * h, 0);
+            } else {
+                for y in 0..h {
+                    let row = &pixels[y * fh / h * fw..][..fw];
+                    self.scaled.extend((0..w).map(|x| row[x * fw / w]));
+                }
+            }
+            &self.scaled[..]
+        };
         // Safety: casting &[u32] as &[u8] is valid on any platform.
         let bytes = unsafe {
             std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
@@ -170,6 +201,7 @@ impl Recorder {
             audio_path: self.audio_path,
             output_path: self.output_path,
             audio_rate: self.audio_rate,
+            size: self.size,
             encoder,
         })
     }
@@ -183,6 +215,7 @@ pub struct EncodeTask {
     /// Final output file, if FFmpeg makes it (`Saved::path` is the real one).
     pub output_path: PathBuf,
     pub audio_rate: u32,
+    pub size: (usize, usize),
     pub encoder: RecordEncoder,
 }
 
@@ -264,7 +297,7 @@ impl EncodeTask {
     }
 
     fn raw(&self) -> anyhow::Result<Raw> {
-        let raw = Raw::open(&self.video_path, &self.audio_path, self.audio_rate)?;
+        let raw = Raw::open(&self.video_path, &self.audio_path, self.audio_rate, self.size)?;
         anyhow::ensure!(raw.frames > 0, "the recording is empty");
         Ok(raw)
     }
@@ -277,13 +310,15 @@ impl EncodeTask {
             RecordEncoder::Vp9 => ("libvpx-vp9", "libopus", &["-crf", "30", "-b:v", "0"], &["-b:a", "128k"]),
             RecordEncoder::Lossless => ("ffv1", "pcm_s16le", &[], &[]),
         };
+        let (w, h) = self.size;
+        let (size, scale) = (format!("{w}x{h}"), format!("scale={}:{}:flags=neighbor", w * upscale(w, h), h * upscale(w, h)));
         let mut cmd = std::process::Command::new(exe);
         cmd.args([
                 "-y",
                 "-f", "rawvideo",
                 "-r", &FPS.to_string(),
                 "-pix_fmt", "bgra",
-                "-s", "160x160",
+                "-s", &size,
                 "-i",
             ])
             .arg(&self.video_path)
@@ -293,7 +328,7 @@ impl EncodeTask {
             .args(vextra)
             .args(["-c:a", acodec])
             .args(aextra)
-            .args(["-vf", "scale=320:320:flags=neighbor"])
+            .args(["-vf", &scale])
             .arg(&self.output_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -348,14 +383,16 @@ struct Raw {
     /// Next frame to read.
     at: u64,
     bytes: Vec<u8>,
+    w: usize,
+    h: usize,
 }
 
 impl Raw {
-    fn open(video: &Path, audio: &Path, rate: u32) -> std::io::Result<Self> {
+    fn open(video: &Path, audio: &Path, rate: u32, (w, h): (usize, usize)) -> std::io::Result<Self> {
         let (v, a) = (File::open(video)?, File::open(audio)?);
-        let frames = v.metadata()?.len() / FRAME_BYTES as u64;
+        let frames = v.metadata()?.len() / (w * h * 4) as u64;
         let audio_samples = a.metadata()?.len() / 2;
-        Ok(Self { video: BufReader::new(v), audio: BufReader::new(a), frames, audio_samples, rate, at: 0, bytes: vec![0; FRAME_BYTES] })
+        Ok(Self { video: BufReader::new(v), audio: BufReader::new(a), frames, audio_samples, rate, at: 0, bytes: vec![0; w * h * 4], w, h })
     }
 
     /// The next frame's pixels (`0x00RRGGBB`) and the sound that plays
@@ -435,13 +472,12 @@ impl Resampler {
 /// Split into parts of at most `MAX_PART_BYTES` (~3.7 minutes each) because
 /// AVI 1.0 offsets are 32-bit and many players stop at 1-2 GB.
 mod avi {
-    use super::{Raw, FPS, HEIGHT, WIDTH};
+    use super::{Raw, FPS};
     use std::fs::File;
     use std::io::{BufWriter, Seek, SeekFrom, Write};
     use std::path::{Path, PathBuf};
 
     pub const MAX_PART_BYTES: u64 = 1 << 30;
-    const DIB_BYTES: usize = WIDTH * HEIGHT * 3;
     /// Bytes from the file's start to the first chunk in 'movi'.
     pub const HEADER_LEN: usize = 12 + 12 + 64 + 12 + 64 + 48 + 12 + 64 + 26 + 12;
 
@@ -461,24 +497,25 @@ mod avi {
     pub fn write(raw: &mut Raw, out: &Path, max_bytes: u64) -> std::io::Result<Vec<PathBuf>> {
         let mut paths = part_paths(out);
         let mut written = Vec::new();
-        let (mut px, mut sound) = (vec![0u32; WIDTH * HEIGHT], Vec::new());
-        let mut dib = vec![0u8; DIB_BYTES];
+        let (w, h) = (raw.w, raw.h);
+        let (mut px, mut sound) = (vec![0u32; w * h], Vec::new());
+        let mut dib = vec![0u8; w * h * 3];
         let mut part: Option<Part> = None;
         for _ in 0..raw.frames {
             raw.next(&mut px, &mut sound)?;
-            let need = (8 + DIB_BYTES + 8 + sound.len() * 2 + 32) as u64;
+            let need = (8 + dib.len() + 8 + sound.len() * 2 + 32) as u64;
             if part.as_ref().is_some_and(|p| p.len() + need > max_bytes) {
-                part.take().unwrap().finish(raw.rate)?;
+                part.take().unwrap().finish(raw.rate, (w, h))?;
             }
             if part.is_none() {
                 let path = paths.next().unwrap();
                 written.push(path.clone());
-                part = Some(Part::create(&path, raw.rate)?);
+                part = Some(Part::create(&path, raw.rate, (w, h))?);
             }
             let p = part.as_mut().unwrap();
-            for (y, row) in dib.chunks_exact_mut(WIDTH * 3).enumerate() {
+            for (y, row) in dib.chunks_exact_mut(w * 3).enumerate() {
                 // Bottom-up: the DIB's first row is the picture's last.
-                let src = &px[(HEIGHT - 1 - y) * WIDTH..][..WIDTH];
+                let src = &px[(h - 1 - y) * w..][..w];
                 for (d, &s) in row.chunks_exact_mut(3).zip(src) {
                     d.copy_from_slice(&[s as u8, (s >> 8) as u8, (s >> 16) as u8]);
                 }
@@ -493,7 +530,7 @@ mod avi {
             p.frames += 1;
         }
         if let Some(p) = part {
-            p.finish(raw.rate)?;
+            p.finish(raw.rate, (w, h))?;
         }
         Ok(written)
     }
@@ -509,9 +546,9 @@ mod avi {
     }
 
     impl Part {
-        fn create(path: &Path, rate: u32) -> std::io::Result<Self> {
+        fn create(path: &Path, rate: u32, size: (usize, usize)) -> std::io::Result<Self> {
             let mut file = BufWriter::new(File::create(path)?);
-            file.write_all(&header(0, 0, 0, 0, rate))?;
+            file.write_all(&header(0, 0, 0, 0, rate, size))?;
             Ok(Self { file, movi: 0, index: Vec::new(), frames: 0, samples: 0, max_audio: 0 })
         }
 
@@ -536,12 +573,12 @@ mod avi {
             Ok(())
         }
 
-        fn finish(mut self, rate: u32) -> std::io::Result<()> {
+        fn finish(mut self, rate: u32, size: (usize, usize)) -> std::io::Result<()> {
             self.file.write_all(b"idx1")?;
             self.file.write_all(&(self.index.len() as u32).to_le_bytes())?;
             self.file.write_all(&self.index)?;
             let riff = self.len() - 8;
-            let h = header(riff as u32, 4 + self.movi as u32, self.frames, self.samples as u32, rate);
+            let h = header(riff as u32, 4 + self.movi as u32, self.frames, self.samples as u32, rate, size);
             let h = {
                 let mut h = h;
                 // The audio stream's suggested buffer size (its biggest chunk).
@@ -577,27 +614,28 @@ mod avi {
     }
 
     /// Everything before the first 'movi' chunk.
-    pub fn header(riff: u32, movi: u32, frames: u32, samples: u32, rate: u32) -> Vec<u8> {
-        let (w, h) = (WIDTH as u32, HEIGHT as u32);
+    pub fn header(riff: u32, movi: u32, frames: u32, samples: u32, rate: u32, size: (usize, usize)) -> Vec<u8> {
+        let (w, h) = (size.0 as u32, size.1 as u32);
+        let dib_bytes = w * h * 3;
         let mut v = Vec::with_capacity(HEADER_LEN);
         v.extend_from_slice(b"RIFF");
         u32s(&mut v, &[riff]);
         v.extend_from_slice(b"AVI LIST");
         u32s(&mut v, &[4 + 64 + 12 + 64 + 48 + 12 + 64 + 26]);
         v.extend_from_slice(b"hdrlavih");
-        let max_bytes = DIB_BYTES as u32 * FPS + rate * 2;
+        let max_bytes = dib_bytes * FPS + rate * 2;
         // AVIF_HASINDEX | AVIF_ISINTERLEAVED; two streams.
-        u32s(&mut v, &[56, 1_000_000 / FPS, max_bytes, 0, 0x110, frames, 0, 2, DIB_BYTES as u32, w, h, 0, 0, 0, 0]);
+        u32s(&mut v, &[56, 1_000_000 / FPS, max_bytes, 0, 0x110, frames, 0, 2, dib_bytes, w, h, 0, 0, 0, 0]);
         // Video: 60 frames a second, 24-bit BI_RGB.
         v.extend_from_slice(b"LIST");
         u32s(&mut v, &[4 + 64 + 48]);
         v.extend_from_slice(b"strl");
-        strh(&mut v, b"vids", 1, FPS, frames, DIB_BYTES as u32, 0, w as u16, h as u16);
+        strh(&mut v, b"vids", 1, FPS, frames, dib_bytes, 0, w as u16, h as u16);
         v.extend_from_slice(b"strf");
         u32s(&mut v, &[40, 40, w, h]);
         v.extend_from_slice(&1u16.to_le_bytes());
         v.extend_from_slice(&24u16.to_le_bytes());
-        u32s(&mut v, &[0, DIB_BYTES as u32, 0, 0, 0, 0]);
+        u32s(&mut v, &[0, dib_bytes, 0, 0, 0, 0]);
         // Sound: mono 16-bit PCM (scale/rate in blocks: samples a second).
         v.extend_from_slice(b"LIST");
         u32s(&mut v, &[4 + 64 + 26]);
@@ -624,13 +662,11 @@ mod avi {
 /// .mp4, so recording works without installing FFmpeg.
 #[cfg(windows)]
 mod mf {
-    use super::{Raw, Resampler, FPS, HEIGHT, WIDTH};
+    use super::{Raw, Resampler, FPS};
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
     use windows::core::{GUID, PCWSTR};
 
-    const W: usize = WIDTH * 2;
-    const H: usize = HEIGHT * 2;
     /// Generous for 320×320: crisp pixel edges even in busy scenes.
     const VIDEO_BITRATE: u32 = 5_000_000;
     /// The AAC encoder takes 44.1 or 48 kHz only.
@@ -680,13 +716,13 @@ mod mf {
         unsafe { t.SetUINT64(key, (u64::from(hi) << 32) | u64::from(lo)) }
     }
 
-    fn video_type(subtype: &GUID) -> windows::core::Result<IMFMediaType> {
+    fn video_type(subtype: &GUID, (w, h): (usize, usize)) -> windows::core::Result<IMFMediaType> {
         unsafe {
             let t = MFCreateMediaType()?;
             t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             t.SetGUID(&MF_MT_SUBTYPE, subtype)?;
             t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            set_pair(&t, &MF_MT_FRAME_SIZE, W as u32, H as u32)?;
+            set_pair(&t, &MF_MT_FRAME_SIZE, w as u32, h as u32)?;
             set_pair(&t, &MF_MT_FRAME_RATE, FPS, 1)?;
             set_pair(&t, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
             // What `nv12_2x` makes (and what players assume for SD video).
@@ -730,18 +766,19 @@ mod mf {
 
     /// BT.601 limited-range NV12 at 2× nearest-neighbour. Each game pixel
     /// is a 2×2 block, so the 4:2:0 chroma is exact: no colour bleeding.
-    pub fn nv12_2x(px: &[u32], out: &mut [u8]) {
-        let (luma, chroma) = out.split_at_mut(W * H);
-        for (y, row) in px.chunks_exact(WIDTH).enumerate() {
+    pub fn nv12_2x(px: &[u32], width: usize, out: &mut [u8]) {
+        let w = width * 2;
+        let (luma, chroma) = out.split_at_mut(w * px.len() / width * 2);
+        for (y, row) in px.chunks_exact(width).enumerate() {
             for (x, &p) in row.iter().enumerate() {
                 let (r, g, b) = (((p >> 16) & 0xff) as i32, ((p >> 8) & 0xff) as i32, (p & 0xff) as i32);
                 let l = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
                 let u = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
                 let v = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
                 for dy in 0..2 {
-                    luma[(2 * y + dy) * W + 2 * x..][..2].fill(l);
+                    luma[(2 * y + dy) * w + 2 * x..][..2].fill(l);
                 }
-                chroma[y * W + 2 * x..][..2].copy_from_slice(&[u, v]);
+                chroma[y * w + 2 * x..][..2].copy_from_slice(&[u, v]);
             }
         }
     }
@@ -758,24 +795,26 @@ mod mf {
             attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
             let writer = MFCreateSinkWriterFromURL(PCWSTR(url.as_ptr()), None, &attrs)?;
 
-            let vout = video_type(&MFVideoFormat_H264)?;
+            // Each pixel a 2x2 block (`nv12_2x`).
+            let size = (raw.w * 2, raw.h * 2);
+            let vout = video_type(&MFVideoFormat_H264, size)?;
             vout.SetUINT32(&MF_MT_AVG_BITRATE, VIDEO_BITRATE)?;
             vout.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
             let v = writer.AddStream(&vout)?;
-            writer.SetInputMediaType(v, &video_type(&MFVideoFormat_NV12)?, None)?;
+            writer.SetInputMediaType(v, &video_type(&MFVideoFormat_NV12, size)?, None)?;
 
             let a = writer.AddStream(&audio_type(&MFAudioFormat_AAC, AAC_BYTES_PER_SEC)?)?;
             writer.SetInputMediaType(a, &audio_type(&MFAudioFormat_PCM, AAC_RATE * 2)?, None)?;
             writer.BeginWriting()?;
 
-            let mut px = vec![0u32; WIDTH * HEIGHT];
-            let mut nv12 = vec![0u8; W * H * 3 / 2];
+            let mut px = vec![0u32; raw.w * raw.h];
+            let mut nv12 = vec![0u8; size.0 * size.1 * 3 / 2];
             let (mut sound, mut resampled, mut bytes) = (Vec::new(), Vec::new(), Vec::new());
             let mut resampler = Resampler::new(raw.rate, AAC_RATE);
             let mut heard = 0i64; // 48 kHz samples written
             for i in 0..raw.frames as i64 {
                 raw.next(&mut px, &mut sound)?;
-                nv12_2x(&px, &mut nv12);
+                nv12_2x(&px, raw.w, &mut nv12);
                 let (t, next) = (i * HNS / FPS as i64, (i + 1) * HNS / FPS as i64);
                 write(&writer, v, &nv12, t, next - t)?;
 
@@ -813,29 +852,58 @@ mod tests {
     /// `frames` frames of a solid colour (red, changing to blue halfway) and
     /// a 1 kHz-ish square wave, as the recorder writes them.
     fn record(dir: &Path, frames: u64) -> EncodeTask {
-        let mut rec = Recorder::start(dir, &dir.join("temp"), RecordEncoder::H264).unwrap();
+        let mut rec = Recorder::start(dir, &dir.join("temp"), RecordEncoder::H264, LEAPSTER_SIZE).unwrap();
         let per_frame = AUDIO_RATE as usize / FPS as usize + 1;
         let tone: Vec<i16> = (0..per_frame).map(|i| if i / 16 % 2 == 0 { 8000 } else { -8000 }).collect();
         while rec.frames < frames {
             rec.add_audio(&tone).unwrap();
             for _ in 0..rec.frames_due().min(frames - rec.frames) {
                 let colour = if rec.frames < frames / 2 { 0x00c8_2828 } else { 0x0028_28c8 };
-                rec.add_frame(&vec![colour; WIDTH * HEIGHT]).unwrap();
+                rec.add_frame(&vec![colour; 160 * 160], LEAPSTER_SIZE).unwrap();
             }
         }
         rec.finish(RecordEncoder::H264).unwrap()
     }
 
+    /// Another console's picture (the Didj's 320x240), and frames of
+    /// another size (its HD drawing) scaled to it.
+    #[test]
+    fn records_any_screen_size() {
+        let dir = temp("size");
+        let mut rec = Recorder::start(&dir, &dir.join("temp"), RecordEncoder::Lossless, (320, 240)).unwrap();
+        rec.add_audio(&vec![0; AUDIO_RATE as usize / 30]).unwrap();
+        rec.add_frame(&vec![0x0011_2233; 320 * 240], (320, 240)).unwrap();
+        // 2x HD: left half red, right half blue.
+        let hd: Vec<u32> = (0..640 * 480).map(|i| if i % 640 < 320 { 0x00ff_0000 } else { 0x0000_00ff }).collect();
+        rec.add_frame(&hd, (640, 480)).unwrap();
+        let task = rec.finish(RecordEncoder::Lossless).unwrap();
+        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate, task.size).unwrap();
+        assert_eq!(raw.frames, 2);
+        let (mut px, mut sound) = (vec![0u32; 320 * 240], Vec::new());
+        raw.next(&mut px, &mut sound).unwrap();
+        assert!(px.iter().all(|&p| p == 0x0011_2233));
+        raw.next(&mut px, &mut sound).unwrap();
+        assert_eq!((px[0], px[159], px[160], px[319 + 320 * 239]), (0x00ff_0000, 0x00ff_0000, 0x0000_00ff, 0x0000_00ff));
+        let out = dir.join("clip.avi");
+        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate, task.size).unwrap();
+        avi::write(&mut raw, &out, avi::MAX_PART_BYTES).unwrap();
+        let b = std::fs::read(&out).unwrap();
+        // The main header's width and height.
+        assert_eq!(&b[64..72], &[64, 1, 0, 0, 240, 0, 0, 0]);
+        drop(raw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn frames_follow_the_sound_not_the_redraws() {
         let dir = temp("follow");
-        let mut rec = Recorder::start(&dir, &dir, RecordEncoder::Lossless).unwrap();
+        let mut rec = Recorder::start(&dir, &dir, RecordEncoder::Lossless, LEAPSTER_SIZE).unwrap();
         let frame = vec![0u32; 160 * 160];
         // A 144 Hz window: 144 redraws in one second of sound, 60 frames.
         for _ in 0..144 {
             rec.add_audio(&vec![0; AUDIO_RATE as usize / 144]).unwrap();
             for _ in 0..rec.frames_due() {
-                rec.add_frame(&frame).unwrap();
+                rec.add_frame(&frame, LEAPSTER_SIZE).unwrap();
             }
         }
         assert!((59..=60).contains(&rec.frames), "{} frames", rec.frames);
@@ -878,7 +946,7 @@ mod tests {
     fn record_avi_is_well_formed_and_splits() {
         let dir = temp("avi");
         let task = record(&dir, 30);
-        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate).unwrap();
+        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate, task.size).unwrap();
         let out = dir.join("clip.avi");
         let parts = avi::write(&mut raw, &out, avi::MAX_PART_BYTES).unwrap();
         assert_eq!(parts, vec![out.clone()]);
@@ -903,7 +971,7 @@ mod tests {
         assert_eq!(u64::from(audio_len), samples);
 
         // A small part limit: split into several well-formed files.
-        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate).unwrap();
+        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate, task.size).unwrap();
         let parts = avi::write(&mut raw, &dir.join("split.avi"), 10 * 80_000).unwrap();
         assert_eq!(parts.len(), 3, "{parts:?}");
         let frames: u32 = parts.iter().map(|p| u32_at(&std::fs::read(p).unwrap(), 48)).sum();
@@ -948,7 +1016,7 @@ mod tests {
         let frames = 120;
         let task = record(&dir, frames);
         let out = dir.join("clip.mp4");
-        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate).unwrap();
+        let mut raw = Raw::open(&task.video_path, &task.audio_path, task.audio_rate, task.size).unwrap();
         mf::encode(&mut raw, &out).unwrap();
 
         let b = std::fs::read(&out).unwrap();

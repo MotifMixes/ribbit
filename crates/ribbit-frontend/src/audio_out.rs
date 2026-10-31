@@ -152,6 +152,9 @@ struct Queue {
     /// The longest time between two device callbacks since last asked (a
     /// starved output thread shows here).
     longest_gap: std::time::Duration,
+    /// While recording (`AudioOut::start_record`): every 32 kHz sample
+    /// queued, before the volume.
+    record: Option<Vec<i16>>,
 }
 
 impl Queue {
@@ -183,7 +186,11 @@ impl AudioSink {
     pub fn push(&mut self, samples: &[i16], gain: f32) {
         let mut q = self.queue.lock().unwrap();
         for &s in samples {
-            q.samples.extend(self.upsample.push(s).map(|v| (v as f32 * gain) as i16));
+            let up = self.upsample.push(s);
+            if let Some(r) = &mut q.record {
+                r.extend(up.clone());
+            }
+            q.samples.extend(up.map(|v| (v as f32 * gain) as i16));
         }
         q.trim();
     }
@@ -191,6 +198,9 @@ impl AudioSink {
     /// Queues 32 kHz samples as they are (the PCM DAC stream).
     pub fn push_32k(&mut self, samples: &[i16], gain: f32) {
         let mut q = self.queue.lock().unwrap();
+        if let Some(r) = &mut q.record {
+            r.extend_from_slice(samples);
+        }
         q.samples.extend(samples.iter().map(|&s| (s as f32 * gain) as i16));
         q.trim();
     }
@@ -202,6 +212,25 @@ impl AudioOut {
         let mut q = self.queue.lock().unwrap();
         q.samples.clear();
         q.playing = false;
+    }
+
+    /// Keeps what the consoles play from now (a recording of a console
+    /// other than the Leapster's, whose emulator keeps its own).
+    pub fn start_record(&self) {
+        self.queue.lock().unwrap().record = Some(Vec::new());
+    }
+
+    /// Moves what was kept since the last call to `out`.
+    pub fn drain_record(&self, out: &mut Vec<i16>) {
+        if let Some(r) = &mut self.queue.lock().unwrap().record {
+            out.append(r);
+        }
+    }
+
+    pub fn stop_record(&self, out: &mut Vec<i16>) {
+        if let Some(mut r) = self.queue.lock().unwrap().record.take() {
+            out.append(&mut r);
+        }
     }
 
     pub fn set_enhance(&self, e: Enhance) {

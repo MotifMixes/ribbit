@@ -146,6 +146,12 @@ pub struct Settings {
     pub leapster2_usb: bool,
     /// Offer the Didj on the PC's USB (USB/IP, as `twist_usb`).
     pub didj_usb: bool,
+    /// Offer the Didj's serial console to terminals on this PC (TCP port
+    /// `serial::PORT`, 127.0.0.1 only).
+    pub didj_serial_tcp: bool,
+    /// Say when a Didj starts without packages it can do without
+    /// (`ribbit_didj::package::EXTRAS`: JetPack Heroes, an avatar).
+    pub didj_extras_notice: bool,
     /// The player's RockIt Twist keys: action (`twist::action_name`) to key
     /// name; actions not here keep their default keys.
     pub twist_keys: BTreeMap<String, String>,
@@ -276,6 +282,8 @@ impl Default for Settings {
             twist_usb: false,
             leapster2_usb: false,
             didj_usb: false,
+            didj_serial_tcp: false,
+            didj_extras_notice: true,
             twist_keys: BTreeMap::new(),
             leappad_bios: None,
             leappad_books: BTreeMap::new(),

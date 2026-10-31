@@ -84,6 +84,8 @@ struct Shared {
     usb_news: Mutex<Option<crate::twist::UsbNews>>,
     /// A USB/IP client has the device imported: the cable is in.
     usb_host: AtomicBool,
+    /// UART0, the Linux console: to the app's window and terminals.
+    serial: Arc<crate::serial::Serial>,
 }
 
 /// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
@@ -111,15 +113,18 @@ pub struct DidjSession {
     save_path: PathBuf,
     /// `original`'s fingerprint, kept beside the save.
     image: String,
+    /// The packages it came with that it was built without
+    /// (`package::EXTRAS`: JetPack Heroes, an avatar), for the player.
+    pub extras_missing: Vec<String>,
 }
 
 impl DidjSession {
     /// Powers on a Didj built from the packages in `dir`.
     /// With `autostart`, the game with that art is then started from the
     /// menu (`ribbit_didj::autostart`). `mode`: Enhanced or Original.
-    pub fn start(dir: &Path, save_dir: &Path, cart: Option<Vec<u8>>, sink: Option<AudioSink>, autostart: Option<Art>, mode: Mode) -> anyhow::Result<Self> {
+    pub fn start(dir: &Path, save_dir: &Path, cart: Option<Vec<u8>>, sink: Option<AudioSink>, autostart: Option<Art>, mode: Mode, serial: Arc<crate::serial::Serial>) -> anyhow::Result<Self> {
         let cart = cart.map(ribbit_didj::cart::Cart::new).transpose().map_err(anyhow::Error::msg)?;
-        let original = ribbit_didj::nand_from_packages(dir, true).map_err(anyhow::Error::msg)?;
+        let (original, extras_missing) = ribbit_didj::nand_and_extras_missing(dir, true).map_err(anyhow::Error::msg)?;
         let save_path = save_file(dir, save_dir);
         // The save holds blocks changed from the built image: on another
         // image (new packages, or Ribbit building it differently) they
@@ -158,14 +163,17 @@ impl DidjSession {
             usb: Mutex::new(None),
             usb_news: Mutex::new(None),
             usb_host: AtomicBool::new(false),
+            serial,
         });
+        shared.serial.note("--- Ribbit: the Didj powers on ---
+");
         let s = shared.clone();
         let thread = std::thread::Builder::new().name("ribbit-didj".into()).spawn(move || {
             crate::perf::raise_thread_priority();
             run(&s, autostart)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image })
+        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing })
     }
 
     /// Copies the latest picture into `out`; its size (SCREEN_W x SCREEN_H,
@@ -366,6 +374,8 @@ fn run(s: &Shared, art: Option<Art>) {
                 d.bus.ga3d.hd.set_scale(hd);
             }
             let cycles = d.cpu_hz() / FPS as u64;
+            let typed = s.serial.take_input();
+            d.bus.uart_rx.extend(typed);
             let t = Instant::now();
             // On USB: in 16 pieces (~1 ms), passing transfers between, so
             // the PC's next one need not wait for the next frame.
@@ -378,6 +388,12 @@ fn run(s: &Shared, art: Option<Art>) {
             } else {
                 d.run(cycles);
             }
+            // UART0's output (each byte kept as a char); the other UARTs
+            // carry nothing.
+            if let Some(out) = d.bus.uart.first_mut().map(std::mem::take) {
+                s.serial.output(&out.chars().map(|c| c as u8).collect::<Vec<u8>>());
+            }
+            d.bus.uart.iter_mut().for_each(String::clear);
             // The system turned itself off (after installing a cartridge's
             // update, as a real Didj does): on again, as its owner would, and
             // the game started again. Not a third time in a row within a
@@ -393,6 +409,8 @@ fn run(s: &Shared, art: Option<Art>) {
             }
             if d.bus.powered_off && !s.gave_up.load(Ordering::Relaxed) {
                 tracing::info!(target: "ribbit::didj", "the Didj turned itself off; turning it on again");
+                s.serial.note("--- Ribbit: the Didj turned itself off; on again ---
+");
                 let (flash, cart, sdram, milli) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take(), d.bus.sdram.len(), d.cpu_milli());
                 *d = Didj::with_sdram(flash, sdram);
                 d.set_cpu_milli(milli);
@@ -602,6 +620,10 @@ fn describe_bundle(path: &Path) -> Option<crate::library::Game> {
     let missing = ribbit_didj::package::missing(names.iter().map(String::as_str));
     if !missing.is_empty() {
         details.push(("Missing", missing.join(", ")));
+    }
+    let extras = ribbit_didj::package::missing_extras(names.iter().map(String::as_str));
+    if !extras.is_empty() {
+        details.push(("Not included (optional)", extras.join(", ")));
     }
     details.push(("Status", "early emulation: starts at the Didj's menu, built from the packages in this bundle".to_string()));
     details.push(("File", path.display().to_string()));

@@ -35,6 +35,7 @@ mod perf;
 pub mod saves;
 pub mod sdcard;
 pub mod settings;
+mod serial;
 mod ui;
 mod touch_pad;
 mod twist;

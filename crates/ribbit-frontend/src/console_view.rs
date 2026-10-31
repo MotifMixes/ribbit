@@ -1246,6 +1246,20 @@ fn keycap(out: &mut Vec<egui::Shape>, ctx: &egui::Context, at: Pos2, label: &str
 }
 
 /// Every shape of the console (never inside the screen).
+/// The console filling `size` (pixels; the layout's shape) for a recording:
+/// its shapes, and where the picture goes in its screen.
+pub fn capture_shapes(layout: &Layout, size: (u32, u32), lit: &Lit, ctx: &egui::Context) -> (Vec<egui::Shape>, Rect) {
+    let shell = Rect::from_min_size(Pos2::ZERO, vec2(size.0 as f32, size.1 as f32));
+    let screen = place(shell, layout.screen);
+    (paint(layout, shell, screen, lit, ctx), screen)
+}
+
+/// A recording's size for the console view: `height` pixels high, the
+/// layout's shape, even sides.
+pub fn capture_size(layout: &Layout, height: u32) -> (u32, u32) {
+    (((height as f32 * layout.aspect) as u32) & !1, height & !1)
+}
+
 fn paint(layout: &Layout, shell: Rect, screen: Rect, lit: &Lit, ctx: &egui::Context) -> Vec<egui::Shape> {
     const N: usize = 160;
     let mut out = Vec::new();

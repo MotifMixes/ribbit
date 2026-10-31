@@ -221,6 +221,17 @@ pub struct App {
     record_default: PathBuf,
     /// Scratch buffer for audio samples drained each frame while recording.
     rec_audio: Vec<i16>,
+    /// The recording shows the console view, drawn off screen at this size
+    /// (`Gpu::capture`); None: the console's picture alone.
+    rec_view: Option<(u32, u32)>,
+    /// The last frame recorded and its size (repeated at the end).
+    rec_frame: (Vec<u32>, (usize, usize)),
+    /// No audio output: the recording's (silent) sound follows the clock.
+    rec_clock: Instant,
+    /// Debug: RIBBIT_RECORD_TEST_SECS=<n> records n seconds of the first
+    /// game, from 8 s after it starts, into RIBBIT_RECORD_TEST_DIR (else the
+    /// recordings folder): the seconds, and when the game was first seen.
+    record_test: Option<(f64, Option<Instant>)>,
     /// Cheat / memory search state.
     cheat: crate::cheat::CheatSearch,
 }
@@ -348,6 +359,10 @@ impl App {
             encoding: None,
             record_default: crate::record::default_folder(&opts_data_dir),
             rec_audio: Vec::new(),
+            rec_view: None,
+            rec_frame: (Vec::new(), (0, 0)),
+            rec_clock: Instant::now(),
+            record_test: std::env::var("RIBBIT_RECORD_TEST_SECS").ok().and_then(|v| v.parse().ok()).map(|n| (n, None)),
             cheat: crate::cheat::CheatSearch::default(),
         };
         // A game given on the command line starts at once; otherwise the
@@ -364,6 +379,7 @@ impl App {
         // checking them).
         // Android's app has one window: the debugger is drawn inside it.
         app.ui.debug.in_app = cfg!(target_os = "android");
+        app.apply_serial_tcp();
         if std::env::var_os("RIBBIT_DEBUG_WINDOWS").is_some() {
             app.ui.debug.show_memory = true;
             app.ui.debug.show_cpu = true;
@@ -988,11 +1004,14 @@ impl App {
         self.end_session();
         let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match crate::didj::DidjSession::start(&dir, &self.save_dir(), cart, sink, art, self.didj_mode()) {
+        match crate::didj::DidjSession::start(&dir, &self.save_dir(), cart, sink, art, self.didj_mode(), self.ui.serial.clone()) {
             Ok(mut d) => {
                 self.fit_window = FIT_TRIES;
                 if let Some(g) = self.library.games.iter().find(|g| g.path == package) {
                     d.title.clone_from(&g.title);
+                }
+                if !d.extras_missing.is_empty() && self.settings.didj_extras_notice {
+                    self.ui.toast(format!("Didj started without {}: add the .lfp to its folder to have it", d.extras_missing.join(" and ")));
                 }
                 self.didj = Some(d);
                 self.apply_didj_usb();
@@ -1861,6 +1880,14 @@ impl App {
                     self.ui.toast("Leapster 2 unplugged from USB");
                 }
             }
+            Action::SetDidjSerialTcp(on) => {
+                self.settings.didj_serial_tcp = on;
+                self.save_settings();
+                self.apply_serial_tcp();
+                if on && self.ui.serial.listening() {
+                    self.ui.toast(format!("Didj serial console: telnet 127.0.0.1 {}", crate::serial::PORT));
+                }
+            }
             Action::SetDidjUsb(on) => {
                 self.settings.didj_usb = on;
                 self.save_settings();
@@ -2518,6 +2545,16 @@ impl App {
         self.usb_server.clone()
     }
 
+    /// Offers the Didj's serial console on TCP if so set, else stops.
+    fn apply_serial_tcp(&mut self) {
+        if !self.settings.didj_serial_tcp {
+            self.ui.serial.stop_tcp();
+        } else if let Err(e) = self.ui.serial.start_tcp() {
+            self.ui.toast(format!("Didj serial console: can't listen on port {} ({e})", crate::serial::PORT));
+            self.settings.didj_serial_tcp = false;
+        }
+    }
+
     /// Offers the running Didj on USB if so set, else unplugs it.
     fn apply_didj_usb(&mut self) {
         if self.didj.is_none() {
@@ -2606,8 +2643,29 @@ impl App {
         }
     }
 
+    fn record_test(&mut self) {
+        let Some((secs, seen)) = &mut self.record_test else { return };
+        let running = self.session.is_some() || self.didj.is_some() || self.twist.is_some() || self.zippity.is_some();
+        if !running {
+            return;
+        }
+        let since = seen.get_or_insert_with(Instant::now).elapsed().as_secs_f64();
+        let (start, stop) = (since >= 8.0 && self.recording.is_none(), since >= 8.0 + *secs && self.recording.is_some());
+        if stop {
+            self.record_test = None;
+        }
+        if start || stop {
+            self.toggle_record();
+        }
+    }
+
     /// Where recordings go: the chosen folder, else the player's Videos folder.
     fn record_dir(&self) -> PathBuf {
+        if self.record_test.is_some()
+            && let Some(dir) = std::env::var_os("RIBBIT_RECORD_TEST_DIR")
+        {
+            return dir.into();
+        }
         self.settings.record_folder.clone().unwrap_or_else(|| self.record_default.clone())
     }
 
@@ -2634,13 +2692,17 @@ impl App {
         self.poll_encoding();
         if let Some(mut rec) = self.recording.take() {
             // Stop: flush remaining buffered audio and start encoding.
+            let mut remaining = Vec::new();
             if let Some(s) = &self.session {
-                let mut remaining = Vec::new();
                 s.emu.stop_record_audio(&mut remaining);
-                let _ = rec.add_audio(&remaining);
-                for _ in 0..rec.frames_due() {
-                    let _ = rec.add_frame(&self.frame[..]);
-                }
+            }
+            if let Some(a) = &self.audio {
+                a.stop_record(&mut remaining);
+            }
+            let _ = rec.add_audio(&remaining);
+            let (px, size) = &self.rec_frame;
+            for _ in 0..rec.frames_due() {
+                let _ = rec.add_frame(px, *size);
             }
             let encoder = self.settings.record_encoder;
             match rec.finish(encoder) {
@@ -2652,15 +2714,37 @@ impl App {
                 Err(e) => self.ui.problem("Recording failed", format!("{e:#}"), ""),
             }
         } else {
-            // Start.
-            let Some(s) = &self.session else { return };
+            // Start: the console's picture, or the whole console when its
+            // view is shown (the screen at the picture's own size).
+            let picture = if self.session.is_some() {
+                crate::record::LEAPSTER_SIZE
+            } else if self.didj.is_some() {
+                (crate::didj::SCREEN_W, crate::didj::SCREEN_H)
+            } else if self.twist.is_some() {
+                (ribbit_twist::SCREEN_W, ribbit_twist::SCREEN_H)
+            } else if self.zippity.is_some() {
+                (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H)
+            } else {
+                if self.leappad.is_some() {
+                    self.ui.toast("The LeapPad has no screen to record");
+                }
+                return;
+            };
+            self.rec_view = self.view_layout().map(|l| crate::console_view::capture_size(&l, (picture.1 as f32 / l.screen.height()).ceil() as u32));
+            let size = self.rec_view.map_or(picture, |(w, h)| (w as usize, h as usize));
             let dir = self.record_dir();
             // The raw frames wait in the data folder, not the Videos folder.
             let temp = self.opts.data_dir.join("recording-temp");
-            match crate::record::Recorder::start(&dir, &temp, self.settings.record_encoder) {
+            match crate::record::Recorder::start(&dir, &temp, self.settings.record_encoder, size) {
                 Ok(rec) => {
                     self.ui.toast(format!("Recording… (F8 to stop). It will be saved in {}", dir.display()));
-                    s.emu.start_record_audio();
+                    match (&self.session, &self.audio) {
+                        (Some(s), _) => s.emu.start_record_audio(),
+                        (None, Some(a)) => a.start_record(),
+                        (None, None) => {}
+                    }
+                    self.rec_frame = (Vec::new(), (0, 0));
+                    self.rec_clock = Instant::now();
                     self.recording = Some(rec);
                 }
                 Err(e) => self.ui.problem("Could not start recording", format!("{e:#}"), ""),
@@ -3172,6 +3256,7 @@ impl App {
             self.first_start_notice();
         }
         self.poll_encoding();
+        self.record_test();
         let (mut hd_frame, mut hd_dirty) = (false, false);
         if let Some(s) = &mut self.session {
             let passes = {
@@ -3179,16 +3264,7 @@ impl App {
                 m.render_frame(&mut self.frame);
                 m.hd.as_mut().map(|h| h.take()).unwrap_or_default()
             };
-            // Screen recording: capture this frame and any buffered audio.
-            if let Some(rec) = &mut self.recording {
-                s.emu.drain_record_audio(&mut self.rec_audio);
-                let _ = rec.add_audio(&self.rec_audio);
-                self.rec_audio.clear();
-                for _ in 0..rec.frames_due() {
-                    let _ = rec.add_frame(&self.frame[..]);
-                }
-                // Apply cheat freezes while recording so they show in the video.
-            }
+
             // Automatic calibration is hidden: black instead of its targets.
             let hidden = self.settings.auto_calibrate && crate::calibrate::target(&self.frame).is_some();
             if hidden {
@@ -3233,6 +3309,10 @@ impl App {
         let save_dir = self.save_dir().display().to_string();
         let slots = self.slot_times();
         let view_layout = self.view_layout();
+        // The console view drawn for a recording (`rec_view`): its shapes
+        // and where the picture goes.
+        let rec_view = self.recording.as_ref().and(self.rec_view);
+        let mut rec_shapes = None;
         let view_available = self.current_hardware().map(|h| crate::console_view::layout_for(h).is_some());
         // A picture other than the Leapster's 160 x 160 LCD.
         let tv_size = if self.twist.is_some() {
@@ -3394,6 +3474,9 @@ impl App {
                     keys: &keys,
                     whole_pixels: settings.display == crate::gpu::Display::Pixel,
                 };
+                if let Some(size) = rec_view {
+                    rec_shapes = Some(crate::console_view::capture_shapes(layout, size, &lit, ui.ctx()));
+                }
                 let (at, events) = view.show(ui, under, layout, area, &lit);
                 screen = Some(at);
                 view_events = events;
@@ -3454,6 +3537,54 @@ impl App {
             self.fatal = Some(e);
             event_loop.exit();
             return;
+        }
+        // Screen recording: this frame and the sound since the last.
+        if let Some(rec) = &mut self.recording {
+            // The other consoles send no sound while quiet (the Didj
+            // starting): silence then, as long as the time that passed, so
+            // the picture goes on (frames follow the sound).
+            let quiet = self.rec_clock.elapsed();
+            if let Some(s) = &self.session {
+                s.emu.drain_record_audio(&mut self.rec_audio);
+            } else if let Some(a) = &self.audio {
+                a.drain_record(&mut self.rec_audio);
+            }
+            let silent = self.session.is_none() && (self.audio.is_none() || quiet >= Duration::from_millis(100));
+            if self.rec_audio.is_empty() && silent && !halted {
+                self.rec_audio.resize((quiet.as_secs_f64() * rec.audio_rate as f64) as usize, 0);
+            }
+            if !self.rec_audio.is_empty() || halted {
+                self.rec_clock = Instant::now();
+            }
+            let _ = rec.add_audio(&self.rec_audio);
+            self.rec_audio.clear();
+            let due = rec.frames_due();
+            if due > 0 {
+                let captured = match (rec_shapes, rec_view) {
+                    (Some((shapes, screen)), Some(size)) => {
+                        let at = (screen.min.x, screen.min.y, screen.width(), screen.height());
+                        let lcd = match tv_size {
+                            Some(tv) => Gpu::tv_rect(at, tv),
+                            None => Gpu::lcd_rect(at, display),
+                        };
+                        let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0 as f32, size.1 as f32));
+                        let shapes = shapes.into_iter().map(|shape| egui::epaint::ClippedShape { clip_rect: clip, shape }).collect();
+                        let jobs = self.egui_ctx.tessellate(shapes, 1.0);
+                        gpu.capture(size, lcd, display, &jobs).map(|px| (px, (size.0 as usize, size.1 as usize)))
+                    }
+                    _ => None,
+                };
+                self.rec_frame = match captured {
+                    Some(c) => c,
+                    None => match tv_size {
+                        Some(size) => (self.tv_frame.clone(), size),
+                        None => (self.frame.to_vec(), crate::record::LEAPSTER_SIZE),
+                    },
+                };
+                for _ in 0..due {
+                    let _ = rec.add_frame(&self.rec_frame.0, self.rec_frame.1);
+                }
+            }
         }
         self.apply_view_events(view_events);
         for e in leappad_events {

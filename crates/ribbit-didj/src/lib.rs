@@ -53,9 +53,16 @@ pub mod udc;
 /// `bios.didj` there (`package::packages_in`); any of `package::NEEDED`
 /// missing is an error naming them all.
 pub fn nand_from_packages(dir: &std::path::Path, brio: bool) -> Result<nand::Nand, String> {
+    nand_and_extras_missing(dir, brio).map(|(nand, _)| nand)
+}
+
+/// As `nand_from_packages`, and the `package::EXTRAS` it was built without
+/// (the menu starts without them), as `package::missing_extras` names them.
+pub fn nand_and_extras_missing(dir: &std::path::Path, brio: bool) -> Result<(nand::Nand, Vec<String>), String> {
     let mut fw = package::Firmware::default();
     let mut brio_files = Vec::new();
     let packages = package::packages_in(dir)?;
+    let extras = package::missing_extras(packages.iter().map(|(n, _)| n.as_str()));
     let missing = package::missing(packages.iter().map(|(n, _)| n.as_str()));
     if !missing.is_empty() {
         return Err(format!("missing Didj packages: {}", missing.join(", ")));
@@ -78,5 +85,5 @@ pub fn nand_from_packages(dir: &std::path::Path, brio: bool) -> Result<nand::Nan
     if !brio_files.is_empty() {
         brio::install(&mut flash, &brio_files).map_err(|e| format!("Brio: {e}"))?;
     }
-    Ok(flash)
+    Ok((flash, extras))
 }

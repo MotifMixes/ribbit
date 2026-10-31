@@ -238,6 +238,9 @@ pub struct Gpu {
     /// console draws, and a new upload re-runs the AI upscale.
     tv_pixels: Vec<u32>,
     pub show_tv: bool,
+    /// A recording's frame drawn off screen (`capture`): its texture and
+    /// the buffer it is read back through.
+    capture: Option<(wgpu::Texture, wgpu::Buffer, (u32, u32))>,
     pixel: wgpu::RenderPipeline,
     sharp: wgpu::RenderPipeline,
     lcd: wgpu::RenderPipeline,
@@ -598,6 +601,7 @@ impl Gpu {
             tv: None,
             tv_pixels: Vec::new(),
             show_tv: false,
+            capture: None,
             lcd_view: view,
             bgl,
             sampler,
@@ -970,6 +974,106 @@ impl Gpu {
             self.egui.free_texture(id);
         }
         Ok(())
+    }
+}
+
+impl Gpu {
+    /// Draws the picture (at `lcd`: x, y, w, h) and `paint_jobs` (the
+    /// console view, tessellated at 1 point per pixel) into a `size` frame
+    /// off screen and reads it back (0x00RRGGBB), for a recording of the
+    /// console view. Plain drawing (an AI display drawn Sharp; no HD).
+    /// Call after `render`, which has brought egui's textures up to date.
+    pub fn capture(&mut self, size: (u32, u32), lcd: (f32, f32, f32, f32), display: Display, paint_jobs: &[egui::ClippedPrimitive]) -> Option<Vec<u32>> {
+        let (w, h) = size;
+        let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        if self.capture.as_ref().is_none_or(|c| c.2 != size) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capture"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("capture readback"),
+                size: (row * h) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            self.capture = Some((texture, buffer, size));
+        }
+        let (texture, buffer, _) = self.capture.as_ref().unwrap();
+        let view = texture.create_view(&Default::default());
+        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: [w, h], pixels_per_point: 1.0 };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let extra = self.egui.update_buffers(&self.device, &self.queue, &mut encoder, paint_jobs, &screen);
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("capture"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.025, b: 0.03, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                })
+                .forget_lifetime();
+            let (x, y, lw, lh) = lcd;
+            let (x0, y0) = (x.max(0.0), y.max(0.0));
+            let (lw, lh) = (lw.min(w as f32 - x0), lh.min(h as f32 - y0));
+            if lw >= 1.0 && lh >= 1.0 {
+                pass.set_viewport(x0, y0, lw, lh, 0.0, 1.0);
+                let tv = self.show_tv.then_some(()).and(self.tv.as_ref()).map(|t| &t.2);
+                pass.set_pipeline(match display {
+                    Display::Pixel => &self.pixel,
+                    Display::Lcd if tv.is_none() => &self.lcd,
+                    Display::Smooth => &self.smooth,
+                    _ => &self.sharp,
+                });
+                pass.set_bind_group(0, tv.unwrap_or(&self.bind_group), &[]);
+                pass.draw(0..3, 0..1);
+                pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            }
+            self.egui.render(&mut pass, paint_jobs, &screen);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(extra.into_iter().chain([encoder.finish()]));
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().ok()?.ok()?;
+        let bgra = matches!(self.config.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        let out = {
+            let data = slice.get_mapped_range().ok()?;
+            let mut out = Vec::with_capacity((w * h) as usize);
+            for line in data.chunks_exact(row as usize).take(h as usize) {
+                out.extend(line[..(w * 4) as usize].chunks_exact(4).map(|p| {
+                    let (r, g, b) = if bgra { (p[2], p[1], p[0]) } else { (p[0], p[1], p[2]) };
+                    (r as u32) << 16 | (g as u32) << 8 | b as u32
+                }));
+            }
+            out
+        };
+        buffer.unmap();
+        Some(out)
     }
 }
 

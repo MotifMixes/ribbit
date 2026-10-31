@@ -24,6 +24,7 @@
 | Show / hide the menu bar | `F10` |
 | Fullscreen | `F11` |
 | Screenshot | `F12` |
+| Start / stop recording a video | `F8` |
 
 **Input › Key bindings…** changes the keys; **Help › Controls** (`F1`) lists them, with the Zippity's and the RockIt Twist's.
 
@@ -65,6 +66,10 @@ A game can have its own picture (Video menu), sound (Audio menu), speed, control
 Click a menu to open it; while one is open, point at another and it opens instead.
 
 ![The Emulation menu](images/menu-emulation.png)
+
+## Recording videos
+
+`F8` starts recording the game, picture and sound, and `F8` again stops it. The video is saved in your Videos folder (or the one chosen in the menu) as H.264 `.mp4` (FFmpeg, if installed, offers other formats). It works on every console with a screen: the Leapster, Leapster 2, Explorer, Didj, RockIt Twist and Zippity. If the console view is on when you start, the video shows the whole console with the game in its screen.
 
 ## The console view
 
