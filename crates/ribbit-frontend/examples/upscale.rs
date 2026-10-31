@@ -59,7 +59,7 @@ fn main() {
     for round in 0..6 {
         let start = Instant::now();
         let mut encoder = device.create_command_encoder(&Default::default());
-        let out = up.run(&device, &mut encoder, &input_view, w, &chain, 0);
+        let out = up.run(&device, &mut encoder, &input_view, (w, h), &chain, 0);
         let out_texture = out.texture().clone();
         if round == 5 {
             encoder.copy_texture_to_buffer(

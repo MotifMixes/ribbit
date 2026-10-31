@@ -367,7 +367,7 @@ pub struct Upscaler {
     compiled: HashMap<Network, Vec<Compiled>>,
     stages: Vec<Stage>,
     /// Chain, input size and input identity the stages were built for.
-    built: Option<(Vec<Network>, u32, usize)>,
+    built: Option<(Vec<Network>, (u32, u32), usize)>,
 }
 
 fn compile(device: &wgpu::Device, network: Network) -> Vec<Compiled> {
@@ -436,7 +436,7 @@ impl Upscaler {
         &mut self,
         device: &wgpu::Device,
         input: &wgpu::TextureView,
-        size: u32,
+        size: (u32, u32),
         chain: &[Network],
         input_id: usize,
     ) {
@@ -444,11 +444,11 @@ impl Upscaler {
             return;
         }
         self.stages.clear();
-        let texture = |side: u32, label: &str| {
+        let texture = |(width, height): (u32, u32), label: &str| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -489,11 +489,12 @@ impl Upscaler {
                     layout: &c.layout,
                     entries: &entries,
                 }));
-                let out_side = match p.kind {
-                    PassKind::Conv => side,
-                    PassKind::DepthToSpace => side * 2,
-                    PassKind::Scale3 => side * 3,
+                let times = match p.kind {
+                    PassKind::Conv => 1,
+                    PassKind::DepthToSpace => 2,
+                    PassKind::Scale3 => 3,
                 };
+                let out_side = (side.0 * times, side.1 * times);
                 let outs: Vec<_> = p
                     .outputs
                     .iter()
@@ -505,7 +506,7 @@ impl Upscaler {
                     .collect();
                 targets.push(outs);
             }
-            side *= network.scale();
+            side = (side.0 * network.scale(), side.1 * network.scale());
             self.stages.push(Stage { network, views, bind_groups, targets });
         }
         self.built = Some((chain.to_vec(), size, input_id));
@@ -516,13 +517,14 @@ impl Upscaler {
         self.stages.last().map(|s| &s.views["MAIN"])
     }
 
-    /// Records `chain` applied to `input` (side `size`) and returns the result.
+    /// Records `chain` applied to `input` (`size`: width, height) and
+    /// returns the result.
     pub fn run(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::TextureView,
-        size: u32,
+        size: (u32, u32),
         chain: &[Network],
         input_id: usize,
     ) -> &wgpu::TextureView {

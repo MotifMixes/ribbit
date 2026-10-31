@@ -702,6 +702,8 @@ impl Gpu {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: None },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+        // (For the AI upscale.)
+        self.frame_dirty = true;
     }
 
     pub fn upload(&mut self, frame: &[u32; WIDTH * HEIGHT]) {
@@ -841,13 +843,20 @@ impl Gpu {
             _ => None,
         };
         let tv = self.show_tv.then_some(()).and(self.tv.as_ref()).map(|t| &t.2);
-        if let (Some(((_, _, w, h), ai)), Some(up), None) = (ai_for(lcd, self.show_hd), &mut self.upscaler, tv) {
-            let size = WIDTH as u32;
-            let chain = ai.chain(size, ai.resolution.target(size, w.min(h)));
+        // A TV picture (Didj, Zippity, RockIt Twist) goes through the same
+        // networks (they work at any size): sized by its longer side, the
+        // width (it is drawn with its shape kept).
+        let tv_input = self.show_tv.then_some(()).and(self.tv.as_ref()).map(|t| (t.0.create_view(&Default::default()), t.1));
+        if let (Some(((_, _, w, h), ai)), Some(up)) = (ai_for(lcd, self.show_hd), &mut self.upscaler) {
+            let (input, size, side, shown) = match &tv_input {
+                Some((view, (tw, th))) => (view, (*tw, *th), *tw.max(th), w),
+                None => (&self.lcd_view, (WIDTH as u32, WIDTH as u32), WIDTH as u32, w.min(h)),
+            };
+            let chain = ai.chain(side, ai.resolution.target(side, shown));
             let view = if self.frame_dirty || chain != self.last_chain || up.output().is_none() {
                 self.frame_dirty = false;
                 self.last_chain.clone_from(&chain);
-                up.run(&self.device, &mut encoder, &self.lcd_view, size, &chain, 0)
+                up.run(&self.device, &mut encoder, input, size, &chain, tv_input.is_some() as usize)
             } else {
                 up.output().unwrap()
             };
@@ -905,8 +914,11 @@ impl Gpu {
                 if w >= 1.0 && h >= 1.0 {
                     pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
                     match (&ai_bind_group, display) {
-                        // A TV picture: drawn as it is (the AI networks are
-                        // trained for the 160x160 LCD; Ai shows as Sharp).
+                        (Some(group), Display::Ai) if tv.is_some() => {
+                            pass.set_pipeline(&self.resample);
+                            pass.set_bind_group(0, group, &[]);
+                        }
+                        // A TV picture: drawn as it is.
                         _ if tv.is_some() => {
                             pass.set_pipeline(match display {
                                 Display::Pixel => &self.pixel,
