@@ -161,7 +161,8 @@ A `.lfp` is a plain zip with a `meta.inf` (`Device="Didj"`). IDs are `DIDJ-0x000
   (`Type="MicroDownload"`, `MDLType` Cinematic/Clothing/...): there it numbers the items of a game's product
   (DIDJ-0x000F0012-000012 "The Play", -000015 "Happy Ending": Tinker Bell), and every one is installed, under
   `/Didj/Data/MDL/<its folder>` (VERIFIED 2026-10-31: 189 micromods from players' archive, products
-  0x000F000D-0x000F0012, all listed there in Ribbit). Whether each game shows them is not checked yet.
+  0x000F0001-0x000F0012, all listed there in Ribbit). The menu shows them: My Didj > My Stuff > JetPack Heroes
+  > Micromods lists Diamond Key, Fire key, Heart Key... (VERIFIED, set-up console built with them).
 
 | ID         | Name                    | Contents                                         |
 |------------|-------------------------|--------------------------------------------------|
