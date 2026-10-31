@@ -147,9 +147,15 @@ pub fn identify(name: &str, data: &[u8]) -> Option<String> {
 /// Whether every version of the package is a package of its own: a
 /// micromod (`Type="MicroDownload"`) is numbered within its game's product
 /// (DIDJ-0x000F0012-000012 "The Play", -000015 "Happy Ending": Tinker
-/// Bell's cinematics), where for the rest the number is a version.
+/// Bell's cinematics), where for the rest the number is a version. Avatars
+/// (`Type="Avatar"`: the Didjis players make in LeapFrog Connect, shown by
+/// the menu's CScreenSelectAvatar, "NO DIDJIS CREATED") are kept every one
+/// too: a player has up to 10, and whether they share a product number is
+/// UNKNOWN (no Didji package seen); keeping only the newest per product
+/// would drop the rest. An avatar's versions all install into its folder,
+/// the newest last.
 fn each_version_kept(data: &[u8]) -> bool {
-    meta_of(data).is_some_and(|m| m.get("Type") == Some("MicroDownload"))
+    meta_of(data).is_some_and(|m| matches!(m.get("Type"), Some("MicroDownload" | "Avatar")))
 }
 
 /// The packages in `dir` as (file name, contents): the `.lfp` files there
@@ -238,6 +244,30 @@ mod tests {
     }
 
     /// A zip of stored (uncompressed) files.
+    /// Every avatar (Didji) is installed; of a game, the newest version.
+    #[test]
+    fn every_avatar_kept() {
+        let dir = std::env::temp_dir().join(format!("ribbit-didj-avatars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pkg = |ty: &str, folder: &str| stored_zip(&[(&format!("{folder}/meta.inf"), format!("Device=\"Didj\"
+Type=\"{ty}\"
+").as_bytes())]);
+        for (name, ty, folder) in [
+            ("DIDJ-0x000E0010-000002.lfp", "Avatar", "Avatar1"),
+            ("DIDJ-0x000E0010-000003.lfp", "Avatar", "Avatar2"),
+            ("DIDJ-0x000F0001-000000.lfp", "Application", "POW"),
+            ("DIDJ-0x000F0001-000001.lfp", "Application", "POW"),
+        ] {
+            std::fs::write(dir.join(name), pkg(ty, folder)).unwrap();
+        }
+        let found = packages_in(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let mut names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["DIDJ-0x000E0010-000002.lfp", "DIDJ-0x000E0010-000003.lfp", "DIDJ-0x000F0001-000001.lfp"]);
+    }
+
     fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
         let (mut out, mut dir) = (Vec::new(), Vec::new());
         for (name, data) in files {
