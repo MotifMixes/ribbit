@@ -132,9 +132,10 @@ pub struct Layout {
     pub look: Look,
     /// Words printed on the face (unit square: where each is centred).
     pub prints: Vec<(Pos2, &'static str)>,
-    /// The picture's pixels across, when the screen is sized to a whole
-    /// multiple of them (the picture is drawn at whole multiples: it then
-    /// fills the screen, no dark border left round it).
+    /// The picture's pixels across, for sizing the screen to a whole
+    /// multiple of them when the picture is drawn at whole multiples
+    /// (`Lit::whole_pixels`): it then fills the screen, no dark border left
+    /// round it. Other displays fill the screen at any size.
     pub lcd: Option<f32>,
 }
 
@@ -704,6 +705,9 @@ pub struct Lit<'a> {
     pub show_caps: bool,
     /// The keys for a control, for its tooltip.
     pub keys: &'a dyn Fn(&Control) -> String,
+    /// The picture is drawn at whole multiples only (the Pixel display):
+    /// the screen is then sized to one (`Layout::lcd`).
+    pub whole_pixels: bool,
 }
 
 /// Scrolling (points) per notch of a mouse wheel.
@@ -744,13 +748,19 @@ impl ConsoleView {
         area: Rect,
         lit: &Lit,
     ) -> (Rect, Vec<Event>) {
-        let shell = shell_rect(layout, area);
+        let mut shell = shell_rect(layout, area);
         let mut screen = place(shell, layout.screen);
-        if let Some(px) = layout.lcd {
+        if let Some(px) = layout.lcd.filter(|_| lit.whole_pixels) {
+            // The whole console scaled down so its screen is a whole
+            // multiple: shrinking the screen alone left it small in its
+            // frame (up to half its size).
             let ppp = ui.ctx().pixels_per_point();
-            let n = (screen.width().min(screen.height()) * ppp / px).floor();
+            let side = screen.width().min(screen.height());
+            let n = (side * ppp / px).floor();
             if n >= 1.0 {
-                screen = Rect::from_center_size(screen.center(), Vec2::splat(n * px / ppp));
+                let fit = n * px / ppp;
+                shell = Rect::from_center_size(shell.center(), shell.size() * (fit / side));
+                screen = Rect::from_center_size(place(shell, layout.screen).center(), Vec2::splat(fit));
             }
         }
         let shapes = paint(layout, shell, screen, lit, ui.ctx());
@@ -1854,6 +1864,7 @@ mod tests {
             cap: &|_| None,
             show_caps: false,
             keys: &|_| String::new(),
+            whole_pixels: true,
         };
         let inside = |p: Pos2, [a, b, c]: [Pos2; 3]| {
             let s = |u: Pos2, v: Pos2| (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);

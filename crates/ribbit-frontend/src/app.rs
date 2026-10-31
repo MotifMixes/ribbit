@@ -3345,6 +3345,7 @@ impl App {
                     cap: &cap,
                     show_caps: settings.console_view_keys,
                     keys: &keys,
+                    whole_pixels: settings.display == crate::gpu::Display::Pixel,
                 };
                 let (at, events) = view.show(ui, under, layout, area, &lit);
                 screen = Some(at);
