@@ -93,6 +93,16 @@ pub fn nand_with_files(dir: &std::path::Path, brio: bool, extra: &[(String, Vec<
     let mut flash = nand::Nand::from_firmware(&fw)?;
     if !brio_files.is_empty() {
         brio_files.extend(extra.iter().cloned());
+        // Didjis, from packages or carried over (Connect sent them to the
+        // console): their meta.inf as the menu takes it.
+        for (path, data) in &mut brio_files {
+            let p = path.trim_start_matches('/').to_ascii_lowercase();
+            if p.starts_with("data/avatars/") && p.ends_with("/meta.inf") && p.matches('/').count() == 3
+                && let Some(fixed) = package::fix_avatar_meta(data)
+            {
+                *data = fixed;
+            }
+        }
         brio::install(&mut flash, &brio_files).map_err(|e| format!("Brio: {e}"))?;
     }
     Ok((flash, extras))

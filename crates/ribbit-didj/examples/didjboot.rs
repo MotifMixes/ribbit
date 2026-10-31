@@ -53,6 +53,13 @@ fn main() {
 
     // DIDJ_NO_BRIO=1 leaves Brio erased (the console then formats it).
     let mut flash = ribbit_didj::nand_from_packages(dir.as_ref(), std::env::var_os("DIDJ_NO_BRIO").is_none()).unwrap_or_else(|e| panic!("{e}"));
+    // DIDJ_CARRY=<file>: a save made on another image, its files carried
+    // over as the app does (ribbit_didj::carry).
+    if let Ok(path) = std::env::var("DIDJ_CARRY") {
+        let files = ribbit_didj::carry::user_files(&std::fs::read(&path).expect("can't read the save"), &flash).unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("carried {} files", files.len());
+        flash = ribbit_didj::nand_with_files(dir.as_ref(), true, &files).unwrap_or_else(|e| panic!("{e}")).0;
+    }
     // DIDJ_SAVE=<file>: apply the app's saved NAND changes (.nandblocks).
     if let Ok(path) = std::env::var("DIDJ_SAVE") {
         flash.apply_changes(&std::fs::read(&path).expect("can't read the save")).unwrap_or_else(|e| panic!("{e}"));

@@ -133,6 +133,28 @@ pub fn product(id: &str) -> &str {
     &id[5..15]
 }
 
+/// An avatar's meta.inf as the menu takes it: the Didjis LeapFrog Connect
+/// makes have no `Device="Didj"` line (only `DeviceTypes="DIDJ"`), and the
+/// menu's "Select a Didji" leaves them out ("NO DIDJIS CREATED") though it
+/// lists their folders ("folder name while getting avatars is ..."). With
+/// the line added they show (VERIFIED in Ribbit 2026-10-31, a player's
+/// Didji, its `ProfileAccess="0"` kept; changing ProfileAccess alone did
+/// nothing). None if it has the line.
+pub fn fix_avatar_meta(text: &[u8]) -> Option<Vec<u8>> {
+    let s = String::from_utf8_lossy(text);
+    if s.lines().any(|l| l.trim_end().starts_with("Device=")) {
+        return None;
+    }
+    let newline = if s.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = s.into_owned();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push_str(newline);
+    }
+    out.push_str("Device=\"Didj\"");
+    out.push_str(newline);
+    Some(out.into_bytes())
+}
+
 /// A package's top-level `meta.inf`, if `data` is a package (a zip).
 pub fn meta_of(data: &[u8]) -> Option<Meta> {
     let entries = ribbit_core::zip::entries(data).ok()?;
@@ -248,6 +270,8 @@ mod tests {
         assert_eq!(package_id(&format!("{didji}.lfp")), Some(didji));
         assert_eq!(product(didji), "0x000e000f");
         assert!(Meta::parse("DeviceTypes=\"DIDJ\"\r\nType=\"Avatar\"\r\n").is_didj());
+        assert_eq!(fix_avatar_meta(b"DeviceTypes=\"DIDJ\"\nProfileAccess=\"0\"\n"), Some(b"DeviceTypes=\"DIDJ\"\nProfileAccess=\"0\"\nDevice=\"Didj\"\n".to_vec()));
+        assert_eq!(fix_avatar_meta(b"Device=\"Didj\"\r\nType=\"Avatar\"\r\n"), None);
     }
 
     #[test]

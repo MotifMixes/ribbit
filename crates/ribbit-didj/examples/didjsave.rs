@@ -25,7 +25,19 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (dir, save) = (std::path::Path::new(&args[1]), &args[2]);
     let original = ribbit_didj::nand_from_packages(dir, true).unwrap_or_else(|e| panic!("{e}"));
-    let changes = std::fs::read(save).expect("the save");
+    let changes = if save == "-" { Vec::new() } else { std::fs::read(save).expect("the save") };
+    // `volume <file>`: the Brio volume (the save applied; "-" as the save:
+    // none) written to <file>, for fsck.vfat.
+    if args.get(3).is_some_and(|a| a == "volume") {
+        let mut flash = original.clone();
+        if !changes.is_empty() {
+            flash.apply_changes(&changes).expect("its changes");
+        }
+        let brio = nand::partition("Brio").unwrap();
+        let len = brio::volume_sectors(brio.size / nand::BLOCK) * 512;
+        std::fs::write(&args[4], ubi::read_volume(&flash, brio, len)).expect("writing the volume");
+        return;
+    }
     if args.get(3).is_some_and(|a| a == "carry") {
         for (p, d) in ribbit_didj::carry::user_files(&changes, &original).unwrap_or_else(|e| panic!("{e}")) {
             println!("carry    {p} ({} bytes)", d.len());

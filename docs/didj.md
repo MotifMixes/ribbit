@@ -448,7 +448,12 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   `ProfileAccess="0"`. Until 1.8.2 Ribbit read neither the name nor the meta.inf, so it left them out. Every
   avatar package is installed (`each_version_kept`), to /Didj/Data/Avatars/<folder>, where a player's
   LeapFrog Connect shows them (Mnt\<UnitID> \Data\Avatars beside Avatar1). VERIFIED: booted with two,
-  `ls /Didj/Data/Avatars` lists Avatar1 and both. Whether the menu lists them: UNVERIFIED here.
+  `ls /Didj/Data/Avatars` lists Avatar1 and both. The menu leaves out an avatar whose meta.inf has no
+  `Device="Didj"` line ("NO DIDJIS CREATED", though it logs "folder name while getting avatars is ..." for
+  each); Connect's Didjis have only `DeviceTypes="DIDJ"`, so Ribbit adds the line to every avatar's meta.inf
+  under Data/Avatars, from packages or carried over (`package::fix_avatar_meta`). `ProfileAccess="0"` (quoted)
+  is taken as it is; changing it alone did nothing. VERIFIED (didjboot DIDJ_CARRY with Ribbit's own save,
+  profile MOTIF in /Didj/Data/0): My Didjis > Select a Didji shows AstroGuy and both of the player's Didjis.
 - LeapFrog Connect stops with an error unless the Didj's /Didj/Base holds `bootstrap-LF_LF1000` and
   `firmware-LF_LF1000` (a player: extracted into Connect's Mnt\<UnitID> \Base, it carries on). The
   Bootstrap and Device Firmware packages are now installed there too, beside being written raw; the Didj
