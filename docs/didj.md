@@ -416,6 +416,29 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   today's image: dosfsck 2.11 then runs for many minutes (more than 10 emulated) and fsck.fat 4.2 loops.
   The app sets such saves aside; don't test with them.
 
+## USB (VERIFIED in Ribbit 2026-10-31, firmware 1.35.2.4222; sources: lf1000_udc.c, file_storage.c, init.d/mass_storage, usbctl)
+
+- The LF1000's USB device controller is at 0xC0018000 (to 0xC0018880), interrupt 20: 16-bit registers, one
+  FIFO port per endpoint (0x30 + 2 * n), every byte moved by the CPU, no DMA. Indexed registers (EPSTAT, EPCTL,
+  BRCR, BWCR, MPR) act on the endpoint in EPINDEX; status bits clear by writing 1. The cable is seen by the chip
+  itself (SYSSTAT VBUSON/VBUSOFF, TEST bit 15), not a GPIO. Model: `ribbit_didj::udc`; the bus reset, the
+  speed handshake (high speed) and SET_ADDRESS are the chip's part and done there. Its timings are GUESSES.
+- At boot /etc/init.d/mass_storage loads g_file_storage (`luns=1 stall=0 removable=1 locked=1`), which enables
+  the controller and its VBUS interrupts. With the cable in, monitord sees the "LF1000 USB" switch, the menu
+  quits ("mUsbShutdownOccurred") and usbctl offers /Didj (UBI volume, FAT) as LUN 0.
+- Device: vendor 0x0F63 (LeapFrog), product 0x0800, release 3.18, USB 2.0 high speed, one interface 08/06/50
+  (mass storage, SCSI, Bulk-Only), bulk IN 0x81 and OUT 0x02, 512-byte packets. INQUIRY: "LeapFrog" "Didj" "0318".
+  Windows (usbip-win2) lists it as "LeapFrog Enterprises : Didj" and installs "LeapFrog Didj USB Device".
+- The disk is locked: TEST UNIT READY says medium not present (sense 02/3A) until the PC sends LeapFrog's
+  vendor command UNLOCK (CDB 0xC2, 10 bytes, no data; LOCK is 0xC1). Then: unit attention 06/28, ready;
+  READ CAPACITY 0x6C08F + 1 blocks of 512 (221 MB); block 0 is a FAT boot sector ("mkdosfs").
+  Other vendor commands (file_storage.c do_vendor_command) read the battery, the clock, needs_repair.
+- Pulling the cable: monitord sees "vbus is low", the system shuts down and powers off (the app turns it on).
+- In the app: Emulation > Didj > Plug into this PC (USB): the shared USB/IP server (port 3240) offers the
+  Didj; the cable is in while a client has it imported. Not tried with LeapFrog Connect yet.
+- examples/didjusb.rs plays the PC's part (enumerate, unlock, read block 0); RIBBIT_USBIP=<seconds> serves
+  the console over USB/IP instead.
+
 ## Plan
 
 1. **M1 (done):** these notes, the package reader, and the NAND image.

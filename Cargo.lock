@@ -3511,6 +3511,7 @@ dependencies = [
  "ribbit-arm",
  "ribbit-armjit",
  "ribbit-core",
+ "ribbit-twist",
  "serde",
 ]
 

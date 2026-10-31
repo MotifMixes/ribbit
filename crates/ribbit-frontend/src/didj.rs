@@ -78,6 +78,12 @@ struct Shared {
     /// The Didj kept turning itself off right after starting, so it was
     /// left off (`run`); the app tells the player once.
     gave_up: AtomicBool,
+    /// On the PC's USB: the USB/IP server whose client is the cable
+    /// (`pump_usb`), and news of the link for the app.
+    usb: Mutex<Option<crate::emu::UsbServer>>,
+    usb_news: Mutex<Option<crate::twist::UsbNews>>,
+    /// A USB/IP client has the device imported: the cable is in.
+    usb_host: AtomicBool,
 }
 
 /// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
@@ -149,6 +155,9 @@ impl DidjSession {
             hd: AtomicU32::new(mode.hd),
             sink: Mutex::new(sink),
             gave_up: AtomicBool::new(false),
+            usb: Mutex::new(None),
+            usb_news: Mutex::new(None),
+            usb_host: AtomicBool::new(false),
         });
         let s = shared.clone();
         let thread = std::thread::Builder::new().name("ribbit-didj".into()).spawn(move || {
@@ -176,6 +185,25 @@ impl DidjSession {
     /// itself off right after starting (see `run`).
     pub fn take_gave_up(&self) -> bool {
         self.shared.gave_up.swap(false, Ordering::Relaxed)
+    }
+
+    /// Offers the Didj on the PC's USB through `server`, or stops (the
+    /// cable comes out). The cable goes in when a USB/IP client imports it.
+    pub fn set_usb(&self, server: Option<crate::emu::UsbServer>) {
+        if let Some(srv) = &server {
+            srv.lock().unwrap().set_info(usb_device());
+        }
+        let off = server.is_none();
+        *self.shared.usb.lock().unwrap() = server;
+        if off {
+            self.shared.usb_host.store(false, Ordering::Relaxed);
+            self.shared.didj.lock().unwrap().bus.udc.attach(false);
+        }
+    }
+
+    /// News of the USB link since last asked.
+    pub fn take_usb_news(&self) -> Option<crate::twist::UsbNews> {
+        self.shared.usb_news.lock().unwrap().take()
     }
 
     pub fn set_running(&self, running: bool) {
@@ -339,7 +367,17 @@ fn run(s: &Shared, art: Option<Art>) {
             }
             let cycles = d.cpu_hz() / FPS as u64;
             let t = Instant::now();
-            d.run(cycles);
+            // On USB: in 16 pieces (~1 ms), passing transfers between, so
+            // the PC's next one need not wait for the next frame.
+            if s.usb.lock().unwrap().is_some() {
+                for _ in 0..16 {
+                    pump_usb(s, &mut d);
+                    d.run(cycles / 16);
+                }
+                pump_usb(s, &mut d);
+            } else {
+                d.run(cycles);
+            }
             // The system turned itself off (after installing a cartridge's
             // update, as a real Didj does): on again, as its owner would, and
             // the game started again. Not a third time in a row within a
@@ -414,6 +452,62 @@ fn run(s: &Shared, art: Option<Art>) {
         }
     }
     power_off(s);
+}
+
+/// Passes the PC's transfers (USB/IP) to the Didj's USB controller
+/// (ribbit_didj::udc) and its answers back. The cable is in while a client
+/// has the device imported, also across a power-on (a new console).
+fn pump_usb(s: &Shared, d: &mut Didj) {
+    use ribbit_didj::udc::Transfer;
+    use ribbit_twist::usbip::Event;
+    let Some(srv) = s.usb.lock().unwrap().clone() else { return };
+    let srv = srv.lock().unwrap();
+    while let Some(e) = srv.next_event() {
+        match e {
+            Event::Attached => {
+                s.usb_host.store(true, Ordering::Relaxed);
+                *s.usb_news.lock().unwrap() = Some(crate::twist::UsbNews::Attached);
+            }
+            Event::Detached => {
+                s.usb_host.store(false, Ordering::Relaxed);
+                d.bus.udc.attach(false);
+                *s.usb_news.lock().unwrap() = Some(crate::twist::UsbNews::Detached);
+            }
+            Event::Submit(u) => {
+                if !d.bus.udc.attached && s.usb_host.load(Ordering::Relaxed) {
+                    d.bus.udc.attach(true);
+                }
+                d.bus.udc.submit(Transfer { seq: u.seq, endpoint: u.endpoint, dir_in: u.dir_in, setup: u.setup, data: u.data, length: u.length });
+            }
+            Event::Unlink(seq) => {
+                d.bus.udc.unlink(seq);
+            }
+        }
+    }
+    if s.usb_host.load(Ordering::Relaxed) && !d.bus.udc.attached {
+        d.bus.udc.attach(true);
+    }
+    for (seq, status, data, length) in d.bus.udc.take_done() {
+        srv.complete(seq, status, data, length);
+    }
+}
+
+/// The Didj as USB/IP lists it before a client imports it (its device
+/// descriptor, VERIFIED with examples/didjusb.rs: vendor 0x0F63, LeapFrog;
+/// product 0x0800; release 3.18; high speed; one mass-storage interface,
+/// SCSI, Bulk-Only).
+pub fn usb_device() -> ribbit_twist::usbip::DeviceInfo {
+    ribbit_twist::usbip::DeviceInfo {
+        busid: "1-1".into(),
+        vendor: 0x0F63,
+        product: 0x0800,
+        bcd_device: 0x0318,
+        class: (0, 0, 0),
+        configuration: 1,
+        num_configurations: 1,
+        interfaces: vec![(8, 6, 0x50)],
+        speed: 3,
+    }
 }
 
 /// Turns the Didj off with its power button, as a player would: Linux then

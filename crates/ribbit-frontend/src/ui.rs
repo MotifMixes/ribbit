@@ -67,6 +67,8 @@ pub enum Action {
     SetTwistUsb(bool),
     /// Offer a Leapster 2 on the PC's USB, or stop.
     SetLeapster2Usb(bool),
+    /// Offer the Didj on the PC's USB, or stop.
+    SetDidjUsb(bool),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
     ImportTwistZip(PathBuf),
     /// Change the Leapster 2's SD card (Emulation › Leapster 2 SD card).
@@ -1126,6 +1128,22 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                         "No Didj found: add the folder that holds its firmware packages (DIDJ-0x….lfp) with \"Add games folder\".",
                     );
                 }
+            }
+            let usb = settings.didj_usb;
+            if ui
+                .button(if usb {
+                    // Green while offered, red while not (as the RockIt Twist's).
+                    egui::RichText::new("🔌  Unplug from this PC (USB)").color(egui::Color32::from_rgb(80, 200, 110))
+                } else {
+                    egui::RichText::new("🔌  Plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
+                })
+                .on_hover_text(format!(
+                    "Experimental. Offers the emulated Didj as a USB device to this PC through USB/IP (port 3240),                      so LeapFrog Connect can talk to it. {USBIP_NEEDS} Then run: {USBIP_ATTACH}. The cable is in                      while that is attached; detaching pulls it out, and the Didj then turns off and on, as a real                      one does."
+                ))
+                .clicked()
+            {
+                actions.push(Action::SetDidjUsb(!usb));
+                ui.close();
             }
             ui.separator();
             let mut original = !settings.didj_enhanced;

@@ -44,6 +44,7 @@ pub mod timer;
 pub mod touch;
 pub mod ubi;
 pub mod ubifs;
+pub mod udc;
 
 /// The internal NAND as LeapFrog Connect leaves it with the packages in
 /// `dir` (the `DIDJ-0x...lfp` files): the firmware written raw, the rest

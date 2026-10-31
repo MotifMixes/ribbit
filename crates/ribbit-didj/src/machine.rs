@@ -282,6 +282,8 @@ pub struct Bus {
     pub dma: crate::dma::Dma,
     pub ga3d: crate::ga3d::Ga3d,
     adc_pending: bool,
+    /// The USB device controller; the host's side comes from the app.
+    pub udc: crate::udc::Udc,
     /// I2C0 and the sound codec on it (Explorer only).
     #[serde(default)]
     pub i2c: crate::i2c::I2c,
@@ -710,6 +712,9 @@ impl Bus {
         if self.explorer && (crate::i2c::BASE..crate::i2c::END).contains(&addr) {
             return self.i2c.read(addr - crate::i2c::BASE);
         }
+        if (crate::udc::BASE..crate::udc::END).contains(&addr) {
+            return self.udc.read(addr - crate::udc::BASE, size);
+        }
         if (crate::ga3d::BASE..crate::ga3d::END).contains(&addr) {
             let shift = 8 * (addr & 3);
             let mask = if size == 4 { u32::MAX } else { (1 << (8 * size)) - 1 };
@@ -751,6 +756,9 @@ impl Bus {
         }
         if self.explorer && (crate::i2c::BASE..crate::i2c::END).contains(&addr) {
             return self.i2c.write(addr - crate::i2c::BASE, v);
+        }
+        if (crate::udc::BASE..crate::udc::END).contains(&addr) {
+            return self.udc.write(addr - crate::udc::BASE, v, size);
         }
         // Narrow writes merge into the register's 32-bit value.
         let base = addr & !3;
@@ -938,6 +946,7 @@ impl Didj {
             dma: Default::default(),
             ga3d: Default::default(),
             adc_pending: false,
+            udc: Default::default(),
             i2c: Default::default(),
             buttons: 0,
             powered_off: false,
@@ -1162,6 +1171,8 @@ impl Didj {
                     let (cpu_hz, plls) = self.clocks();
                     let frame = (cpu_hz / FRAME_HZ).saturating_sub(self.bus.frame_cycles);
                     let skip = self.bus.timers.next_event(cpu_hz, plls).min(self.bus.dma.next_event(cpu_hz)).min(frame).min(end.saturating_sub(self.cpu.cycles));
+                    // The USB host has work: wake again soon (`Udc::tick`).
+                    let skip = if self.bus.udc.busy() { skip.min(cpu_hz / 20_000) } else { skip };
                     self.cpu.cycles += skip.max(SLICE) - 1;
                     break;
                 }
@@ -1170,6 +1181,7 @@ impl Didj {
             self.bus.timers.tick(self.cpu.cycles - before, cpu_hz, plls);
             self.bus.dma.tick(self.cpu.cycles - before, cpu_hz, &self.bus.sdram);
             self.bus.ga3d.tick(self.cpu.cycles - before, cpu_hz);
+            self.bus.udc.tick(self.cpu.cycles - before, cpu_hz);
             self.bus.frame_cycles += self.cpu.cycles - before;
             if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
                 self.bus.frame_cycles = 0;
@@ -1194,6 +1206,9 @@ impl Didj {
             }
             if self.bus.i2c.irq() {
                 self.bus.timers.raise(crate::i2c::IRQ);
+            }
+            if self.bus.udc.irq() {
+                self.bus.timers.raise(crate::udc::IRQ);
             }
             if self.bus.gpio_tick() {
                 self.bus.timers.raise(GPIO_IRQ);

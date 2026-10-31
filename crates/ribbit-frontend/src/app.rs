@@ -118,9 +118,10 @@ pub struct App {
     zippity_cleaning: Option<std::thread::JoinHandle<anyhow::Result<PathBuf>>>,
     /// A zip of RockIt Twist packages being unpacked.
     twist_import: Option<std::thread::JoinHandle<anyhow::Result<crate::twist::Imported>>>,
-    /// The Leapster 2's USB/IP server, once started (its port stays bound
-    /// for the rest of the program).
-    leapster2_usb: Option<crate::emu::UsbServer>,
+    /// The USB/IP server for the Leapster 2 and the Didj, once started (its
+    /// port stays bound for the rest of the program; it offers whichever
+    /// console runs).
+    usb_server: Option<crate::emu::UsbServer>,
     /// A RockIt Twist session (early emulation), instead of the others.
     twist: Option<crate::twist::TwistSession>,
     /// An original LeapPad being played.
@@ -290,7 +291,7 @@ impl App {
             tv_frame: Vec::new(),
             zippity_cleaning: None,
             twist_import: None,
-            leapster2_usb: None,
+            usb_server: None,
             twist: None,
             leappad: None,
             console_view: ConsoleView::default(),
@@ -994,6 +995,7 @@ impl App {
                     d.title.clone_from(&g.title);
                 }
                 self.didj = Some(d);
+                self.apply_didj_usb();
                 self.paused = false;
                 // Remembered for a cartridge opened from another folder.
                 let system = crate::didj::find_package(&dir, 0);
@@ -1859,6 +1861,16 @@ impl App {
                     self.ui.toast("Leapster 2 unplugged from USB");
                 }
             }
+            Action::SetDidjUsb(on) => {
+                self.settings.didj_usb = on;
+                self.save_settings();
+                self.apply_didj_usb();
+                self.ui.toast(if on {
+                    format!("Didj on USB: run  {}  to plug it in", crate::ui::USBIP_ATTACH)
+                } else {
+                    "Didj unplugged from USB".to_string()
+                });
+            }
             Action::ImportTwistZip(path) => self.import_twist_zip(path),
             Action::SdCard(job) => self.sd_card(job),
             Action::SetSdFolder(path) => self.set_sd_folder(path),
@@ -2485,22 +2497,43 @@ impl App {
             s.emu.set_usb(None);
             return;
         }
-        if self.leapster2_usb.is_none() {
-            match ribbit_twist::usbip::Server::start(leapster2_usb_device(), ribbit_twist::usbip::PORT) {
-                Ok(srv) => self.leapster2_usb = Some(std::sync::Arc::new(std::sync::Mutex::new(srv))),
-                Err(e) => {
-                    self.ui.toast(format!("Leapster 2 USB: can't listen on port 3240 ({e})"));
-                    return;
-                }
-            }
+        let Some(srv) = self.usb_server(leapster2_usb_device(), "Leapster 2") else { return };
+        if let Some(s) = &self.session {
+            s.emu.set_usb(Some(srv));
         }
-        s.emu.set_usb(self.leapster2_usb.clone());
+    }
+
+    /// The USB/IP server offering `info` (started the first time).
+    fn usb_server(&mut self, info: ribbit_twist::usbip::DeviceInfo, console: &str) -> Option<crate::emu::UsbServer> {
+        match &self.usb_server {
+            Some(srv) => srv.lock().unwrap().set_info(info),
+            None => match ribbit_twist::usbip::Server::start(info, ribbit_twist::usbip::PORT) {
+                Ok(srv) => self.usb_server = Some(std::sync::Arc::new(std::sync::Mutex::new(srv))),
+                Err(e) => {
+                    self.ui.toast(format!("{console} USB: can't listen on port 3240 ({e})"));
+                    return None;
+                }
+            },
+        }
+        self.usb_server.clone()
+    }
+
+    /// Offers the running Didj on USB if so set, else unplugs it.
+    fn apply_didj_usb(&mut self) {
+        if self.didj.is_none() {
+            return;
+        }
+        let srv = if self.settings.didj_usb { self.usb_server(crate::didj::usb_device(), "Didj") } else { None };
+        if let Some(d) = &self.didj {
+            d.set_usb(srv);
+        }
     }
 
     fn halted(&self) -> bool {
         // A console plugged into the PC keeps running in the background.
         let on_usb = (self.twist.is_some() && self.settings.twist_usb)
-            || (self.settings.leapster2_usb && self.session.as_ref().is_some_and(|s| s.hardware == Hardware::Leapster2));
+            || (self.settings.leapster2_usb && self.session.as_ref().is_some_and(|s| s.hardware == Hardware::Leapster2))
+            || (self.didj.is_some() && self.settings.didj_usb);
         self.paused || (self.background && self.settings.pause_in_background && !on_usb)
     }
 
@@ -2734,6 +2767,12 @@ impl App {
             d.set_running(!halted);
             d.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
             self.speed_percent = d.speed_percent();
+            match d.take_usb_news() {
+                Some(crate::twist::UsbNews::Attached) => self.ui.toast("Didj plugged into this PC"),
+                Some(crate::twist::UsbNews::Detached) => self.ui.toast("Didj unplugged from this PC"),
+                Some(crate::twist::UsbNews::Failed(e)) => self.ui.toast(format!("Didj USB: {e}")),
+                None => {}
+            }
             if d.take_gave_up() {
                 let explain = if self.settings.didj_enhanced {
                     "It turned itself off 3 times in a row soon after starting, so Ribbit left it off. Try starting the Didj's menu without a game, or another cartridge."

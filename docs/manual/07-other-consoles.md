@@ -59,11 +59,12 @@ The menu, the built-in games, the videos and the sound work; the console keeps i
 
 ## Plugging a console into this PC (USB)
 
-**Emulation › Leapster 2: plug into this PC (USB)** and **Emulation › RockIt Twist › Plug into this PC (USB)** offer the emulated console to your PC as a USB device through USB/IP, so programs such as LeapLoader (Leapster 2) or LeapFrog Connect (RockIt Twist) can talk to it. Then connect it with a USB/IP client:
+**Emulation › Leapster 2: plug into this PC (USB)**, **Emulation › RockIt Twist › Plug into this PC (USB)** and **Emulation › Didj › Plug into this PC (USB)** offer the emulated console to your PC as a USB device through USB/IP, so programs such as LeapLoader (Leapster 2) or LeapFrog Connect (RockIt Twist, Didj) can talk to it. Then connect it with a USB/IP client:
 
 - **Windows**: install usbip-win2 (`winget install usbip-win2`), then run `usbip attach -r 127.0.0.1 -b 1-1`.
 - **Linux**: the client is part of the kernel. Install the `usbip` tool (Ubuntu/Debian: `sudo apt install linux-tools-generic`; Fedora: `sudo dnf install usbip`), load its module once with `sudo modprobe vhci-hcd`, then run `sudo usbip attach -r 127.0.0.1 -b 1-1`. The Leapster 2 shows up as two drives (Leapster 2-RAM and Leapster 2-SD).
 - For the Leapster 2, wait about 7 seconds after plugging in before you attach: a running Leapster 2 restarts once, as a real one does.
+- The Didj is plugged in while `usbip attach` has it: its menu closes and it waits for the PC, as a real one does. Windows shows it as a LeapFrog Didj drive with no disk in it until LeapFrog Connect unlocks it. Detaching pulls the cable out: the Didj shuts down, and Ribbit turns it on again.
 - `usbip detach -p 0` (with `sudo` on Linux) unplugs it from the PC's side.
 
 ## Didj (early emulation)

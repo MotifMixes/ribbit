@@ -144,6 +144,8 @@ pub struct Settings {
     pub twist_usb: bool,
     /// Offer a running Leapster 2 on the PC's USB (USB/IP, as `twist_usb`).
     pub leapster2_usb: bool,
+    /// Offer the Didj on the PC's USB (USB/IP, as `twist_usb`).
+    pub didj_usb: bool,
     /// The player's RockIt Twist keys: action (`twist::action_name`) to key
     /// name; actions not here keep their default keys.
     pub twist_keys: BTreeMap<String, String>,
@@ -273,6 +275,7 @@ impl Default for Settings {
             leapster2_sd_folder: None,
             twist_usb: false,
             leapster2_usb: false,
+            didj_usb: false,
             twist_keys: BTreeMap::new(),
             leappad_bios: None,
             leappad_books: BTreeMap::new(),

@@ -85,6 +85,8 @@ pub struct Server {
     /// Transfers the host is waiting on (an unlink of one not here is
     /// answered as already finished).
     pending: Arc<Mutex<HashSet<u32>>>,
+    /// The device offered (`set_info`).
+    info: Arc<Mutex<DeviceInfo>>,
     pub port: u16,
 }
 
@@ -96,7 +98,8 @@ impl Server {
         let (ev_tx, events) = channel();
         let replies: Arc<Mutex<Option<Sender<Reply>>>> = Arc::new(Mutex::new(None));
         let pending = Arc::new(Mutex::new(HashSet::new()));
-        let (r, p) = (replies.clone(), pending.clone());
+        let info = Arc::new(Mutex::new(info));
+        let (r, p, i) = (replies.clone(), pending.clone(), info.clone());
         std::thread::Builder::new().name("usbip".into()).spawn(move || {
             for stream in listener.incoming().flatten() {
                 // Only a connection that imported the device unplugs it when
@@ -104,6 +107,7 @@ impl Server {
                 // cable pulled for a moment, and the RockIt Twist then
                 // missed its bus reset and never answered the attach after.
                 let mut imported = false;
+                let info = i.lock().unwrap().clone();
                 let _ = serve(stream, &info, &ev_tx, &r, &p, &mut imported);
                 if !imported {
                     continue;
@@ -115,7 +119,13 @@ impl Server {
                 }
             }
         })?;
-        Ok(Self { events, replies, pending, port })
+        Ok(Self { events, replies, pending, info, port })
+    }
+
+    /// Offers another device from the next connection on (one server, one
+    /// port, for whichever console runs).
+    pub fn set_info(&self, info: DeviceInfo) {
+        *self.info.lock().unwrap() = info;
     }
 
     /// The next transfer, cancellation or detach, if any (non-blocking).

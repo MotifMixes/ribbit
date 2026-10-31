@@ -24,3 +24,5 @@ bzip2 = "0.6"
 [dev-dependencies]
 # didjboot's DIDJ_START reads the game's art.
 png = "0.18"
+# didjusb's RIBBIT_USBIP=1 serves the console over USB/IP.
+ribbit-twist.workspace = true
