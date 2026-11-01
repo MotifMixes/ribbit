@@ -504,6 +504,11 @@ TCP terminal types `uname -r` and gets `2.6.20.1-leapfrog`, about 4 s after powe
   READ CAPACITY 0x6C08F + 1 blocks of 512 (221 MB); block 0 is a FAT boot sector ("mkdosfs").
   Other vendor commands (file_storage.c do_vendor_command) read the battery, the clock, needs_repair.
 - Pulling the cable: monitord sees "vbus is low", the system shuts down and powers off (the app turns it on).
+- On the bus only while its USB driver is loaded (`Udc::ready`: g_file_storage enabled the VBUS interrupt).
+  A `usbip attach` while the Didj is starting waits for it (up to 30 s, `Server::set_ready`): Windows
+  enumerates at once, and before, the descriptor requests went unanswered ("USB device not recognized",
+  a player, 2026-11-01). When the Didj turns off or starts again while attached, Ribbit closes the client's
+  connection (`Server::disconnect`): to Windows the cable is pulled; attach again once it is up.
 - In the app: Emulation > Didj > Plug into this PC (USB): the shared USB/IP server (port 3240) offers the
   Didj; the cable is in while a client has it imported. Not tried with LeapFrog Connect yet.
 - examples/didjusb.rs plays the PC's part (enumerate, unlock, read block 0); RIBBIT_USBIP=<seconds> serves

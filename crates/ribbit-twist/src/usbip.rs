@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const PORT: u16 = 3240;
@@ -29,6 +30,8 @@ const CMD_SUBMIT: u32 = 1;
 const CMD_UNLINK: u32 = 2;
 const RET_SUBMIT: u32 = 3;
 const RET_UNLINK: u32 = 4;
+/// The longest an import waits for the device to be ready (`set_ready`).
+const READY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Linux error numbers the protocol carries (negated).
 pub const ECONNRESET: i32 = 104;
 pub const EPIPE: i32 = 32;
@@ -87,6 +90,10 @@ pub struct Server {
     pending: Arc<Mutex<HashSet<u32>>>,
     /// The device offered (`set_info`).
     info: Arc<Mutex<DeviceInfo>>,
+    /// The device can be enumerated (`set_ready`): an import waits for it.
+    ready: Arc<AtomicBool>,
+    /// The importing client's connection, to end it (`disconnect`).
+    client: Arc<Mutex<Option<TcpStream>>>,
     pub port: u16,
 }
 
@@ -99,7 +106,9 @@ impl Server {
         let replies: Arc<Mutex<Option<Sender<Reply>>>> = Arc::new(Mutex::new(None));
         let pending = Arc::new(Mutex::new(HashSet::new()));
         let info = Arc::new(Mutex::new(info));
-        let (r, p, i) = (replies.clone(), pending.clone(), info.clone());
+        let ready = Arc::new(AtomicBool::new(true));
+        let client: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
+        let (r, p, i, rd, c) = (replies.clone(), pending.clone(), info.clone(), ready.clone(), client.clone());
         std::thread::Builder::new().name("usbip".into()).spawn(move || {
             for stream in listener.incoming().flatten() {
                 // Only a connection that imported the device unplugs it when
@@ -108,7 +117,9 @@ impl Server {
                 // missed its bus reset and never answered the attach after.
                 let mut imported = false;
                 let info = i.lock().unwrap().clone();
-                let _ = serve(stream, &info, &ev_tx, &r, &p, &mut imported);
+                *c.lock().unwrap() = stream.try_clone().ok();
+                let _ = serve(stream, &info, &ev_tx, &r, &p, &rd, &mut imported);
+                *c.lock().unwrap() = None;
                 if !imported {
                     continue;
                 }
@@ -119,13 +130,31 @@ impl Server {
                 }
             }
         })?;
-        Ok(Self { events, replies, pending, info, port })
+        Ok(Self { events, replies, pending, info, ready, client, port })
     }
 
     /// Offers another device from the next connection on (one server, one
-    /// port, for whichever console runs).
+    /// port, for whichever console runs). It is ready until `set_ready`
+    /// says otherwise.
     pub fn set_info(&self, info: DeviceInfo) {
         *self.info.lock().unwrap() = info;
+        self.ready.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the device answers on the bus yet (a Didj starting up: not
+    /// until its USB driver is loaded). An import waits for it, up to
+    /// `READY_WAIT`: the PC enumerates at once, and a device that doesn't
+    /// answer is "USB device not recognized".
+    pub fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::Relaxed);
+    }
+
+    /// Ends the importing client's connection: to the PC, the device is
+    /// unplugged (a console turning off or starting again leaves the bus).
+    pub fn disconnect(&self) {
+        if let Some(s) = self.client.lock().unwrap().as_ref() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     /// The next transfer, cancellation or detach, if any (non-blocking).
@@ -182,6 +211,7 @@ fn serve(
     events: &Sender<Event>,
     replies: &Arc<Mutex<Option<Sender<Reply>>>>,
     pending: &Arc<Mutex<HashSet<u32>>>,
+    ready: &AtomicBool,
     imported: &mut bool,
 ) -> std::io::Result<()> {
     s.set_nodelay(true)?;
@@ -205,6 +235,10 @@ fn serve(
             s.read_exact(&mut busid)?;
             let wanted = String::from_utf8_lossy(&busid).trim_end_matches('\0').to_string();
             let ok = wanted == info.busid;
+            let since = std::time::Instant::now();
+            while ok && !ready.load(Ordering::Relaxed) && since.elapsed() < READY_WAIT {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             let mut r = Vec::new();
             r.extend_from_slice(&VERSION.to_be_bytes());
             r.extend_from_slice(&OP_REP_IMPORT.to_be_bytes());
@@ -334,6 +368,45 @@ mod tests {
         c.write_all(&[0x01, 0x11, 0x80, 0x05, 0, 0, 0, 0]).unwrap();
         c.read_to_end(&mut r).unwrap();
         assert!(server.next_event().is_none(), "no Detached after `usbip list`");
+    }
+
+    #[test]
+    fn an_import_waits_until_ready_and_disconnect_unplugs() {
+        let server = Server::start(info(), 0).unwrap();
+        server.set_ready(false);
+        let mut c = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        let mut req = vec![0x01, 0x11, 0x80, 0x03, 0, 0, 0, 0];
+        let mut busid = [0u8; 32];
+        busid[..3].copy_from_slice(b"1-1");
+        req.extend_from_slice(&busid);
+        c.write_all(&req).unwrap();
+        // Not answered while the device isn't ready.
+        c.set_read_timeout(Some(std::time::Duration::from_millis(300))).unwrap();
+        let mut rep = [0u8; 8 + 312];
+        assert!(c.read_exact(&mut rep).is_err(), "answered before ready");
+        server.set_ready(true);
+        c.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        c.read_exact(&mut rep).unwrap();
+        assert_eq!(be32(&rep[4..]), 0, "imported");
+        let wait = |want: &Event| {
+            let t = std::time::Instant::now();
+            while t.elapsed() < std::time::Duration::from_secs(5) {
+                if server.next_event().as_ref() == Some(want) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        };
+        assert!(wait(&Event::Attached));
+        // The device leaves the bus: the client's connection ends.
+        server.disconnect();
+        let mut rest = Vec::new();
+        assert_eq!(c.read_to_end(&mut rest).map(|_| ()).ok(), Some(()), "connection closed");
+        // (On Windows a blocked read ends once the client closes its end too,
+        // as usbip-win2 does when the server closes.)
+        drop(c);
+        assert!(wait(&Event::Detached));
     }
 
     #[test]

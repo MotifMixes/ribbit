@@ -341,6 +341,12 @@ impl Udc {
         self.done.push((c.t.seq, status, if c.t.dir_in { c.data } else { Vec::new() }, n));
     }
 
+    /// The driver is loaded (it enabled the cable's interrupt): a host can
+    /// enumerate the device. Until then a real Didj isn't on the bus.
+    pub fn ready(&self) -> bool {
+        self.reg(SYSCTL) & VBUSONEN != 0
+    }
+
     /// The interrupt line.
     pub fn irq(&self) -> bool {
         let ctl = self.reg(SYSCTL);

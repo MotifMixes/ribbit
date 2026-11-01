@@ -28,6 +28,9 @@ pub enum Hardware {
     /// LeapFrog Didj (2008 handheld): an LF1000 (ARM926EJ-S) running Linux,
     /// its NAND built from its firmware packages (crates/ribbit-didj).
     Didj,
+    /// LeapFrog Leapster Explorer (2010): the Didj's LF1000 with 64 MB, its
+    /// NAND built from its firmware packages (ribbit_didj::explorer).
+    Explorer,
 }
 
 impl Hardware {
@@ -42,6 +45,7 @@ impl Hardware {
             Hardware::RockItTwist => "RockIt Twist",
             Hardware::LeapPad => "LeapPad",
             Hardware::Didj => "Didj",
+            Hardware::Explorer => "Leapster Explorer",
         }
     }
 }

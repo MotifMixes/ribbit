@@ -799,6 +799,11 @@ impl App {
             }
             None => {}
         }
+        // The Leapster Explorer's firmware: the Explorer, built from the
+        // packages beside it.
+        if crate::didj::describe_explorer(&path).is_some() {
+            return self.start_explorer(path);
+        }
         // A Didj package: the Didj, built from the packages beside it.
         if crate::didj::is_package(&path) {
             let art = crate::didj::menu_art(&path, None);
@@ -1047,6 +1052,30 @@ impl App {
                 };
                 self.ui.problem("Couldn't start the Didj", explain, e)
             }
+        }
+    }
+
+    /// Plays a Leapster Explorer built from the packages in the folder of
+    /// `firmware` (its Firmware Base package).
+    fn start_explorer(&mut self, firmware: PathBuf) {
+        self.end_session();
+        let dir = firmware.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::didj::DidjSession::start_explorer(&dir, &self.save_dir(), sink, self.ui.serial.clone()) {
+            Ok(d) => {
+                self.fit_window = FIT_TRIES;
+                self.didj = Some(d);
+                self.paused = false;
+                if let Some(a) = &mut self.audio {
+                    a.clear();
+                }
+                self.update_title();
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't start the Leapster Explorer",
+                format!("Ribbit builds the Explorer's memory from its packages as LeapFrog Connect downloads them (Firmware Base.lfp, Firmware Bulk Empty.lfp and the .lf2 files), all in one folder: \"{}\". One may be missing or damaged.", dir.display()),
+                format!("{e:#}"),
+            ),
         }
     }
 
@@ -1414,8 +1443,8 @@ impl App {
             Some(Hardware::RockItTwist)
         } else if self.zippity.is_some() {
             Some(Hardware::Zippity)
-        } else if self.didj.is_some() {
-            Some(Hardware::Didj)
+        } else if let Some(d) = &self.didj {
+            Some(if d.explorer { Hardware::Explorer } else { Hardware::Didj })
         } else {
             self.session.as_ref().map(|s| s.hardware)
         }
@@ -1709,8 +1738,8 @@ impl App {
         } else {
             let system = if self.zippity.is_some() {
                 "Zippity"
-            } else if self.didj.is_some() {
-                "Didj"
+            } else if let Some(d) = &self.didj {
+                if d.explorer { "Leapster Explorer" } else { "Didj" }
             } else if self.twist.is_some() { "RockIt Twist" } else { "no game" };
             crate::debugger::Snapshot { system: system.into(), ..Default::default() }
         };
@@ -2386,7 +2415,13 @@ impl App {
             (None, None, None) if self.didj.is_some() => {
                 let title = self.didj.as_ref().map_or("", |d| d.title.as_str());
                 let name: String = title.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-                if name == "didj" { name } else { format!("didj-{name}") }
+                if self.didj.as_ref().is_some_and(|d| d.explorer) {
+                    "explorer".to_string()
+                } else if name == "didj" {
+                    name
+                } else {
+                    format!("didj-{name}")
+                }
             }
             _ => return None,
         };
@@ -2589,7 +2624,8 @@ impl App {
 
     /// Offers the running Didj on USB if so set, else unplugs it.
     fn apply_didj_usb(&mut self) {
-        if self.didj.is_none() {
+        // The Explorer's USB isn't modelled yet.
+        if self.didj.as_ref().is_none_or(|d| d.explorer) {
             return;
         }
         let srv = if self.settings.didj_usb { self.usb_server(crate::didj::usb_device(), "Didj") } else { None };
@@ -3023,6 +3059,16 @@ impl App {
 
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
     fn set_stylus(&mut self, pos: Option<(f64, f64)>) {
+        // The Leapster Explorer's touch screen: the stylus in its pixels.
+        if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
+            let (x, y, w, h) = self.lcd_px;
+            let (sw, sh) = (crate::didj::SCREEN_W as f32, crate::didj::SCREEN_H as f32);
+            d.set_touch(pos.and_then(|(cx, cy)| {
+                let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
+                ((0.0..sw).contains(&px) && (0.0..sh).contains(&py)).then_some((px, py))
+            }));
+            return;
+        }
         let Some(s) = &mut self.session else {
             return;
         };
@@ -3468,7 +3514,7 @@ impl App {
                 (None, Some(t), _) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
                 (None, None, Some(l)) => crate::discord::Presence::playing(&l.title, "LeapPad", l.started).with_series(l.series.as_deref()),
                 (None, None, None) => match &self.didj {
-                    Some(d) => crate::discord::Presence::playing(&d.title, "Didj", d.started),
+                    Some(d) => crate::discord::Presence::playing(&d.title, if d.explorer { "Leapster Explorer" } else { "Didj" }, d.started),
                     None => crate::discord::Presence::Browsing,
                 },
             },

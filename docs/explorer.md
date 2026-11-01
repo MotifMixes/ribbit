@@ -5,7 +5,7 @@ the same LF1000 (MagicEyes Pollux, ARM926EJ-S at 393 MHz) as the Didj, so Ribbit
 emulates it with the Didj's machine (`crates/ribbit-didj`, `src/explorer.rs`).
 Status: boots Linux and LeapFrog's AppManager; touch screen and buttons work in the
 first-time setup (Language Selection, Set the Date); the NOR flash with factory data
-is there; no app support yet.
+is there. In the app (early): the library lists Firmware Base.lfp as the console and starts it from the packages beside it; the mouse is the stylus; saves in explorer-<folder>.nandblocks and .nor.
 
 Run: `cargo run --release -p ribbit-didj --example explorerboot -- <folder> [million cycles]`
 with the folder holding the English firmware set (archive.org item
@@ -168,8 +168,8 @@ sample for sample.
 
 ## Not done yet
 
-* Codec volume/mute applied to the sound, the LFP100 power chip, cartridges, the app
-  (library, touch from the mouse, buttons from the keyboard, saving NAND and NOR).
+* Codec volume/mute applied to the sound, the LFP100 power chip, cartridges, USB, the
+  volume buttons in the app, carrying saves over to another image. The app's start is untested by a player.
   D-pad tested (moves the highlight); A/B and the rest not tried yet.
 
 Sources: LF1000 kernel 2.6.37 port (github.com/mac2612/lf1000_kernel; LeapFrog's

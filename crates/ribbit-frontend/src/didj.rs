@@ -86,6 +86,10 @@ struct Shared {
     usb_host: AtomicBool,
     /// UART0, the Linux console: to the app's window and terminals.
     serial: Arc<crate::serial::Serial>,
+    /// A Leapster Explorer (`ribbit_didj::explorer`), not a Didj.
+    explorer: bool,
+    /// The Explorer's stylus on the screen (pixels), None while lifted.
+    touch: Mutex<Option<(f32, f32)>>,
 }
 
 /// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
@@ -119,6 +123,8 @@ pub struct DidjSession {
     /// The save was made on another image: this many of the player's files
     /// were carried over from it (`ribbit_didj::carry`).
     pub carried: Option<usize>,
+    /// A Leapster Explorer (`start_explorer`).
+    pub explorer: bool,
 }
 
 impl DidjSession {
@@ -200,6 +206,8 @@ impl DidjSession {
             usb_news: Mutex::new(None),
             usb_host: AtomicBool::new(false),
             serial,
+            explorer: false,
+            touch: Mutex::new(None),
         });
         shared.serial.note("--- Ribbit: the Didj powers on ---
 ");
@@ -209,7 +217,66 @@ impl DidjSession {
             run(&s, autostart)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried })
+        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false })
+    }
+
+    /// Powers on a Leapster Explorer built from the packages in `dir`
+    /// (`ribbit_didj::explorer::nand_from_packages`), with what it saved to
+    /// its NAND and NOR flash before.
+    pub fn start_explorer(dir: &Path, save_dir: &Path, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>) -> anyhow::Result<Self> {
+        let original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
+        let save_path = explorer_save_file(dir, save_dir);
+        let image = format!("{:08x}", original.fingerprint());
+        let image_path = save_path.with_extension("nandimage");
+        let mut flash = original.clone();
+        // A save made on another image would mix two file system layouts:
+        // set aside (the Explorer's files aren't carried over yet).
+        if save_path.exists() && std::fs::read_to_string(&image_path).ok().as_deref() != Some(image.as_str()) {
+            let aside = set_aside(&save_path);
+            tracing::warn!(target: "ribbit::saves", "{} was made on another NAND image; kept as {}", save_path.display(), aside.display());
+        } else if let Ok(changes) = std::fs::read(&save_path)
+            && let Err(e) = flash.apply_changes(&changes)
+        {
+            tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
+            flash = original.clone();
+        }
+        let mut lx = ribbit_didj::explorer::boot(flash, ribbit_didj::explorer::CMDLINE).map_err(anyhow::Error::msg)?;
+        if let Ok(nor) = std::fs::read(save_path.with_extension("nor")) {
+            lx.bus.nor = Some(ribbit_didj::nor::Nor::new(nor));
+        }
+        let shared = Arc::new(Shared {
+            didj: Mutex::new(lx),
+            frame: Mutex::new((SCREEN_W, SCREEN_H, vec![0; SCREEN_W * SCREEN_H])),
+            running: AtomicBool::new(true),
+            quit: AtomicBool::new(false),
+            held: AtomicU32::new(0),
+            gain: AtomicU32::new(1f32.to_bits()),
+            speed: AtomicU32::new(100f32.to_bits()),
+            cpu_max: AtomicU32::new(1000),
+            frame_skip: AtomicBool::new(false),
+            hd: AtomicU32::new(1),
+            sink: Mutex::new(sink),
+            gave_up: AtomicBool::new(false),
+            usb: Mutex::new(None),
+            usb_news: Mutex::new(None),
+            usb_host: AtomicBool::new(false),
+            serial,
+            explorer: true,
+            touch: Mutex::new(None),
+        });
+        shared.serial.note("--- Ribbit: the Leapster Explorer powers on ---\n");
+        let s = shared.clone();
+        let thread = std::thread::Builder::new().name("ribbit-explorer".into()).spawn(move || {
+            crate::perf::raise_thread_priority();
+            run(&s, None)
+        })?;
+        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        Ok(Self { shared, thread: Some(thread), title: "Leapster Explorer".into(), started, original, save_path, image, extras_missing: Vec::new(), carried: None, explorer: true })
+    }
+
+    /// The Explorer's stylus at `pos` on the screen (pixels; None lifts it).
+    pub fn set_touch(&self, pos: Option<(f32, f32)>) {
+        *self.shared.touch.lock().unwrap() = pos;
     }
 
     /// Copies the latest picture into `out`; its size (SCREEN_W x SCREEN_H,
@@ -287,6 +354,10 @@ impl DidjSession {
     /// Restarts the console (keeping what it has saved), in `mode`.
     pub fn reset(&self, mode: Mode) {
         let mut d = self.shared.didj.lock().unwrap();
+        if self.explorer {
+            power_on_again(&mut d, true);
+            return;
+        }
         let (mut flash, cart) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take());
         set_mode(&mut flash, &self.original, mode.enhanced);
         *d = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced));
@@ -321,6 +392,12 @@ impl DidjSession {
         std::fs::write(&tmp, &changes)?;
         std::fs::rename(&tmp, &self.save_path)?;
         std::fs::write(self.save_path.with_extension("nandimage"), &self.image)?;
+        // The Explorer's NOR flash holds its factory data (Ribbit's touch
+        // calibration among it): kept whole once the system has written it.
+        let nor = self.shared.didj.lock().unwrap().bus.nor.as_ref().filter(|n| n.dirty).map(|n| n.data.clone());
+        if let Some(nor) = nor {
+            std::fs::write(self.save_path.with_extension("nor"), nor)?;
+        }
         Ok(())
     }
 
@@ -383,6 +460,34 @@ pub fn import_save(from: &Path, dir: &Path, save_dir: &Path) -> anyhow::Result<P
     Ok(save)
 }
 
+/// Where a Leapster Explorer built from `dir` keeps its NAND's changes
+/// (and its NOR flash beside, `.nor`).
+pub fn explorer_save_file(dir: &Path, save_dir: &Path) -> PathBuf {
+    let name = dir.file_name().map_or_else(|| "explorer".into(), |s| s.to_string_lossy().into_owned());
+    save_dir.join(format!("explorer-{name}.nandblocks"))
+}
+
+/// Powers the console on again with the NAND (and the cartridge, and the
+/// Explorer's NOR flash) it has.
+fn power_on_again(d: &mut Didj, explorer: bool) {
+    let (flash, cart, sdram, milli) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take(), d.bus.sdram.len(), d.cpu_milli());
+    if explorer {
+        let nor = d.bus.nor.take();
+        match ribbit_didj::explorer::boot(flash, ribbit_didj::explorer::CMDLINE) {
+            Ok(lx) => *d = lx,
+            // The NAND held a kernel when it started; this can't happen.
+            Err(e) => tracing::error!(target: "ribbit::didj", "powering the Explorer on again: {e}"),
+        }
+        if nor.is_some() {
+            d.bus.nor = nor;
+        }
+    } else {
+        *d = Didj::with_sdram(flash, sdram);
+        d.set_cpu_milli(milli);
+    }
+    d.bus.cart = cart;
+}
+
 pub fn save_file(dir: &Path, save_dir: &Path) -> PathBuf {
     let name = dir.file_name().map_or_else(|| "didj".into(), |s| s.to_string_lossy().into_owned());
     save_dir.join(format!("didj-{name}.nandblocks"))
@@ -427,6 +532,9 @@ fn run(s: &Shared, art: Option<Art>) {
         let picture = {
             let mut d = s.didj.lock().unwrap();
             d.bus.buttons = s.held.load(Ordering::Relaxed) | auto_buttons;
+            if s.explorer {
+                d.bus.touch = *s.touch.lock().unwrap();
+            }
             // Frame skipping (a setting; not while the autostart reads the
             // screen): asked for while behind, it starts at the game's next
             // frame. A game that stops flipping buffers (a still screen drawn
@@ -480,10 +588,16 @@ fn run(s: &Shared, art: Option<Art>) {
                 tracing::info!(target: "ribbit::didj", "the Didj turned itself off; turning it on again");
                 s.serial.note("--- Ribbit: the Didj turned itself off; on again ---
 ");
-                let (flash, cart, sdram, milli) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take(), d.bus.sdram.len(), d.cpu_milli());
-                *d = Didj::with_sdram(flash, sdram);
-                d.set_cpu_milli(milli);
-                d.bus.cart = cart;
+                // Off the bus while it starts again: the PC sees the cable
+                // pulled (its client detaches), not a device that stopped
+                // answering ("USB device not recognized").
+                if s.usb_host.swap(false, Ordering::Relaxed)
+                    && let Some(srv) = s.usb.lock().unwrap().as_ref()
+                {
+                    srv.lock().unwrap().disconnect();
+                    *s.usb_news.lock().unwrap() = Some(crate::twist::UsbNews::Detached);
+                }
+                power_on_again(&mut d, s.explorer);
                 auto = art.clone().map(AutoStart::new);
             }
             // A faster processor (Enhanced) only as far as the PC keeps up:
@@ -549,6 +663,7 @@ fn pump_usb(s: &Shared, d: &mut Didj) {
     use ribbit_twist::usbip::Event;
     let Some(srv) = s.usb.lock().unwrap().clone() else { return };
     let srv = srv.lock().unwrap();
+    srv.set_ready(d.bus.udc.ready());
     while let Some(e) = srv.next_event() {
         match e {
             Event::Attached => {
@@ -614,6 +729,10 @@ fn power_off(s: &Shared) {
         d.run(hz / FPS as u64);
         d.bus.dma.pcm.clear();
     }
+    // The shutdown's messages, for the serial console.
+    if let Some(out) = d.bus.uart.first_mut().map(std::mem::take) {
+        s.serial.output(&out.chars().map(|c| c as u8).collect::<Vec<u8>>());
+    }
     if d.bus.powered_off {
         tracing::info!(target: "ribbit::saves", "Didj powered off in {:.1} s", t.elapsed().as_secs_f32());
     } else {
@@ -671,6 +790,55 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
         details,
         tags: vec![tag.into()],
         key: format!("didj-{id}"),
+        art: Art::Missing,
+    })
+}
+
+/// Whether `path` may be the Leapster Explorer's Firmware Base package, by
+/// its name (LeapFrog Connect's "Firmware Base.lfp", or its package ID
+/// LST3-0x00170029-...), before it is read.
+fn may_be_explorer_firmware(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| {
+        let n = n.to_string_lossy().to_ascii_lowercase();
+        n.ends_with(".lfp") && (n.starts_with("lst3-") || n.contains("firmware base") || n.contains("firmware-base"))
+    })
+}
+
+/// The Leapster Explorer's Firmware Base package (its meta.inf: Device
+/// "LeapsterExplorer", Name "Firmware-Base") stands for the console in the
+/// library; the other packages are found beside it when it starts.
+pub fn describe_explorer(path: &Path) -> Option<crate::library::Game> {
+    use crate::library::{Art, Family, Game};
+    if !may_be_explorer_firmware(path) {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    let meta = ribbit_core::zip::entries(&data)
+        .ok()?
+        .into_iter()
+        .find(|e| e.name.to_ascii_lowercase().ends_with("meta.inf"))
+        .and_then(|e| ribbit_core::zip::read_entry(&data, &e).ok())
+        .map(|m| ribbit_didj::package::Meta::parse(&String::from_utf8_lossy(&m)))?;
+    if meta.get("Device") != Some("LeapsterExplorer") || meta.get("Name") != Some("Firmware-Base") {
+        return None;
+    }
+    let mut details = vec![("System", "Leapster Explorer".to_string())];
+    for (label, key) in [("Version", "Version"), ("Locale", "Locale")] {
+        if let Some(v) = meta.get(key) {
+            details.push((label, v.to_string()));
+        }
+    }
+    details.push(("Status", "early emulation: starts Linux and the Explorer's own setup and menu, built from the packages in this folder; no cartridges yet".to_string()));
+    details.push(("File", path.display().to_string()));
+    let mb = (data.len() as u64).div_ceil(1 << 20);
+    Some(Game {
+        path: path.to_path_buf(),
+        family: Family::Explorer,
+        title: "Leapster Explorer".to_string(),
+        subtitle: format!("{}  ·  {mb} MB", meta.get("Version").unwrap_or("")),
+        details,
+        tags: vec!["System".into()],
+        key: "explorer-firmware".to_string(),
         art: Art::Missing,
     })
 }
