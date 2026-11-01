@@ -339,6 +339,16 @@ impl DidjSession {
         }
     }
 
+    /// The Leapster Explorer's volume up or down button.
+    pub fn set_explorer_volume(&self, up: bool, pressed: bool) {
+        let bits = if up { button::VOLUME_UP } else { button::VOLUME_DOWN };
+        if pressed {
+            self.shared.held.fetch_or(bits, Ordering::Relaxed);
+        } else {
+            self.shared.held.fetch_and(!bits, Ordering::Relaxed);
+        }
+    }
+
     /// The console now, for a save slot (its NAND as changes from the built
     /// image; the cartridge left out).
     pub fn save_state(&self) -> Vec<u8> {
@@ -625,6 +635,13 @@ fn run(s: &Shared, art: Option<Art>) {
             let pcm = &mut d.bus.dma.pcm;
             let bytes = pcm.len() & !3;
             stereo.extend(pcm.drain(..bytes).collect::<Vec<u8>>().as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)));
+            // The Explorer's codec: its volume (the volume buttons) and mutes.
+            if d.bus.explorer {
+                let (l, r) = d.bus.i2c.gain();
+                for (k, v) in stereo.iter_mut().enumerate() {
+                    *v = (*v as f32 * if k % 2 == 0 { l } else { r }).clamp(-32768.0, 32767.0) as i16;
+                }
+            }
             // A buffer whose drawing was skipped: the last picture stays.
             // The autostart reads the console's own picture.
             (!d.bus.shown_skipped).then(|| (d.bus.frame_hd(), auto.is_some().then(|| d.bus.frame())))

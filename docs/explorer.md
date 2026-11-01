@@ -153,7 +153,12 @@ itself). The NOR isn't saved yet (`Nor::dirty`).
 snd-soc-didj-cs43l22) or else 0xCC (LFP100; board_ids.h has it on LeapPad Explorer
 boards only). Ribbit models I2C0 (0xC000_E000, IRQ 32, `src/i2c.rs`, Explorer only)
 and answers as a CS43L22: a register file with its address pointer, chip ID 0xE3
-(revision B1, GUESS). Volume and mute in the codec registers aren't applied yet.
+(revision B1, GUESS). The app applies the codec's volume and mutes to the sound
+(`I2c::gain`: PCM 0x1A/0x1B, master 0x20/0x21, speaker 0x24/0x25, mutes 0x0D/0x0F;
+silent while powered down); the speaker's mono mix and tone control aren't. The volume
+buttons work: two presses of volume up in explorerboot took the speaker volume from
+0xF3 (-6.5 dB, booted) to 0xFC (-2 dB). In the app they are Page Up / Page Down (Ribbit's
+volume keys are the shoulders L/R, as on the Didj), unless bound to a button.
 
 ALSA (lf1000-pcm.c) plays through circular DMA to PCM out (request 24), the same
 pacing as the Didj. Two things the Didj's own audio driver never needed:
@@ -168,8 +173,7 @@ sample for sample.
 
 ## Not done yet
 
-* Codec volume/mute applied to the sound, the LFP100 power chip, cartridges, USB, the
-  volume buttons in the app, carrying saves over to another image. The app's start is untested by a player.
+* The LFP100 power chip, cartridges, USB, carrying saves over to another image. The app's start is untested by a player.
   D-pad tested (moves the highlight); A/B and the rest not tried yet.
 
 Sources: LF1000 kernel 2.6.37 port (github.com/mac2612/lf1000_kernel; LeapFrog's

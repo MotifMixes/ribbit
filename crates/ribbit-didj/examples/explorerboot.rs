@@ -16,7 +16,11 @@ fn main() {
     let dir = args.first().expect("usage: explorerboot <folder of .lfp files> [million cycles]");
     let millions: u64 = args.get(1).map_or(200, |s| s.parse().expect("not a number"));
 
-    let flash = ribbit_didj::explorer::nand_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+    let mut flash = ribbit_didj::explorer::nand_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+    // EXPLORER_SAVE=<file.nandblocks>: start from the app's save of this image.
+    if let Ok(path) = std::env::var("EXPLORER_SAVE") {
+        flash.apply_changes(&std::fs::read(&path).expect("can't read the save")).unwrap_or_else(|e| panic!("{e}"));
+    }
     // EXPLORER_BULK=<file>: save the Bulk partition as a UBI image and stop.
     if let Ok(path) = std::env::var("EXPLORER_BULK") {
         let at = ribbit_didj::explorer::PARTITIONS[4].1;
@@ -70,6 +74,7 @@ fn main() {
     let mut wav: Vec<u8> = Vec::new();
     let started = std::time::Instant::now();
     let mut samples = std::collections::HashMap::<u32, u32>::new();
+    let exact_pcs = std::env::var("EXPLORER_PCS").is_ok();
     let mut printed = 0;
     for m in 0..millions {
         for (_, what) in input.iter().filter(|e| e.0 == m) {
@@ -94,7 +99,8 @@ fn main() {
         if shots_at.contains(&(m + 1)) {
             shot(&lx, &format!("{}-{}.png", shot_path.trim_end_matches(".png"), m + 1));
         }
-        *samples.entry(lx.cpu.r[15] & !0xFFF).or_default() += 1;
+        // EXPLORER_PCS=1: by instruction instead of by page.
+        *samples.entry(lx.cpu.r[15] & if exact_pcs { !0 } else { !0xFFF }).or_default() += 1;
         // UART0 as it comes, so a hang still shows how far it got.
         if let Some(out) = lx.bus.uart.first()
             && out.len() > printed
@@ -122,6 +128,10 @@ fn main() {
         println!("{a:#010x} {pc:#010x} {}", if *w { "w" } else { "r" });
     }
     println!("PCM out: {} bytes, {} not zero", wav.len(), wav.iter().filter(|&&b| b != 0).count());
+    println!("codec registers: {:02x?}", lx.bus.i2c.codec());
+    println!("JIT: {:?}", lx.jit.stats);
+    let mlc: Vec<String> = (0..=0xA4).step_by(4).filter(|o| lx.bus.reg(0xC000_4000 + o) != 0).map(|o| format!("{o:02x}={:08x}", lx.bus.reg(0xC000_4000 + o))).collect();
+    println!("MLC: {}", mlc.join(" "));
     if let Ok(path) = std::env::var("EXPLORER_WAV") {
         let rate = lx.bus.dma.pcm_rate as u32;
         let mut f = b"RIFF".to_vec();

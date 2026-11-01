@@ -348,10 +348,20 @@ impl Bus {
         self.regs.get(&addr).copied().unwrap_or(0)
     }
 
+    /// The SDRAM byte behind physical address `addr`: block (2D) addresses
+    /// through the display-mode layout (`mlc::block_sdram`), at `ram_base` +
+    /// 0x2000_0000 (the Explorer's video planes are at 0xA3F0_0000, its SDRAM
+    /// at 0x8000_0000), the rest as they are. May be past the end of SDRAM.
+    fn sdram_offset(&self, addr: u32) -> usize {
+        let rel = addr.wrapping_sub(self.ram_base);
+        let end = crate::mlc::BLOCK_END.max(crate::mlc::BLOCK_BASE + self.sdram.len() as u32);
+        if (crate::mlc::BLOCK_BASE..end).contains(&rel) { crate::mlc::block_sdram(rel, false) } else { rel as usize }
+    }
+
     /// The picture on the screen: (width, height, 0x00RRGGBB pixels).
     pub fn frame(&self) -> (usize, usize, Vec<u32>) {
         let mem = |a: u32, n: u32| {
-            let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&a) { crate::mlc::block_sdram(a, false) as u32 } else { a.wrapping_sub(self.ram_base) };
+            let a = self.sdram_offset(a) as u32;
             (0..n).fold(0, |v, i| v | (self.sdram.get((a + i) as usize).copied().unwrap_or(0) as u32) << (8 * i))
         };
         crate::mlc::compose(|a| self.reg(a), mem)
@@ -365,7 +375,7 @@ impl Bus {
             return self.frame();
         }
         let mem = |a: u32, n: u32| {
-            let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&a) { crate::mlc::block_sdram(a, false) as u32 } else { a.wrapping_sub(self.ram_base) };
+            let a = self.sdram_offset(a) as u32;
             (0..n).fold(0, |v, i| v | (self.sdram.get((a + i) as usize).copied().unwrap_or(0) as u32) << (8 * i))
         };
         crate::mlc::compose_scaled(|a| self.reg(a), mem, hd.scale, |a, v, j, k| hd.sample(a, j, k, v as u16) as u32)
@@ -688,7 +698,7 @@ impl Bus {
 
     fn read_n(&mut self, addr: u32, size: u32) -> u32 {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
-        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr.wrapping_sub(self.ram_base) as usize };
+        let a = self.sdram_offset(addr);
         if a + size as usize <= self.sdram.len() {
             return match size {
                 4 => u32::from_le_bytes(self.sdram[a..a + 4].try_into().unwrap()),
@@ -735,7 +745,7 @@ impl Bus {
 
     fn write_n(&mut self, addr: u32, v: u32, size: u32) {
         // Block (2D) addresses reach SDRAM through the display-mode layout.
-        let a = if (crate::mlc::BLOCK_BASE..crate::mlc::BLOCK_END).contains(&addr) { crate::mlc::block_sdram(addr, false) } else { addr.wrapping_sub(self.ram_base) as usize };
+        let a = self.sdram_offset(addr);
         if a + size as usize <= self.sdram.len() {
             self.sdram[a..a + size as usize].copy_from_slice(&v.to_le_bytes()[..size as usize]);
             self.code.wrote(a + self.ram_base as usize);
@@ -875,8 +885,10 @@ fn new_jit() -> ArmJit {
     ArmJit::new(SDRAM_SIZE as u32)
 }
 
-pub(crate) fn jit_for(sdram: usize) -> ArmJit {
-    ArmJit::new(sdram as u32)
+/// A JIT for `sdram` bytes of SDRAM at physical `ram_base` (0 on the Didj,
+/// 0x8000_0000 on the Explorer): it compiles code below their end only.
+pub(crate) fn jit_for(ram_base: u32, sdram: usize) -> ArmJit {
+    ArmJit::new(ram_base + sdram as u32)
 }
 
 /// Save states: this number, then the machine (bincode, deflated), then the
@@ -910,7 +922,7 @@ impl Didj {
         let machine = state.get(12..12usize.checked_add(len).ok_or_else(bad)?).ok_or_else(bad)?;
         let machine = miniz_oxide::inflate::decompress_to_vec(machine).map_err(|_| bad())?;
         let mut d: Didj = bincode::deserialize(&machine).map_err(|e| e.to_string())?;
-        d.jit = jit_for(d.bus.sdram.len());
+        d.jit = jit_for(d.bus.ram_base, d.bus.sdram.len());
         let mut nand = base.clone();
         nand.apply_changes(&state[12 + len..])?;
         d.bus.nand = nand;
@@ -967,7 +979,7 @@ impl Didj {
             pc: 0,
             frame_cycles: 0,
         };
-        let jit = jit_for(bus.sdram.len());
+        let jit = jit_for(bus.ram_base, bus.sdram.len());
         Self { cpu: Arm::new(), bus, jit, exact: false, cpu_milli: 1000, linux_nand: None, nand_check: None, fonts: Default::default() }
     }
 

@@ -3164,6 +3164,15 @@ impl App {
             }
             return;
         }
+        // Page Up / Page Down: the Leapster Explorer's volume buttons (its
+        // shoulders are on Ribbit's volume keys), unless bound to a button.
+        if matches!(code, KeyCode::PageUp | KeyCode::PageDown)
+            && self.settings.button_for(code).is_none()
+            && let Some(d) = self.didj.as_ref().filter(|d| d.explorer)
+        {
+            d.set_explorer_volume(code == KeyCode::PageUp, pressed);
+            return;
+        }
         if let Some(b) = self.settings.button_for(code) {
             self.press(Source::Keyboard, b, pressed);
         }

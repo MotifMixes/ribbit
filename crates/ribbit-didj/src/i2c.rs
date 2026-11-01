@@ -117,6 +117,36 @@ impl I2c {
         &self.codec
     }
 
+    /// The codec's gain on each channel (left, right; 1.0 = as sent) through
+    /// the speaker, from its registers (CS43L22 datasheet): PCMx volume 0x1A/0x1B
+    /// (7-bit, 0.5 dB steps, +12 to -51.5 dB, bit 7 mute), master 0x20/0x21
+    /// (8-bit, +12 to -102 dB), speaker 0x24/0x25 (8-bit, 0 to -96 dB, 0x01 and
+    /// up muted), master mutes 0x0D bits 0-1, speaker mutes 0x0F bits 4-5;
+    /// silent while powered down (0x02 not 0x9E). Booted: PCM 0 dB, master +3,
+    /// speaker -6.5. The speaker's mono mix (0x0F bit 1) and tone control
+    /// (0x1E/0x1F) aren't applied: the sound stays stereo, as through headphones.
+    pub fn gain(&self) -> (f32, f32) {
+        let c = &self.codec;
+        if c[0x02] != 0x9E {
+            return (0.0, 0.0);
+        }
+        let channel = |b: usize| {
+            let pcm = c[0x1A + b];
+            let muted = pcm & 0x80 != 0 || c[0x0D] >> b & 1 != 0 || c[0x0F] >> (4 + b) & 1 != 0;
+            let pcm = ((pcm << 1) as i8 >> 1) as i32;
+            let master = c[0x20 + b] as i8 as i32;
+            let speaker = c[0x24 + b] as i8 as i32;
+            if muted || speaker > 0 {
+                return 0.0;
+            }
+            let pcm = if pcm > 24 { -103 } else { pcm };
+            let master = if master > 24 { -204 } else { master };
+            let half_db = pcm + master + speaker.max(-192);
+            10f32.powf(half_db as f32 / 40.0)
+        };
+        (channel(0), channel(1))
+    }
+
     fn condition(&mut self) {
         let receive = self.icsr & TX_RX == 0;
         if self.start {
@@ -210,5 +240,19 @@ mod tests {
         xfer(&mut i, 0x94, &[0xA0, 0x18, 0x19], 0).unwrap();
         xfer(&mut i, 0x94, &[0xA0], 0).unwrap();
         assert_eq!(xfer(&mut i, 0x94, &[], 2).unwrap(), [0x18, 0x19]);
+    }
+
+    #[test]
+    fn gain_follows_volume_and_mute() {
+        let mut i = I2c::default();
+        assert_eq!(i.gain(), (0.0, 0.0));
+        // As the Explorer leaves it booted: +3 dB master, -6.5 dB speaker.
+        xfer(&mut i, 0x94, &[0x02, 0x9E], 0).unwrap();
+        xfer(&mut i, 0x94, &[0xA0, 0x06, 0x06, 0xCD, 0xCD, 0xF3, 0xF3], 0).unwrap();
+        let (l, r) = i.gain();
+        assert!((l - 10f32.powf(-3.5 / 20.0)).abs() < 1e-4 && l == r);
+        xfer(&mut i, 0x94, &[0x0F, 0x10], 0).unwrap();
+        assert_eq!(i.gain().0, 0.0);
+        assert!(i.gain().1 > 0.0);
     }
 }

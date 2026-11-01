@@ -254,6 +254,42 @@ fn inflate_gzip(gz: &[u8]) -> Result<Vec<u8>, String> {
 /// Kernel partition at 0x8000_8000, ATAG boot tags (core, memory, command
 /// line) at 0x8000_0100, the processor in SVC mode with interrupts off and
 /// the MMU off, r0 = 0, r1 = the machine number, r2 = the tags.
+/// The frame buffer (the command line's `mlc_fb=`).
+const FRAMEBUFFER: u32 = 0x82E0_0000;
+
+/// Shows the boot splash as Emerald Boot leaves it: FIRST.32.rle from the
+/// I18n_Screens partition (the LeapFrog logo) in the frame buffer, on MLC
+/// layer 0, 320x240 XRGB (format 0x0653). Linux's frame buffer driver only
+/// changes the format, address and enable, so without this the layer stayed
+/// 1 pixel big and the screen black until AppManager (LEGAL.png, drawn by
+/// rcS into /dev/fb0, never showed). The RLE: 32-bit words, run length in
+/// bits 24-31, colour in bits 0-23 as the layer shows it (as LEGAL.png
+/// drawn there by rcS; checked against FIRST.png's green). The registers are INFERRED from what the kernel and
+/// AppManager set, not read from Emerald Boot.
+fn show_splash(bus: &mut crate::machine::Bus) {
+    let part = PARTITIONS[1].1;
+    let rle = bus.nand.read(part, PARTITIONS[2].1 - part);
+    let mut pixels = Vec::with_capacity(320 * 240);
+    for w in rle.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)) {
+        let (n, c) = ((w >> 24) as usize, w & 0xFF_FFFF);
+        if n == 0 || pixels.len() + n > 320 * 240 {
+            break;
+        }
+        pixels.extend(std::iter::repeat_n(0xFF00_0000 | c, n));
+    }
+    if pixels.len() != 320 * 240 {
+        return;
+    }
+    let at = (FRAMEBUFFER - RAM_BASE) as usize;
+    for (i, p) in pixels.iter().enumerate() {
+        bus.sdram[at + 4 * i..][..4].copy_from_slice(&p.to_le_bytes());
+    }
+    let mlc = crate::mlc::BASE;
+    for (off, v) in [(0x00, 0x2), (0x04, 239 << 16 | 319), (0x0C, 319), (0x10, 239), (0x24, 0x0653_0020), (0x28, 4), (0x2C, 320 * 4), (0x38, FRAMEBUFFER)] {
+        bus.preset(mlc + off, v);
+    }
+}
+
 pub fn boot(flash: Nand, cmdline: &str) -> Result<Didj, String> {
     let kernel_part = PARTITIONS[2].1;
     let cbf = flash.read(kernel_part, PARTITIONS[3].1 - kernel_part);
@@ -283,7 +319,8 @@ pub fn boot(flash: Nand, cmdline: &str) -> Result<Didj, String> {
     // image PLAY (6-7; RECOVERY makes rcS start recovery mode), board ID
     // (8-12) and boot source NAND (17-19).
     bus.preset(0xC001_9018, 1 | 1 << 6 | (BOARD_ID as u32) << 8 | 2 << 17);
-    didj.jit = crate::machine::jit_for(SDRAM_SIZE);
+    show_splash(bus);
+    didj.jit = crate::machine::jit_for(RAM_BASE, SDRAM_SIZE);
     let cpu = &mut didj.cpu;
     cpu.set_mode(mode::SVC);
     cpu.r[0] = 0;

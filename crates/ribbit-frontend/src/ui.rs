@@ -2626,6 +2626,16 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         }
         return;
     }
+    // The Explorer's page: its firmware package in the library is the console.
+    if tab == Some(Family::Explorer) {
+        let firmware = library.games.iter().find(|g| g.family == Family::Explorer && g.has_tag("System"));
+        if let Some(g) = firmware
+            && power_button(ui, "Turn on the Leapster Explorer (its setup and menu)")
+        {
+            actions.push(Action::PlayFromLibrary(g.path.clone()));
+        }
+        return;
+    }
     let console = match tab {
         Some(Family::Zippity) => Hardware::Zippity,
         Some(Family::RockItTwist) => Hardware::RockItTwist,
@@ -3468,6 +3478,7 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
             }
             for (what, key) in [
                 ("Stylus", "Left mouse button / touch"),
+                ("Leapster Explorer volume - / +", "Page Down / Page Up"),
                 ("Pause", "Esc"),
                 ("Fast-forward", "Hold Tab"),
                 ("Rewind", "Hold ` (left of 1)"),
