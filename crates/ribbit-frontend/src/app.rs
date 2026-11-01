@@ -118,6 +118,9 @@ pub struct App {
     zippity_cleaning: Option<std::thread::JoinHandle<anyhow::Result<PathBuf>>>,
     /// A zip of RockIt Twist packages being unpacked.
     twist_import: Option<std::thread::JoinHandle<anyhow::Result<crate::twist::Imported>>>,
+    /// A Leapster Explorer being built (its NAND from the packages takes
+    /// seconds) and the folder of its packages, for the problem message.
+    explorer_building: Option<(PathBuf, std::thread::JoinHandle<anyhow::Result<crate::didj::ExplorerBuilt>>)>,
     /// The USB/IP server for the Leapster 2 and the Didj, once started (its
     /// port stays bound for the rest of the program; it offers whichever
     /// console runs).
@@ -302,6 +305,7 @@ impl App {
             tv_frame: Vec::new(),
             zippity_cleaning: None,
             twist_import: None,
+            explorer_building: None,
             usb_server: None,
             twist: None,
             leappad: None,
@@ -631,6 +635,8 @@ impl App {
             d.stop();
             self.fit_window = FIT_TRIES;
         }
+        // An Explorer still being built is dropped when it's done.
+        self.explorer_building = None;
         if let Some(s) = self.session.take() {
             // How long closing takes, for "the library takes a while to
             // come back" reports.
@@ -1056,12 +1062,21 @@ impl App {
     }
 
     /// Plays a Leapster Explorer built from the packages in the folder of
-    /// `firmware` (its Firmware Base package).
+    /// `firmware` (its Firmware Base package). It's built in the background
+    /// (`finish_explorer`): the window stays responsive meanwhile.
     fn start_explorer(&mut self, firmware: PathBuf) {
         self.end_session();
         let dir = firmware.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let save_dir = self.save_dir();
+        let into = dir.clone();
+        self.ui.toast("Starting the Leapster Explorer…");
+        self.explorer_building = Some((dir, std::thread::spawn(move || crate::didj::DidjSession::build_explorer(&into, &save_dir))));
+    }
+
+    /// Powers on the Leapster Explorer `start_explorer` built.
+    fn finish_explorer(&mut self, dir: &Path, built: anyhow::Result<crate::didj::ExplorerBuilt>) {
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match crate::didj::DidjSession::start_explorer(&dir, &self.save_dir(), sink, self.ui.serial.clone()) {
+        match built.and_then(|b| crate::didj::DidjSession::start_explorer(b, sink, self.ui.serial.clone())) {
             Ok(d) => {
                 self.fit_window = FIT_TRIES;
                 self.didj = Some(d);
@@ -2878,6 +2893,11 @@ impl App {
                 Ok(Err(e)) => self.ui.problem("Couldn't import the RockIt Twist games", TWIST_IMPORT_FAILED, format!("{e:#}")),
                 Err(_) => self.ui.problem("Couldn't import the RockIt Twist games", TWIST_IMPORT_FAILED, "The import thread crashed."),
             }
+        }
+        if self.explorer_building.as_ref().is_some_and(|(_, h)| h.is_finished()) {
+            let (dir, h) = self.explorer_building.take().unwrap();
+            let built = h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the thread building it crashed")));
+            self.finish_explorer(&dir, built);
         }
         if let Some(t) = &mut self.twist {
             if !halted {

@@ -5,7 +5,7 @@ the same LF1000 (MagicEyes Pollux, ARM926EJ-S at 393 MHz) as the Didj, so Ribbit
 emulates it with the Didj's machine (`crates/ribbit-didj`, `src/explorer.rs`).
 Status: boots Linux and LeapFrog's AppManager; touch screen and buttons work in the
 first-time setup (Language Selection, Set the Date); the NOR flash with factory data
-is there. In the app (early): the library lists Firmware Base.lfp as the console and starts it from the packages beside it; the mouse is the stylus; saves in explorer-<folder>.nandblocks and .nor.
+is there. In the app (early): the library lists Firmware Base.lfp as the console and starts it from the packages beside it (built on a worker thread, so the window doesn't freeze meanwhile); the mouse is the stylus; Page Up / Page Down are the volume buttons; saves in explorer-<folder>.nandblocks and .nor. Speed about 100% in the app (tested by the user).
 
 Run: `cargo run --release -p ribbit-didj --example explorerboot -- <folder> [million cycles]`
 with the folder holding the English firmware set (archive.org item
@@ -170,6 +170,20 @@ pacing as the Didj. Two things the Didj's own audio driver never needed:
 
 Checked: `EXPLORER_WAV=<file>` of a boot to 3000M holds `/var/sounds/startup.wav`
 sample for sample.
+
+## Speed, video, splash
+
+* JIT: SDRAM starts at 0x8000_0000 here, not 0, so the JIT's RAM range is
+  `machine::jit_for(ram_base, size)`. Before, its end was the RAM size and no
+  Explorer code was ever compiled (about 7x slower).
+* Video: the kernel uses SDRAM through two more windows, the MLC's block addresses at
+  ram_base + 0x2000_0000 and the video planes at 0xA3F0_0000; both are mapped to SDRAM
+  (`Bus::sdram_offset`). Without them the screen was green.
+* Boot splash: `explorer::show_splash` draws FIRST.32.rle on MLC layer 0, with the
+  layer set up as Emerald Boot would (GUESS: its exact register values are UNKNOWN).
+* Health and safety screen: a YouTube video (hFn62e6TbRU, other firmware) shows one;
+  firmware 1.4.11.2128's rcS shows LEGAL.png instead and nothing shows
+  HEALTH_AND_SAFETY.png, so its absence is right for this firmware.
 
 ## Not done yet
 

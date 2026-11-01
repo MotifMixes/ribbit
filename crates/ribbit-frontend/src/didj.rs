@@ -105,6 +105,14 @@ pub struct Mode {
     pub hd: u32,
 }
 
+/// A Leapster Explorer ready to power on (`DidjSession::build_explorer`).
+pub struct ExplorerBuilt {
+    lx: Didj,
+    original: Nand,
+    save_path: PathBuf,
+    image: String,
+}
+
 pub struct DidjSession {
     shared: Arc<Shared>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -220,10 +228,11 @@ impl DidjSession {
         Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false })
     }
 
-    /// Powers on a Leapster Explorer built from the packages in `dir`
+    /// Builds a Leapster Explorer from the packages in `dir`
     /// (`ribbit_didj::explorer::nand_from_packages`), with what it saved to
-    /// its NAND and NOR flash before.
-    pub fn start_explorer(dir: &Path, save_dir: &Path, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>) -> anyhow::Result<Self> {
+    /// its NAND and NOR flash before. Takes seconds: the app runs it on a
+    /// worker thread, then `start_explorer`.
+    pub fn build_explorer(dir: &Path, save_dir: &Path) -> anyhow::Result<ExplorerBuilt> {
         let original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
         let save_path = explorer_save_file(dir, save_dir);
         let image = format!("{:08x}", original.fingerprint());
@@ -244,6 +253,12 @@ impl DidjSession {
         if let Ok(nor) = std::fs::read(save_path.with_extension("nor")) {
             lx.bus.nor = Some(ribbit_didj::nor::Nor::new(nor));
         }
+        Ok(ExplorerBuilt { lx, original, save_path, image })
+    }
+
+    /// Powers on the Leapster Explorer `build_explorer` made.
+    pub fn start_explorer(built: ExplorerBuilt, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>) -> anyhow::Result<Self> {
+        let ExplorerBuilt { lx, original, save_path, image } = built;
         let shared = Arc::new(Shared {
             didj: Mutex::new(lx),
             frame: Mutex::new((SCREEN_W, SCREEN_H, vec![0; SCREEN_W * SCREEN_H])),
