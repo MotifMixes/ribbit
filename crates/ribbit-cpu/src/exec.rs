@@ -22,6 +22,28 @@ const MACMODE_S1: u32 = 1 << 8;
 
 const UNMODELLED_AUX_LOG_LIMIT: usize = 256;
 
+/// RIBBIT_WARN_LP=1: prints, once per address, every LP (zero-overhead loop)
+/// that runs outside the BIOS (`0x0000_0000-0x007F_FFFF` and its mirror at
+/// `0x4000_0000`), i.e. code loaded into RAM. On a real Leapster 2 (LeapLoader,
+/// 2026-11-01, tested by the user) GCC's and newlib's/libgcc's LP loops made
+/// native code fail (copies stopped early, games crashed) while it ran right
+/// here: Ribbit doesn't model what the hardware does differently, and the
+/// exact rule is UNKNOWN, so this only reports. The JIT stays off while it is
+/// set (ribbit-jit `Jit::from_env`), so every LP comes through here.
+fn warn_lp(addr: u32) {
+    use std::sync::{Mutex, OnceLock};
+    static ON: OnceLock<bool> = OnceLock::new();
+    static SEEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    if !*ON.get_or_init(|| std::env::var("RIBBIT_WARN_LP").is_ok_and(|v| v != "0")) || addr & !0x4000_0000 < 0x0080_0000 {
+        return;
+    }
+    let Ok(mut seen) = SEEN.lock() else { return };
+    if !seen.contains(&addr) {
+        seen.push(addr);
+        eprintln!("ribbit: zero-overhead loop (LP) at {addr:#010x} outside the BIOS: may fail on a real Leapster 2");
+    }
+}
+
 /// What `Cpu::run_block` did.
 #[derive(Debug)]
 pub struct Block {
@@ -1244,6 +1266,7 @@ impl Cpu {
                 return Ok(Flow::Jump(target));
             }
             Op::Lp => {
+                warn_lp(i.addr);
                 if self.cond(i.cc) {
                     self.lp_start = i.next();
                     self.lp_end = i.target;

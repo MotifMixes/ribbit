@@ -3,6 +3,25 @@
 LeapLoader (an SD-card loader for the Leapster 2) is tested in Ribbit. Fixes found there are made in
 Ribbit directly and listed here.
 
+## 2026-11-01: RIBBIT_WARN_LP reports zero-overhead loops in RAM code
+
+* **Why:** LeapLoader's NES and Game Boy apps ran right in Ribbit but failed on a real Leapster 2 (user's
+  console): ROM-list names mixed ("Basebal" + "ros"), NES tiles scrambled, games crashed to a black
+  screen. On-console checks found RAM, the data cache, MUL64 and newlib's ARC600 `strcpy` fine. The
+  failures went away step by step as LP loops went: newlib's `strncpy-bs`/`memcpy-bs`/`memset-bs`/
+  `strchr-bs` replaced by C (names fixed), libgcc's `__udivmodsi4` replaced, then GCC's own loops
+  (`-fno-branch-count-reg`; 88 `lp` in the NES app) -> the games work on the console. The BIOS's own LP
+  loops (e.g. 0x4008_4C38) work there, so it is some uses of LP, not LP itself; the exact hardware rule is
+  UNKNOWN, and Ribbit runs all of them the same way.
+* **Change:** `RIBBIT_WARN_LP=1` prints each LP outside the BIOS (`0x0000_0000-0x007F_FFFF` and its
+  `0x4000_0000` mirror) once, to stderr (ribbit-cpu `exec.rs` `warn_lp`). It doesn't change execution. While
+  it is set the JIT stays off (ribbit-jit `Jit::from_env`), so every LP is interpreted and seen. Unset:
+  no change. LeapFrog's own games run from RAM too, so a report there is only a hint.
+* **Also found on the console (not modelled):** `sr addr,[0x4C]` (DC_FLDL, flush one data-cache line) had
+  no visible effect: pixels drawn into VRAM through the cache reached the LCD late or not at all. Writing
+  VRAM with `st.di` works. Ribbit doesn't model the caches (hardware-research.md).
+* **Tests:** ribbit-cpu tests pass unchanged; the check was not run against a card yet.
+
 ## 2026-10-29: code in RAM is cached and compiled (the JIT), with its writes watched
 
 * **Why:** LeapLoader's emulator apps (NES, SNES, Game Boy, GBA) are native code loaded from the SD card into

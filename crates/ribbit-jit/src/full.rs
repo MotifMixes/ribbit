@@ -913,11 +913,15 @@ impl Default for Jit {
 }
 
 impl Jit {
-    /// A JIT, or None where it cannot run (`SUPPORTED`) or when the
-    /// environment variable RIBBIT_JIT is 0. RIBBIT_JIT_CHECK=1 turns on
-    /// `check`.
+    /// A JIT, or None where it cannot run (`SUPPORTED`), when the
+    /// environment variable RIBBIT_JIT is 0, or while RIBBIT_WARN_LP is set
+    /// (ribbit-cpu `warn_lp` sees only interpreted LPs). RIBBIT_JIT_CHECK=1
+    /// turns on `check`.
     pub fn from_env() -> Option<Jit> {
-        if !SUPPORTED || std::env::var("RIBBIT_JIT").is_ok_and(|v| v == "0") {
+        if !SUPPORTED
+            || std::env::var("RIBBIT_JIT").is_ok_and(|v| v == "0")
+            || std::env::var("RIBBIT_WARN_LP").is_ok_and(|v| v != "0")
+        {
             return None;
         }
         let check = std::env::var("RIBBIT_JIT_CHECK").is_ok_and(|v| v != "0");

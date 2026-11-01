@@ -854,6 +854,15 @@ is populated). Tag bit 0 reads as valid and bit 1 as locked. The replacement pol
 policy are UNKNOWN; the existence of flush operations (aux 0x4B) suggests write-back. Games (Cars, Sonic X) use
 the same aux registers through their own copies of the routines. Ribbit does not model the caches yet.
 
+Tested on a Leapster 2 (LeapLoader's NES/GB apps, user's console, 2026-11-01; changes-from-leaploader.md):
+
+* The data cache is write-back: pixels drawn into VRAM (0x0300_0000) through it reached the LCD late or not
+  at all (black blocks, leftover text). `sr addr,[0x4C]` (DC_FLDL, one line) afterwards didn't help; `st.di`
+  stores did. DC_CTRL read 0x0000_008B once bit 0 (disable) was set; with the cache off, RAM read back right.
+* Some zero-overhead loops fail: GCC's and newlib's/libgcc's LP loops broke native code (copies stopped
+  early, games crashed) that ran right in Ribbit; with none of them left, it works. The BIOS's own LP loops
+  work. Which use of LP the hardware runs differently is UNKNOWN (`RIBBIT_WARN_LP=1` lists LPs in RAM code).
+
 ### Clock control (VERIFIED-FW)
 
 * BIOS CPU-clock function (US v2.1 0x4008_B940; copies in Cars 0x8003_8BB4 and Sonic X 0x8007_E538): reads aux
