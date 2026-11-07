@@ -80,6 +80,34 @@ pub fn rootfs_from_packages(dir: &std::path::Path) -> Result<Vec<u8>, String> {
     Err("no erootfs.jffs2 in the Didj packages".into())
 }
 
+/// How long Original takes from power-on to the first program's first
+/// picture (the copyright, 3.72 s), less the HLE's own time to it (0.24 s):
+/// the boot loader and kernel, while the boot splash shows.
+const BOOT_TIME: std::time::Duration = std::time::Duration::from_millis(3480);
+
+/// The boot splash (bootsplash.rgb in kernel.bin's TFS) out of a folder of
+/// Didj firmware packages: a loose kernel.bin there, else the packaged one.
+pub fn boot_splash_from_packages(dir: &std::path::Path) -> Result<Vec<u8>, String> {
+    let loose = dir.join("kernel.bin");
+    let kernel = if loose.is_file() {
+        std::fs::read(&loose).map_err(|e| format!("{}: {e}", loose.display()))?
+    } else {
+        let mut found = None;
+        'packages: for (name, data) in super::package::packages_in(dir)? {
+            for entry in ribbit_core::zip::entries(&data).map_err(|e| format!("{name}: {e}"))? {
+                if entry.name.rsplit('/').next() == Some("kernel.bin") {
+                    found = Some(ribbit_core::zip::read_entry(&data, &entry).map_err(|e| format!("{name}: {e}"))?);
+                    break 'packages;
+                }
+            }
+        }
+        found.ok_or("no kernel.bin in the Didj packages")?
+    };
+    let files = super::tfs::files(&kernel).ok_or("kernel.bin: no TFS summary")?;
+    let f = files.iter().find(|f| f.name == "bootsplash.rgb").ok_or("kernel.bin: no bootsplash.rgb")?;
+    kernel.get(f.offset..f.offset + 320 * 240 * 3).map(<[u8]>::to_vec).ok_or_else(|| "kernel.bin: bootsplash.rgb is cut short".into())
+}
+
 /// The Didj's file systems out of a folder of firmware packages: the root
 /// file system, /Didj holding what `nand_from_packages` puts on the Brio
 /// volume (packages and installed cartridges), and an empty /tmp.
@@ -177,6 +205,8 @@ pub struct Process {
     /// Logging every system call (to stderr), for bring-up.
     pub trace: bool,
     start: std::time::Instant,
+    /// Showing the boot splash: nothing runs before then.
+    boot_until: Option<std::time::Instant>,
     dev: dev::Devices,
     /// poll/select deadlines by thread, while they wait.
     poll_until: HashMap<u32, std::time::Instant>,
@@ -243,6 +273,7 @@ impl Process {
             poll_until: HashMap::new(),
             trace: false,
             start: std::time::Instant::now(),
+            boot_until: None,
             m,
             frames,
             tlb_for: 0,
@@ -368,6 +399,14 @@ impl Process {
     /// Runs up to `budget` instructions (all tasks together), or until init
     /// (the first program) exits, a program crashes, or nothing can run.
     pub fn run(&mut self, budget: u64) -> Stop {
+        if let Some(until) = self.boot_until {
+            let now = std::time::Instant::now();
+            if now < until {
+                std::thread::sleep((until - now).min(std::time::Duration::from_millis(10)));
+                return Stop::Budget;
+            }
+            self.boot_until = None;
+        }
         let mut left = budget;
         let mut slice = 0;
         loop {

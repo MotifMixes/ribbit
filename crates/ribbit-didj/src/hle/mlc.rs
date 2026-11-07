@@ -100,6 +100,23 @@ impl Process {
         self.mlc_change(CONTROLT, |v| bit(v, DITTYFLAG, true));
     }
 
+    /// Shows the boot loader's splash (bootsplash.rgb, the health and safety
+    /// warning: 320x240 B8G8R8) as lightning-boot's mlc_set_video_mode
+    /// leaves it, in layer 0's frame buffer, which the kernel keeps showing
+    /// until rcS draws the copyright. Original: CONTROL0 0xC6539020. The
+    /// programs then wait for the boot time (`BOOT_TIME`).
+    pub fn boot_splash(&mut self, rgb: &[u8]) {
+        self.boot_until = Some(self.start + super::BOOT_TIME);
+        let at = FB_ADDR[0] as usize;
+        let n = rgb.len().min(320 * 240 * 3);
+        self.m.bus.sdram[at..at + n].copy_from_slice(&rgb[..n]);
+        self.mlc_write(LEFTRIGHT0, 320 - 1);
+        self.mlc_write(TOPBOTTOM0, 240 - 1);
+        self.mlc_write(HSTRIDE0, 3);
+        self.mlc_write(VSTRIDE[0], 3 * 320);
+        self.mlc_write(CONTROL[0], 0xC653 << FORMAT | 1 << PALETTEPWD | 1 << LOCKSIZE | 1 << LAYERENB);
+    }
+
     fn mlc_enable(&mut self, en: bool) {
         let mut t = bit(self.mlc_read(CONTROLT), DITTYFLAG, false);
         if en {

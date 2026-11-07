@@ -158,7 +158,12 @@ in-between option (phase 7).
   Also: the kernel has HZ 100 and no clock events, so a sleep ends on the first tick after its deadline;
   nanosleep now does that (`tick_after`). It changed nothing measurable here. AppManager's main thread
   busy-waits on gettimeofday while the copyright shows (fopen/fscanf of the USB vbus file each pass).
-  Open: whether to show the health warning for the boot time; timing of a game against Original.
+- Boot splash (2026-11-07, the user's choice): the HLE shows the health and safety warning (bootsplash.rgb from
+  kernel.bin's TFS, 320x240 B8G8R8, layer 0 as lightning-boot's mlc_set_video_mode sets it, CONTROL0 0xC6539020
+  as on Original) and holds the programs for BOOT_TIME (3.48 s) meanwhile; the clocks count from power-on as on
+  the real Didj. `hle::boot_splash_from_packages`, `Process::boot_splash`; didjhle shows it unless
+  DIDJ_HLE_NO_SPLASH=1. Checked: the warning at 10 ms (Original about 0.05 s), the copyright at 3.70 s (3.72).
+  Open: timing of a game against Original.
 
 ## Known risks
 

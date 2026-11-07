@@ -28,6 +28,14 @@ fn main() {
     eprintln!("[didjhle] file systems read in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
     let mut p = Process::new(vfs);
     p.trace = std::env::var_os("DIDJ_HLE_TRACE").is_some();
+    // The boot splash for the boot loader's and kernel's time, as Original
+    // (DIDJ_HLE_NO_SPLASH=1: the programs start at once).
+    if std::env::var_os("DIDJ_HLE_NO_SPLASH").is_none() {
+        match ribbit_didj::hle::boot_splash_from_packages(args[0].as_ref()) {
+            Ok(rgb) => p.boot_splash(&rgb),
+            Err(e) => eprintln!("[didjhle] no boot splash: {e}"),
+        }
+    }
     if let Ok(path) = std::env::var("DIDJ_HLE_CARRY") {
         let base = ribbit_didj::nand_from_packages(args[0].as_ref(), true).unwrap_or_else(|e| panic!("{e}"));
         let save = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -86,6 +94,7 @@ fn main() {
         // thread and PC after each (a cheap profile).
         let sampling = pcs.is_some_and(|(a, b)| (a..b).contains(&(p.executed / 1_000_000)));
         let step = left.min(if sampling { 1_000_000 } else { 10_000_000 });
+        let before = p.executed;
         let stop = p.run(step);
         if sampling {
             eprintln!("[pc] {} {:08X}", p.tid(), p.cpu.r[15]);
@@ -108,7 +117,8 @@ fn main() {
         }
         std::io::stdout().write_all(&std::mem::take(&mut p.console)).unwrap();
         std::io::stdout().flush().unwrap();
-        left -= step;
+        // Nothing runs while the boot splash shows.
+        left -= (p.executed - before).min(left);
         if stop != ribbit_didj::hle::Stop::Budget || left == 0 {
             break stop;
         }
