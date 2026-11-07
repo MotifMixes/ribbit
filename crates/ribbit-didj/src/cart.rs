@@ -175,7 +175,8 @@ const BLOCKS: usize = 4096;
 /// from its root ("JDI/App.so"): an application package like a download's
 /// (`JDI/meta.inf`, Type="Application"), ready for /Didj/ProgramFiles.
 pub fn files(raw: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
-    let fat = volume(raw)?;
+    // A NAND dump, or the volume alone (as the app keeps some).
+    let fat = if is_volume(raw) { raw.to_vec() } else { volume(raw)? };
     let mut out = Vec::new();
     let mut folders = vec![String::new()];
     while let Some(dir) = folders.pop() {

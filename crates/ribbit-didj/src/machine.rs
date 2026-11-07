@@ -1164,9 +1164,11 @@ impl Didj {
         let (cpu_hz, _) = self.clocks();
         self.bus.dma.tick(cycles, cpu_hz, &self.bus.sdram);
         self.bus.ga3d.tick(cycles, cpu_hz);
+        // `cycles` can span several frames (every thread slept): the rest
+        // is kept, so frames stay at 60 Hz and not on the HLE's 10 ms ticks.
         self.bus.frame_cycles += cycles;
         if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
-            self.bus.frame_cycles = 0;
+            self.bus.frame_cycles %= cpu_hz / FRAME_HZ;
             for (reg, bit) in MLC_DIRTY {
                 if let Some(v) = self.bus.regs.get_mut(&reg) {
                     *v &= !bit;

@@ -184,6 +184,25 @@ in-between option (phase 7).
   processor 56% busy, nothing changes on screen), the HLE about 12 s after. Not drawing load; some timed event in the
   game (sound ending? a timer?) comes sooner in the HLE. The HLE also runs about 420 million instructions a second
   there against Original's about 290 (thread 1, code at 0x4021xxxx and 0x4044xxxx; likely polling hardware faster).
+  EXPLAINED (2026-11-07): about 87% of the main thread is libopengles_lite.so 0x3E320 (reads the 3D chip's queue
+  registers; mode 2 works out the read position with __umoddi3, which is the 0x4044xxxx code in libgcc_s) in a
+  loop waiting for the 3D chip. So the extra instructions are only faster spinning. The level's 3D work is about
+  3.9 million chip cycles a frame (26.5 ms at 147.456 MHz) at 33 and at 25 fps alike, so a frame is about 30 ms
+  of chip and processor time: right on the 3-tick edge. Any delay tips it to 4 ticks, and it stays there. HLE runs
+  dropped after 9, 12 and 32 s, or not in 55 s (host timing jitter); Original's 26 s is deterministic but just as
+  near the edge. Not a bug to chase further; what real hardware does is UNKNOWN (ask the user to check).
+  FIXED with it: `hle_tick` set `frame_cycles` to 0 when a frame came, losing the rest; HLE ticks span whole
+  sleeps, so frames slipped onto the 10 ms ticks. The rest is now kept (`%=`).
+- No lag, same pace (2026-11-07, the user: "any fps, keep the speed"): the HLE runs the 3D chip 4 times as fast
+  (`Ga3d::speed_up`, didjhle DIDJ_HLE_GA3D=<n>, 1 = real). Checked by holding Right for 3 s of host time:
+  JetPack 25-33 -> 60 fps, same distance (231 vs 224 px at 1x/2x); Clone Wars first level 20 -> 38-41 fps
+  (55-62 while turning), same place at the end (frames differ by 1.0 of 255, as much as 0.4 s apart standing).
+  Both games move by the clock. Left: the MLC's 60 Hz frame and HZ 100 ticks cap the rest; frame-locked games
+  (none found yet) need in-between frames from the phase 5 renderer.
+  didjhle: `DIDJ_HLE_KEYS_MS=1` (key times in host ms; menus wait, so instruction times drift), `right@N+3000ms`,
+  `DIDJ_HLE_UNTIL_MS`, `DIDJ_HLE_FRAMES_FROM`. FIXED: cart::files took only NAND dumps; a bare FAT volume
+  (as the app keeps some carts) now works too. Clone Wars keys: see the session's script (New Game needs Down
+  then A on "are you sure?").
 
 ## Known risks
 

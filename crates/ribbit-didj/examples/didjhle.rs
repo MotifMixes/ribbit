@@ -8,7 +8,10 @@
 //! the screen at the end, as the MLC composes it. DIDJ_HLE_KEYS presses keys:
 //! `a@3000,down@3500` presses A after 3000 million instructions and Down
 //! after 3500, each held for 50 million (names in hle::key::by_name;
-//! `a@3000+400` holds it for 400 million).
+//! `a@3000+400` holds it for 400 million, `right@3000+2000ms` for 2000 host
+//! ms). DIDJ_HLE_KEYS_MS=1: those times (and DIDJ_HLE_FRAMES_FROM) are host
+//! ms instead, for menus that wait; DIDJ_HLE_UNTIL_MS=<ms> stops then.
+//! DIDJ_HLE_GA3D=<n> runs the 3D chip n times as fast.
 //! DIDJ_HLE_CART=<dump> puts a cartridge in the slot; DIDJ_HLE_CARRY=<save>
 //! puts the player's files from an Original save (.nandblocks) on /Didj.
 //! DIDJ_HLE_WAV, DIDJ_HLE_LOG, DIDJ_HLE_FRAMES and DIDJ_HLE_PCS: sound,
@@ -54,15 +57,26 @@ fn main() {
     let envp = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/", "TERM=vt100"];
     p.exec(&args[1], &argv, &envp).unwrap_or_else(|e| panic!("{e}"));
     let millions: u64 = std::env::var("DIDJ_HLE_MILLIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
-    let mut keys: Vec<(u64, u16, bool)> = Vec::new();
+    // (at instructions, key, down, hold in host ms): a key held by host time
+    // comes up from `ups`.
+    let keys_ms = std::env::var_os("DIDJ_HLE_KEYS_MS").is_some();
+    let until_ms: Option<u128> = std::env::var("DIDJ_HLE_UNTIL_MS").ok().and_then(|v| v.parse().ok());
+    // In millions of instructions, or host ms (DIDJ_HLE_KEYS_MS).
+    let unit = if keys_ms { 1 } else { 1_000_000 };
+    let mut keys: Vec<(u64, u16, bool, Option<u128>)> = Vec::new();
+    let mut ups: Vec<(u128, u16)> = Vec::new();
     for item in std::env::var("DIDJ_HLE_KEYS").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
         let (name, at) = item.split_once('@').expect("DIDJ_HLE_KEYS: name@millions");
         let code = ribbit_didj::hle::key::by_name(name).unwrap_or_else(|| panic!("no key {name}"));
         let (at, hold) = at.split_once('+').unwrap_or((at, "50"));
         let at: u64 = at.parse().expect("DIDJ_HLE_KEYS: millions");
+        if let Some(ms) = hold.strip_suffix("ms") {
+            keys.push((at * unit, code, true, Some(ms.parse().expect("DIDJ_HLE_KEYS: ms held"))));
+            continue;
+        }
         let hold: u64 = hold.parse().expect("DIDJ_HLE_KEYS: millions held");
-        keys.push((at * 1_000_000, code, true));
-        keys.push(((at + hold) * 1_000_000, code, false));
+        keys.push((at * unit, code, true, None));
+        keys.push(((at + hold) * unit, code, false, None));
     }
     keys.sort_by_key(|k| k.0);
     let mut keys = keys.into_iter().peekable();
@@ -73,8 +87,10 @@ fn main() {
     let (mut rate, mut channels) = (32000, 2);
     let sound_log = std::env::var_os("DIDJ_HLE_LOG").is_some();
     // DIDJ_HLE_FRAMES=<folder> saves the screen whenever it changed, after
-    // each step, named by host ms.
+    // each step, named by host ms (DIDJ_HLE_FRAMES_FROM=<millions>: from
+    // then on).
     let frames_dir = std::env::var("DIDJ_HLE_FRAMES").ok();
+    let frames_from: u64 = std::env::var("DIDJ_HLE_FRAMES_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let fps = std::env::var_os("DIDJ_HLE_FPS").is_some();
     let (mut fps_second, mut fps_flips, mut fps_executed) = (0, 0, 0);
     let mut last_frame: Vec<u32> = Vec::new();
@@ -85,12 +101,21 @@ fn main() {
     });
     let mut left = millions * 1_000_000;
     let stop = loop {
-        while let Some(&(at, code, down)) = keys.peek()
-            && at <= p.executed
+        let now = if keys_ms { t.elapsed().as_millis() as u64 } else { p.executed };
+        while let Some(&(at, code, down, ms)) = keys.peek()
+            && at <= now
         {
             eprintln!("[didjhle] key {code} {} at {} ms", if down { "down" } else { "up" }, t.elapsed().as_millis());
             p.key(code, down);
+            if let Some(ms) = ms {
+                ups.push((t.elapsed().as_millis() + ms, code));
+            }
             keys.next();
+        }
+        while let Some(i) = ups.iter().position(|&(at, _)| at <= t.elapsed().as_millis()) {
+            let (_, code) = ups.remove(i);
+            eprintln!("[didjhle] key {code} up at {} ms", t.elapsed().as_millis());
+            p.key(code, false);
         }
         // DIDJ_HLE_PCS=<from>-<to>: steps of 1 million there, printing the
         // thread and PC after each (a cheap profile).
@@ -107,7 +132,9 @@ fn main() {
             eprintln!("[fps] {fps_second} s: {} frames shown, {} million instructions", p.m.bus.flips - fps_flips, (p.executed - fps_executed) / 1_000_000);
             (fps_second, fps_flips, fps_executed) = (t.elapsed().as_secs(), p.m.bus.flips, p.executed);
         }
-        if let Some(dir) = &frames_dir {
+        if let Some(dir) = &frames_dir
+            && now >= frames_from * unit
+        {
             let (w, h, pixels) = p.m.bus.frame();
             if pixels[..] != last_frame[..] {
                 last_frame = pixels.to_vec();
@@ -127,7 +154,7 @@ fn main() {
         std::io::stdout().flush().unwrap();
         // Nothing runs while the boot splash shows.
         left -= (p.executed - before).min(left);
-        if stop != ribbit_didj::hle::Stop::Budget || left == 0 {
+        if stop != ribbit_didj::hle::Stop::Budget || left == 0 || until_ms.is_some_and(|u| t.elapsed().as_millis() >= u) {
             break stop;
         }
     };

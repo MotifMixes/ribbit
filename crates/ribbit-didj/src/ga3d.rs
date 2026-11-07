@@ -399,6 +399,10 @@ pub struct Ga3d {
     done: u64,
     #[serde(default)]
     shown_rear: u32,
+    /// The engine's clock times this (0 and 1: the real one); Enhanced
+    /// (new) runs it faster so frames never wait on drawing.
+    #[serde(skip)]
+    pub speed_up: u64,
     #[serde(default)]
     drawing: std::collections::VecDeque<(u32, u64)>,
     /// CPU cycles left over from the last tick (a fraction of an engine
@@ -614,6 +618,7 @@ impl Default for Ga3d {
             cost: 0,
             done: 0,
             shown_rear: 0,
+            speed_up: 1,
             drawing: Default::default(),
             tick_rest: 0,
             cycles_per_pixel: CYCLES_PER_PIXEL,
@@ -639,7 +644,7 @@ impl Ga3d {
             self.tick_rest = 0;
             return;
         }
-        let t = cycles as u128 * GA3D_HZ as u128 + self.tick_rest as u128;
+        let t = cycles as u128 * (GA3D_HZ * self.speed_up.max(1)) as u128 + self.tick_rest as u128;
         self.done = (self.done + (t / cpu_hz as u128) as u64).min(self.cost);
         self.tick_rest = (t % cpu_hz as u128) as u64;
         while let Some(&(rear, end)) = self.drawing.front() {

@@ -239,6 +239,9 @@ impl Process {
         stops[..7].copy_from_slice(&[SWI_VECTOR, KUSER_GET_TLS, KUSER_CMPXCHG, KUSER_MEMORY_BARRIER, VECTORS + 4, VECTORS + 0xC, VECTORS + 0x10]);
         m.jit.set_stops(stops);
         m.jit.enabled &= std::env::var_os("DIDJ_HLE_NOJIT").is_none();
+        // The 3D chip 4 times as fast (DIDJ_HLE_GA3D=<n>; 1 is the real one): frames never
+        // wait on drawing. JetPack Heroes went from 25-33 to 60 fps, its play at the same pace.
+        m.bus.ga3d.speed_up = std::env::var("DIDJ_HLE_GA3D").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
         let mut p = Self {
             cpu,
             vfs,
