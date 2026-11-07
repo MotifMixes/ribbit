@@ -126,6 +126,10 @@ enum Command {
         /// in first-visit order ("cycle pc" lines).
         #[arg(long)]
         coverage: Option<PathBuf>,
+        /// Write the console's sound (the 8 kHz mix the app plays) to this
+        /// WAV file: 16-bit mono, from the start of the run to its end.
+        #[arg(long)]
+        audio_out: Option<PathBuf>,
     },
     /// Open the desktop window (the default when no command is given).
     Run(Images),
@@ -221,6 +225,7 @@ fn real_main() -> Result<ExitCode> {
             eeprom,
             cpu_mhz,
             cart_save,
+            audio_out,
         } => {
             let mut config = config;
             config.system_eeprom = eeprom.or(config.system_eeprom);
@@ -270,6 +275,10 @@ fn real_main() -> Result<ExitCode> {
             bounds.sort_unstable();
             bounds.dedup();
             let none = Breakpoints::default();
+            // The output ring holds a second of sound; a million steps is far
+            // less than that (a run's steps go by at 24-28 million a second).
+            let mut audio: Option<Vec<i16>> = audio_out.as_ref().map(|_| Vec::new());
+            let chunk = if audio.is_some() { 1_000_000 } else { u64::MAX };
             let mut report =
                 RunReport { steps: 0, instructions: 0, interrupts: 0, pc: machine.cpu.pc, stop: StopReason::StepLimit };
             for end in bounds {
@@ -281,14 +290,25 @@ fn real_main() -> Result<ExitCode> {
                     let down = (steps_at(start)..steps_at(start + dur)).contains(&report.steps);
                     machine.buttons.set(button, down);
                 }
-                let r = machine.run(end - report.steps, active);
-                report = RunReport {
-                    steps: report.steps + r.steps,
-                    instructions: report.instructions + r.instructions,
-                    interrupts: report.interrupts + r.interrupts,
-                    pc: r.pc,
-                    stop: r.stop,
-                };
+                while report.steps < end {
+                    let r = machine.run((end - report.steps).min(chunk), active);
+                    report = RunReport {
+                        steps: report.steps + r.steps,
+                        instructions: report.instructions + r.instructions,
+                        interrupts: report.interrupts + r.interrupts,
+                        pc: r.pc,
+                        stop: r.stop,
+                    };
+                    if let Some(samples) = &mut audio {
+                        let out = &mut machine.io.voices.output;
+                        let at = samples.len();
+                        samples.resize(at + out.len(), 0);
+                        out.pop_into(&mut samples[at..]);
+                    }
+                    if report.stop != StopReason::StepLimit || r.steps == 0 {
+                        break;
+                    }
+                }
                 if report.stop != StopReason::StepLimit {
                     break;
                 }
@@ -316,6 +336,11 @@ fn real_main() -> Result<ExitCode> {
                 let status = dump_ppm(&machine, &path)?;
                 println!("frame: {status:?} -> {}", path.display());
             }
+            if let (Some(path), Some(samples)) = (&audio_out, &audio) {
+                write_wav(path, samples, 8_000)?;
+                let lost = machine.io.voices.output.overruns;
+                println!("audio: {} samples (8 kHz), {lost} lost -> {}", samples.len(), path.display());
+            }
             if let Some(path) = save_state {
                 std::fs::write(&path, machine.save_state()).with_context(|| format!("writing {}", path.display()))?;
                 println!("state saved to {}", path.display());
@@ -330,6 +355,26 @@ fn real_main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// 16-bit mono PCM.
+fn write_wav(path: &Path, samples: &[i16], hz: u32) -> Result<()> {
+    let data = samples.len() as u32 * 2;
+    let mut b = Vec::with_capacity(44 + data as usize);
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    b.extend_from_slice(&1u16.to_le_bytes()); // mono
+    b.extend_from_slice(&hz.to_le_bytes());
+    b.extend_from_slice(&(hz * 2).to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data.to_le_bytes());
+    samples.iter().for_each(|s| b.extend_from_slice(&s.to_le_bytes()));
+    std::fs::write(path, b).with_context(|| format!("writing {}", path.display()))
 }
 
 fn print_report(machine: &Machine, report: &RunReport, tail: usize) {

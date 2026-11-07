@@ -233,7 +233,7 @@ pub struct Game {
     /// Label, value pairs for the details tooltip.
     pub details: Vec<(&'static str, String)>,
     /// Badges shown with the game ("Internal": built into the console;
-    /// "Prototype" and its build date).
+    /// "Prototype" or "Homebrew" and its build date).
     pub tags: Vec<std::borrow::Cow<'static, str>>,
     pub(crate) key: String,
     pub art: Art,
@@ -1130,7 +1130,17 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     let known = cart.known();
     let header_title = cart.header_text(0x0b);
     let part = cart.header_text(0x0a);
-    let built = cart.header_text(0x0f);
+    // Ribbit Studio writes "Made with Ribbit Studio, built Nov 01 2026 14:05:00"
+    // where LeapFrog's carts name their toolchain (0x0c). Its 0x0d-0x0f are a
+    // donor cart's (the BIOS's approval hash covers them), so its date is
+    // taken from 0x0c instead.
+    let studio = cart.header_text(0x0c).filter(|t| t.starts_with("Made with Ribbit Studio"));
+    let homebrew = known.is_none() && studio.is_some();
+    let built = if homebrew {
+        studio.as_deref().and_then(|t| t.split_once(", built ")).map(|(_, d)| d.trim().to_string())
+    } else {
+        cart.header_text(0x0f)
+    };
     let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     // Known dumps by name; otherwise the file name, which players usually
     // keep tidy (the header's title can be generic, e.g. "Included Title").
@@ -1183,12 +1193,15 @@ fn describe(path: &Path, cart: &Cartridge, key: String, art: Art) -> Game {
     if prototype {
         tags.push("Prototype".into());
     }
+    if homebrew {
+        tags.push("Homebrew".into());
+    }
     if let Some(v) = version {
         tags.push(v.into());
     }
     // A prototype's build date tells one build from another: the header's,
     // else the file name's, else a compile stamp found in the program.
-    if prototype
+    if (prototype || homebrew)
         && let Some(date) = built
             .as_deref()
             .and_then(pretty_date)
@@ -1560,6 +1573,49 @@ mod tests {
         assert_eq!(pretty_date("Dec 20 2007 16:28:29").as_deref(), Some("Dec 20, 2007"));
         assert_eq!(pretty_date("Feb  9 2005").as_deref(), Some("Feb 9, 2005"));
         assert_eq!(pretty_date("v1.0"), None);
+    }
+
+    /// A cart whose 0x1003 directory holds these text fields.
+    fn cart_with_text(fields: &[(u16, &str)]) -> Cartridge {
+        let mut rom = vec![0u8; 0x1000];
+        rom[0..4].copy_from_slice(b"LEAP");
+        rom[4..6].copy_from_slice(&0x0100u16.to_le_bytes());
+        rom[6..8].copy_from_slice(&1u16.to_le_bytes());
+        rom[0x20..0x22].copy_from_slice(&0x1003u16.to_le_bytes());
+        rom[0x22..0x24].copy_from_slice(&(fields.len() as u16).to_le_bytes());
+        rom[0x24..0x28].copy_from_slice(&0x8000_0040u32.to_le_bytes());
+        let mut text = 0x200;
+        for (i, (id, t)) in fields.iter().enumerate() {
+            let e = 0x40 + i * 8;
+            rom[e..e + 2].copy_from_slice(&id.to_le_bytes());
+            rom[e + 4..e + 8].copy_from_slice(&(0x8000_0000u32 + text as u32).to_le_bytes());
+            rom[text..text + t.len()].copy_from_slice(t.as_bytes());
+            text += t.len() + 1;
+        }
+        Cartridge::from_bytes(rom).unwrap()
+    }
+
+    #[test]
+    fn ribbit_studio_games_are_homebrew_with_their_own_date() {
+        let donor = "Oct 09 2003 18:23:53";
+        let describe_cart = |cart: &Cartridge| describe(Path::new("Game.bin"), cart, "0".into(), Art::Missing);
+        let built = |g: &Game| g.details.iter().find(|d| d.0 == "Built").map(|d| d.1.clone());
+
+        let g = describe_cart(&cart_with_text(&[(0x0c, "Made with Ribbit Studio, built Nov 01 2026 14:05:00"), (0x0f, donor)]));
+        assert!(g.has_tag("Homebrew") && g.has_tag("Nov 1, 2026"));
+        assert!(g.subtitle.contains("2026") && !g.subtitle.contains("2003"));
+        assert_eq!(built(&g).as_deref(), Some("Nov 01 2026 14:05:00"));
+
+        // No date in the marker: none shown, and still not the donor's.
+        let g = describe_cart(&cart_with_text(&[(0x0c, "Made with Ribbit Studio"), (0x0f, donor)]));
+        assert!(g.has_tag("Homebrew"));
+        assert_eq!(built(&g), None);
+        assert!(!g.subtitle.contains("2003"));
+
+        // Anything else keeps its own header date and gets no tag.
+        let g = describe_cart(&cart_with_text(&[(0x0c, "ToolPad V2.2.29"), (0x0f, donor)]));
+        assert!(!g.has_tag("Homebrew"));
+        assert_eq!(built(&g).as_deref(), Some(donor));
     }
 
     #[test]
