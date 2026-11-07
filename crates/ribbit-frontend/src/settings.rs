@@ -219,6 +219,15 @@ pub struct Settings {
     /// (1 = original). From the next power-on.
     #[serde(default = "default_didj_cpu_scale")]
     pub didj_cpu_scale: u32,
+    /// Didj, with `didj_enhanced`: Enhanced (new), the programs run without
+    /// the Didj's kernel (`ribbit_didj::hle`; experimental). From the next
+    /// power-on.
+    #[serde(default)]
+    pub didj_hle: bool,
+    /// Didj, Enhanced (new): in-between frames, smooth motion whatever the
+    /// game's frame rate. At once.
+    #[serde(default = "default_true")]
+    pub didj_smooth: bool,
     /// Didj: skip drawing frames while the PC can't keep up (the game runs
     /// the same; the picture updates less often). Off: every frame drawn.
     #[serde(default)]
@@ -309,6 +318,8 @@ impl Default for Settings {
             record_folder: None,
             close_with_shutdown: false,
             didj_enhanced: true,
+            didj_hle: false,
+            didj_smooth: true,
             didj_cpu_scale: default_didj_cpu_scale(),
             didj_frame_skip: false,
             didj_hd: default_didj_hd(),

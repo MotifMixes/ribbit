@@ -203,7 +203,7 @@ impl Process {
             Device::Zero => Ok(vec![0; len]),
             Device::Random => {
                 // xorshift from the clock: the programs only seed with it.
-                let mut x = self.start.elapsed().as_nanos() as u64 | 1;
+                let mut x = self.since_start().as_nanos() as u64 | 1;
                 Ok((0..len)
                     .map(|_| {
                         x ^= x << 13;
@@ -244,7 +244,7 @@ impl Process {
         if d != Device::Dsp {
             return Ok(data.len());
         }
-        let now = Instant::now();
+        let now = self.clock();
         let dsp = &mut self.dev.dsp;
         let size = (FRAG_SIZE * FRAGS) as u64;
         let room = size - dsp.queued(now).min(size);
@@ -276,7 +276,7 @@ impl Process {
         match d {
             Device::Input(n) => (!self.dev.input[n].is_empty(), true, false),
             // Writable with a whole fragment free, as OSS reports it.
-            Device::Dsp => (false, self.dev.dsp.queued(Instant::now()) <= (FRAG_SIZE * (FRAGS - 1)) as u64, false),
+            Device::Dsp => (false, self.dev.dsp.queued(self.clock()) <= (FRAG_SIZE * (FRAGS - 1)) as u64, false),
             _ => (true, true, false),
         }
     }
@@ -347,7 +347,7 @@ impl Process {
     fn dsp_ioctl(&mut self, cmd: u32, arg: u32) -> Result<u32, i32> {
         const AFMT_S16_LE: u32 = 0x10;
         let int_arg = |p: &mut Self| p.mem().read_bytes(arg, 4).map(|b| u32::from_le_bytes(b[..4].try_into().unwrap()));
-        let now = Instant::now();
+        let now = self.clock();
         match cmd {
             0x5000 | 0x5001 | 0x5008 => {
                 // RESET, SYNC, POST

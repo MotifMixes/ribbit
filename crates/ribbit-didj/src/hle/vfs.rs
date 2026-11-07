@@ -153,6 +153,20 @@ impl Vfs {
             .collect()
     }
 
+    /// Every file anywhere under `dir`: (path from `dir`, starting with
+    /// '/', contents).
+    pub fn files_under(&self, dir: &str) -> Vec<(String, &[u8])> {
+        let prefix = format!("{}/", dir.trim_end_matches('/'));
+        self.nodes
+            .range(prefix.clone()..)
+            .take_while(|(p, _)| p.starts_with(&prefix))
+            .filter_map(|(p, n)| match &n.data {
+                Data::File(d) => Some((p[prefix.len() - 1..].to_string(), &d[..])),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The canonical path `path` names, from directory `cwd`, following
     /// symbolic links on the way (and in the last component if `follow`).
     /// A missing last component is still named (for creating it); a

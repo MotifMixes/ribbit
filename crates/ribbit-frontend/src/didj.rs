@@ -90,6 +90,9 @@ struct Shared {
     explorer: bool,
     /// The Explorer's stylus on the screen (pixels), None while lifted.
     touch: Mutex<Option<(f32, f32)>>,
+    /// Enhanced (new): the Didj's programs on the HLE, without its kernel
+    /// (`Hle`). `didj` then only keeps the NAND the saves are written to.
+    hle: Mutex<Option<Hle>>,
 }
 
 /// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
@@ -103,6 +106,12 @@ pub struct Mode {
     pub frame_skip: bool,
     /// HD drawing: the 3D engine at this many times the resolution (1 off).
     pub hd: u32,
+    /// Enhanced (new): the programs without the kernel (`Hle`); `enhanced`
+    /// is then left alone (the NAND isn't run).
+    pub hle: bool,
+    /// Enhanced (new): in-between frames, so motion is smooth at 60 fps
+    /// whatever the game's own rate (at once, `DidjSession::set_smooth`).
+    pub smooth: bool,
 }
 
 /// A Leapster Explorer ready to power on (`DidjSession::build_explorer`).
@@ -133,6 +142,10 @@ pub struct DidjSession {
     pub carried: Option<usize>,
     /// A Leapster Explorer (`start_explorer`).
     pub explorer: bool,
+    /// The packages' folder and the cartridge's dump, for building the
+    /// HLE again (`reset`).
+    dir: PathBuf,
+    cart: Option<Vec<u8>>,
 }
 
 impl DidjSession {
@@ -140,6 +153,7 @@ impl DidjSession {
     /// With `autostart`, the game with that art is then started from the
     /// menu (`ribbit_didj::autostart`). `mode`: Enhanced or Original.
     pub fn start(dir: &Path, save_dir: &Path, cart: Option<Vec<u8>>, sink: Option<AudioSink>, autostart: Option<Art>, mode: Mode, serial: Arc<crate::serial::Serial>) -> anyhow::Result<Self> {
+        let cart_dump = cart.clone();
         let cart = cart.map(ribbit_didj::cart::Cart::new).transpose().map_err(anyhow::Error::msg)?;
         let (original, extras_missing) = ribbit_didj::nand_and_extras_missing(dir, true).map_err(anyhow::Error::msg)?;
         let save_path = save_file(dir, save_dir);
@@ -194,7 +208,14 @@ impl DidjSession {
             let _ = std::fs::write(&save_path, flash.changes_from(&original));
             let _ = std::fs::write(&image_path, &image);
         }
-        let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced));
+        let hle = match mode.hle {
+            true => {
+                let files = ribbit_didj::carry::files_beyond(&flash, &original);
+                Some(Hle::new(dir, cart_dump.as_deref(), files, mode)?)
+            }
+            false => None,
+        };
+        let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced && !mode.hle));
         didj.set_cpu_scale(mode.cpu_scale);
         didj.bus.cart = cart;
         let shared = Arc::new(Shared {
@@ -216,6 +237,7 @@ impl DidjSession {
             serial,
             explorer: false,
             touch: Mutex::new(None),
+            hle: Mutex::new(hle),
         });
         shared.serial.note("--- Ribbit: the Didj powers on ---
 ");
@@ -225,7 +247,7 @@ impl DidjSession {
             run(&s, autostart)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false })
+        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false, dir: dir.to_path_buf(), cart: cart_dump })
     }
 
     /// Builds a Leapster Explorer from the packages in `dir`
@@ -278,6 +300,7 @@ impl DidjSession {
             serial,
             explorer: true,
             touch: Mutex::new(None),
+            hle: Mutex::new(None),
         });
         shared.serial.note("--- Ribbit: the Leapster Explorer powers on ---\n");
         let s = shared.clone();
@@ -286,7 +309,7 @@ impl DidjSession {
             run(&s, None)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Leapster Explorer".into(), started, original, save_path, image, extras_missing: Vec::new(), carried: None, explorer: true })
+        Ok(Self { shared, thread: Some(thread), title: "Leapster Explorer".into(), started, original, save_path, image, extras_missing: Vec::new(), carried: None, explorer: true, dir: PathBuf::new(), cart: None })
     }
 
     /// The Explorer's stylus at `pos` on the screen (pixels; None lifts it).
@@ -327,6 +350,11 @@ impl DidjSession {
         }
     }
 
+    /// Why USB isn't offered now (Enhanced (new) has no kernel to drive it).
+    pub fn usb_unavailable(&self) -> Option<&'static str> {
+        self.is_hle().then_some("USB and LeapFrog Connect need the Didj's own system: switch to Enhanced or Original (Emulation > Didj)")
+    }
+
     /// News of the USB link since last asked.
     pub fn take_usb_news(&self) -> Option<crate::twist::UsbNews> {
         self.shared.usb_news.lock().unwrap().take()
@@ -365,19 +393,66 @@ impl DidjSession {
     }
 
     /// The console now, for a save slot (its NAND as changes from the built
-    /// image; the cartridge left out).
-    pub fn save_state(&self) -> Vec<u8> {
-        self.shared.didj.lock().unwrap().save_state(&self.original)
+    /// image; the cartridge left out). None in Enhanced (new).
+    pub fn save_state(&self) -> Option<Vec<u8>> {
+        if self.is_hle() {
+            return None;
+        }
+        Some(self.shared.didj.lock().unwrap().save_state(&self.original))
     }
 
     /// Restores a state from `save_state`. The NAND goes back to what it
     /// held then, as the system's memory expects.
     pub fn load_state(&self, state: &[u8]) -> Result<(), String> {
+        if self.is_hle() {
+            return Err(HLE_NO_STATES.into());
+        }
         self.shared.didj.lock().unwrap().load_state(state, &self.original)
+    }
+
+    /// Running Enhanced (new): no kernel, so no USB and no save states.
+    pub fn is_hle(&self) -> bool {
+        self.shared.hle.lock().unwrap().is_some()
+    }
+
+    /// Enhanced (new): in-between frames on or off, at once.
+    pub fn set_smooth(&self, on: bool) {
+        if let Some(h) = self.shared.hle.lock().unwrap().as_mut() {
+            h.smooth = on;
+        }
+    }
+
+    /// Enhanced (new): the player's files written into the NAND kept in
+    /// `didj`, as the other modes keep them (`Hle::user_files`).
+    fn hle_to_nand(&self) -> anyhow::Result<()> {
+        let mut hle = self.shared.hle.lock().unwrap();
+        let Some(h) = hle.as_mut() else { return Ok(()) };
+        let files = h.user_files();
+        if files == h.written {
+            return Ok(());
+        }
+        let (nand, _) = ribbit_didj::nand_with_files(&self.dir, true, &files).map_err(anyhow::Error::msg)?;
+        self.shared.didj.lock().unwrap().bus.nand = nand;
+        h.written = files;
+        Ok(())
     }
 
     /// Restarts the console (keeping what it has saved), in `mode`.
     pub fn reset(&self, mode: Mode) {
+        if let Err(e) = self.hle_to_nand() {
+            tracing::warn!(target: "ribbit::saves", "keeping the Didj's files: {e:#}");
+        }
+        if mode.hle && !self.explorer {
+            let files = ribbit_didj::carry::files_beyond(&self.shared.didj.lock().unwrap().bus.nand, &self.original);
+            let built = Hle::new(&self.dir, self.cart.as_deref(), files, mode);
+            match built {
+                Ok(h) => *self.shared.hle.lock().unwrap() = Some(h),
+                Err(e) => tracing::error!(target: "ribbit::didj", "starting Enhanced (new): {e:#}"),
+            }
+            self.set_hd(mode.hd);
+            return;
+        }
+        *self.shared.hle.lock().unwrap() = None;
         let mut d = self.shared.didj.lock().unwrap();
         if self.explorer {
             power_on_again(&mut d, true);
@@ -406,6 +481,7 @@ impl DidjSession {
 
     /// Keeps what the system has saved to its NAND.
     pub fn flush(&self) -> anyhow::Result<()> {
+        self.hle_to_nand()?;
         let changes = self.shared.didj.lock().unwrap().bus.nand.changes_from(&self.original);
         if changes.is_empty() && !self.save_path.exists() {
             return Ok(());
@@ -533,6 +609,9 @@ fn run(s: &Shared, art: Option<Art>) {
     let mut quick_offs = 0;
     while !s.quit.load(Ordering::Relaxed) {
         if !s.running.load(Ordering::Relaxed) {
+            if let Some(h) = s.hle.lock().unwrap().as_mut() {
+                h.p.set_paused(true);
+            }
             std::thread::sleep(Duration::from_millis(10));
             next = Instant::now();
             (counted_since, frames) = (next, 0);
@@ -554,7 +633,9 @@ fn run(s: &Shared, art: Option<Art>) {
             next = Instant::now();
         }
         next += Duration::from_secs_f64(1.0 / FPS);
-        let picture = {
+        let picture = if let Some(h) = s.hle.lock().unwrap().as_mut() {
+            h.frame(s, next, auto.as_ref().map_or(0, |_| auto_buttons), &mut rate, &mut resample, &mut stereo, auto.is_some())
+        } else {
             let mut d = s.didj.lock().unwrap();
             d.bus.buttons = s.held.load(Ordering::Relaxed) | auto_buttons;
             if s.explorer {
@@ -684,7 +765,201 @@ fn run(s: &Shared, art: Option<Art>) {
             sink.push_32k(&mono, gain);
         }
     }
-    power_off(s);
+    if s.hle.lock().unwrap().is_none() {
+        power_off(s);
+    }
+}
+
+const HLE_NO_STATES: &str = "Save states aren't made in Enhanced (new) yet: switch to Enhanced or Original (Emulation > Didj) for them.";
+
+/// The Didj's buttons (`button` bits) as the keypad's Linux key codes.
+const HLE_KEYS: [(u32, u16); 12] = {
+    use ribbit_didj::hle::key;
+    [
+        (button::UP, key::UP),
+        (button::DOWN, key::DOWN),
+        (button::LEFT, key::LEFT),
+        (button::RIGHT, key::RIGHT),
+        (button::A, key::A),
+        (button::B, key::B),
+        (button::L, key::L),
+        (button::R, key::R),
+        (button::MENU, key::MENU),
+        (button::HINT, key::HINT),
+        (button::PAUSE, key::PAUSE),
+        (button::BRIGHTNESS, key::BRIGHTNESS),
+    ]
+};
+
+/// Enhanced (new): the Didj's programs (AppManager, the menu, the games) on
+/// `ribbit_didj::hle`, Ribbit answering their Linux system calls. The
+/// player's files on /Didj go to the same save as the other modes'.
+struct Hle {
+    p: ribbit_didj::hle::Process,
+    dir: PathBuf,
+    cart: Option<Vec<u8>>,
+    mode: Mode,
+    /// The paths the packages put on /Didj (lower case): the other files
+    /// there are the player's.
+    built: std::collections::HashSet<String>,
+    /// The player's files as last written to the NAND (or read from it).
+    written: Vec<(String, Vec<u8>)>,
+    /// Buttons down on the keypad (`button` bits).
+    keys: u32,
+    /// In-between frames (`Mode::smooth`).
+    smooth: bool,
+    /// The game's frames seen, and when the last two came.
+    flips: (u64, Instant, Instant),
+    started: Instant,
+    /// Stops in a row that came within a minute of starting.
+    quick_stops: u32,
+    /// Left off: it kept stopping soon after starting.
+    off: bool,
+}
+
+impl Hle {
+    fn new(dir: &Path, cart: Option<&[u8]>, files: Vec<(String, Vec<u8>)>, mode: Mode) -> anyhow::Result<Self> {
+        use ribbit_didj::hle;
+        let mut vfs = hle::system_from_packages(dir).map_err(anyhow::Error::msg)?;
+        let built = vfs.files_under("/Didj").into_iter().map(|(p, _)| p.to_ascii_lowercase()).collect();
+        for (name, data) in files {
+            vfs.add_file(&format!("/Didj/{}", name.trim_start_matches('/')), data);
+        }
+        let mut p = hle::Process::new(vfs);
+        // The boot splash for the boot loader's and kernel's time, as Original.
+        match hle::boot_splash_from_packages(dir) {
+            Ok(rgb) => p.boot_splash(&rgb),
+            Err(e) => tracing::warn!(target: "ribbit::didj", "Enhanced (new): no boot splash: {e}"),
+        }
+        p.m.bus.ga3d.hd.set_scale(mode.hd as usize);
+        if let Some(raw) = cart {
+            p.insert_cart(raw).map_err(anyhow::Error::msg)?;
+        }
+        let envp = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/", "TERM=vt100"];
+        p.exec("/bin/sh", &["/bin/sh", "-c", ". /etc/profile; exec AppManager"], &envp).map_err(anyhow::Error::msg)?;
+        let now = Instant::now();
+        let mut h = Self {
+            p,
+            dir: dir.to_path_buf(),
+            cart: cart.map(<[u8]>::to_vec),
+            mode,
+            built,
+            written: Vec::new(),
+            keys: 0,
+            smooth: mode.smooth,
+            flips: (0, now, now),
+            started: now,
+            quick_stops: 0,
+            off: false,
+        };
+        h.written = h.user_files();
+        Ok(h)
+    }
+
+    /// The player's files on /Didj (paths from /Didj), sorted.
+    fn user_files(&self) -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<_> = self
+            .p
+            .vfs
+            .files_under("/Didj")
+            .into_iter()
+            .filter(|(p, _)| !self.built.contains(&p.to_ascii_lowercase()))
+            .map(|(p, d)| (p, d.to_vec()))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Runs the programs until `until` (host time); the picture (with the
+    /// console-size one for the autostart) and the sound, as `run` takes
+    /// them from the console.
+    #[allow(clippy::too_many_arguments)]
+    fn frame(&mut self, s: &Shared, until: Instant, auto: u32, rate: &mut u64, resample: &mut Resampler, stereo: &mut Vec<i16>, console: bool) -> Option<((usize, usize, Vec<u32>), Option<(usize, usize, Vec<u32>)>)> {
+        use ribbit_didj::hle::Stop;
+        self.p.set_paused(false);
+        let held = s.held.load(Ordering::Relaxed) | auto;
+        for &(bit, code) in &HLE_KEYS {
+            if (held ^ self.keys) & bit != 0 {
+                self.p.key(code, held & bit != 0);
+            }
+        }
+        self.keys = held;
+        let hd = s.hd.load(Ordering::Relaxed) as usize;
+        if self.p.m.bus.ga3d.hd.scale != hd.clamp(1, 4) {
+            self.p.m.bus.ga3d.hd.set_scale(hd);
+        }
+        if self.p.m.bus.ga3d.tween().is_some() != self.smooth {
+            self.p.m.bus.ga3d.set_tween(self.smooth);
+        }
+        while !self.off && Instant::now() < until {
+            match self.p.run(1_000_000) {
+                Stop::Budget => {}
+                // Every thread waits for something only the player can do.
+                Stop::Blocked => std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(2))),
+                stop => {
+                    self.stopped(s, stop);
+                    break;
+                }
+            }
+            if !self.p.console.is_empty() {
+                s.serial.output(&std::mem::take(&mut self.p.console));
+            }
+        }
+        let (sound, r, channels) = self.p.take_sound();
+        stereo.clear();
+        if r > 0 {
+            if r as u64 != *rate {
+                *rate = r as u64;
+                *resample = Resampler::new(r as f64);
+            }
+            match channels {
+                1 => stereo.extend(sound.iter().flat_map(|&v| [v, v])),
+                _ => stereo.extend(sound),
+            }
+        }
+        let flips = self.p.m.bus.flips;
+        if flips != self.flips.0 {
+            self.flips = (flips, self.flips.2, Instant::now());
+        }
+        // In-between frames: the picture between the last two frames, as far
+        // along as the time since the last one, so motion is even (a game
+        // frame behind). Not across a pause of the game's drawing.
+        let (_, t0, t1) = self.flips;
+        let span = t1.saturating_duration_since(t0);
+        let between = (self.smooth && span > Duration::ZERO && span < Duration::from_millis(150))
+            .then(|| t1.elapsed().as_secs_f32() / span.as_secs_f32())
+            .filter(|&f| f < 1.0)
+            .and_then(|f| self.p.m.bus.frame_between(f));
+        let picture = between.unwrap_or_else(|| self.p.m.bus.frame_hd());
+        Some((picture, console.then(|| self.p.m.bus.frame())))
+    }
+
+    /// AppManager ended or a program crashed. As a Didj that turned itself
+    /// off: on again, with the player's files, but not a third time in a
+    /// row within a minute of starting (as `run` does).
+    fn stopped(&mut self, s: &Shared, stop: ribbit_didj::hle::Stop) {
+        tracing::warn!(target: "ribbit::didj", "Enhanced (new) stopped: {stop:?}");
+        let quick_stops = if self.started.elapsed() < Duration::from_secs(60) { self.quick_stops + 1 } else { 0 };
+        if quick_stops >= 3 {
+            s.serial.note(&format!("--- Ribbit: Enhanced (new) stopped ({stop:?}); left off ---\n"));
+            s.gave_up.store(true, Ordering::Relaxed);
+            self.off = true;
+            return;
+        }
+        s.serial.note(&format!("--- Ribbit: Enhanced (new) stopped ({stop:?}); on again ---\n"));
+        match Self::new(&self.dir, self.cart.as_deref(), self.user_files(), self.mode) {
+            Ok(mut h) => {
+                h.smooth = self.smooth;
+                h.written = std::mem::take(&mut self.written);
+                h.quick_stops = quick_stops;
+                *self = h;
+            }
+            Err(e) => {
+                tracing::error!(target: "ribbit::didj", "starting Enhanced (new) again: {e:#}");
+                self.off = true;
+            }
+        }
+    }
 }
 
 /// Passes the PC's transfers (USB/IP) to the Didj's USB controller
@@ -1033,4 +1308,50 @@ pub fn find_package(dir: &Path, depth: u32) -> Option<PathBuf> {
     entries.iter().find(system).cloned().or_else(|| {
         (depth > 0).then(|| entries.iter().filter(|p| p.is_dir()).find_map(|d| find_package(d, depth - 1))).flatten()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Enhanced (new) in the app's session: the menu draws, and a file the
+    /// programs write to /Didj reaches the save, where the other modes find
+    /// it (carry::user_files). RIBBIT_DIDJ_DIR: a folder of Didj packages;
+    /// RIBBIT_DIDJ_SHOT=<file.png> saves the picture.
+    #[test]
+    #[ignore]
+    fn didj_hle_session() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_DIDJ_DIR").expect("RIBBIT_DIDJ_DIR"));
+        let saves = std::env::temp_dir().join("ribbit-hle-test");
+        let _ = std::fs::remove_dir_all(&saves);
+        let mode = Mode { enhanced: true, cpu_scale: 1, frame_skip: false, hd: 1, hle: true, smooth: true };
+        let didj = DidjSession::start(&dir, &saves, None, None, None, mode, Arc::new(crate::serial::Serial::default())).unwrap();
+        assert!(didj.is_hle());
+        std::thread::sleep(Duration::from_secs(10));
+        let mut px = Vec::new();
+        let (w, h) = didj.frame(&mut px);
+        let lit = px.iter().filter(|&&p| p != 0).count();
+        eprintln!("picture {w}x{h}, {lit} pixels not black, speed {:.0}%", didj.speed_percent());
+        if let Ok(path) = std::env::var("RIBBIT_DIDJ_SHOT") {
+            let mut enc = png::Encoder::new(std::fs::File::create(path).unwrap(), w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgb);
+            let rgb: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+            enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+        }
+        assert!(lit > w * h / 4);
+        didj.shared.hle.lock().unwrap().as_mut().unwrap().p.vfs.add_file("/Didj/Data/ribbit-test.txt", b"hello".to_vec());
+        eprintln!("player's files: {:?}", didj.shared.hle.lock().unwrap().as_ref().unwrap().user_files().iter().map(|f| f.0.clone()).collect::<Vec<_>>());
+        let original = didj.original.clone();
+        let save = didj.save_path.clone();
+        let t = Instant::now();
+        didj.stop();
+        eprintln!("stopped and saved in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        let bytes = std::fs::read(&save).unwrap();
+        eprintln!("save {} bytes", bytes.len());
+        let mut flash = original.clone();
+        flash.apply_changes(&bytes).unwrap();
+        let files = ribbit_didj::carry::files_beyond(&flash, &original);
+        eprintln!("save holds {:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
+        assert!(files.iter().any(|(p, d)| p.to_ascii_lowercase().ends_with("data/ribbit-test.txt") && d == b"hello"));
+    }
 }

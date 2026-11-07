@@ -205,6 +205,10 @@ pub struct Process {
     /// Logging every system call (to stderr), for bring-up.
     pub trace: bool,
     start: std::time::Instant,
+    /// Time spent paused (`set_paused`), taken off the host clock: the
+    /// programs' clocks stand still meanwhile.
+    paused: std::time::Duration,
+    paused_at: Option<std::time::Instant>,
     /// Showing the boot splash: nothing runs before then.
     boot_until: Option<std::time::Instant>,
     /// Processor cycles the 3D chip, DMA and frame timing have had: they
@@ -281,6 +285,8 @@ impl Process {
             poll_until: HashMap::new(),
             trace: false,
             start: std::time::Instant::now(),
+            paused: std::time::Duration::ZERO,
+            paused_at: None,
             boot_until: None,
             ticked: 0,
             frame_hz: std::env::var("DIDJ_HLE_MLC_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(60).max(1),
@@ -395,6 +401,30 @@ impl Process {
     }
 
     /// The thread that ran last.
+    /// The host clock less the time spent paused: what every deadline and
+    /// clock of the programs follows.
+    fn clock(&self) -> std::time::Instant {
+        let now = self.paused_at.unwrap_or_else(std::time::Instant::now);
+        now.checked_sub(self.paused).unwrap_or(self.start)
+    }
+
+    fn since_start(&self) -> std::time::Duration {
+        self.clock().saturating_duration_since(self.start)
+    }
+
+    /// Stops or restarts the programs' clocks (the app paused); nothing
+    /// should `run` meanwhile.
+    pub fn set_paused(&mut self, on: bool) {
+        match (on, self.paused_at) {
+            (true, None) => self.paused_at = Some(std::time::Instant::now()),
+            (false, Some(at)) => {
+                self.paused += at.elapsed();
+                self.paused_at = None;
+            }
+            _ => {}
+        }
+    }
+
     pub fn tid(&self) -> u32 {
         self.tid
     }
@@ -410,7 +440,7 @@ impl Process {
     /// (the first program) exits, a program crashes, or nothing can run.
     pub fn run(&mut self, budget: u64) -> Stop {
         if let Some(until) = self.boot_until {
-            let now = std::time::Instant::now();
+            let now = self.clock();
             if now < until {
                 std::thread::sleep((until - now).min(std::time::Duration::from_millis(10)));
                 return Stop::Budget;
@@ -491,7 +521,7 @@ impl Process {
     /// or slower than on a Didj, and none run while every thread sleeps.
     fn tick_machine(&mut self) {
         let hz = self.m.hle_cpu_hz() as u128;
-        let due = (self.start.elapsed().as_nanos() * hz / 1_000_000_000) as u64;
+        let due = (self.since_start().as_nanos() * hz / 1_000_000_000) as u64;
         if due > self.ticked {
             self.m.hle_tick(due - self.ticked, self.frame_hz);
             self.ticked = due;
@@ -1490,7 +1520,7 @@ impl Process {
         let d = if clock == 0 {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
         } else {
-            self.start.elapsed()
+            self.since_start()
         };
         (d.as_secs() as u32, d.subsec_nanos())
     }

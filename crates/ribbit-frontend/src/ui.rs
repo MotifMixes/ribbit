@@ -1191,9 +1191,10 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 actions.push(Action::SettingsChanged);
             }
             ui.separator();
-            let mut original = !settings.didj_enhanced;
+            // 0 Enhanced, 1 Enhanced (new), 2 Original.
+            let mut mode = if !settings.didj_enhanced { 2 } else { settings.didj_hle as u8 };
             let mut changed = ui
-                .radio_value(&mut original, false, "Enhanced")
+                .radio_value(&mut mode, 0, "Enhanced")
                 .on_hover_text(
                     "Fixes faults in the Didj's own software. After a crash or a power-off without a shutdown, \
                      its file check only looked for faults and never repaired them, so even a harmless finding \
@@ -1204,12 +1205,22 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 )
                 .changed();
             changed |= ui
-                .radio_value(&mut original, true, "Original")
+                .radio_value(&mut mode, 1, "Enhanced (new, experimental)")
+                .on_hover_text(
+                    "Runs the Didj's menu and games without its Linux system: Ribbit answers what they ask of it. \
+                     Starts sooner, never lags, and motion is smooth at 60 frames a second (in-between frames). \
+                     Saves are shared with the other modes. No USB or LeapFrog Connect and no save states here: \
+                     use Enhanced for those. Checked so far on the menu, JetPack Heroes and Star Wars: The Clone \
+                     Wars. From the next power-on.",
+                )
+                .changed();
+            changed |= ui
+                .radio_value(&mut mode, 2, "Original")
                 .on_hover_text("The Didj's software, memory and processor as LeapFrog shipped them. From the next power-on.")
                 .changed();
             ui.separator();
             ui.label(egui::RichText::new("Processor (Enhanced)").weak());
-            ui.add_enabled_ui(!original, |ui| {
+            ui.add_enabled_ui(mode == 0, |ui| {
                 for (scale, label) in [(1, "393 MHz (original)"), (2, "Up to 2× (786 MHz)"), (3, "Up to 3× (1.2 GHz)")] {
                     changed |= ui
                         .radio_value(&mut settings.didj_cpu_scale, scale, label)
@@ -1241,8 +1252,18 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                     )
                     .changed();
             }
+            changed |= ui
+                .add_enabled(mode == 1, egui::Checkbox::new(&mut settings.didj_smooth, "Smooth motion (Enhanced (new))"))
+                .on_hover_text(
+                    "In-between frames: between two of the game's frames, Ribbit draws the picture again with \
+                     everything moved part of the way, so games that run at 20-30 frames a second move as smoothly \
+                     as at 60, at their own speed. The picture is one game frame behind. Off: each game frame as \
+                     it was drawn (original). At once.",
+                )
+                .changed();
             if changed {
-                settings.didj_enhanced = !original;
+                settings.didj_enhanced = mode != 2;
+                settings.didj_hle = mode == 1;
                 actions.push(Action::SettingsChanged);
             }
         });

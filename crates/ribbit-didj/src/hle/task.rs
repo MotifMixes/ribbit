@@ -433,7 +433,7 @@ impl Process {
         }
         // Even a zero sleep waits for the next tick: 2.6.20's do_nanosleep
         // has no shortcut, and the timer only fires from the tick.
-        self.block = Some(Wait::Sleep(self.tick_after(Instant::now() + d)));
+        self.block = Some(Wait::Sleep(self.tick_after(self.clock() + d)));
         Ok(0)
     }
 
@@ -451,7 +451,7 @@ impl Process {
     /// timeouts of poll, select, futex and message queues).
     pub(super) fn ticks_from_now(&self, n: u64) -> Instant {
         let tick = tick_ns();
-        let ticks = self.start.elapsed().as_nanos() as u64 / tick;
+        let ticks = self.since_start().as_nanos() as u64 / tick;
         self.start + Duration::from_nanos((ticks + n) * tick)
     }
 
@@ -478,7 +478,7 @@ impl Process {
     /// `ticks` timer ticks from the first call (None: no deadline); true
     /// when it has passed.
     fn poll_wait(&mut self, ticks: Option<u64>) -> bool {
-        let now = Instant::now();
+        let now = self.clock();
         let until = match ticks {
             Some(0) => return true,
             Some(n) => {
@@ -660,7 +660,7 @@ impl Process {
         let at = Duration::new(s, ns);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         // ipc/mqueue.c prepare_timeout: timespec_to_jiffies + 1 ticks.
-        Ok(Some(if at <= now { Instant::now() } else { self.ticks_from_now(jiffies(at - now) + 1) }))
+        Ok(Some(if at <= now { self.clock() } else { self.ticks_from_now(jiffies(at - now) + 1) }))
     }
 
     pub(super) fn mq_send(&mut self, fd: u32, msg: u32, len: u32, prio: u32, timeout: u32) -> Result<u32, i32> {
@@ -755,7 +755,7 @@ impl Process {
             self.alive = false;
         }
         loop {
-            let now = Instant::now();
+            let now = self.clock();
             let mut earliest: Option<Instant> = None;
             for i in 0..self.tasks.len() {
                 if self.wake(i, now) {

@@ -48,6 +48,17 @@ pub fn user_files(changes: &[u8], base: &Nand) -> Result<Vec<(String, Vec<u8>)>,
     Ok(files.into_iter().filter(|(p, _)| !built.contains(&p.to_ascii_lowercase())).collect())
 }
 
+/// The files on `flash`'s Brio volume at paths `base` (the image it was
+/// built as) doesn't have: the player's, read from a whole image (the save
+/// applied to `base`), so every block is known, unlike in `user_files`.
+pub fn files_beyond(flash: &Nand, base: &Nand) -> Vec<(String, Vec<u8>)> {
+    let brio = nand::partition("Brio").unwrap();
+    let len = brio::volume_sectors(brio.size / nand::BLOCK) * 512;
+    let built: std::collections::HashSet<String> =
+        fatfs::known_files(&ubi::read_volume(base, brio, len), &|_| true).into_iter().map(|(p, _)| p.to_ascii_lowercase()).collect();
+    fatfs::known_files(&ubi::read_volume(flash, brio, len), &|_| true).into_iter().filter(|(p, _)| !built.contains(&p.to_ascii_lowercase())).collect()
+}
+
 /// Whether an avatar on `flash`'s volume (/Didj/Data/Avatars/<folder>/meta.inf)
 /// wants `package::fix_avatar_meta`: Didjis LeapFrog Connect sent to the
 /// console over USB. The image is then built again with the player's files

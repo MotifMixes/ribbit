@@ -267,7 +267,7 @@ mod tests {
         let serial = Arc::new(Serial::default());
         serial.start_tcp().unwrap();
         let saves = std::env::temp_dir().join("ribbit-serial-test");
-        let mode = crate::didj::Mode { enhanced: true, cpu_scale: 1, frame_skip: false, hd: 1 };
+        let mode = crate::didj::Mode { enhanced: true, cpu_scale: 1, frame_skip: false, hd: 1, hle: false, smooth: false };
         let didj = crate::didj::DidjSession::start(&dir, &saves, None, None, None, mode, serial.clone()).unwrap();
         let mut term = TcpStream::connect(("127.0.0.1", PORT)).unwrap();
         term.set_read_timeout(Some(Duration::from_millis(500))).unwrap();

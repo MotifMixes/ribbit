@@ -234,6 +234,19 @@ in-between option (phase 7).
   but other texture coordinates now pairs only when no exact match is within RESYNC. Keys: the menu keys are
   instruction-timed (host-ms keys miss: the name screen came 5.3-9.5 s in), the old script plus A every 500 M
   from 30500 to 40000 reaches the first level at GA3D=4; Right from 41500.
+- Phase 6 started (2026-11-07): "Enhanced (new, experimental)" in Emulation > Didj (settings `didj_hle`, with
+  `didj_enhanced`; `didj_smooth` "Smooth motion", on by default, at once). ribbit-frontend didj.rs `Hle`: the
+  session's thread runs the Process until each 1/60 s deadline (1 M instruction steps), buttons as keypad keys,
+  /dev/dsp sound through the same resampler, AppManager stopping/crashing = a power-off (on again, left off after
+  3 quick ones). In-betweens in time: the picture at `frame_between((now - t1) / (t1 - t0))` between the last two
+  flips (one game frame behind; not over gaps > 150 ms). The HLE's clock pauses with the app
+  (`Process::set_paused`: every Instant::now() in hle/ is `clock()`, the host clock less time paused).
+  Saves: the player's files (/Didj files at paths the packages don't put there) are built into the image again
+  (`nand_with_files`, ~1 s, only when they changed) and kept as the usual .nandblocks; read back with
+  `carry::files_beyond` (whole image, so `user_files`' known-LEB test isn't needed). Test
+  `didj::tests::didj_hle_session` (RIBBIT_DIDJ_DIR, ignored): boots at 99-101% speed, a file round-trips.
+  Save states and USB say they need Enhanced/Original. Left: player checks in the app (menu, JetPack, Clone
+  Wars, smoothness), autostart of a library game, HLE save states.
 
 ## Known risks
 

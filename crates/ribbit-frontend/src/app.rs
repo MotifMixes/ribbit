@@ -999,8 +999,9 @@ impl App {
         }
     }
 
-    /// The Didj's mode from the settings: Enhanced, the processor's clock
-    /// multiplier (1 in Original mode), frame skipping and HD drawing.
+    /// The Didj's mode from the settings: Enhanced, Enhanced (new) or
+    /// Original, the processor's clock multiplier (1 in Original mode),
+    /// frame skipping, HD drawing and in-between frames.
     fn didj_mode(&self) -> crate::didj::Mode {
         let enhanced = self.settings.didj_enhanced;
         crate::didj::Mode {
@@ -1008,6 +1009,8 @@ impl App {
             cpu_scale: if enhanced { self.settings.didj_cpu_scale.clamp(1, 3) } else { 1 },
             frame_skip: self.settings.didj_frame_skip,
             hd: self.settings.didj_hd.clamp(1, 4),
+            hle: enhanced && self.settings.didj_hle,
+            smooth: self.settings.didj_smooth,
         }
     }
 
@@ -1978,6 +1981,7 @@ impl App {
                 if let Some(d) = &self.didj {
                     d.set_frame_skip(self.settings.didj_frame_skip);
                     d.set_hd(self.settings.didj_hd.clamp(1, 4));
+                    d.set_smooth(self.settings.didj_smooth);
                 }
             }
             Action::ResumeAfterIdle => self.resume_after_idle(),
@@ -2474,8 +2478,9 @@ impl App {
                 Some(Err(e)) => return self.ui.problem("Couldn't save the state", "The RockIt Twist didn't answer.", e),
                 None => return,
             },
-            (None, None, None) => match &self.didj {
-                Some(d) => d.save_state(),
+            (None, None, None) => match self.didj.as_ref().map(|d| d.save_state()) {
+                Some(Some(b)) => b,
+                Some(None) => return self.ui.toast("Save states aren't made in Didj Enhanced (new) yet: switch to Enhanced or Original (Emulation > Didj) for them"),
                 None => return,
             },
         };
@@ -2644,6 +2649,12 @@ impl App {
     fn apply_didj_usb(&mut self) {
         // The Explorer's USB isn't modelled yet.
         if self.didj.as_ref().is_none_or(|d| d.explorer) {
+            return;
+        }
+        if self.settings.didj_usb
+            && let Some(why) = self.didj.as_ref().and_then(|d| d.usb_unavailable())
+        {
+            self.ui.toast(why);
             return;
         }
         let srv = if self.settings.didj_usb { self.usb_server(crate::didj::usb_device(), "Didj") } else { None };
@@ -3759,6 +3770,7 @@ impl App {
         let mut lines = vec![("Ribbit", env!("CARGO_PKG_VERSION").to_string())];
         if let Some(h) = self.current_hardware() {
             let mode = match h {
+                Hardware::Didj if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
                 Hardware::Didj if self.settings.didj_enhanced => " (Enhanced)",
                 Hardware::Didj => " (Original)",
                 _ => "",
