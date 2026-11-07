@@ -222,6 +222,10 @@ in-between option (phase 7).
   HD in-betweens: the HD store's tiles under the saved buffers are saved and put back too (`Hd::save`,
   `Hd::restore`); JetPack at 2x: 4/8/12 px a frame comes out in exactly even 1/2/3 px steps, as sharp as frames.
   Left: showing them in time (app, phase 6), Clone Wars (3D) check.
+  OPEN (2026-11-07): Clone Wars with the 3D chip at 4x (GA3D=4) and the old key script (instruction times) ends
+  on a cutscene at 32.3 billion (800 s), not the level; it shows only the lower-right triangle of the video quad
+  (16 operations a frame), with or without HD and in-betweens, so not from them. Not yet checked on Original
+  or at GA3D=1.
 
 ## Known risks
 
