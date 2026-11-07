@@ -1731,6 +1731,7 @@ impl Ga3d {
     /// LUT fill: 256 colours (8 x 32 16-bit pixels) or one bank of 16 (8 x 2)
     /// from texture sub-segment 0's page into a stage's table.
     fn lut_fill(&mut self, mem: &mut Mem) {
+        self.record_lut();
         self.epoch += 1;
         self.flush(mem);
         let p = self.regs[LUTPARAM];

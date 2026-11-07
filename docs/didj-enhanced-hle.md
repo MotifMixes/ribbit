@@ -225,8 +225,15 @@ in-between option (phase 7).
   FIXED (2026-11-07): Clone Wars' menus and cutscene video showed half of each 2D quad, in Original too (so in
   the released app): libopengles_lite starts the TSE directly with 0x402 then 0x602 per quad, and the inverse
   culling flag is bit 9 of GRP3D_CONTROL, not bit 8 (ga3d.rs). JetPack and the Didj menu draw through the
-  primitive processor (flag in PPARAM bit 3) and are unchanged. The old key script still ends on a cutscene at
-  GA3D=4 (instruction-timed keys).
+  primitive processor (flag in PPARAM bit 3) and are unchanged.
+  Clone Wars in-betweens (2026-11-07): the first level's run and camera turn blend in even steps (mean change
+  about 12 a picture, none at the real frames), every operation pairs, about 1500-2250 of 4100-4700 clipper
+  triangles move. FIXED on the way: LUT fills weren't recorded, so the redraw drew with the last palette loaded
+  (purple floor, faded HUD); they're operations now and the palette is put back after. Text that changed (the
+  "A" icon coming and going) paired letters with other letters of the font and blended them across: same key
+  but other texture coordinates now pairs only when no exact match is within RESYNC. Keys: the menu keys are
+  instruction-timed (host-ms keys miss: the name screen came 5.3-9.5 s in), the old script plus A every 500 M
+  from 30500 to 40000 reaches the first level at GA3D=4; Right from 41500.
 
 ## Known risks
 

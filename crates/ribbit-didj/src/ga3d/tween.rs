@@ -24,6 +24,8 @@ enum Kind {
     Triangle([Vertex; 3], bool),
     Rectangle(Vertex, Vertex),
     Fill,
+    /// A LUT fill (the palette is part of what later operations draw with).
+    Lut,
 }
 
 #[derive(Clone, Copy)]
@@ -68,8 +70,22 @@ impl Frame {
             Kind::Triangle(..) => 1,
             Kind::Rectangle(..) => 2,
             Kind::Fill => 3,
+            Kind::Lut => 4,
         };
         (kind, r[RENDERSTATE], r[TEXINFO[0]], r[TEXINFO[0] + 1], r[TEXINFO[1]])
+    }
+
+    /// The texture coordinates, hashed: the same for the same letter or
+    /// sprite frame (an animated sprite changes them, so they don't have
+    /// to match).
+    fn uvs(&self, k: usize) -> u64 {
+        let uv = |h: u64, c: f32| (h ^ c.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(23);
+        match &self.ops[k].kind {
+            Kind::Clip(out, _) => out.iter().flat_map(|v| v[2]).fold(0, uv),
+            Kind::Triangle(v, _) => v.iter().flat_map(|v| v[8..].iter().copied()).fold(0, uv),
+            Kind::Rectangle(a, b) => [a, b].iter().flat_map(|v| v[8..].iter().copied()).fold(0, uv),
+            Kind::Fill | Kind::Lut => 0,
+        }
     }
 }
 
@@ -96,11 +112,28 @@ const MAX_MOVE: f32 = 48.0;
 const RESYNC: usize = 64;
 
 /// For each operation of `b`, the operation of `a` it is (by key, in order).
+/// Two with the same key but other texture coordinates pair only when no
+/// exact match is near: otherwise text that changes pairs each letter with
+/// another one of the same font and blends it across.
 fn line_up(a: &Frame, b: &Frame) -> Vec<Option<usize>> {
     let mut pairs = vec![None; b.ops.len()];
     let (mut i, mut j) = (0, 0);
+    let exact = |i: usize, j: usize| a.key(i) == b.key(j) && a.uvs(i) == b.uvs(j);
     while i < a.ops.len() && j < b.ops.len() {
         if a.key(i) == b.key(j) {
+            if a.uvs(i) != b.uvs(j) {
+                let ahead_a = (1..RESYNC).find(|&d| i + d < a.ops.len() && exact(i + d, j));
+                let ahead_b = (1..RESYNC).find(|&d| j + d < b.ops.len() && exact(i, j + d));
+                match (ahead_a, ahead_b) {
+                    (Some(da), Some(db)) if da <= db => i += da,
+                    (Some(da), None) => i += da,
+                    (_, Some(db)) => j += db,
+                    (None, None) => {}
+                }
+                if ahead_a.is_some() || ahead_b.is_some() {
+                    continue;
+                }
+            }
             pairs[j] = Some(i);
             (i, j) = (i + 1, j + 1);
             continue;
@@ -155,6 +188,10 @@ impl Ga3d {
         self.record(Kind::Fill);
     }
 
+    pub(super) fn record_lut(&mut self) {
+        self.record(Kind::Lut);
+    }
+
     /// A frame was shown: what was drawn since the last one is the newest
     /// frame. True when there was any.
     pub fn end_frame(&mut self) -> bool {
@@ -190,7 +227,7 @@ impl Ga3d {
         let saved = Saved { mem: mem_saved, hd: if self.hd.on() { self.hd.save(tiles) } else { Vec::new() } };
         let pairs = line_up(a, b);
         // Everything the drawing touches that the game would see.
-        let keep = (self.regs.clone(), self.out, self.cost, self.pixels, self.triangles, self.trace.len(), self.skip);
+        let keep = (self.regs.clone(), self.lut, self.out, self.cost, self.pixels, self.triangles, self.trace.len(), self.skip);
         self.skip = false;
         for (k, op) in b.ops.iter().enumerate() {
             self.regs[..REGS].copy_from_slice(&b.regs[op.regs]);
@@ -226,11 +263,12 @@ impl Ga3d {
                     self.rectangle(&p, &q, mem);
                 }
                 Kind::Fill => self.memory_fill(mem),
+                Kind::Lut => self.lut_fill(mem),
             }
         }
         self.flush(mem);
-        let (regs, out, cost, pixels, triangles, trace, skip) = keep;
-        (self.regs, self.out, self.cost, self.pixels, self.triangles, self.skip) = (regs, out, cost, pixels, triangles, skip);
+        let (regs, lut, out, cost, pixels, triangles, trace, skip) = keep;
+        (self.regs, self.lut, self.out, self.cost, self.pixels, self.triangles, self.skip) = (regs, lut, out, cost, pixels, triangles, skip);
         self.trace.truncate(trace);
         self.epoch += 1;
         saved
@@ -306,6 +344,9 @@ fn save(b: &Frame, mem: &Mem) -> (Vec<(usize, Vec<u8>)>, std::collections::BTree
     };
     for op in &b.ops {
         let r = &b.regs[op.regs];
+        if let Kind::Lut = op.kind {
+            continue;
+        }
         if let Kind::Fill = op.kind {
             let (p0, p1, p2) = (r[MFILLPARAM0], r[MFILLPARAM0 + 1], r[MFILLPARAM0 + 2]);
             let sub = p0 >> 16 & 0x7FF;
