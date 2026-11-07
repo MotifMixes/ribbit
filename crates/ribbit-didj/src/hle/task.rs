@@ -352,8 +352,9 @@ impl Process {
                 let until = if timeout == 0 {
                     None
                 } else {
+                    // kernel/futex.c: timespec_to_jiffies + 1 ticks.
                     let (s, ns) = (word(self, timeout)?, word(self, timeout + 4)?);
-                    Some(Instant::now() + Duration::new(s as u64, ns.min(999_999_999)))
+                    Some(self.ticks_from_now(jiffies(Duration::new(s as u64, ns.min(999_999_999))) + 1))
                 };
                 self.block = Some(Wait::Futex { addr, until, woken: false });
                 Ok(0)
@@ -424,7 +425,9 @@ impl Process {
         if self.trace {
             eprintln!("[hle {}] nanosleep {d:?}", self.tid);
         }
-        self.block = Some(if d.is_zero() { Wait::Yield } else { Wait::Sleep(self.tick_after(Instant::now() + d)) });
+        // Even a zero sleep waits for the next tick: 2.6.20's do_nanosleep
+        // has no shortcut, and the timer only fires from the tick.
+        self.block = Some(Wait::Sleep(self.tick_after(Instant::now() + d)));
         Ok(0)
     }
 
@@ -436,6 +439,14 @@ impl Process {
         const TICK: u128 = 10_000_000;
         let ns = t.saturating_duration_since(self.start).as_nanos();
         self.start + Duration::from_nanos((ns.div_ceil(TICK) * TICK) as u64)
+    }
+
+    /// The `n`th timer tick from now: when schedule_timeout(n) ends (the
+    /// timeouts of poll, select, futex and message queues).
+    pub(super) fn ticks_from_now(&self, n: u64) -> Instant {
+        const TICK: u64 = 10_000_000;
+        let ticks = self.start.elapsed().as_nanos() as u64 / TICK;
+        self.start + Duration::from_nanos((ticks + n) * TICK)
     }
 
     // ---- poll and select -------------------------------------------------
@@ -457,13 +468,17 @@ impl Process {
         })
     }
 
-    /// Nothing ready: wait a little and run the call again, until the
-    /// deadline (`ms` < 0: none); true when it has passed.
-    fn poll_wait(&mut self, ms: Option<u64>) -> bool {
+    /// Nothing ready: wait a little and run the call again, until
+    /// `ticks` timer ticks from the first call (None: no deadline); true
+    /// when it has passed.
+    fn poll_wait(&mut self, ticks: Option<u64>) -> bool {
         let now = Instant::now();
-        let until = match ms {
+        let until = match ticks {
             Some(0) => return true,
-            Some(ms) => *self.poll_until.entry(self.tid).or_insert(now + Duration::from_millis(ms)),
+            Some(n) => {
+                let at = self.ticks_from_now(n);
+                *self.poll_until.entry(self.tid).or_insert(at)
+            }
             None => now + Duration::from_secs(3600),
         };
         if until <= now {
@@ -508,7 +523,8 @@ impl Process {
             self.mem().put32(at + 4, word);
             count += (revents != 0) as u32;
         }
-        if count > 0 || self.poll_wait(if timeout < 0 { None } else { Some(timeout as u64) }) {
+        // fs/select.c: msecs_to_jiffies.
+        if count > 0 || self.poll_wait(if timeout < 0 { None } else { Some((timeout as u64).div_ceil(10)) }) {
             self.poll_until.remove(&self.tid);
             return Ok(count);
         }
@@ -543,7 +559,8 @@ impl Process {
         } else {
             let s = self.mem().get32(a[4]).ok_or(EFAULT)? as u64;
             let us = self.mem().get32(a[4] + 4).ok_or(EFAULT)? as u64;
-            Some(s * 1000 + us.div_ceil(1000))
+            // fs/select.c: rounded up to ticks.
+            Some(s * 100 + us.div_ceil(10_000))
         };
         if count == 0 && !self.poll_wait(timeout) {
             return Ok(0);
@@ -636,7 +653,8 @@ impl Process {
         let ns = self.mem().get32(ts + 4).ok_or(EFAULT)?.min(999_999_999);
         let at = Duration::new(s, ns);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        Ok(Some(Instant::now() + at.saturating_sub(now)))
+        // ipc/mqueue.c prepare_timeout: timespec_to_jiffies + 1 ticks.
+        Ok(Some(if at <= now { Instant::now() } else { self.ticks_from_now(jiffies(at - now) + 1) }))
     }
 
     pub(super) fn mq_send(&mut self, fd: u32, msg: u32, len: u32, prio: u32, timeout: u32) -> Result<u32, i32> {
@@ -801,4 +819,9 @@ impl Process {
         self.block = None;
         self.alive = true;
     }
+}
+
+/// timespec_to_jiffies at HZ 100: rounded up to whole 10 ms ticks.
+fn jiffies(d: Duration) -> u64 {
+    d.as_nanos().div_ceil(10_000_000) as u64
 }

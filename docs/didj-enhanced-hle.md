@@ -163,7 +163,27 @@ in-between option (phase 7).
   as on Original) and holds the programs for BOOT_TIME (3.48 s) meanwhile; the clocks count from power-on as on
   the real Didj. `hle::boot_splash_from_packages`, `Process::boot_splash`; didjhle shows it unless
   DIDJ_HLE_NO_SPLASH=1. Checked: the warning at 10 ms (Original about 0.05 s), the copyright at 3.70 s (3.72).
-  Open: timing of a game against Original.
+- JetPack Heroes timing against Original (2026-11-07). Tools: didjboot `DIDJ_FRAME_CYCLES=<millions>` checks the
+  screen by cycles (DIDJ_FRAME_EVERY counts instructions, so screen times were wrong while the processor idled; use
+  DIDJ_CARRY, not DIDJ_SAVE, with the app's save: DIDJ_SAVE stalled after the copyright); didjhle `DIDJ_HLE_FPS=1`
+  (frames shown and million instructions each host second, as DIDJ_SPEED), key presses print host ms.
+  Original in gameplay: 33 frames a second with the processor 73% busy, so not CPU-bound; 33 and 25 fps are 3 and 4
+  ticks. The HLE showed 41: three FIXES, all from the 2.6.20 kernel source:
+  1. The 3D chip, DMA and the MLC's frames (dirty flags) went on by instructions run, so frames came at the HLE's
+     instruction rate and stopped while every thread slept; now they follow the host clock (`Process::tick_machine`).
+  2. nanosleep of 0 was a yield; 2.6.20's do_nanosleep has no shortcut and low-res hrtimers fire from the tick, so it
+     waits for the next tick. The game's main thread loops on it (about 15,000 a second as a yield).
+  3. poll/select wait ceil(t/10 ms) ticks from the current tick (fs/select.c), futex and mq_timed* ceil+1
+     (kernel/futex.c, ipc/mqueue.c prepare_timeout): `ticks_from_now`, `jiffies`.
+  Now (fps, HLE vs Original): main menu 50 vs 50, Choose Your Hero 33 vs 33-35, level start 50, 48, 33 vs 50, 50,
+  40, 33, then 25 in both. Intro video 15.7 s at 12 fps in both. After A on "Select a Game" (before the fixes):
+  title art 0.64 s vs 1.47, "Loading" 3.72 vs 4.78, video 5.06 vs 7.23; A on the mood to the level 3.45 vs 4.62:
+  the HLE loads faster (no NAND or kernel file system work); kept, it is the HLE's point. Original shows a white
+  screen after A where the HLE shows black.
+  OPEN: in the first level with no input, Original drops from 33 to 25 fps about 26 s after the level appears (96 s,
+  processor 56% busy, nothing changes on screen), the HLE about 12 s after. Not drawing load; some timed event in the
+  game (sound ending? a timer?) comes sooner in the HLE. The HLE also runs about 420 million instructions a second
+  there against Original's about 290 (thread 1, code at 0x4021xxxx and 0x4044xxxx; likely polling hardware faster).
 
 ## Known risks
 

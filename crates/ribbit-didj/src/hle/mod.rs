@@ -207,6 +207,9 @@ pub struct Process {
     start: std::time::Instant,
     /// Showing the boot splash: nothing runs before then.
     boot_until: Option<std::time::Instant>,
+    /// Processor cycles the 3D chip, DMA and frame timing have had: they
+    /// follow the host clock, as the programs' clocks do.
+    ticked: u64,
     dev: dev::Devices,
     /// poll/select deadlines by thread, while they wait.
     poll_until: HashMap<u32, std::time::Instant>,
@@ -274,6 +277,7 @@ impl Process {
             trace: false,
             start: std::time::Instant::now(),
             boot_until: None,
+            ticked: 0,
             m,
             frames,
             tlb_for: 0,
@@ -469,10 +473,22 @@ impl Process {
             self.m.bus.pc = pc;
             self.m.jit.step(&mut self.cpu, &mut self.m.bus, chain, chain);
             let ran = (self.cpu.cycles - before).clamp(1, left);
-            self.m.hle_tick(ran);
+            self.tick_machine();
             left -= ran;
             slice += ran as u32;
             self.executed += ran;
+        }
+    }
+
+    /// The 3D chip, DMA and the MLC's frames go on to now (host time; at
+    /// the processor's clock), not by instructions run: those come faster
+    /// or slower than on a Didj, and none run while every thread sleeps.
+    fn tick_machine(&mut self) {
+        let hz = self.m.hle_cpu_hz() as u128;
+        let due = (self.start.elapsed().as_nanos() * hz / 1_000_000_000) as u64;
+        if due > self.ticked {
+            self.m.hle_tick(due - self.ticked);
+            self.ticked = due;
         }
     }
 

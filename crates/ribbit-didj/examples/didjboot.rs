@@ -138,6 +138,9 @@ fn main() {
     // DIDJ_FRAMES_FROM=<millions>: not before then.
     let frame_every: u64 = std::env::var("DIDJ_FRAME_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(100) * 1_000_000;
     let frames_from: u64 = std::env::var("DIDJ_FRAMES_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0) * 1_000_000;
+    // DIDJ_FRAME_CYCLES=<millions>: look every that many million cycles
+    // instead (screen times stay right while the processor idles).
+    let frame_cycles: Option<u64> = std::env::var("DIDJ_FRAME_CYCLES").ok().and_then(|v| v.parse().ok());
     let mut last_frame = Vec::new();
     // DIDJ_SPEED=1: after each second of Didj time, how long it took (100%
     // is as fast as a real Didj).
@@ -269,7 +272,7 @@ fn main() {
         // instructions when it has changed.
         if let Some(dir) = &frames_dir
             && ran >= frames_from
-            && ran / frame_every != (ran - n) / frame_every
+            && frame_cycles.map_or(ran / frame_every != (ran - n) / frame_every, |c| (m + 1) % c.max(1) == 0)
         {
             let (w, h, px) = didj.bus.frame_hd();
             if px != last_frame {

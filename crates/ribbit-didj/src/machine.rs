@@ -1152,6 +1152,11 @@ impl Didj {
         }));
     }
 
+    /// For the HLE: the processor's clock.
+    pub(crate) fn hle_cpu_hz(&mut self) -> u64 {
+        self.clocks().0
+    }
+
     /// For the HLE (no kernel, no interrupts): `cycles` have run; the 3D
     /// chip and DMA go on and the MLC's dirty flags clear each frame, as in
     /// `run`.

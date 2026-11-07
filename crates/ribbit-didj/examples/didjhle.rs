@@ -75,6 +75,8 @@ fn main() {
     // DIDJ_HLE_FRAMES=<folder> saves the screen whenever it changed, after
     // each step, named by host ms.
     let frames_dir = std::env::var("DIDJ_HLE_FRAMES").ok();
+    let fps = std::env::var_os("DIDJ_HLE_FPS").is_some();
+    let (mut fps_second, mut fps_flips, mut fps_executed) = (0, 0, 0);
     let mut last_frame: Vec<u32> = Vec::new();
     // In steps of 10 million, printing the console as it comes.
     let pcs: Option<(u64, u64)> = std::env::var("DIDJ_HLE_PCS").ok().map(|v| {
@@ -86,7 +88,7 @@ fn main() {
         while let Some(&(at, code, down)) = keys.peek()
             && at <= p.executed
         {
-            eprintln!("[didjhle] key {code} {}", if down { "down" } else { "up" });
+            eprintln!("[didjhle] key {code} {} at {} ms", if down { "down" } else { "up" }, t.elapsed().as_millis());
             p.key(code, down);
             keys.next();
         }
@@ -98,6 +100,12 @@ fn main() {
         let stop = p.run(step);
         if sampling {
             eprintln!("[pc] {} {:08X}", p.tid(), p.cpu.r[15]);
+        }
+        // DIDJ_HLE_FPS=1: the frames shown in each second (as didjboot's
+        // DIDJ_SPEED counts them).
+        if fps && t.elapsed().as_secs() > fps_second {
+            eprintln!("[fps] {fps_second} s: {} frames shown, {} million instructions", p.m.bus.flips - fps_flips, (p.executed - fps_executed) / 1_000_000);
+            (fps_second, fps_flips, fps_executed) = (t.elapsed().as_secs(), p.m.bus.flips, p.executed);
         }
         if let Some(dir) = &frames_dir {
             let (w, h, pixels) = p.m.bus.frame();
