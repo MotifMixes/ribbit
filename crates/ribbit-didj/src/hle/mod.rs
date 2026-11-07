@@ -210,6 +210,8 @@ pub struct Process {
     /// Processor cycles the 3D chip, DMA and frame timing have had: they
     /// follow the host clock, as the programs' clocks do.
     ticked: u64,
+    /// The MLC's frames a second (DIDJ_HLE_MLC_HZ=<n>; 60 is the real one).
+    frame_hz: u64,
     dev: dev::Devices,
     /// poll/select deadlines by thread, while they wait.
     poll_until: HashMap<u32, std::time::Instant>,
@@ -281,6 +283,7 @@ impl Process {
             start: std::time::Instant::now(),
             boot_until: None,
             ticked: 0,
+            frame_hz: std::env::var("DIDJ_HLE_MLC_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(60).max(1),
             m,
             frames,
             tlb_for: 0,
@@ -490,7 +493,7 @@ impl Process {
         let hz = self.m.hle_cpu_hz() as u128;
         let due = (self.start.elapsed().as_nanos() * hz / 1_000_000_000) as u64;
         if due > self.ticked {
-            self.m.hle_tick(due - self.ticked);
+            self.m.hle_tick(due - self.ticked, self.frame_hz);
             self.ticked = due;
         }
     }

@@ -1159,16 +1159,16 @@ impl Didj {
 
     /// For the HLE (no kernel, no interrupts): `cycles` have run; the 3D
     /// chip and DMA go on and the MLC's dirty flags clear each frame, as in
-    /// `run`.
-    pub(crate) fn hle_tick(&mut self, cycles: u64) {
+    /// `run`, `frame_hz` times a second.
+    pub(crate) fn hle_tick(&mut self, cycles: u64, frame_hz: u64) {
         let (cpu_hz, _) = self.clocks();
         self.bus.dma.tick(cycles, cpu_hz, &self.bus.sdram);
         self.bus.ga3d.tick(cycles, cpu_hz);
         // `cycles` can span several frames (every thread slept): the rest
-        // is kept, so frames stay at 60 Hz and not on the HLE's 10 ms ticks.
+        // is kept, so frames stay at `frame_hz` and not on the HLE's 10 ms ticks.
         self.bus.frame_cycles += cycles;
-        if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
-            self.bus.frame_cycles %= cpu_hz / FRAME_HZ;
+        if self.bus.frame_cycles >= cpu_hz / frame_hz {
+            self.bus.frame_cycles %= cpu_hz / frame_hz;
             for (reg, bit) in MLC_DIRTY {
                 if let Some(v) = self.bus.regs.get_mut(&reg) {
                     *v &= !bit;

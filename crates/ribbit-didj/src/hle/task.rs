@@ -16,6 +16,12 @@ use std::time::{Duration, Instant};
 /// Instructions a task runs before the next one gets a turn.
 pub(super) const SLICE: u32 = 20_000;
 
+/// The kernel's timer tick: 10 ms (HZ 100; DIDJ_HLE_TICK_US=<n> for others).
+fn tick_ns() -> u64 {
+    static TICK: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TICK.get_or_init(|| std::env::var("DIDJ_HLE_TICK_US").ok().and_then(|v| v.parse::<u64>().ok()).map_or(10_000_000, |us| us.max(1) * 1000))
+}
+
 const CLONE_VM: u32 = 0x100;
 const CLONE_THREAD: u32 = 0x1_0000;
 const CLONE_SETTLS: u32 = 0x8_0000;
@@ -436,17 +442,17 @@ impl Process {
     /// from the tick (kernel/timer.c run_timer_softirq): a sleep ends on
     /// the first tick after its deadline.
     pub(super) fn tick_after(&self, t: Instant) -> Instant {
-        const TICK: u128 = 10_000_000;
+        let tick = tick_ns() as u128;
         let ns = t.saturating_duration_since(self.start).as_nanos();
-        self.start + Duration::from_nanos((ns.div_ceil(TICK) * TICK) as u64)
+        self.start + Duration::from_nanos((ns.div_ceil(tick) * tick) as u64)
     }
 
     /// The `n`th timer tick from now: when schedule_timeout(n) ends (the
     /// timeouts of poll, select, futex and message queues).
     pub(super) fn ticks_from_now(&self, n: u64) -> Instant {
-        const TICK: u64 = 10_000_000;
-        let ticks = self.start.elapsed().as_nanos() as u64 / TICK;
-        self.start + Duration::from_nanos((ticks + n) * TICK)
+        let tick = tick_ns();
+        let ticks = self.start.elapsed().as_nanos() as u64 / tick;
+        self.start + Duration::from_nanos((ticks + n) * tick)
     }
 
     // ---- poll and select -------------------------------------------------
@@ -821,7 +827,7 @@ impl Process {
     }
 }
 
-/// timespec_to_jiffies at HZ 100: rounded up to whole 10 ms ticks.
+/// timespec_to_jiffies: rounded up to whole ticks (10 ms at HZ 100).
 fn jiffies(d: Duration) -> u64 {
-    d.as_nanos().div_ceil(10_000_000) as u64
+    d.as_nanos().div_ceil(tick_ns() as u128) as u64
 }

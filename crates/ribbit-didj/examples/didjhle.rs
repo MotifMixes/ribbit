@@ -11,7 +11,9 @@
 //! `a@3000+400` holds it for 400 million, `right@3000+2000ms` for 2000 host
 //! ms). DIDJ_HLE_KEYS_MS=1: those times (and DIDJ_HLE_FRAMES_FROM) are host
 //! ms instead, for menus that wait; DIDJ_HLE_UNTIL_MS=<ms> stops then.
-//! DIDJ_HLE_GA3D=<n> runs the 3D chip n times as fast.
+//! DIDJ_HLE_GA3D=<n> runs the 3D chip n times as fast; DIDJ_HLE_MLC_HZ=<n>
+//! gives the MLC n frames a second (60 is real); DIDJ_HLE_TICK_US=<n> makes
+//! the kernel tick n microseconds (10000 is real).
 //! DIDJ_HLE_CART=<dump> puts a cartridge in the slot; DIDJ_HLE_CARRY=<save>
 //! puts the player's files from an Original save (.nandblocks) on /Didj.
 //! DIDJ_HLE_WAV, DIDJ_HLE_LOG, DIDJ_HLE_FRAMES and DIDJ_HLE_PCS: sound,

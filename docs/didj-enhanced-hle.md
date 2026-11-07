@@ -197,8 +197,12 @@ in-between option (phase 7).
   (`Ga3d::speed_up`, didjhle DIDJ_HLE_GA3D=<n>, 1 = real). Checked by holding Right for 3 s of host time:
   JetPack 25-33 -> 60 fps, same distance (231 vs 224 px at 1x/2x); Clone Wars first level 20 -> 38-41 fps
   (55-62 while turning), same place at the end (frames differ by 1.0 of 255, as much as 0.4 s apart standing).
-  Both games move by the clock. Left: the MLC's 60 Hz frame and HZ 100 ticks cap the rest; frame-locked games
-  (none found yet) need in-between frames from the phase 5 renderer.
+  Both games move by the clock up to 60 fps. Above 60 (2026-11-07, didjhle DIDJ_HLE_MLC_HZ=<n> gives the MLC n
+  frames a second, DIDJ_HLE_TICK_US=<n> the kernel tick): the MLC's 60 Hz frame is the only cap (1 ms ticks
+  change nothing: 60 fps at MLC 60, 120 at MLC 120 with 1 ms ticks, about 100 with 10 ms). But JetPack then
+  moves too fast: Right held 2 s scrolls 61 px at 60 fps, 96 at about 82, 108 at about 90 (world, from the
+  frames). So it counts at least one 60 Hz frame per frame shown: clock-timed below 60, frame-locked above.
+  MLC 60 and HZ 100 stay; more than 60 fps must come from in-between frames in the phase 5 renderer.
   didjhle: `DIDJ_HLE_KEYS_MS=1` (key times in host ms; menus wait, so instruction times drift), `right@N+3000ms`,
   `DIDJ_HLE_UNTIL_MS`, `DIDJ_HLE_FRAMES_FROM`. FIXED: cart::files took only NAND dumps; a bare FAT volume
   (as the app keeps some carts) now works too. Clone Wars keys: see the session's script (New Game needs Down
