@@ -212,6 +212,15 @@ in-between option (phase 7).
   (as the app keeps some carts) now works too. Clone Wars keys: see the session's script (New Game needs Down
   then A on "are you sure?").
 
+- Phase 5 started (2026-11-07): HD drawing works in the HLE as it is (didjhle DIDJ_HLE_HD=<n>, JetPack 2x right).
+  In-between frames, first version (`ga3d/tween.rs`): each frame's drawing is recorded (clipper triangles in clip
+  space, TSE triangles/rectangles, fills, with registers 0-63), frames end at the MLC flip; a picture at t
+  draws the newer frame again into its own buffers (saved, then put back) with positions blended towards the
+  older one's, matched in order by kind, render state and textures (not the render target: two buffers take
+  turns). Moves over 48 px or behind the camera are not blended. HD off while it draws (console size for now).
+  didjhle `DIDJ_HLE_TWEEN=<n>`. JetPack with Right held: 4-6 px a frame scroll comes out in about 1-2 px steps.
+  Left: HD in-between pictures, showing them in time (app, phase 6), Clone Wars (3D) check.
+
 ## Known risks
 
 - Timing: games paced by the 3D chip or by audio DMA lose their pacing; the HLE must pace frames at 60 Hz and

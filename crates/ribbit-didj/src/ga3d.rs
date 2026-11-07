@@ -21,6 +21,9 @@ use crate::texup::{Texel, UP, Upscaled};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+mod tween;
+pub use tween::{Frame, Saved, Tween};
+
 /// Pixels (the triangles' bounding boxes) from which a batch is drawn on
 /// several threads.
 const PARALLEL_PIXELS: i64 = 2048;
@@ -433,6 +436,9 @@ pub struct Ga3d {
     /// are drawn again from its outlines.
     #[serde(skip)]
     pub text: crate::fonthd::TextStore,
+    /// Frames recorded for in-between pictures (`set_tween`).
+    #[serde(skip)]
+    tween: Option<Box<Tween>>,
 }
 
 /// The largest texture upscaled (texels), and the cache's size (bytes).
@@ -627,6 +633,7 @@ impl Default for Ga3d {
             epoch: 0,
             hd_textures: true,
             text: Default::default(),
+            tween: None,
         }
     }
 }
@@ -933,6 +940,7 @@ impl Ga3d {
                         _ => !invcull_in,
                     };
                     if (id == 5 || render_in) && !self.skip {
+                        self.record_clip(inv);
                         self.clip_and_draw(inv, mem);
                     }
                 }
@@ -1084,8 +1092,10 @@ impl Ga3d {
         }
         let v: [Vertex; 3] = std::array::from_fn(|n| std::array::from_fn(|c| f24(self.regs[TSEINPUT + n * 16 + c])));
         if triangle {
+            self.record_triangle(&v, invcull);
             self.triangle(&v, invcull, mem);
         } else {
+            self.record_rectangle(&v[0], &v[1]);
             self.rectangle(&v[0], &v[1], mem);
         }
     }
@@ -1695,6 +1705,7 @@ impl Ga3d {
     /// says 8-15; the menu clears its Z buffer with 0xFFFF and its screen
     /// with 0x319E), coordinates in 16-bit pixels.
     fn memory_fill(&mut self, mem: &mut Mem) {
+        self.record_fill();
         self.epoch += 1;
         self.flush(mem);
         let (p0, p1, p2) = (self.regs[MFILLPARAM0], self.regs[MFILLPARAM0 + 1], self.regs[MFILLPARAM0 + 2]);

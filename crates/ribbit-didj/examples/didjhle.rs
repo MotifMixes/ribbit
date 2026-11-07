@@ -101,6 +101,14 @@ fn main() {
     let fps = std::env::var_os("DIDJ_HLE_FPS").is_some();
     let (mut fps_second, mut fps_flips, mut fps_executed) = (0, 0, 0);
     let mut last_frame: Vec<u32> = Vec::new();
+    // DIDJ_HLE_TWEEN=<n> (with DIDJ_HLE_FRAMES): at each frame shown, n - 1
+    // in-between pictures and the frame, named <flip>_<k>.png (k = n: the
+    // frame itself).
+    let tween: Option<u32> = std::env::var("DIDJ_HLE_TWEEN").ok().and_then(|v| v.parse().ok());
+    if tween.is_some() {
+        p.m.bus.ga3d.set_tween(true);
+    }
+    let mut tween_flips = 0;
     // In steps of 10 million, printing the console as it comes.
     let pcs: Option<(u64, u64)> = std::env::var("DIDJ_HLE_PCS").ok().map(|v| {
         let (a, b) = v.split_once('-').expect("DIDJ_HLE_PCS=<from>-<to>");
@@ -127,7 +135,8 @@ fn main() {
         // DIDJ_HLE_PCS=<from>-<to>: steps of 1 million there, printing the
         // thread and PC after each (a cheap profile).
         let sampling = pcs.is_some_and(|(a, b)| (a..b).contains(&(p.executed / 1_000_000)));
-        let step = left.min(if sampling { 1_000_000 } else { 10_000_000 });
+        let tweening = tween.is_some() && frames_dir.is_some() && now >= frames_from * unit;
+        let step = left.min(if sampling || tweening { 1_000_000 } else { 10_000_000 });
         let before = p.executed;
         let stop = p.run(step);
         if sampling {
@@ -139,7 +148,22 @@ fn main() {
             eprintln!("[fps] {fps_second} s: {} frames shown, {} million instructions", p.m.bus.flips - fps_flips, (p.executed - fps_executed) / 1_000_000);
             (fps_second, fps_flips, fps_executed) = (t.elapsed().as_secs(), p.m.bus.flips, p.executed);
         }
-        if let Some(dir) = &frames_dir
+        if let (Some(n), Some(dir)) = (tween, &frames_dir)
+            && now >= frames_from * unit
+        {
+            if p.m.bus.flips != tween_flips {
+                tween_flips = p.m.bus.flips;
+                let tw = p.m.bus.ga3d.tween().unwrap();
+                eprintln!("[tween] flip {tween_flips} at {} ms: {} -> {} operations", t.elapsed().as_millis(), tw.older.len(), tw.newer.len());
+                for k in 1..n {
+                    if let Some((w, h, pixels)) = p.m.bus.frame_between(k as f32 / n as f32) {
+                        save_png(&format!("{dir}/{tween_flips:06}_{k}.png"), w, h, &pixels);
+                    }
+                }
+                let (w, h, pixels) = p.m.bus.frame();
+                save_png(&format!("{dir}/{tween_flips:06}_{n}.png"), w, h, &pixels);
+            }
+        } else if let Some(dir) = &frames_dir
             && now >= frames_from * unit
         {
             let (w, h, pixels) = p.m.bus.frame_hd();
