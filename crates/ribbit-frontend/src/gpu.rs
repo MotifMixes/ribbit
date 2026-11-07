@@ -254,6 +254,12 @@ type Connection =
     (wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration);
 
 impl Gpu {
+    /// For F3's details: the adapter, its graphics API and the size drawn to.
+    pub fn summary(&self) -> (String, (u32, u32)) {
+        let i = self.adapter.get_info();
+        (format!("{} ({:?}, {:?})", i.name, i.backend, self.config.present_mode), (self.config.width, self.config.height))
+    }
+
     /// A GPU set up to show pictures in `window`: the platform's usual API
     /// first (or the one `WGPU_BACKEND` names: vulkan, gl, dx12, metal),
     /// then OpenGL, then on Windows the software DirectX 12 renderer (WARP,

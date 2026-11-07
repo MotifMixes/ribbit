@@ -155,6 +155,8 @@ pub struct Info {
     pub paused: bool,
     pub title: String,
     pub speed: f64,
+    /// F3's details panel, line by line (None: hidden).
+    pub details: Option<Vec<(&'static str, String)>>,
     pub bios_name: Option<String>,
     pub fullscreen: bool,
     pub experimental_touch: bool,
@@ -357,6 +359,11 @@ pub fn draw(
     let mut area = egui::Rect::NOTHING;
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
         area = ui.max_rect();
+        if info.running
+            && let Some(lines) = &info.details
+        {
+            details_panel(ui.ctx(), area.left_top() + egui::vec2(8.0, 8.0), lines);
+        }
         // The library once any console's system files are known (a player
         // with only a LeapPad, Zippity or RockIt Twist has no Leapster BIOS).
         let have_system = info.bios_name.is_some() || settings.leappad_bios.is_some() || library.has_system_files();
@@ -1425,6 +1432,9 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::ToggleFullscreen);
         }
         if ui.checkbox(&mut settings.show_status_bar, "Status bar").changed() {
+            actions.push(Action::SettingsChanged);
+        }
+        if ui.checkbox(&mut settings.show_details, "Details (F3)").on_hover_text("Frame rates, speed, sound and GPU over the game").changed() {
             actions.push(Action::SettingsChanged);
         }
         ui.separator();
@@ -3489,6 +3499,7 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
                 ("Screenshot", "F12"),
                 ("Show/hide menu", "F10"),
                 ("Console view on/off", "F7"),
+                ("Details (frame rates)", "F3"),
             ] {
                 ui.label(what);
                 ui.label(key);
@@ -3946,4 +3957,23 @@ fn serial_window(ctx: &egui::Context, st: &mut UiState, settings: &Settings, act
     st.show_serial = open;
     // Output arrives while the window is open.
     ctx.request_repaint_after(std::time::Duration::from_millis(100));
+}
+
+/// F3's details over the game's top left: a label and its value per line.
+fn details_panel(ctx: &egui::Context, at: egui::Pos2, lines: &[(&'static str, String)]) {
+    egui::Area::new(egui::Id::new("details")).order(egui::Order::Foreground).fixed_pos(at).interactable(false).show(ctx, |ui| {
+        egui::Frame::NONE
+            .fill(egui::Color32::from_black_alpha(170))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                egui::Grid::new("details_grid").num_columns(2).spacing([12.0, 2.0]).show(ui, |ui| {
+                    for (label, value) in lines {
+                        ui.label(egui::RichText::new(*label).monospace().color(egui::Color32::from_gray(170)));
+                        ui.label(egui::RichText::new(value).monospace().color(egui::Color32::WHITE));
+                        ui.end_row();
+                    }
+                });
+            });
+    });
 }

@@ -99,6 +99,9 @@ pub struct Settings {
     /// Where saves go (default: `saves` in the data folder).
     pub save_dir: Option<PathBuf>,
     pub show_status_bar: bool,
+    /// F3: the details panel (frame rates, speed, sound, GPU) over the game.
+    #[serde(default)]
+    pub show_details: bool,
     /// EXPERIMENTAL: redraw the BIOS's Flash vector art at 4x (640x640)
     /// instead of showing the 160x160 LCD (ribbit_core::hd).
     pub hd_vectors: bool,
@@ -267,6 +270,7 @@ impl Default for Settings {
             mame_gpio_lines: false,
             save_dir: None,
             show_status_bar: true,
+            show_details: false,
             hd_vectors: false,
             hd_trace_pixel_art: false,
             turn_off_when_idle: false,

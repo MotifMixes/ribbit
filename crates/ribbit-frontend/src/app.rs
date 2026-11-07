@@ -164,6 +164,8 @@ pub struct App {
     audio_log: (Instant, (u64, u64)),
     /// Window frame statistics for the log (`FrameDiag`).
     frame_diag: FrameDiag,
+    /// F3's details panel: its frame rates (`Details`).
+    details: Details,
     audio: Option<AudioOut>,
     #[cfg(not(target_os = "android"))]
     pads: Option<crate::gamepad::Gamepads>,
@@ -330,6 +332,7 @@ impl App {
             speed_percent: 100.0,
             audio_log: (Instant::now(), (0, 0)),
             frame_diag: FrameDiag::default(),
+            details: Details::default(),
             audio: AudioOut::open(),
             #[cfg(not(target_os = "android"))]
             pads: crate::gamepad::Gamepads::open(),
@@ -3146,6 +3149,10 @@ impl App {
                 KeyCode::F8 => return self.toggle_record(),
                 KeyCode::F12 => return self.screenshot(),
                 KeyCode::F7 => return self.toggle_console_view(),
+                KeyCode::F3 => {
+                    self.settings.show_details = !self.settings.show_details;
+                    return self.save_settings();
+                }
                 KeyCode::F5 => return self.save_state(1),
                 KeyCode::F9 => return self.load_state(1),
                 KeyCode::KeyO if ctrl => return self.act(Action::Pick(Pick::Cartridge), event_loop),
@@ -3433,6 +3440,13 @@ impl App {
         };
         let touch_pads = self.touch_pads();
         self.poll_debugger();
+        // F3: whether the console's picture changed (the game's own frame
+        // rate), and the panel's lines.
+        let picture = self.settings.show_details.then(|| match tv_size {
+            Some((w, h)) => picture_hash(&self.tv_frame[..(w * h).min(self.tv_frame.len())]),
+            None => picture_hash(&self.frame[..]),
+        });
+        let details = self.settings.show_details.then(|| self.details_lines(tv_size));
         let (Some(gpu), Some(state)) = (&mut self.gpu, &mut self.egui_state) else {
             return;
         };
@@ -3477,6 +3491,7 @@ impl App {
                     .or(self.leappad.as_ref().map(|l| l.title.clone()))
                     .unwrap_or_default(),
                 speed: self.speed_percent,
+                details,
                 bios_name: self.settings.bios.as_ref().map(|p| {
                     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
                 }),
@@ -3731,6 +3746,98 @@ impl App {
         }
         let running = self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some();
         self.frame_diag.frame(frame_start, took, running && !self.halted());
+        match picture {
+            Some(hash) => self.details.frame(frame_start, hash, took),
+            None => self.details = Details::default(),
+        }
+    }
+
+    /// F3's lines.
+    fn details_lines(&self, tv_size: Option<(usize, usize)>) -> Vec<(&'static str, String)> {
+        let d = &self.details;
+        let ms = |t: Duration| t.as_secs_f64() * 1e3;
+        let mut lines = vec![("Ribbit", env!("CARGO_PKG_VERSION").to_string())];
+        if let Some(h) = self.current_hardware() {
+            let mode = match h {
+                Hardware::Didj if self.settings.didj_enhanced => " (Enhanced)",
+                Hardware::Didj => " (Original)",
+                _ => "",
+            };
+            lines.push(("Console", format!("{}{mode}", h.name())));
+        }
+        let rate = |v: f64| if d.measured { format!("{v:.0}") } else { "…".into() };
+        lines.push(("Game fps", rate(d.shown.0)));
+        lines.push(("Window fps", rate(d.shown.1)));
+        lines.push(("Frame work", format!("{:.1} ms (longest {:.1})", ms(d.shown.2), ms(d.shown.3))));
+        let state = if self.halted() {
+            " (paused)"
+        } else if self.fast_forward {
+            " (fast-forward)"
+        } else {
+            ""
+        };
+        lines.push(("Speed", format!("{:.0}%{state}", self.speed_percent)));
+        let (w, h) = tv_size.unwrap_or((WIDTH, HEIGHT));
+        lines.push(("Picture", format!("{w} x {h}")));
+        if let Some(gpu) = &self.gpu {
+            let (name, (ww, wh)) = gpu.summary();
+            lines.push(("Window", format!("{ww} x {wh}")));
+            lines.push(("GPU", name));
+        }
+        lines.push((
+            "Sound",
+            match &self.audio {
+                Some(a) => {
+                    let (gaps, skips) = a.glitches();
+                    format!("{gaps} gaps, {skips} skips")
+                }
+                None => "no output".into(),
+            },
+        ));
+        lines
+    }
+}
+
+/// A cheap fingerprint of a picture, to see when it changes (FNV-1a over
+/// the pixels).
+fn picture_hash(pixels: &[u32]) -> u64 {
+    pixels.iter().fold(0xCBF2_9CE4_8422_2325, |h, &p| (h ^ p as u64).wrapping_mul(0x0000_0100_0000_01B3))
+}
+
+/// F3's frame rates over each half second: how often the console's picture
+/// changed (the game's own frame rate) and how often the window was drawn,
+/// with the window's own work per frame.
+#[derive(Default)]
+struct Details {
+    since: Option<Instant>,
+    last_picture: u64,
+    redraws: u32,
+    pictures: u32,
+    work: Duration,
+    longest_work: Duration,
+    /// A half second has been measured.
+    measured: bool,
+    /// The last half second: game fps, window fps, average and longest work.
+    shown: (f64, f64, Duration, Duration),
+}
+
+impl Details {
+    fn frame(&mut self, now: Instant, picture: u64, work: Duration) {
+        let since = *self.since.get_or_insert(now);
+        self.redraws += 1;
+        if picture != self.last_picture {
+            self.pictures += 1;
+            self.last_picture = picture;
+        }
+        self.work += work;
+        self.longest_work = self.longest_work.max(work);
+        let span = now - since;
+        if span >= Duration::from_millis(500) {
+            let s = span.as_secs_f64();
+            self.shown = (self.pictures as f64 / s, self.redraws as f64 / s, self.work / self.redraws, self.longest_work);
+            self.measured = true;
+            (self.since, self.redraws, self.pictures, self.work, self.longest_work) = (Some(now), 0, 0, Duration::ZERO, Duration::ZERO);
+        }
     }
 }
 
