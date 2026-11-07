@@ -7,8 +7,8 @@
 //!
 //! The newer frame is drawn into its own buffers (render target and depth),
 //! saved first and put back after the picture is made (`Ga3d::untween`),
-//! so the game never sees it. HD drawing is off while it draws (in-between
-//! pictures are console-sized for now).
+//! so the game never sees it; with HD drawing on, so are the HD store's
+//! tiles under them.
 
 use super::*;
 
@@ -82,7 +82,10 @@ pub struct Tween {
 }
 
 /// What `tween` overwrote: (memory offset, bytes).
-pub struct Saved(Vec<(usize, Vec<u8>)>);
+pub struct Saved {
+    mem: Vec<(usize, Vec<u8>)>,
+    hd: Vec<(usize, Option<(Vec<u32>, Vec<u16>)>)>,
+}
 
 /// The farthest a vertex moves between frames and is still blended, in
 /// console pixels (beyond it, a different thing drawn in the same place
@@ -175,18 +178,19 @@ impl Ga3d {
     }
 
     pub fn untween(&mut self, saved: Saved, mem: &mut Mem) {
-        for (o, bytes) in saved.0 {
+        for (o, bytes) in saved.mem {
             mem.sdram[o..o + bytes.len()].copy_from_slice(&bytes);
         }
+        self.hd.restore(saved.hd);
     }
 
     fn redraw(&mut self, a: &Frame, b: &Frame, t: f32, mem: &mut Mem) -> Saved {
         self.flush(mem);
-        let saved = save(b, mem);
+        let (mem_saved, tiles) = save(b, mem);
+        let saved = Saved { mem: mem_saved, hd: if self.hd.on() { self.hd.save(tiles) } else { Vec::new() } };
         let pairs = line_up(a, b);
         // Everything the drawing touches that the game would see.
         let keep = (self.regs.clone(), self.out, self.cost, self.pixels, self.triangles, self.trace.len(), self.skip);
-        let hd = std::mem::take(&mut self.hd);
         self.skip = false;
         for (k, op) in b.ops.iter().enumerate() {
             self.regs[..REGS].copy_from_slice(&b.regs[op.regs]);
@@ -225,7 +229,6 @@ impl Ga3d {
             }
         }
         self.flush(mem);
-        self.hd = hd;
         let (regs, out, cost, pixels, triangles, trace, skip) = keep;
         (self.regs, self.out, self.cost, self.pixels, self.triangles, self.skip) = (regs, out, cost, pixels, triangles, skip);
         self.trace.truncate(trace);
@@ -264,10 +267,12 @@ fn blend_clip(old: &[[[f32; 4]; 3]; 3], new: &[[[f32; 4]; 3]; 3], t: f32, regs: 
 }
 
 /// Saves the memory frame `b` draws into: each render target and depth
-/// buffer inside its clipping rectangle, and each fill's rectangle.
-fn save(b: &Frame, mem: &Mem) -> Saved {
+/// buffer inside its clipping rectangle, and each fill's rectangle; and
+/// lists the HD store's tiles under them.
+fn save(b: &Frame, mem: &Mem) -> (Vec<(usize, Vec<u8>)>, std::collections::BTreeSet<usize>) {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    let mut tiles = std::collections::BTreeSet::new();
     let mut rect = |sub: u32, texture: bool, addr: &dyn Fn(u32, u32) -> u32, [x0, y0, x1, y1]: [u32; 4]| {
         if !seen.insert((sub, texture, x0, y0, x1, y1)) {
             return;
@@ -277,7 +282,9 @@ fn save(b: &Frame, mem: &Mem) -> Saved {
             // runs that break only at the block's 64-byte cells.
             let mut run: Option<(usize, usize)> = None;
             for x in x0..=x1 {
-                let o = Mem::offset(addr(x, y), texture);
+                let a = addr(x, y);
+                tiles.extend(Hd::tile_of(a));
+                let o = Mem::offset(a, texture);
                 match &mut run {
                     Some((start, end)) if *end == o => *end = o + 2,
                     _ => {
@@ -314,5 +321,5 @@ fn save(b: &Frame, mem: &Mem) -> Saved {
             rect(b, b >> 27 & 1 != 0, &|x, y| pixel_addr(b >> 16 & 0x7FF, b & 0xFF, b >> 8 & 0xFF, x, y), clip);
         }
     }
-    Saved(out)
+    (out, tiles)
 }

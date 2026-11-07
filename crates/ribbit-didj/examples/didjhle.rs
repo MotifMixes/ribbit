@@ -160,7 +160,7 @@ fn main() {
                         save_png(&format!("{dir}/{tween_flips:06}_{k}.png"), w, h, &pixels);
                     }
                 }
-                let (w, h, pixels) = p.m.bus.frame();
+                let (w, h, pixels) = p.m.bus.frame_hd();
                 save_png(&format!("{dir}/{tween_flips:06}_{n}.png"), w, h, &pixels);
             }
         } else if let Some(dir) = &frames_dir

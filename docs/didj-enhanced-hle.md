@@ -219,7 +219,9 @@ in-between option (phase 7).
   older one's, matched in order by kind, render state and textures (not the render target: two buffers take
   turns). Moves over 48 px or behind the camera are not blended. HD off while it draws (console size for now).
   didjhle `DIDJ_HLE_TWEEN=<n>`. JetPack with Right held: 4-6 px a frame scroll comes out in about 1-2 px steps.
-  Left: HD in-between pictures, showing them in time (app, phase 6), Clone Wars (3D) check.
+  HD in-betweens: the HD store's tiles under the saved buffers are saved and put back too (`Hd::save`,
+  `Hd::restore`); JetPack at 2x: 4/8/12 px a frame comes out in exactly even 1/2/3 px steps, as sharp as frames.
+  Left: showing them in time (app, phase 6), Clone Wars (3D) check.
 
 ## Known risks
 

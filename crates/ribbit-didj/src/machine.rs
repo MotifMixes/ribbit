@@ -394,7 +394,7 @@ impl Bus {
     /// (in-between frames, `Ga3d::set_tween`); None with nothing to blend.
     pub fn frame_between(&mut self, t: f32) -> Option<(usize, usize, Vec<u32>)> {
         let saved = self.ga3d.tween_draw(t, &mut crate::ga3d::Mem { sdram: &mut self.sdram })?;
-        let picture = self.frame();
+        let picture = self.frame_hd();
         self.ga3d.untween(saved, &mut crate::ga3d::Mem { sdram: &mut self.sdram });
         Some(picture)
     }

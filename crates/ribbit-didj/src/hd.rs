@@ -142,4 +142,34 @@ impl Hd {
             _ => native,
         }
     }
+
+    /// The tile console address `a` is in (for `save`).
+    pub fn tile_of(a: u32) -> Option<usize> {
+        locate(a).map(|(t, _, _)| t)
+    }
+
+    /// Copies of tiles `ts` (None: not made yet), for `restore`.
+    pub fn save(&self, ts: impl IntoIterator<Item = usize>) -> Vec<(usize, Option<(Vec<u32>, Vec<u16>)>)> {
+        let load32 = |c: &[AtomicU32]| c.iter().map(|v| v.load(Ordering::Relaxed)).collect();
+        let load16 = |c: &[AtomicU16]| c.iter().map(|v| v.load(Ordering::Relaxed)).collect();
+        ts.into_iter().filter(|&t| t < self.tiles.len()).map(|t| (t, self.tiles[t].get().map(|tile| (load32(&tile.shadow), load16(&tile.hd))))).collect()
+    }
+
+    /// Puts tiles back as `save` copied them.
+    pub fn restore(&mut self, saved: Vec<(usize, Option<(Vec<u32>, Vec<u16>)>)>) {
+        for (t, copy) in saved {
+            match copy {
+                Some((shadow, hd)) => {
+                    let tile = self.tile(t);
+                    for (c, v) in tile.shadow.iter().zip(shadow) {
+                        c.store(v, Ordering::Relaxed);
+                    }
+                    for (c, v) in tile.hd.iter().zip(hd) {
+                        c.store(v, Ordering::Relaxed);
+                    }
+                }
+                None => self.tiles[t] = OnceLock::new(),
+            }
+        }
+    }
 }
