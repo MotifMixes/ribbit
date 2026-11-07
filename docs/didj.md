@@ -22,6 +22,65 @@ Tags: VERIFIED = checked on the firmware files or the GPL source; UNKNOWN = not 
 
 Ribbit keeps these sources in `local/didj-src/` (git-ignored) and the packages in `didj/` (git-ignored).
 
+## Real hardware (VERIFIED: kernel logs and shell output from real Didjs, over UART and telnet)
+
+Gathered 2026-11-07. What changed Ribbit:
+
+- **Board ID 3** (LF1000_BOARD_DIDJ; EP1 in the 2.6.20 sources). Three real serials, 00000E0300CF058C,
+  00000E0300F6CF52, 00000E0300EF70C0; init.d/mass_storage requires digits 7-8 = `board_id`. Ribbit read 0
+  (the prototype "ALPHA"), so the kernel took the prototype's paths: headphone jack inverted (pin B10 low
+  read as headphones in), backlight range [140,511] instead of [0,511], LCD reset pin, CS42L52 speaker
+  and mixer settings, DAC power pin. Now port B pins 27-31 read 3 (machine.rs BOARD_ID).
+- **Internal NAND ID 0x2C 0xDA** ("ST Micro NAND 256MiB 3,3V 8-bit" in LeapFrog's kernel). Ribbit
+  guessed Samsung 0xEC. The bytes after them are still UNKNOWN.
+- **/Didj is FAT32** with the geometry above (Brio partition).
+
+What it confirmed (no change): the 12 MTD partitions and sizes (cat /proc/mtd: uniboot 128 KiB,
+Atomic_Boot_Flags, Manufacturing_Data, Kernel0/1 2 MiB, Linux_RFS0/1 14 MiB, Brio 222 MiB, EXT empty
+"out of reach", Cartridge 64 MiB with 16 KiB blocks, ubi_Brio, ubi_Cartridge with 15 KiB LEBs); cartridge
+type 7 with ECC off and ID 0x98 0x76; CPU ID 0x41069265; `mem=18M ... root=31:04 ... ubi.mtd=Brio
+ubi.mtd=prg_Brio ubi.mtd=Cartridge ubi.mtd=EXT ubi.mtd=prg_EXT`; PLL0 register 0x00DF2100 (27 MHz x 801
+/ 55 = 393.218 MHz); audio 32000 Hz from CLKGEN0 0x2F0 (PLL0 / 48, 256 fs); the stock kernel
+"2.6.20.1-leapfrog (gstanfield@lightning-release) #9 Wed Apr 22 15:32:34 PDT 2009"; UBI numbers; mass
+storage with 2 LUNs (Brio and the cartridge) and the serial number; vendor command 0xC3 (battery, RTC,
+needs_repair).
+
+Other facts, not modelled:
+
+- Boot ROM UART boot: pulling NAND pin D5 low (boot mode 00) makes the CPU take a payload of at most
+  16 KiB over UART (lightning-boot's UART build fits); the console stays dark. From NAND, uniboot's
+  partition is 128 KiB. Boot flags (/flags/rootfs RFS0/RFS1, needs_repair) live in Atomic_Boot_Flags; an
+  update writes the other Kernel/RFS pair and then switches the flag.
+- The tune-up screen comes from fsck.vfat on /Didj at every start (needs_repair); a badly corrupted FAT
+  (long names) can make that start take up to an hour on real hardware. Mass storage writes ran about
+  5 KB/s for them with a GUI copy; mounting with noatime and syncing was much faster.
+- Real NANDs have factory bad blocks (one console: block 655 at 0x051E0000) and bit flips UBI scrubs.
+- With power on the cartridge's UART VCC the console stays powered after DC is pulled. The kernel resets
+  the clock to before 2000 after a power loss (no battery-backed RTC).
+- `/sys/devices/platform/lf1000-clock/cpu_clock_in_hz` sets the CPU clock (532.5 MHz panicked their
+  kernel; lf1000_oscvco_set logs "changing pll 0, old=0x00DF2100").
+- A kernel needing about 250 KB more RAM stops Ni Hao Kai-Lan from starting: AppManager has only about
+  3.7 MB free at start (mem=18M). Their USB networking kernel (g_ether, 192.168.2.63, telnet) works on
+  lf1000_udc (ep2-bulk OUT, ep1-bulk IN).
+- With no NAND on a cartridge that pulls detect low, READ ID gives 0xA9 0xA9 ("No NAND device found!!!").
+
+## A real console's NAND, and firmware of one's own (Ribbit, 2026-11-07)
+
+- **A NAND dump** in the firmware folder is used instead of the packages: `didj.nand`, or `mtd0` to `mtd7` (any
+  extension) put end to end, which tile the whole chip (mtd8 EXT is empty; mtd9 and on are the cartridge and
+  UBI's gluebi views). 268435456 bytes (data only: Ribbit adds its ECC) or 276824064 (`nanddump -o`, spare areas
+  and bad-block marks kept). `ribbit_didj::nand_dump_in`, `Nand::from_dump`. VERIFIED: a raw dump made by the
+  didjnand example boots (kernel, root file system; an empty Brio is set up by the console as on hardware).
+  The library still lists the Didj from its firmware package, so keep that package in the folder.
+- **Own builds:** a loose `lightning-boot.bin`, `bootflags.jffs2`, `kernel.bin` or `erootfs.jffs2` in the firmware
+  folder replaces the packaged one, for trying a bootloader, kernel or root file system before flashing a console.
+- **Cartridges installed like downloads:** cartridge dumps in `<firmware folder>/Installed/` go onto /Didj under
+  ProgramFiles (`ribbit_didj::installed_carts`, `cart::files`). A cartridge holds the same application package as a
+  download (Clone Wars: `JDI/meta.inf`, Type="Application", 6548 files), and the menu takes /Didj/ProgramFiles
+  apps as downloaded games (JetPack Heroes, POW). VERIFIED: Clone Wars lands beside POW on the built volume and
+  the console boots to the menu; seeing it in My Games is UNVERIFIED (autostart needs a set-up console).
+- How the console creates and keeps its UBI and FAT: [didj-ubi.md](didj-ubi.md).
+
 ## Boot chain (VERIFIED by running the packaged files, except where marked)
 
 1. The LF1000 loads the start of NAND into SDRAM at address 0 and runs it. The packaged lightning-boot.bin
@@ -106,7 +165,15 @@ erased (the console then formats it itself); `DIDJ_DUMP=<file>` saves SDRAM.
 - In it, through gluebi/mtdblock, FAT16 from `mkfs.vfat -n Didj -S 512`: 442512 sectors, 8 per cluster,
   1 reserved, 2 FATs of 216 sectors, 512 root entries, boot sector OEM "mkdosfs", the label also as the
   root's first entry.
-- Ribbit builds the same (crates/ribbit-didj/src/ubi.rs, brio.rs; FAT writing in ribbit-core fatfs.rs)
+- A real console's volume is FAT32 instead (VERIFIED: `fsck.vfat -nv /dev/mtdblock9` on a Didj, see
+  "Real hardware" below): OEM "MSDOS5.0", 4 sectors per cluster, 38 reserved, 2 FATs of 861 sectors, data
+  at sector 1760, 110188 clusters, 63/255 geometry, 0 hidden, 442512 sectors. Since 2026-11-07 Ribbit
+  formats new images like that (brio.rs; FSInfo at 1, backup boot sector at 6 and the label "DIDJ" are
+  GUESSES); older saves keep their FAT16 volume. Mounted by rcS as vfat
+  rw,noatime,fmask=0022,dmask=0022,codepage=cp437,iocharset=iso8859-1 (VERIFIED, real console).
+- UBI on a real stock console matches Ribbit's numbers (VERIFIED: its attach log): 1776 good PEBs,
+  0 available, 17 reserved for bad PEBs, 1 internal + 1 user volume, VID header 512, data offset 2048.
+- Ribbit builds this (crates/ribbit-didj/src/ubi.rs, brio.rs; FAT writing in ribbit-core fatfs.rs)
   and installs every package that isn't raw firmware: system packages and the avatar under
   `/Didj/Base/<folder>`, applications under `/Didj/<folder>` (GUESS). Each package is copied whole,
   meta.inf and .md5 lists too (what LeapFrog Connect copies is UNKNOWN).
@@ -142,7 +209,7 @@ its error flag. Whether the kernel checks ECC is UNKNOWN.
 | 0x00400000 | Linux_RFS0         | 14 MiB    | erootfs.jffs2                                |
 | 0x01200000 | Kernel1            | 2 MiB     | kernel.bin                                   |
 | 0x01400000 | Linux_RFS1         | 14 MiB    | erootfs.jffs2                                |
-| 0x02200000 | Brio               | 222 MiB   | UBI + FAT16 with the other packages          |
+| 0x02200000 | Brio               | 222 MiB   | UBI + FAT32 with the other packages          |
 
 `kernel.bin` uses lightning-boot's "table file system". Its first block is a summary: `0x12345678`, a file
 count, then a 64-byte name and a block count for each file. The files follow block by block, skipping bad
@@ -199,7 +266,7 @@ blocks. They hold UBI with one volume, "ubi_Cartridge", which contains FAT32.
   bytes, and the page can be read at once (no 0x30). The ID read is 0x98 0x76 (Toshiba, 64 MiB).
 - Detect: GPIO port A pin 18 low. Type: port B pins 2-5 (pin 5 high bit), which lightning-boot keeps in the
   Alive scratch register (bits 10-13; set/reset/read registers at 0xC0019010/14/18) for the kernel. 0x7 is
-  production (OTP, ECC off), 0xF development. Ribbit answers 0x7 (GUESS: retail cartridges are production).
+  production (OTP, ECC off), 0xF development. Ribbit answers 0x7 (VERIFIED: a real Didj logs "cart type read=7, used=7").
   The kernel prints "cart type read=7, used=7"; before Ribbit kept the scratch register it printed "read=0,
   used=7" (the shipped kernel then still took 7).
 - The dump's spare areas carry software ECC (nand_oob_16, bytes 0-3 and 6-7), unused with ECC off.
@@ -357,8 +424,9 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   /mfgdata/UnitID.txt; Ribbit's Manufacturing_Data was empty. Then init.d/mass_storage (`set -e`) died on
   `echo $BRD_REV > /Didj/brd.rev` whenever /Didj was not mounted (path 1), g_file_storage never loaded,
   launch_main dropped needs_repair and showed "Download Failed" instead of the tune-up screen.
-  `Nand::add_factory_data` writes "00000E0000000001" (form from mass_storage's check; last 8 digits a
-  GUESS) at power-on when the partition is empty.
+  `Nand::add_factory_data` writes "00000E0300000001" (form from mass_storage's check; "03" the board ID,
+  VERIFIED on real consoles; last 8 digits Ribbit's own) at power-on when the partition is empty. Saves
+  made before 2026-11-07 keep "00000E0000000001" (board ID 0 then).
 - How Enhanced writes them: each edited file (`EDITS`) as newer uncompressed JFFS2 nodes (4 KiB each,
   crates/ribbit-didj/src/jffs2.rs) in the first unused block after each root file system image
   (read-only mount, so the kernel never writes there).

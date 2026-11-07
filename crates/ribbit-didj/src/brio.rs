@@ -1,12 +1,17 @@
-//! The Brio partition's file system, mounted at /Didj: a FAT16 volume
+//! The Brio partition's file system, mounted at /Didj: a FAT32 volume
 //! inside the UBI volume "ubi_Brio" (ubi.rs), holding the Brio libraries,
 //! the menu, its art and sounds, and the built-in game.
 //!
-//! The format copies what the console's own `mkfs.vfat -n Didj -S 512`
-//! writes (VERIFIED: Ribbit boot, rcS formatting an empty Brio): FAT16,
-//! 512-byte sectors, 8 per cluster, 1 reserved sector, 2 FATs, 512 root
-//! entries, the label "Didj" in the boot sector and as the root's first
-//! entry. Its serial number is Ribbit's own choice.
+//! The format copies a real console's (VERIFIED: `fsck.vfat -nv
+//! /dev/mtdblock9` on a real Didj): FAT32,
+//! "MSDOS5.0", 512-byte sectors, 4 per cluster, 38 reserved sectors, 2 FATs
+//! of 861 sectors, root at cluster 2, 63 sectors per track, 255 heads, no
+//! hidden sectors, 442512 sectors. The FSInfo sector (1) and the backup
+//! boot sector (6) are where Windows puts them (GUESS). The label "DIDJ"
+//! (GUESS: the community's `mkfs.vfat -F 32 -s 4 -S 512 -n DIDJ` for that
+//! geometry). The console's own `mkfs.vfat -n Didj -S 512` (rcS, on an
+//! empty Brio) makes FAT16 instead; Ribbit made that before 2026-11-07, and
+//! saves from then keep it. Its serial number is Ribbit's own choice.
 //!
 //! Where packages go: system packages (meta.inf `Type="System"`) under
 //! `/Didj/Base/<their folder>` (VERIFIED: the PATH and library path in
@@ -22,11 +27,13 @@ use crate::ubi;
 use ribbit_core::fatfs;
 
 const SECTOR: usize = 512;
-const SECTORS_PER_CLUSTER: usize = 8;
-const RESERVED: usize = 1;
+const SECTORS_PER_CLUSTER: usize = 4;
+const RESERVED: usize = 38;
 const FATS: usize = 2;
-const ROOT_ENTRIES: usize = 512;
-const LABEL: &[u8; 11] = b"Didj       ";
+const FSINFO: usize = 1;
+const BACKUP_BOOT: usize = 6;
+const ROOT_CLUSTER: u32 = 2;
+const LABEL: &[u8; 11] = b"DIDJ       ";
 const SERIAL: u32 = 0x2008_0601;
 
 /// The sectors of the volume on a partition of `blocks` erase blocks: all
@@ -35,43 +42,58 @@ pub fn volume_sectors(blocks: usize) -> usize {
     ubi::available_blocks(blocks) * ubi::LEB / SECTOR
 }
 
-/// The sectors in each FAT, as mkdosfs (dosfstools 2.x) works it out.
+/// The sectors in each FAT (861 for Brio, as on the real console).
 fn fat_sectors(total: usize) -> usize {
-    let root = ROOT_ENTRIES * 32 / SECTOR;
-    let data = total - RESERVED - root;
-    let clusters = (data * SECTOR + FATS * 4) / (SECTORS_PER_CLUSTER * SECTOR + FATS * 2);
-    ((clusters + 2) * 2).div_ceil(SECTOR)
+    let data = total - RESERVED;
+    let clusters = (data * SECTOR + FATS * 8) / (SECTORS_PER_CLUSTER * SECTOR + FATS * 4);
+    ((clusters + 2) * 4).div_ceil(SECTOR)
 }
 
 /// A freshly formatted volume of `total` sectors, up to the end of its
-/// root directory (the rest is free space; fatfs::Writer grows it).
+/// root directory's cluster (the rest is free space; fatfs::Writer grows
+/// it).
 pub fn format(total: usize) -> Vec<u8> {
     let fat = fat_sectors(total);
-    let root = RESERVED + FATS * fat;
-    let mut d = vec![0u8; (root + ROOT_ENTRIES * 32 / SECTOR) * SECTOR];
+    let data = RESERVED + FATS * fat;
+    let clusters = (total - data) / SECTORS_PER_CLUSTER;
+    let mut d = vec![0u8; (data + SECTORS_PER_CLUSTER) * SECTOR];
     let b = &mut d[..SECTOR];
-    b[0..3].copy_from_slice(&[0xEB, 0x3C, 0x90]);
-    b[3..11].copy_from_slice(b"mkdosfs\0");
+    b[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+    b[3..11].copy_from_slice(b"MSDOS5.0");
     b[11..13].copy_from_slice(&(SECTOR as u16).to_le_bytes());
     b[13] = SECTORS_PER_CLUSTER as u8;
     b[14..16].copy_from_slice(&(RESERVED as u16).to_le_bytes());
     b[16] = FATS as u8;
-    b[17..19].copy_from_slice(&(ROOT_ENTRIES as u16).to_le_bytes());
     b[21] = 0xF8; // media: fixed disk
-    b[22..24].copy_from_slice(&(fat as u16).to_le_bytes());
     b[24..26].copy_from_slice(&63u16.to_le_bytes()); // sectors per track
     b[26..28].copy_from_slice(&255u16.to_le_bytes()); // heads
     b[32..36].copy_from_slice(&(total as u32).to_le_bytes());
-    b[38] = 0x29; // extended boot signature
-    b[39..43].copy_from_slice(&SERIAL.to_le_bytes());
-    b[43..54].copy_from_slice(LABEL);
-    b[54..62].copy_from_slice(b"FAT16   ");
+    b[36..40].copy_from_slice(&(fat as u32).to_le_bytes());
+    b[44..48].copy_from_slice(&ROOT_CLUSTER.to_le_bytes());
+    b[48..50].copy_from_slice(&(FSINFO as u16).to_le_bytes());
+    b[50..52].copy_from_slice(&(BACKUP_BOOT as u16).to_le_bytes());
+    b[64] = 0x80; // drive number
+    b[66] = 0x29; // extended boot signature
+    b[67..71].copy_from_slice(&SERIAL.to_le_bytes());
+    b[71..82].copy_from_slice(LABEL);
+    b[82..90].copy_from_slice(b"FAT32   ");
     b[510..512].copy_from_slice(&[0x55, 0xAA]);
+    // FSInfo: free clusters (all but the root's) and where to look next.
+    let mut info = [0u8; SECTOR];
+    info[0..4].copy_from_slice(b"RRaA");
+    info[484..488].copy_from_slice(b"rrAa");
+    info[488..492].copy_from_slice(&(clusters as u32 - 1).to_le_bytes());
+    info[492..496].copy_from_slice(&(ROOT_CLUSTER + 1).to_le_bytes());
+    info[508..512].copy_from_slice(&[0, 0, 0x55, 0xAA]);
+    let boot: [u8; SECTOR] = d[..SECTOR].try_into().unwrap();
+    for (sector, s) in [(FSINFO, &info), (BACKUP_BOOT, &boot), (BACKUP_BOOT + 1, &info)] {
+        d[sector * SECTOR..(sector + 1) * SECTOR].copy_from_slice(s);
+    }
     for f in 0..FATS {
         let at = (RESERVED + f * fat) * SECTOR;
-        d[at..at + 4].copy_from_slice(&[0xF8, 0xFF, 0xFF, 0xFF]);
+        d[at..at + 12].copy_from_slice(&[0xF8, 0xFF, 0xFF, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
     }
-    let at = root * SECTOR;
+    let at = data * SECTOR;
     d[at..at + 11].copy_from_slice(LABEL);
     d[at + 11] = 0x08; // volume label
     d
@@ -135,17 +157,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_format_matches_mkfs_vfat() {
+    fn the_format_matches_a_real_console() {
         let total = volume_sectors(nand::partition("Brio").unwrap().size / nand::BLOCK);
         assert_eq!(total, 442512);
-        assert_eq!(fat_sectors(total), 216);
+        assert_eq!(fat_sectors(total), 861);
         let d = format(total);
-        // The boot sector's fields as the console's mkfs.vfat wrote them.
-        assert_eq!(d[11..36], [0, 2, 8, 1, 0, 2, 0, 2, 0, 0, 0xF8, 216, 0, 63, 0, 255, 0, 0, 0, 0, 0, 0x90, 0xC0, 6, 0]);
+        // What fsck.vfat -nv showed on the console: 2048-byte clusters, 38
+        // reserved sectors, FATs of 861 sectors, data at sector 1760, 110188
+        // clusters.
+        assert_eq!(&d[3..11], b"MSDOS5.0");
+        assert_eq!(d[11..36], [0, 2, 4, 38, 0, 2, 0, 0, 0, 0, 0xF8, 0, 0, 63, 0, 255, 0, 0, 0, 0, 0, 0x90, 0xC0, 6, 0]);
         let v = fatfs::Volume::parse(&d).unwrap();
-        assert!(v.fat16);
-        assert_eq!((v.root, v.data), (433 * 512, 465 * 512));
-        assert_eq!(d.len(), v.data);
+        assert!(!v.fat16);
+        assert_eq!((v.fat, v.data, v.root_cluster), (38 * 512, 1760 * 512, 2));
+        assert_eq!((total - 1760) / 4, 110188);
+        assert_eq!(d.len(), v.data + 2048);
+        assert_eq!(d[..512], d[6 * 512..7 * 512], "backup boot sector");
     }
 
     #[test]
@@ -160,11 +187,11 @@ mod tests {
         assert_eq!(fatfs::read_file(&d, "Base/Brio/lib/libKernelMPI.so").as_deref(), Some(&b"elf"[..]));
         let root: Vec<String> = fatfs::list(&d, "").unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(root, ["Base", "POW"], "the label is not listed");
-        // FAT16 entries: AppManager takes 2 clusters, chained.
+        // FAT32 entries: AppManager takes 3 clusters, chained.
         let v = fatfs::Volume::parse(&d).unwrap();
-        let fat: Vec<u16> = d[v.fat..v.fat + 16].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        assert_eq!(fat[..2], [0xFFF8, 0xFFFF]);
-        assert!(fat[2..].iter().any(|&e| e == 0xFFFF));
+        let fat: Vec<u32> = d[v.fat..v.fat + 64].chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap()) & 0x0FFF_FFFF).collect();
+        assert_eq!(fat[..3], [0x0FFF_FFF8, 0x0FFF_FFFF, 0x0FFF_FFFF]);
+        assert!(fat[3..].iter().filter(|&&e| e >= 0x0FFF_FFF8).count() >= 3);
         assert_eq!(d[v.fat..v.fat + v.fat_bytes], d[v.fat + v.fat_bytes..v.fat + 2 * v.fat_bytes]);
     }
 
@@ -172,7 +199,7 @@ mod tests {
     fn installed_on_the_nand() {
         let mut flash = Nand::erased();
         install(&mut flash, &[("Base/x.txt".to_string(), b"hi".to_vec())]).unwrap();
-        let d = ubi::read_volume(&flash, nand::partition("Brio").unwrap(), 300 * 1024);
+        let d = ubi::read_volume(&flash, nand::partition("Brio").unwrap(), 1024 * 1024);
         assert_eq!(fatfs::read_file(&d, "Base/x.txt").as_deref(), Some(&b"hi"[..]));
     }
 }

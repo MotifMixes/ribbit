@@ -172,6 +172,15 @@ const GPIO_IRQ: u32 = 13;
 const CART_DETECT: u32 = 1 << 18;
 /// Port B pins 2-5: the cartridge type (gpio.h GPIO_CART_CFG_LOW/HIGH).
 const CART_CFG_SHIFT: u32 = 2;
+/// Port B pins 27-31: the board ID lightning-boot reads into the scratch
+/// register (gpio.h GPIO_CFG_LOW/HIGH, pin 27 the low bit). 3 is
+/// LF1000_BOARD_DIDJ, EP1 in the 2.6.20 sources (VERIFIED: three real
+/// serial numbers, 00000E03..., whose digits 7-8 init.d/mass_storage
+/// checks against /sys/.../board_id). Below EP1 the kernel takes the
+/// prototype's paths: headphone jack inverted (pin B10 low read as
+/// headphones in), other backlight scale and codec settings.
+const BOARD_ID: u32 = 3;
+const BOARD_ID_SHIFT: u32 = 27;
 
 /// The buttons: port C pins, low while pressed (lf1000-keypad.c button_map;
 /// L and R swap on boards before EP1, these are the later boards').
@@ -403,7 +412,8 @@ impl Bus {
         match port {
             0 if self.cart.is_some() => 0,
             0 => CART_DETECT,
-            1 if self.cart.is_some() => crate::cart::PRODUCTION << CART_CFG_SHIFT,
+            1 if self.cart.is_some() => BOARD_ID << BOARD_ID_SHIFT | crate::cart::PRODUCTION << CART_CFG_SHIFT,
+            1 => BOARD_ID << BOARD_ID_SHIFT,
             2 => button::ALL & !self.buttons | button::POWER & self.buttons,
             _ => 0,
         }
@@ -558,10 +568,12 @@ impl Bus {
         match c.cmd {
             0x70 => c.status,
             0x90 => {
-                // GUESS: Samsung K9F2G08 (256 MB, 2 KiB pages) and, for the
-                // Explorer's 1 GB, K9K8G08 (8 Gbit SLC, 128 KiB blocks); the
-                // real parts are UNKNOWN.
-                let id = if self.nand.size() > nand::SIZE { [0xEC, 0xD3, 0x51, 0x95, 0x58] } else { [0xEC, 0xDA, 0x10, 0x95, 0x44] };
+                // The Didj: maker 0x2C, device 0xDA (VERIFIED: a real
+                // Didj's kernel log, "ST Micro NAND 256MiB 3,3V 8-bit");
+                // the bytes after them are UNKNOWN (these give 2 KiB pages,
+                // 64-byte spare areas and 128 KiB blocks). The Explorer's
+                // 1 GB: GUESS, Samsung K9K8G08 (8 Gbit SLC, 128 KiB blocks).
+                let id = if self.nand.size() > nand::SIZE { [0xEC, 0xD3, 0x51, 0x95, 0x58] } else { [0x2C, 0xDA, 0x10, 0x95, 0x44] };
                 let b = id.get(c.pos).copied().unwrap_or(0);
                 c.pos += 1;
                 b
@@ -1138,6 +1150,24 @@ impl Didj {
             2..7 => fonts[i - 2],
             _ => u32::MAX,
         }));
+    }
+
+    /// For the HLE (no kernel, no interrupts): `cycles` have run; the 3D
+    /// chip and DMA go on and the MLC's dirty flags clear each frame, as in
+    /// `run`.
+    pub(crate) fn hle_tick(&mut self, cycles: u64) {
+        let (cpu_hz, _) = self.clocks();
+        self.bus.dma.tick(cycles, cpu_hz, &self.bus.sdram);
+        self.bus.ga3d.tick(cycles, cpu_hz);
+        self.bus.frame_cycles += cycles;
+        if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
+            self.bus.frame_cycles = 0;
+            for (reg, bit) in MLC_DIRTY {
+                if let Some(v) = self.bus.regs.get_mut(&reg) {
+                    *v &= !bit;
+                }
+            }
+        }
     }
 
     /// Runs `n` processor cycles (one per instruction for now), the timers

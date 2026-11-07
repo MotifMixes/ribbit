@@ -8,6 +8,8 @@ pub const INODE: u16 = 0xE002;
 pub const INODE_HEADER: usize = 68;
 pub const DIRENT_HEADER: usize = 40;
 const COMPR_NONE: u8 = 0;
+const COMPR_RTIME: u8 = 2;
+const COMPR_ZERO: u8 = 5;
 const COMPR_ZLIB: u8 = 6;
 /// mkfs.jffs2 keeps each data node to one page of the file.
 const NODE_DATA: usize = 4096;
@@ -68,19 +70,33 @@ pub fn read_file(image: &[u8], name: &str) -> Option<File> {
         .filter(|&(at, ..)| image.get(at + DIRENT_HEADER..at + DIRENT_HEADER + image[at + 28] as usize) == Some(name.as_bytes()))
         .map(|(at, ..)| u32_at(image, at + 20))
         .last()?;
-    let mut parts: Vec<(u32, usize)> = nodes(image)
+    let parts: Vec<usize> = nodes(image)
         .filter(|&(at, kind, len)| kind == INODE && len >= INODE_HEADER && u32_at(image, at + 12) == ino)
-        .map(|(at, ..)| (u32_at(image, at + 16), at))
+        .map(|(at, ..)| at)
         .collect();
-    parts.sort();
-    let &(_, newest) = parts.last()?;
-    let mut data = vec![0; u32_at(image, newest + 28) as usize];
-    for &(_, at) in &parts {
+    let (newest, data) = inode_data(image, parts)?;
+    Some(File { header: image[newest..newest + INODE_HEADER].to_vec(), data })
+}
+
+/// The contents of the inode whose nodes are at `parts` (any order), and
+/// its newest node's offset. None if a node can't be decompressed.
+fn inode_data(image: &[u8], mut parts: Vec<usize>) -> Option<(usize, Vec<u8>)> {
+    parts.sort_by_key(|&at| u32_at(image, at + 16));
+    let &newest = parts.last()?;
+    // A device node's isize is 0; its data (the device number) is dsize long.
+    let size = match u32_at(image, newest + 20) & 0o170000 {
+        0o020000 | 0o060000 => u32_at(image, newest + 52),
+        _ => u32_at(image, newest + 28),
+    };
+    let mut data = vec![0; size as usize];
+    for &at in &parts {
         let (offset, csize, dsize) = (u32_at(image, at + 44) as usize, u32_at(image, at + 48) as usize, u32_at(image, at + 52) as usize);
         let raw = image.get(at + INODE_HEADER..at + INODE_HEADER + csize)?;
         let bytes = match image[at + 56] {
             COMPR_NONE => raw.to_vec(),
             COMPR_ZLIB => miniz_oxide::inflate::decompress_to_vec_zlib(raw).ok()?,
+            COMPR_RTIME => rtime(raw, dsize),
+            COMPR_ZERO => vec![0; dsize],
             _ => return None,
         };
         let end = (offset + dsize.min(bytes.len())).min(data.len());
@@ -88,7 +104,85 @@ pub fn read_file(image: &[u8], name: &str) -> Option<File> {
             data[offset..end].copy_from_slice(&bytes[..end - offset]);
         }
     }
-    Some(File { header: image[newest..newest + INODE_HEADER].to_vec(), data })
+    Some((newest, data))
+}
+
+/// JFFS2's "rtime" compressor, undone (fs/jffs2/compr_rtime.c).
+fn rtime(raw: &[u8], dsize: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dsize);
+    let mut positions = [0usize; 256];
+    let mut i = 0;
+    while out.len() < dsize && i + 1 < raw.len() {
+        let value = raw[i];
+        let repeat = raw[i + 1] as usize;
+        i += 2;
+        out.push(value);
+        let mut back = positions[value as usize];
+        positions[value as usize] = out.len();
+        for _ in 0..repeat {
+            let b = out[back];
+            out.push(b);
+            back += 1;
+        }
+    }
+    out.truncate(dsize);
+    out
+}
+
+/// One entry of a whole file system (`tree`).
+pub struct Entry {
+    /// From the root, starting with '/'.
+    pub path: String,
+    /// st_mode: file type and permissions.
+    pub mode: u32,
+    pub mtime: u32,
+    /// A file's contents, a symbolic link's target, a device's
+    /// (major << 8 | minor) as two bytes (old 16-bit dev_t), or empty.
+    pub data: Vec<u8>,
+}
+
+/// Every file, directory, link and device in `image`, parents before
+/// their children. Newest directory entries win; deleted ones (inode 0)
+/// and entries whose inode can't be read are left out.
+pub fn tree(image: &[u8]) -> Vec<Entry> {
+    use std::collections::HashMap;
+    // (parent, name) -> (version, inode)
+    let mut dirents: HashMap<(u32, Vec<u8>), (u32, u32)> = HashMap::new();
+    let mut inodes: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (at, kind, len) in nodes(image) {
+        if kind == DIRENT && len >= DIRENT_HEADER {
+            let Some(name) = image.get(at + DIRENT_HEADER..at + DIRENT_HEADER + image[at + 28] as usize) else { continue };
+            let (pino, version, ino) = (u32_at(image, at + 12), u32_at(image, at + 16), u32_at(image, at + 20));
+            let slot = dirents.entry((pino, name.to_vec())).or_insert((0, 0));
+            if version >= slot.0 {
+                *slot = (version, ino);
+            }
+        } else if kind == INODE && len >= INODE_HEADER {
+            inodes.entry(u32_at(image, at + 12)).or_default().push(at);
+        }
+    }
+    let mut children: HashMap<u32, Vec<(Vec<u8>, u32)>> = HashMap::new();
+    for ((pino, name), (_, ino)) in dirents {
+        if ino != 0 {
+            children.entry(pino).or_default().push((name, ino));
+        }
+    }
+    let mut out = vec![Entry { path: "/".into(), mode: 0o040755, mtime: 0, data: Vec::new() }];
+    let mut todo = vec![(ROOT_INO, String::new())];
+    while let Some((dir, prefix)) = todo.pop() {
+        let Some(mut list) = children.remove(&dir) else { continue };
+        list.sort();
+        for (name, ino) in list {
+            let Some((newest, data)) = inodes.get(&ino).and_then(|p| inode_data(image, p.clone())) else { continue };
+            let path = format!("{prefix}/{}", String::from_utf8_lossy(&name));
+            let mode = u32_at(image, newest + 20);
+            if mode & 0o170000 == 0o040000 {
+                todo.push((ino, path.clone()));
+            }
+            out.push(Entry { path, mode, mtime: u32_at(image, newest + 36), data });
+        }
+    }
+    out
 }
 
 /// Uncompressed inode nodes holding the whole file `data`, after the node
@@ -183,6 +277,25 @@ mod tests {
         image.extend(rewrite(&file.header, b"short"));
         assert_eq!(read_file(&image, "UnitID.txt").unwrap().data, b"short");
         assert!(read_file(&image, "other").is_none());
+    }
+
+    #[test]
+    fn tree_lists_newest_entries() {
+        let mut image = new_file(2, "a.txt", b"one", 1);
+        image.extend(new_file(3, "b.txt", b"two", 1));
+        let b = read_file(&image, "b.txt").unwrap();
+        image.extend(rewrite(&b.header, b"three"));
+        let t = tree(&image);
+        let paths: Vec<&str> = t.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["/", "/a.txt", "/b.txt"]);
+        assert_eq!(t[2].data, b"three");
+        assert_eq!(t[2].mode, 0o100644);
+    }
+
+    #[test]
+    fn undoes_rtime() {
+        // "aaaa" + "b": 'a' then 3 repeats of the bytes from its last spot.
+        assert_eq!(rtime(&[b'a', 0, b'a', 2, b'b', 0], 5), b"aaaab");
     }
 
     #[test]

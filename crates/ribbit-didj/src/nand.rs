@@ -89,12 +89,13 @@ pub const PARTITIONS: [Partition; 8] = [
 /// The serial number a console leaves the factory with, in
 /// /mfgdata/UnitID.txt (the only file the firmware reads there). Its form is
 /// what init.d/mass_storage checks: 16 hex digits, starting "00000E" and the
-/// board revision (Ribbit's board_id reads 0). The last 8 digits are a
-/// GUESS. Without it, a start with /flags/needs_repair set dies in
-/// mass_storage (`set -e`, then "echo > /Didj/brd.rev" on the unmounted
+/// board revision, 03 (machine.rs BOARD_ID; VERIFIED: real consoles'
+/// 00000E0300CF058C, 00000E0300F6CF52, 00000E0300EF70C0). The last 8
+/// digits are Ribbit's own. Saves made before keep 00000E0000000001.
+/// Without it, a start with /flags/needs_repair set dies in mass_storage (`set -e`, then "echo > /Didj/brd.rev" on the unmounted
 /// /Didj), the USB driver never loads, launch_main drops the flag and shows
 /// "Download Failed" where a real console shows the tune-up screen.
-pub const UNIT_ID: &str = "00000E0000000001\n";
+pub const UNIT_ID: &str = "00000E0300000001\n";
 
 pub fn partition(name: &str) -> Option<Partition> {
     PARTITIONS.iter().copied().find(|p| p.name == name)
@@ -257,6 +258,34 @@ impl Nand {
         out
     }
 
+    /// A real console's flash from a dump: the 256 MB data area alone
+    /// (`nanddump` of /dev/mtd0..mtd7 put end to end, or `cat` of their
+    /// mtdblocks; spare areas then get Ribbit's ECC), or every page with
+    /// its 64-byte spare area (`nanddump -o`, bad-block marks kept). Erased
+    /// blocks take no memory.
+    pub fn from_dump(data: &[u8]) -> Result<Self, String> {
+        let raw = BLOCKS * PAGES_PER_BLOCK * PAGE_RAW;
+        let mut nand = Self::erased();
+        match data.len() {
+            SIZE => {
+                for (b, block) in data.chunks(BLOCK).enumerate() {
+                    if block.iter().any(|&x| x != 0xFF) {
+                        nand.write(b * BLOCK, block);
+                    }
+                }
+            }
+            n if n == raw => {
+                for (b, block) in data.chunks(BLOCK / PAGE * PAGE_RAW).enumerate() {
+                    if block.iter().any(|&x| x != 0xFF) {
+                        nand.blocks[b] = Some(block.into());
+                    }
+                }
+            }
+            n => return Err(format!("a Didj NAND dump is {SIZE} bytes, or {raw} with spare areas, not {n}")),
+        }
+        Ok(nand)
+    }
+
     /// The flash as LeapFrog Connect leaves it after a firmware install:
     /// lightning-boot, the boot flags, both kernel and root file system
     /// copies, and an erased Brio partition (brio::install writes it with the
@@ -292,6 +321,22 @@ impl Nand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dumps_with_and_without_spare_areas() {
+        let mut built = Nand::erased();
+        built.write(partition("Kernel0").unwrap().offset, &[0x42; 3 * PAGE]);
+        built.page_mut(5 * PAGES_PER_BLOCK)[PAGE] = 0; // a bad-block mark
+        let data = built.read(0, SIZE);
+        let from_data = Nand::from_dump(&data).unwrap();
+        assert_eq!(from_data.read(0, SIZE), data);
+        assert_eq!(from_data.page(partition("Kernel0").unwrap().offset / PAGE), built.page(partition("Kernel0").unwrap().offset / PAGE));
+        let raw: Vec<u8> = (0..BLOCKS * PAGES_PER_BLOCK).flat_map(|p| built.page(p).to_vec()).collect();
+        let from_raw = Nand::from_dump(&raw).unwrap();
+        assert!(from_raw == built, "every page and spare area, the bad block too");
+        assert!(from_raw.is_bad(5) && !from_data.is_bad(5));
+        assert!(Nand::from_dump(&[0; 100]).is_err());
+    }
 
     #[test]
     fn partitions_tile_the_flash() {

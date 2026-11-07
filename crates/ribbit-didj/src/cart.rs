@@ -21,7 +21,8 @@ pub const PAGES_PER_BLOCK: usize = 32;
 
 /// The cartridge type lightning-boot reads from GPIO port B pins 2-5 into
 /// the scratch register (nand.h): production carts are OTP with ECC off.
-/// GUESS: retail cartridges are production ones.
+/// VERIFIED: a real Didj with a cartridge logs "cart type read=7, used=7",
+/// "cartridge ECC mode: none" and the ID 0x98 0x76 (Toshiba NAND 64MiB).
 pub const PRODUCTION: u32 = 0x7;
 
 pub struct Cart {
@@ -170,6 +171,27 @@ const BLOCKS: usize = 4096;
 /// True for an image of a cartridge's FAT volume alone (as players dump
 /// them from /dev/mtdblock or a mounted cart): a FAT boot sector labelled
 /// "Cartridge" that fits a 64 MB chip's volume.
+/// Every folder (ending in "/") and file on a cartridge dump's volume, paths
+/// from its root ("JDI/App.so"): an application package like a download's
+/// (`JDI/meta.inf`, Type="Application"), ready for /Didj/ProgramFiles.
+pub fn files(raw: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    let fat = volume(raw)?;
+    let mut out = Vec::new();
+    let mut folders = vec![String::new()];
+    while let Some(dir) = folders.pop() {
+        for e in ribbit_core::fatfs::list(&fat, &dir)? {
+            let path = if dir.is_empty() { e.name.clone() } else { format!("{dir}/{}", e.name) };
+            if e.is_dir {
+                out.push((format!("{path}/"), Vec::new()));
+                folders.push(path);
+            } else {
+                out.push((path.clone(), ribbit_core::fatfs::read_file(&fat, &path)?));
+            }
+        }
+    }
+    Some(out)
+}
+
 pub fn is_volume(data: &[u8]) -> bool {
     data.len() >= 512
         && data.len() % 512 == 0
