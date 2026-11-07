@@ -245,8 +245,9 @@ in-between option (phase 7).
   (`nand_with_files`, ~1 s, only when they changed) and kept as the usual .nandblocks; read back with
   `carry::files_beyond` (whole image, so `user_files`' known-LEB test isn't needed). Test
   `didj::tests::didj_hle_session` (RIBBIT_DIDJ_DIR, ignored): boots at 99-101% speed, a file round-trips.
-  Save states and USB say they need Enhanced/Original. Left: player checks in the app (menu, JetPack, Clone
-  Wars, smoothness), autostart of a library game, HLE save states.
+  Save states and USB say they need Enhanced/Original. Autostart of a library game VERIFIED (test
+  `didj_hle_autostart`, the app's MOTIF save, JetPack: My Games at 15 s, JetPack's main menu at 40 s).
+  Left: player checks in the app (menu, JetPack, Clone Wars, smoothness), HLE save states.
 
 ## Known risks
 

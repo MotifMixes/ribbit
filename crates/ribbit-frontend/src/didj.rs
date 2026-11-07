@@ -1354,4 +1354,35 @@ mod tests {
         eprintln!("save holds {:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
         assert!(files.iter().any(|(p, d)| p.to_ascii_lowercase().ends_with("data/ribbit-test.txt") && d == b"hello"));
     }
+
+    /// Enhanced (new) starting a library game from the menu (the autostart):
+    /// RIBBIT_DIDJ_DIR as above, RIBBIT_DIDJ_SAVE a set-up console's
+    /// .nandblocks (copied, not changed), RIBBIT_DIDJ_GAME the game's
+    /// package; pictures every 5 s to RIBBIT_DIDJ_SHOT_DIR.
+    #[test]
+    #[ignore]
+    fn didj_hle_autostart() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_DIDJ_DIR").expect("RIBBIT_DIDJ_DIR"));
+        let game = PathBuf::from(std::env::var("RIBBIT_DIDJ_GAME").expect("RIBBIT_DIDJ_GAME"));
+        let shots = PathBuf::from(std::env::var("RIBBIT_DIDJ_SHOT_DIR").expect("RIBBIT_DIDJ_SHOT_DIR"));
+        let saves = std::env::temp_dir().join("ribbit-hle-autostart");
+        let _ = std::fs::remove_dir_all(&saves);
+        std::fs::create_dir_all(&saves).unwrap();
+        let save = PathBuf::from(std::env::var("RIBBIT_DIDJ_SAVE").expect("RIBBIT_DIDJ_SAVE"));
+        std::fs::copy(&save, save_file(&dir, &saves)).unwrap();
+        std::fs::copy(save.with_extension("nandimage"), save_file(&dir, &saves).with_extension("nandimage")).unwrap();
+        let art = menu_art(&game, None).expect("the game's menu art");
+        let mode = Mode { enhanced: true, cpu_scale: 1, frame_skip: false, hd: 1, hle: true, smooth: true };
+        let didj = DidjSession::start(&dir, &saves, None, None, Some(art), mode, Arc::new(crate::serial::Serial::default())).unwrap();
+        let mut px = Vec::new();
+        for k in 1..=12 {
+            std::thread::sleep(Duration::from_secs(5));
+            let (w, h) = didj.frame(&mut px);
+            let mut enc = png::Encoder::new(std::fs::File::create(shots.join(format!("auto-{:02}.png", k * 5))).unwrap(), w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgb);
+            let rgb: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+            enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+        }
+        didj.stop();
+    }
 }
