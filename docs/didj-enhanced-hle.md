@@ -222,10 +222,11 @@ in-between option (phase 7).
   HD in-betweens: the HD store's tiles under the saved buffers are saved and put back too (`Hd::save`,
   `Hd::restore`); JetPack at 2x: 4/8/12 px a frame comes out in exactly even 1/2/3 px steps, as sharp as frames.
   Left: showing them in time (app, phase 6), Clone Wars (3D) check.
-  OPEN (2026-11-07): Clone Wars with the 3D chip at 4x (GA3D=4) and the old key script (instruction times) ends
-  on a cutscene at 32.3 billion (800 s), not the level; it shows only the lower-right triangle of the video quad
-  (16 operations a frame), with or without HD and in-betweens, so not from them. Not yet checked on Original
-  or at GA3D=1.
+  FIXED (2026-11-07): Clone Wars' menus and cutscene video showed half of each 2D quad, in Original too (so in
+  the released app): libopengles_lite starts the TSE directly with 0x402 then 0x602 per quad, and the inverse
+  culling flag is bit 9 of GRP3D_CONTROL, not bit 8 (ga3d.rs). JetPack and the Didj menu draw through the
+  primitive processor (flag in PPARAM bit 3) and are unchanged. The old key script still ends on a cutscene at
+  GA3D=4 (instruction-timed keys).
 
 ## Known risks
 

@@ -788,11 +788,15 @@ impl Ga3d {
         match v & 3 {
             0 => self.primitives(mem),
             // GUESS: bit 9 (the data book repeats CULLMODE) is the
-            // rendering flag.
+            // rendering flag. The TSE's inverse culling is bit 9 (below), so
+            // this may be swapped; no direct GTE run has been seen.
             1 => self.gte(v >> 6 & 3, v >> 8 & 1 != 0, v >> 9 & 1 != 0, mem),
+            // The TSE's inverse culling flag is bit 9 (CULLMODE, the one
+            // with a reset value): libopengles_lite draws each 2D quad as
+            // two triangles, the second with 0x602 where the first has 0x402.
             2 => {
                 let tri = v >> 10 & 1 != 0;
-                self.tse(tri, v >> 8 & 1 != 0, mem);
+                self.tse(tri, v >> 9 & 1 != 0, mem);
             }
             _ => match v >> 3 & 3 {
                 1 => self.memory_fill(mem),

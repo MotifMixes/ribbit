@@ -308,7 +308,9 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
   head that is also the first data word, written to register CMDID * 2 (1, 1, 1, 1, 2, 2, 2, 2, 1, 1 words;
   9 also loads the palette), 14 = NOP. The library waits for idle with CONTROL 0x40000004 (NOP flag).
 - CONTROL (0x20) starts a sub-module: 0 the primitive processor, 1 the GTE, 2 the TSE, 3 the rasterizer
-  (mode bits 3-4: 1 memory fill, 2 LUT fill, 3 texture cache clear).
+  (mode bits 3-4: 1 memory fill, 2 LUT fill, 3 texture cache clear). The TSE's inverse culling flag is bit 9
+  (VERIFIED 2026-11-07: the library draws each 2D quad as TSE 0x40000402 then 0x40000602; with bit 8 Clone
+  Wars' menus and video showed half of each quad); bit 10 triangle (1) or rectangle mode.
 - Primitive processor (PRIMCON1 0x100: bit 0 GTE, 1 matrix palette, 2 index buffer, 6-7 index size,
   8-15 valid streams): indices from IDXSTART to IDXEND (0x104, 0x108, inclusive), up to 8 vertex streams
   (0x120 + 12n: address, stride, param = destination word bits 20-31, count - 1 bits 8-19, type 0-7), a
