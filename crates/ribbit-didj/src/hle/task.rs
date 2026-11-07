@@ -421,8 +421,21 @@ impl Process {
         let s = self.mem().get32(req).ok_or(EFAULT)?;
         let ns = self.mem().get32(req + 4).ok_or(EFAULT)?;
         let d = Duration::new(s as u64, ns.min(999_999_999));
-        self.block = Some(if d.is_zero() { Wait::Yield } else { Wait::Sleep(Instant::now() + d) });
+        if self.trace {
+            eprintln!("[hle {}] nanosleep {d:?}", self.tid);
+        }
+        self.block = Some(if d.is_zero() { Wait::Yield } else { Wait::Sleep(self.tick_after(Instant::now() + d)) });
         Ok(0)
+    }
+
+    /// The first timer tick at or after `t`. The LF1000 kernel has HZ 100
+    /// and no clock events (arch/arm/mach-lf1000/core.c), so hrtimers run
+    /// from the tick (kernel/timer.c run_timer_softirq): a sleep ends on
+    /// the first tick after its deadline.
+    pub(super) fn tick_after(&self, t: Instant) -> Instant {
+        const TICK: u128 = 10_000_000;
+        let ns = t.saturating_duration_since(self.start).as_nanos();
+        self.start + Duration::from_nanos((ns.div_ceil(TICK) * TICK) as u64)
     }
 
     // ---- poll and select -------------------------------------------------

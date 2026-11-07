@@ -141,8 +141,10 @@ impl Process {
             1 => self.mlc_write(BGCOLOR, arg & 0xFF_FFFF),
             2 => return Ok(self.mlc_read(BGCOLOR)),
             3 => {
-                // VID_PRIORITY_INVALID is 4.
-                if arg >= 4 {
+                // VID_PRIORITY_INVALID is 3 when CPU_LF1000 is defined
+                // (asm-arm/arch-lf1000/mlc.h), so AppManager's 3 fails and
+                // the video stays in front: Original shows CONTROLT 0xC02.
+                if arg >= 3 {
                     return Err(EINVAL);
                 }
                 self.mlc_change(CONTROLT, |v| v & !(3 << PRIORITY) | arg << PRIORITY);

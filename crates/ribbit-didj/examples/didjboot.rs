@@ -254,6 +254,9 @@ fn main() {
             didj.bus.cart = cart;
             auto = art.clone().map(ribbit_didj::autostart::AutoStart::new);
         }
+        if wav.is_empty() && !didj.bus.dma.pcm.is_empty() {
+            println!("sound starts at {m} million cycles, {} million instructions", didj.cpu.instructions / 1_000_000);
+        }
         wav.extend(didj.bus.dma.pcm.drain(..));
         ran += n;
         if speed && (m + 1 - lap_m) * 1_000_000 >= didj.cpu_hz() {
@@ -276,7 +279,7 @@ fn main() {
 ").into_bytes();
                 f.extend(px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
                 std::fs::write(format!("{dir}/frame_{:06}.ppm", ran / 1_000_000), f).expect("can't write a frame");
-                println!("frame {} at {m} million cycles", ran / 1_000_000);
+                println!("frame {} at {m} million cycles, mlc {}", ran / 1_000_000, [0xC000_4000u32, 0xC000_4024, 0xC000_4038, 0xC000_4058, 0xC000_406C, 0xC000_407C, 0xC000_408C].map(|a| format!("{:08X}", didj.bus.reg(a))).join(" "));
                 last_frame = px;
             }
         }

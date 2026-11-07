@@ -140,6 +140,25 @@ in-between option (phase 7).
   Neutrino_..._suckUp000N.png", "parseSpriteCel ID number is wrong" and "getAvatarTexturePiece - Could not find
   component ..."; whether Original logs the same is NOT checked. Phase 4's picture/sound check against Original is
   still open. Next: sound and timing against Original.
+- Sound and start-up timing (2026-11-07): `Process::take_sound`; didjhle `DIDJ_HLE_WAV=<file>`, `DIDJ_HLE_LOG=1`
+  (when each block of sound arrived, host ms and instructions), `DIDJ_HLE_FRAMES=<folder>` (the screen when it
+  changed, named by host ms, with the MLC registers on stderr), `DIDJ_HLE_PCS=<from>-<to>` (thread and PC every
+  million instructions); didjboot prints when PCM out starts and the MLC registers with each frame. The HLE's
+  sound and clocks follow the host clock, Original's WAV is in emulated time, and neither WAV holds the silence
+  before the first sound (compare by frames, or by the loudness every 10 ms).
+  FIXED: the didj logo animation was hidden behind the copyright screen. AppManager asks for video priority 3;
+  the LF1000 build defines VID_PRIORITY_INVALID as 3 (asm-arm/arch-lf1000/mlc.h), so the driver refuses it and
+  the video stays in front (Original: CONTROLT 0xC02); the HLE took it (0xF02). Hiding it had also cut the time
+  to "Select a name" by about 0.8 s.
+  Now, with the user's save and no keys: the same screens and sounds as Original, all about 3.5 s sooner (the
+  bootloader and kernel; the health warning is the bootloader's picture, so the HLE never shows it):
+  copyright 0.24 s (Original 3.72), logo 3.28 s (7.0), "Select a name" 10.8 s (about 14). Sound starts at
+  0.18 s (Original 3.44 s); after that the splash sound is 0.35 s earlier and the menu voice 0.55 s earlier
+  than Original, measured from each WAV's start.
+  Also: the kernel has HZ 100 and no clock events, so a sleep ends on the first tick after its deadline;
+  nanosleep now does that (`tick_after`). It changed nothing measurable here. AppManager's main thread
+  busy-waits on gettimeofday while the copyright shows (fopen/fscanf of the USB vbus file each pass).
+  Open: whether to show the health warning for the boot time; timing of a game against Original.
 
 ## Known risks
 

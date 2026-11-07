@@ -11,6 +11,8 @@
 //! `a@3000+400` holds it for 400 million).
 //! DIDJ_HLE_CART=<dump> puts a cartridge in the slot; DIDJ_HLE_CARRY=<save>
 //! puts the player's files from an Original save (.nandblocks) on /Didj.
+//! DIDJ_HLE_WAV, DIDJ_HLE_LOG, DIDJ_HLE_FRAMES and DIDJ_HLE_PCS: sound,
+//! frames and a PC profile for timing checks (see below).
 
 use ribbit_didj::hle::Process;
 use std::io::Write;
@@ -57,7 +59,20 @@ fn main() {
     keys.sort_by_key(|k| k.0);
     let mut keys = keys.into_iter().peekable();
     let t = std::time::Instant::now();
+    // DIDJ_HLE_WAV=<file> saves the sound written to /dev/dsp; DIDJ_HLE_LOG=1
+    // prints when each block of it arrived (host ms, instructions).
+    let mut sound: Vec<i16> = Vec::new();
+    let (mut rate, mut channels) = (32000, 2);
+    let sound_log = std::env::var_os("DIDJ_HLE_LOG").is_some();
+    // DIDJ_HLE_FRAMES=<folder> saves the screen whenever it changed, after
+    // each step, named by host ms.
+    let frames_dir = std::env::var("DIDJ_HLE_FRAMES").ok();
+    let mut last_frame: Vec<u32> = Vec::new();
     // In steps of 10 million, printing the console as it comes.
+    let pcs: Option<(u64, u64)> = std::env::var("DIDJ_HLE_PCS").ok().map(|v| {
+        let (a, b) = v.split_once('-').expect("DIDJ_HLE_PCS=<from>-<to>");
+        (a.parse().unwrap(), b.parse().unwrap())
+    });
     let mut left = millions * 1_000_000;
     let stop = loop {
         while let Some(&(at, code, down)) = keys.peek()
@@ -67,8 +82,30 @@ fn main() {
             p.key(code, down);
             keys.next();
         }
-        let step = left.min(10_000_000);
+        // DIDJ_HLE_PCS=<from>-<to>: steps of 1 million there, printing the
+        // thread and PC after each (a cheap profile).
+        let sampling = pcs.is_some_and(|(a, b)| (a..b).contains(&(p.executed / 1_000_000)));
+        let step = left.min(if sampling { 1_000_000 } else { 10_000_000 });
         let stop = p.run(step);
+        if sampling {
+            eprintln!("[pc] {} {:08X}", p.tid(), p.cpu.r[15]);
+        }
+        if let Some(dir) = &frames_dir {
+            let (w, h, pixels) = p.m.bus.frame();
+            if pixels[..] != last_frame[..] {
+                last_frame = pixels.to_vec();
+                eprintln!("[mlc] {} ms: {}", t.elapsed().as_millis(), [0xC000_4000u32, 0xC000_4024, 0xC000_4038, 0xC000_4058, 0xC000_406C, 0xC000_407C, 0xC000_408C].map(|a| format!("{:08X}", p.m.bus.reg(a))).join(" "));
+                save_png(&format!("{dir}/{:06}.png", t.elapsed().as_millis()), w, h, &last_frame);
+            }
+        }
+        let (s, r, c) = p.take_sound();
+        if !s.is_empty() {
+            if sound_log {
+                eprintln!("[didjhle] sound {} frames at {:.0} ms, {}M", s.len() / c as usize, t.elapsed().as_secs_f64() * 1000.0, p.executed / 1_000_000);
+            }
+            (rate, channels) = (r, c);
+            sound.extend(s);
+        }
         std::io::stdout().write_all(&std::mem::take(&mut p.console)).unwrap();
         std::io::stdout().flush().unwrap();
         left -= step;
@@ -77,13 +114,32 @@ fn main() {
         }
     };
     eprintln!("[didjhle] {stop:?} after {} instructions in {:.0} ms", p.executed, t.elapsed().as_secs_f64() * 1000.0);
+    eprintln!("[didjhle] sound: {} frames ({:.1} s at {rate} Hz), {} not zero", sound.len() / channels as usize, sound.len() as f64 / channels as f64 / rate as f64, sound.iter().filter(|&&v| v != 0).count());
+    if let Ok(path) = std::env::var("DIDJ_HLE_WAV") {
+        let data: Vec<u8> = sound.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut f = b"RIFF".to_vec();
+        f.extend((36 + data.len() as u32).to_le_bytes());
+        f.extend(b"WAVEfmt ");
+        f.extend(16u32.to_le_bytes());
+        f.extend([1u16, channels as u16].iter().flat_map(|v| v.to_le_bytes()));
+        f.extend([rate, rate * channels * 2].iter().flat_map(|v| v.to_le_bytes()));
+        f.extend([channels as u16 * 2, 16].iter().flat_map(|v| v.to_le_bytes()));
+        f.extend(b"data");
+        f.extend((data.len() as u32).to_le_bytes());
+        f.extend(&data);
+        std::fs::write(&path, f).expect("can't write the WAV");
+    }
     if let Ok(path) = std::env::var("DIDJ_HLE_SHOT") {
         let (w, h, pixels) = p.m.bus.frame();
-        let file = std::io::BufWriter::new(std::fs::File::create(&path).expect("can't create the PNG"));
-        let mut enc = png::Encoder::new(file, w as u32, h as u32);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
-        enc.write_header().and_then(|mut w| w.write_image_data(&rgb)).expect("can't write the PNG");
+        save_png(&path, w, h, &pixels);
     }
+}
+
+fn save_png(path: &str, w: usize, h: usize, pixels: &[u32]) {
+    let file = std::io::BufWriter::new(std::fs::File::create(path).expect("can't create the PNG"));
+    let mut enc = png::Encoder::new(file, w as u32, h as u32);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+    enc.write_header().and_then(|mut w| w.write_image_data(&rgb)).expect("can't write the PNG");
 }

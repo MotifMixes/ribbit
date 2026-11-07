@@ -353,6 +353,18 @@ impl Process {
         Ok(())
     }
 
+    /// The thread that ran last.
+    pub fn tid(&self) -> u32 {
+        self.tid
+    }
+
+    /// The sound written to /dev/dsp since the last call (16-bit samples,
+    /// interleaved), with its rate and channel count.
+    pub fn take_sound(&mut self) -> (Vec<i16>, u32, u32) {
+        let d = &mut self.dev.dsp;
+        (d.out.drain(..).collect(), d.rate, d.channels)
+    }
+
     /// Runs up to `budget` instructions (all tasks together), or until init
     /// (the first program) exits, a program crashes, or nothing can run.
     pub fn run(&mut self, budget: u64) -> Stop {
