@@ -51,6 +51,11 @@ fn main() {
             p.vfs.add_file(&format!("/Didj/{}", name.trim_start_matches('/')), data);
         }
     }
+    // DIDJ_HLE_HD=<n>: the 3D engine also draws at n times the resolution;
+    // DIDJ_HLE_FRAMES and DIDJ_HLE_SHOT save that picture.
+    if let Some(n) = std::env::var("DIDJ_HLE_HD").ok().and_then(|v| v.parse().ok()) {
+        p.m.bus.ga3d.hd.set_scale(n);
+    }
     if let Ok(path) = std::env::var("DIDJ_HLE_CART") {
         let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
         p.insert_cart(&raw).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -137,7 +142,7 @@ fn main() {
         if let Some(dir) = &frames_dir
             && now >= frames_from * unit
         {
-            let (w, h, pixels) = p.m.bus.frame();
+            let (w, h, pixels) = p.m.bus.frame_hd();
             if pixels[..] != last_frame[..] {
                 last_frame = pixels.to_vec();
                 eprintln!("[mlc] {} ms: {}", t.elapsed().as_millis(), [0xC000_4000u32, 0xC000_4024, 0xC000_4038, 0xC000_4058, 0xC000_406C, 0xC000_407C, 0xC000_408C].map(|a| format!("{:08X}", p.m.bus.reg(a))).join(" "));
@@ -177,7 +182,7 @@ fn main() {
         std::fs::write(&path, f).expect("can't write the WAV");
     }
     if let Ok(path) = std::env::var("DIDJ_HLE_SHOT") {
-        let (w, h, pixels) = p.m.bus.frame();
+        let (w, h, pixels) = p.m.bus.frame_hd();
         save_png(&path, w, h, &pixels);
     }
 }

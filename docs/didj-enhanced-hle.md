@@ -43,9 +43,13 @@ in-between option (phase 7).
    cartridge switches), sysfs/proc the libraries read (board_id 3, battery/power, cartridge state, clock,
    needs_repair flags, /proc/meminfo with mem=18M or Enhanced's larger memory), RTC.
    Check: the menu appears and a cartridge game and JetPack Heroes play, picture and sound matching Original.
-5. **Ribbit's own OpenGL ES 1.1.** Catch calls into libopengles_lite's exported functions (the menu and games use
-   fixed-point GLES 1.x only) and draw them with Ribbit's renderer at 1x-4x, instead of the 3D chip model.
-   Check: every game's 3D at 1x matches the chip model pixel for pixel on reference frames; 2x-4x look right.
+5. **Ribbit's own 3D drawing, at the chip level** (user, 2026-11-07, instead of rewriting GLES): keep the Didj's
+   libopengles_lite.so (exact game behaviour; the menu, JetPack and Clone Wars alone import 63 gl* functions,
+   with matrix palettes, point sprites, fog, lighting, compressed textures) and draw the 3D chip's commands
+   (GTE vertex programs with their matrices and points, TSE triangles) with Ribbit's HD renderer at 1x-4x.
+   More than 60 fps: in-between frames from blending the GTE constants (matrices) and points of two frames.
+   Check: every game's 3D at 1x matches the chip model pixel for pixel on reference frames; 2x-4x look right;
+   in-between frames keep the game's pace.
 6. **The app.** "Enhanced (new)" in the Didj menu; saves: the HLE /Didj writes back into the same ubi_Brio
    volume Original uses, so a save moves between modes. USB/LeapFrog Connect needs the kernel: the app says so
    and offers Original for it. Save states for the HLE machine.
