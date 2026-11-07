@@ -14,6 +14,7 @@ pub const ENOENT: i32 = 2;
 pub const ENOTDIR: i32 = 20;
 pub const ELOOP: i32 = 40;
 
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Data {
     Dir,
     File(Vec<u8>),
@@ -22,6 +23,7 @@ pub enum Data {
     Dev(u32),
 }
 
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub ino: u32,
     /// st_mode: type and permissions.
@@ -45,10 +47,10 @@ impl Node {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Vfs {
-    nodes: BTreeMap<String, Node>,
-    next_ino: u32,
+    pub(super) nodes: BTreeMap<String, Node>,
+    pub(super) next_ino: u32,
 }
 
 /// `parent` joined with `name` ("/" + name at the root).

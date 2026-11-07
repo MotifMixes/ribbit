@@ -245,9 +245,18 @@ in-between option (phase 7).
   (`nand_with_files`, ~1 s, only when they changed) and kept as the usual .nandblocks; read back with
   `carry::files_beyond` (whole image, so `user_files`' known-LEB test isn't needed). Test
   `didj::tests::didj_hle_session` (RIBBIT_DIDJ_DIR, ignored): boots at 99-101% speed, a file round-trips.
-  Save states and USB say they need Enhanced/Original. Autostart of a library game VERIFIED (test
+  USB says it needs Enhanced/Original. Autostart of a library game VERIFIED (test
   `didj_hle_autostart`, the app's MOTIF save, JetPack: My Games at 15 s, JetPack's main menu at 40 s).
-  Left: player checks in the app (menu, JetPack, Clone Wars, smoothness), HLE save states.
+  Save states DONE (hle/state.rs): the Process in bincode (deflated, first word "HLE" 1, so Original's
+  and the HLE's states refuse each other), the file tree as changes from the built system + cartridge (the
+  player's files and installed games go in the state: ~45 MB with the MOTIF save, as Original's NAND changes),
+  times from the programs' clock, shared pipes/queues written once then by number (bincode::serialize_into:
+  serialize's size pass would mark them all written). The clock stands still while a state is made or
+  loaded. Found with it: CLOCK_REALTIME/gettimeofday read the host's date, so a load (or the app's pause)
+  moved realtime-timed programs on (Clone Wars' crawl); now `epoch` + the programs' clock. Test
+  `didj_hle_states` (RIBBIT_DIDJ_CART/SAVE/KEYS/WAIT/SHOT_DIR): Clone Wars' crawl saved and loaded, picture
+  identical, state 1.5 s (first: builds the base tree), load 0.3 s.
+  Left: player checks in the app (menu, JetPack, Clone Wars, smoothness, states).
 
 ## Known risks
 

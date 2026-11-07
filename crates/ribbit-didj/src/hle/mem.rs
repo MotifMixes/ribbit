@@ -35,6 +35,7 @@ pub fn page_up(v: u32) -> u32 {
 }
 
 /// The free physical memory, shared by every process.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Frames {
     free: Vec<u32>,
     l1_free: Vec<u32>,
@@ -69,7 +70,7 @@ fn put(ram: &mut [u8], pa: u32, v: u32) {
 }
 
 /// One process's map. Its tables live in SDRAM; `Space` changes them.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Mem {
     /// The level-1 table's physical address (TTB).
     pub l1: u32,

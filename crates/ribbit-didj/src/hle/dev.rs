@@ -17,7 +17,7 @@ const ENODEV: i32 = 19;
 
 pub const INPUT_NAMES: [&str; 3] = ["LF1000 USB", "Power Button", "LF1000 Keyboard"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Device {
     Null,
     Zero,
@@ -59,6 +59,7 @@ impl Device {
 
 /// The OSS output: format and how far ahead of the clock the program
 /// has written.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Dsp {
     pub rate: u32,
     pub channels: u32,
@@ -67,6 +68,7 @@ pub(super) struct Dsp {
     /// Sound written, waiting for the host (16-bit samples, interleaved).
     pub out: VecDeque<i16>,
     /// When the first sample was written and how many bytes since.
+    #[serde(with = "super::state::inst_opt")]
     started: Option<Instant>,
     written: u64,
 }
@@ -101,7 +103,7 @@ impl Dsp {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct Devices {
     /// Events waiting on /dev/input/event0..2 (struct input_event, 16 bytes).
     pub input: [VecDeque<[u8; 16]>; 3],
@@ -150,23 +152,30 @@ pub mod key {
     }
 }
 
+/// A cartridge's files in `vfs`: its volume at /Cart, as rcS mounts it, and
+/// the kernel's files reporting a production cartridge.
+pub fn cart_files(vfs: &mut super::Vfs, raw: &[u8]) -> Result<(), String> {
+    let files = crate::cart::files(raw).ok_or("no cartridge volume in the dump")?;
+    vfs.mkdir_all("/Cart");
+    for (path, data) in files {
+        let full = format!("/Cart/{}", path.trim_matches('/'));
+        if path.ends_with('/') {
+            vfs.mkdir_all(&full);
+        } else {
+            vfs.add_file(&full, data);
+        }
+    }
+    super::sysfs::cart_in(vfs);
+    Ok(())
+}
+
 impl Process {
     /// A cartridge in the slot from power-on (`raw` its dump): its volume
     /// at /Cart as rcS mounts it, the kernel's files reporting a production
     /// cartridge, and the keypad's cartridge switch (SW_TABLET_MODE, pin
     /// A18 low; lf1000-keypad.c) on.
     pub fn insert_cart(&mut self, raw: &[u8]) -> Result<(), String> {
-        let files = crate::cart::files(raw).ok_or("no cartridge volume in the dump")?;
-        self.vfs.mkdir_all("/Cart");
-        for (path, data) in files {
-            let full = format!("/Cart/{}", path.trim_matches('/'));
-            if path.ends_with('/') {
-                self.vfs.mkdir_all(&full);
-            } else {
-                self.vfs.add_file(&full, data);
-            }
-        }
-        super::sysfs::cart_in(&mut self.vfs);
+        cart_files(&mut self.vfs, raw)?;
         const SW_TABLET_MODE: u8 = 1;
         self.dev.switches[2] |= SW_TABLET_MODE;
         Ok(())

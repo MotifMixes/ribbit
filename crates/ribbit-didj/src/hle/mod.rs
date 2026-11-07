@@ -12,10 +12,11 @@ mod dev;
 mod mlc;
 pub mod elf;
 pub mod mem;
+mod state;
 mod sysfs;
 mod task;
 
-pub use dev::key;
+pub use dev::{cart_files, key};
 pub mod vfs;
 
 use mem::{Frames, Mem, PAGE, Space, page_up};
@@ -137,13 +138,17 @@ pub fn system_from_packages(dir: &std::path::Path) -> Result<Vfs, String> {
     Ok(vfs)
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Fd {
     /// Standard input/output: the console.
     Console,
     Pipe(PipeEnd),
     /// A POSIX message queue (mqd_t is a file descriptor on Linux).
-    Mq { q: std::sync::Arc<std::sync::Mutex<task::Mq>>, nonblock: bool },
+    Mq {
+        #[serde(with = "state::shared")]
+        q: std::sync::Arc<std::sync::Mutex<task::Mq>>,
+        nonblock: bool,
+    },
     File { path: String, pos: u64, append: bool },
     Dir { path: String, pos: usize },
     /// A device node (dev.rs).
@@ -163,9 +168,12 @@ pub enum Stop {
     Crashed(String),
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Process {
     /// The running thread's registers.
     pub cpu: Arm,
+    /// Saved as its changes (state.rs).
+    #[serde(skip)]
     pub vfs: Vfs,
     /// The running thread's process: memory, files, directory.
     g: Group,
@@ -189,6 +197,7 @@ pub struct Process {
     /// sched_setscheduler's (policy, priority) by thread.
     sched: HashMap<u32, (u32, u32)>,
     /// Message queues by name.
+    #[serde(with = "state::shared_map")]
     queues: HashMap<String, std::sync::Arc<std::sync::Mutex<task::Mq>>>,
     next_tid: u32,
     /// rt_sigaction handlers by signal (0 default, 1 ignore).
@@ -204,12 +213,19 @@ pub struct Process {
     logged: HashSet<String>,
     /// Logging every system call (to stderr), for bring-up.
     pub trace: bool,
+    #[serde(with = "state::inst")]
     start: std::time::Instant,
+    /// CLOCK_REALTIME at `start` (the host's date then): the programs' date
+    /// runs on from it with their clock, standing still while paused.
+    epoch: std::time::Duration,
     /// Time spent paused (`set_paused`), taken off the host clock: the
     /// programs' clocks stand still meanwhile.
+    #[serde(skip)]
     paused: std::time::Duration,
+    #[serde(skip)]
     paused_at: Option<std::time::Instant>,
     /// Showing the boot splash: nothing runs before then.
+    #[serde(with = "state::inst_opt")]
     boot_until: Option<std::time::Instant>,
     /// Processor cycles the 3D chip, DMA and frame timing have had: they
     /// follow the host clock, as the programs' clocks do.
@@ -218,6 +234,7 @@ pub struct Process {
     frame_hz: u64,
     dev: dev::Devices,
     /// poll/select deadlines by thread, while they wait.
+    #[serde(with = "state::inst_map")]
     poll_until: HashMap<u32, std::time::Instant>,
     /// The machine: SDRAM, the JIT and the device models (its own `cpu`
     /// is not used: the running thread's is `cpu`).
@@ -227,6 +244,15 @@ pub struct Process {
     /// current tables.
     tlb_for: u32,
     tlb_generation: u32,
+}
+
+/// The JIT stops where Ribbit answers instead of the kernel: system calls,
+/// the user helpers and the exception vectors.
+fn set_up_jit(m: &mut crate::machine::Didj) {
+    let mut stops = [u32::MAX; 8];
+    stops[..7].copy_from_slice(&[SWI_VECTOR, KUSER_GET_TLS, KUSER_CMPXCHG, KUSER_MEMORY_BARRIER, VECTORS + 4, VECTORS + 0xC, VECTORS + 0x10]);
+    m.jit.set_stops(stops);
+    m.jit.enabled &= std::env::var_os("DIDJ_HLE_NOJIT").is_none();
 }
 
 fn err(e: i32) -> u32 {
@@ -241,10 +267,7 @@ impl Process {
         cpu.cp15.dacr = 3;
         let mut m = crate::machine::Didj::with_sdram(crate::nand::Nand::erased(), mem::SDRAM);
         let frames = Frames::new(&mut m.bus, KUSER_VERSION);
-        let mut stops = [u32::MAX; 8];
-        stops[..7].copy_from_slice(&[SWI_VECTOR, KUSER_GET_TLS, KUSER_CMPXCHG, KUSER_MEMORY_BARRIER, VECTORS + 4, VECTORS + 0xC, VECTORS + 0x10]);
-        m.jit.set_stops(stops);
-        m.jit.enabled &= std::env::var_os("DIDJ_HLE_NOJIT").is_none();
+        set_up_jit(&mut m);
         // The 3D chip 4 times as fast (DIDJ_HLE_GA3D=<n>; 1 is the real one): frames never
         // wait on drawing. JetPack Heroes went from 25-33 to 60 fps, its play at the same pace.
         m.bus.ga3d.speed_up = std::env::var("DIDJ_HLE_GA3D").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
@@ -285,6 +308,7 @@ impl Process {
             poll_until: HashMap::new(),
             trace: false,
             start: std::time::Instant::now(),
+            epoch: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default(),
             paused: std::time::Duration::ZERO,
             paused_at: None,
             boot_until: None,
@@ -410,6 +434,10 @@ impl Process {
 
     fn since_start(&self) -> std::time::Duration {
         self.clock().saturating_duration_since(self.start)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
     }
 
     /// Stops or restarts the programs' clocks (the app paused); nothing
@@ -1516,12 +1544,13 @@ impl Process {
         Ok(0)
     }
 
+    /// CLOCK_REALTIME.
+    fn realtime(&self) -> std::time::Duration {
+        self.epoch + self.since_start()
+    }
+
     fn now(&self, clock: u32) -> (u32, u32) {
-        let d = if clock == 0 {
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
-        } else {
-            self.since_start()
-        };
+        let d = if clock == 0 { self.realtime() } else { self.since_start() };
         (d.as_secs() as u32, d.subsec_nanos())
     }
 

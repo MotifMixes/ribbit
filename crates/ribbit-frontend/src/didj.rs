@@ -393,10 +393,11 @@ impl DidjSession {
     }
 
     /// The console now, for a save slot (its NAND as changes from the built
-    /// image; the cartridge left out). None in Enhanced (new).
+    /// image; the cartridge left out). In Enhanced (new), the programs and
+    /// their files (as changes from the built system).
     pub fn save_state(&self) -> Option<Vec<u8>> {
-        if self.is_hle() {
-            return None;
+        if let Some(h) = self.shared.hle.lock().unwrap().as_mut() {
+            return h.save_state().map_err(|e| tracing::warn!(target: "ribbit::didj", "Enhanced (new): no state: {e}")).ok();
         }
         Some(self.shared.didj.lock().unwrap().save_state(&self.original))
     }
@@ -404,8 +405,8 @@ impl DidjSession {
     /// Restores a state from `save_state`. The NAND goes back to what it
     /// held then, as the system's memory expects.
     pub fn load_state(&self, state: &[u8]) -> Result<(), String> {
-        if self.is_hle() {
-            return Err(HLE_NO_STATES.into());
+        if let Some(h) = self.shared.hle.lock().unwrap().as_mut() {
+            return h.load_state(state);
         }
         self.shared.didj.lock().unwrap().load_state(state, &self.original)
     }
@@ -770,7 +771,6 @@ fn run(s: &Shared, art: Option<Art>) {
     }
 }
 
-const HLE_NO_STATES: &str = "Save states aren't made in Enhanced (new) yet: switch to Enhanced or Original (Emulation > Didj) for them.";
 
 /// The Didj's buttons (`button` bits) as the keypad's Linux key codes.
 const HLE_KEYS: [(u32, u16); 12] = {
@@ -815,6 +815,9 @@ struct Hle {
     quick_stops: u32,
     /// Left off: it kept stopping soon after starting.
     off: bool,
+    /// The file tree as built (system and cartridge), that save states
+    /// keep the changes from: built at the first state.
+    base: Option<ribbit_didj::hle::vfs::Vfs>,
 }
 
 impl Hle {
@@ -851,9 +854,44 @@ impl Hle {
             started: now,
             quick_stops: 0,
             off: false,
+            base: None,
         };
         h.written = h.user_files();
         Ok(h)
+    }
+
+    /// The file tree as built, without the player's files (they go in the
+    /// states as changes).
+    fn base(&mut self) -> Result<&ribbit_didj::hle::vfs::Vfs, String> {
+        if self.base.is_none() {
+            let mut vfs = ribbit_didj::hle::system_from_packages(&self.dir)?;
+            if let Some(raw) = &self.cart {
+                ribbit_didj::hle::cart_files(&mut vfs, raw)?;
+            }
+            self.base = Some(vfs);
+        }
+        Ok(self.base.as_ref().unwrap())
+    }
+
+    /// The programs' clock stands still meanwhile, so the game doesn't
+    /// jump on by the time a state takes.
+    fn save_state(&mut self) -> Result<Vec<u8>, String> {
+        let paused = self.p.is_paused();
+        self.p.set_paused(true);
+        let state = self.base().map(|_| ()).map(|_| self.p.save_state(self.base.as_ref().unwrap()));
+        self.p.set_paused(paused);
+        state
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> Result<(), String> {
+        let paused = self.p.is_paused();
+        self.p.set_paused(true);
+        let loaded = self.base().map(|_| ()).and_then(|_| self.p.load_state(state, self.base.as_ref().unwrap()));
+        self.p.set_paused(paused);
+        loaded?;
+        let now = Instant::now();
+        self.flips = (self.p.m.bus.flips, now, now);
+        Ok(())
     }
 
     /// The player's files on /Didj (paths from /Didj), sorted.
@@ -1353,6 +1391,91 @@ mod tests {
         let files = ribbit_didj::carry::files_beyond(&flash, &original);
         eprintln!("save holds {:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
         assert!(files.iter().any(|(p, d)| p.to_ascii_lowercase().ends_with("data/ribbit-test.txt") && d == b"hello"));
+    }
+
+    /// Enhanced (new) save states: one made at the menu, the menu run on
+    /// with a file added, the state loaded (the file gone again) and the
+    /// programs going on. RIBBIT_DIDJ_DIR as above; RIBBIT_DIDJ_CART a
+    /// cartridge dump, RIBBIT_DIDJ_SAVE a set-up save, RIBBIT_DIDJ_KEYS buttons to
+    /// press (below) and RIBBIT_DIDJ_WAIT the seconds before the state (10).
+    #[test]
+    #[ignore]
+    fn didj_hle_states() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_DIDJ_DIR").expect("RIBBIT_DIDJ_DIR"));
+        let saves = std::env::temp_dir().join("ribbit-hle-states");
+        let _ = std::fs::remove_dir_all(&saves);
+        let mode = Mode { enhanced: true, cpu_scale: 1, frame_skip: false, hd: 1, hle: true, smooth: true };
+        let cart = std::env::var("RIBBIT_DIDJ_CART").ok().map(|p| ribbit_core::read_image(Path::new(&p)).unwrap());
+        let wait = std::env::var("RIBBIT_DIDJ_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+        // RIBBIT_DIDJ_SAVE: a set-up console's .nandblocks (copied), past the first-run questions.
+        if let Ok(save) = std::env::var("RIBBIT_DIDJ_SAVE") {
+            let save = PathBuf::from(save);
+            std::fs::create_dir_all(&saves).unwrap();
+            std::fs::copy(&save, save_file(&dir, &saves)).unwrap();
+            std::fs::copy(save.with_extension("nandimage"), save_file(&dir, &saves).with_extension("nandimage")).unwrap();
+        }
+        let didj = DidjSession::start(&dir, &saves, cart, None, None, mode, Arc::new(crate::serial::Serial::default())).unwrap();
+        let flips = || didj.shared.hle.lock().unwrap().as_ref().unwrap().p.m.bus.flips;
+        let lit = || {
+            let mut px = Vec::new();
+            let (w, h) = didj.frame(&mut px);
+            (px.iter().filter(|&&p| p != 0).count(), w * h)
+        };
+        // Pictures at saving and just after loading, to RIBBIT_DIDJ_SHOT_DIR.
+        let shot = |name: &str| {
+            let Ok(shots) = std::env::var("RIBBIT_DIDJ_SHOT_DIR") else { return };
+            let mut px = Vec::new();
+            let (w, h) = didj.frame(&mut px);
+            let mut enc = png::Encoder::new(std::fs::File::create(Path::new(&shots).join(name)).unwrap(), w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgb);
+            let rgb: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+            enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+        };
+        // RIBBIT_DIDJ_KEYS: <seconds from the start>:<button> taps, comma separated
+        // (a, b, up, down, left, right); a picture before each.
+        let started = Instant::now();
+        for tap in std::env::var("RIBBIT_DIDJ_KEYS").unwrap_or_default().split(',').filter(|t| !t.is_empty()) {
+            let (at, key) = tap.split_once(':').expect("<seconds>:<button>");
+            let b = match key {
+                "a" => Button::A,
+                "b" => Button::B,
+                "up" => Button::Up,
+                "down" => Button::Down,
+                "left" => Button::Left,
+                "right" => Button::Right,
+                _ => panic!("button {key}"),
+            };
+            std::thread::sleep(Duration::from_secs(at.parse().unwrap()).saturating_sub(started.elapsed()));
+            shot(&format!("state-key-{at}.png"));
+            didj.set_button(b, true);
+            std::thread::sleep(Duration::from_millis(150));
+            didj.set_button(b, false);
+        }
+        std::thread::sleep(Duration::from_secs(wait).saturating_sub(started.elapsed()));
+        let t = Instant::now();
+        let state = didj.save_state().expect("a state");
+        shot("state-saved.png");
+        eprintln!("state {} bytes in {:.0} ms", state.len(), t.elapsed().as_secs_f64() * 1000.0);
+        didj.shared.hle.lock().unwrap().as_mut().unwrap().p.vfs.add_file("/Didj/Data/ribbit-state.txt", b"later".to_vec());
+        std::thread::sleep(Duration::from_secs(3));
+        let t = Instant::now();
+        didj.load_state(&state).unwrap();
+        eprintln!("loaded in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        std::thread::sleep(Duration::from_millis(100));
+        shot("state-loaded.png");
+        assert!(didj.shared.hle.lock().unwrap().as_ref().unwrap().p.vfs.get("/Didj/Data/ribbit-state.txt").is_none());
+        let before = flips();
+        std::thread::sleep(Duration::from_secs(5));
+        let (on, all) = lit();
+        let hle = didj.shared.hle.lock().unwrap();
+        let h = hle.as_ref().unwrap();
+        eprintln!("after loading: {} flips in 5 s, {on}/{all} pixels lit, exit {:?}, speed {:.0}%", h.p.m.bus.flips - before, h.p.exit, didj.speed_percent());
+        assert!(h.p.m.bus.flips > before + 20 && h.p.exit.is_none() && on > all / 4);
+        drop(hle);
+        // A second state from the loaded one loads too.
+        let again = didj.save_state().expect("a state");
+        didj.load_state(&again).unwrap();
+        didj.stop();
     }
 
     /// Enhanced (new) starting a library game from the menu (the autostart):

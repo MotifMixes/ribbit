@@ -35,6 +35,7 @@ const ETIMEDOUT: i32 = 110;
 const WNOHANG: u32 = 1;
 
 /// A process: what its threads share.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Group {
     pub mem: Mem,
     pub fds: Vec<Option<Fd>>,
@@ -49,6 +50,7 @@ pub(super) struct Group {
 }
 
 /// A thread not running now.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Task {
     pub tid: u32,
     pub tgid: u32,
@@ -59,27 +61,39 @@ pub(super) struct Task {
 }
 
 /// What a task is blocked on.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) enum Wait {
     /// FUTEX_WAIT; `woken` by FUTEX_WAKE. The call returns 0 (or
     /// ETIMEDOUT), it isn't run again.
-    Futex { addr: u32, until: Option<Instant>, woken: bool },
-    Sleep(Instant),
+    Futex {
+        addr: u32,
+        #[serde(with = "super::state::inst_opt")]
+        until: Option<Instant>,
+        woken: bool,
+    },
+    Sleep(#[serde(with = "super::state::inst")] Instant),
     /// Gives the others a turn first.
     Yield,
     /// wait4 for this pid (-1 any): the call runs again when a child ends.
     Child(i32),
     /// Reading an empty pipe: the call runs again when there is data.
-    Pipe(Arc<Mutex<Pipe>>),
+    Pipe(#[serde(with = "super::state::shared")] Arc<Mutex<Pipe>>),
     /// mq_timedsend on a full queue (`send`) or mq_timedreceive on an empty
     /// one: runs again when there's room or a message; ETIMEDOUT at `until`.
-    Mq { q: Arc<Mutex<Mq>>, send: bool, until: Option<Instant> },
+    Mq {
+        #[serde(with = "super::state::shared")]
+        q: Arc<Mutex<Mq>>,
+        send: bool,
+        #[serde(with = "super::state::inst_opt")]
+        until: Option<Instant>,
+    },
     /// Reading /dev/input/eventN with no events: runs again on one.
     Input(usize),
     /// Writing /dev/dsp with its buffer full: runs again at the time.
-    DspFull(Instant),
+    DspFull(#[serde(with = "super::state::inst")] Instant),
     /// poll/select with nothing ready: runs again at the time, to look
     /// again (its deadline is in `Process::poll_until`).
-    Retry(Instant),
+    Retry(#[serde(with = "super::state::inst")] Instant),
 }
 
 impl Wait {
@@ -90,6 +104,7 @@ impl Wait {
 }
 
 #[derive(Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Pipe {
     pub data: VecDeque<u8>,
     pub readers: u32,
@@ -97,7 +112,9 @@ pub(super) struct Pipe {
 }
 
 /// One end of a pipe; the pipe counts its open ends.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct PipeEnd {
+    #[serde(with = "super::state::shared")]
     pub pipe: Arc<Mutex<Pipe>>,
     pub write: bool,
 }
@@ -124,6 +141,7 @@ impl Drop for PipeEnd {
 }
 
 /// A message queue: messages by priority, highest first.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Mq {
     pub msgs: Vec<(u32, Vec<u8>)>,
     pub maxmsg: u32,
@@ -133,6 +151,7 @@ pub(super) struct Mq {
 const O_NONBLOCK: u32 = 0o4000;
 
 /// A process ended, until its parent collects it with wait4.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Zombie {
     pub pid: u32,
     pub ppid: u32,
@@ -658,7 +677,7 @@ impl Process {
         let s = self.mem().get32(ts).ok_or(EFAULT)? as u64;
         let ns = self.mem().get32(ts + 4).ok_or(EFAULT)?.min(999_999_999);
         let at = Duration::new(s, ns);
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let now = self.realtime();
         // ipc/mqueue.c prepare_timeout: timespec_to_jiffies + 1 ticks.
         Ok(Some(if at <= now { self.clock() } else { self.ticks_from_now(jiffies(at - now) + 1) }))
     }
