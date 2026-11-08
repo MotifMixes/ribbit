@@ -170,6 +170,10 @@ pub enum Stop {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Process {
+    /// The last frame shown (MLC flips) and the programs' clock then, for
+    /// timing checks.
+    #[serde(skip)]
+    pub last_flip: (u64, std::time::Duration),
     /// The running thread's registers.
     pub cpu: Arm,
     /// Saved as its changes (state.rs).
@@ -289,6 +293,7 @@ impl Process {
         m.bus.ga3d.speed_up = std::env::var("DIDJ_HLE_GA3D").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
         let start = std::time::Instant::now();
         let mut p = Self {
+            last_flip: Default::default(),
             cpu,
             vfs,
             g: Group {
@@ -505,6 +510,11 @@ impl Process {
         self.clock().saturating_duration_since(self.start)
     }
 
+    /// The programs' clock since the start (for timing checks).
+    pub fn program_time(&self) -> std::time::Duration {
+        self.since_start()
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused_at.is_some()
     }
@@ -553,6 +563,9 @@ impl Process {
         let mut left = budget;
         let mut slice = 0;
         loop {
+            if self.m.bus.flips != self.last_flip.0 {
+                self.last_flip = (self.m.bus.flips, self.since_start());
+            }
             if let Some(code) = self.exit {
                 return Stop::Exited(code);
             }

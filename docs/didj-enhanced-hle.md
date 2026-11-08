@@ -287,7 +287,22 @@ in-between option (phase 7).
   picture: correlation 0.6-0.87 within 0.35 s, the same level (Didji Racing, Super Chicks, SpongeBob, Nancy
   Drew, Nicktoons, Sonic, Jedi Trials, Fosters, Indiana Jones, Hannah Montana, NeoPets); Clone Wars, High
   School Musical, Tinker Bell and Wolverine not lined up (Original's autostart started them ~8 s later).
-  Gameplay with input is NOT compared yet.
+- Gameplay with input (2026-11-08, Sonic, Green Hill Zone 1): didjboot and didjhle press keys from when a
+  screen shows (DIDJ_KEYS_AFTER / DIDJ_HLE_KEYS_AFTER + DIDJ_HLE_THEN, several screens separated by ";"),
+  in ms or, from a given list on, in frames shown (DIDJ_KEYS_FLIPS / DIDJ_HLE_KEYS_FLIPS: ms-timed keys
+  reached the game a frame apart and changed Sonic's jumps). A on the SEGA logo's screen to the level, then
+  20 s of running, jumps, Left and Down by frames: Original against Original and the HLE against the HLE
+  repeat exactly; the HLE against Original matches pixel for pixel over 22 s except a few single frames
+  where one is a physics step ahead, and 1.5 s where the HLE hits a badnik one frame sooner (score 100 a
+  frame early), so the bounce goes a few pixels another way until Sonic lands, then identical again.
+  Ruled out: frame timing (both flip on exact 30/40 ms, Linux's tick is 10.0 ms: 45930 at 4.59375 MHz; the
+  HLE's flips logged with the programs' clock, `Process::last_flip`), the button driver (lf1000-keypad
+  reports in its GPIO interrupt, no polling delay), the kernel's time (Original's PCs during play: idle
+  loop 85%, the game 14%, other kernel code 0.3%; charging each system call 5 or 20 us changed nothing at
+  that spot), the date (the HLE's comes from the host, yet its runs repeat). Left: a sub-frame difference
+  in when the game reads the clock within a frame; not visible in play.
+  didjhle's frames were taken after 10-million-instruction steps, 200 ms apart while a game sleeps (Sonic
+  looked like 5 fps); they are now looked at every million while recording.
 
 ## Known risks
 

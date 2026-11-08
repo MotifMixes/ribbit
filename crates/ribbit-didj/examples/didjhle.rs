@@ -70,23 +70,37 @@ fn main() {
     let until_ms: Option<u128> = std::env::var("DIDJ_HLE_UNTIL_MS").ok().and_then(|v| v.parse().ok());
     // In millions of instructions, or host ms (DIDJ_HLE_KEYS_MS).
     let unit = if keys_ms { 1 } else { 1_000_000 };
-    let mut keys: Vec<(u64, u16, bool, Option<u128>)> = Vec::new();
-    let mut ups: Vec<(u128, u16)> = Vec::new();
-    for item in std::env::var("DIDJ_HLE_KEYS").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
-        let (name, at) = item.split_once('@').expect("DIDJ_HLE_KEYS: name@millions");
-        let code = ribbit_didj::hle::key::by_name(name).unwrap_or_else(|| panic!("no key {name}"));
-        let (at, hold) = at.split_once('+').unwrap_or((at, "50"));
-        let at: u64 = at.parse().expect("DIDJ_HLE_KEYS: millions");
-        if let Some(ms) = hold.strip_suffix("ms") {
-            keys.push((at * unit, code, true, Some(ms.parse().expect("DIDJ_HLE_KEYS: ms held"))));
-            continue;
+    let parse = |list: &str| {
+        let mut keys: Vec<(u64, u16, bool, Option<u128>)> = Vec::new();
+        for item in list.split(',').filter(|s| !s.is_empty()) {
+            let (name, at) = item.split_once('@').expect("DIDJ_HLE_KEYS: name@millions");
+            let code = ribbit_didj::hle::key::by_name(name).unwrap_or_else(|| panic!("no key {name}"));
+            let (at, hold) = at.split_once('+').unwrap_or((at, "50"));
+            let at: u64 = at.parse().expect("DIDJ_HLE_KEYS: millions");
+            if let Some(ms) = hold.strip_suffix("ms") {
+                keys.push((at * unit, code, true, Some(ms.parse().expect("DIDJ_HLE_KEYS: ms held"))));
+                continue;
+            }
+            let hold: u64 = hold.parse().expect("DIDJ_HLE_KEYS: millions held");
+            keys.push((at * unit, code, true, None));
+            keys.push(((at + hold) * unit, code, false, None));
         }
-        let hold: u64 = hold.parse().expect("DIDJ_HLE_KEYS: millions held");
-        keys.push((at * unit, code, true, None));
-        keys.push(((at + hold) * unit, code, false, None));
-    }
-    keys.sort_by_key(|k| k.0);
-    let mut keys = keys.into_iter().peekable();
+        keys.sort_by_key(|k| k.0);
+        keys
+    };
+    let mut keys = parse(&std::env::var("DIDJ_HLE_KEYS").unwrap_or_default());
+    let mut ups: Vec<(u128, u16)> = Vec::new();
+    // DIDJ_HLE_KEYS_AFTER=<png> and DIDJ_HLE_THEN=<keys>: those keys' times
+    // count from when the screen first looks like that picture (its size,
+    // mean difference under 3), as didjboot's DIDJ_KEYS_AFTER; several
+    // separated by ";" follow each other.
+    let afters: Vec<Vec<u32>> = std::env::var("DIDJ_HLE_KEYS_AFTER").map_or(Vec::new(), |v| v.split(';').map(read_png).collect());
+    let mut after = afters.iter().enumerate().peekable();
+    // DIDJ_HLE_KEYS_FLIPS=<n>: from DIDJ_HLE_THEN's n-th list on, times and
+    // holds count frames shown (MLC flips), as didjboot's DIDJ_KEYS_FLIPS.
+    let flips_from: Option<usize> = std::env::var("DIDJ_HLE_KEYS_FLIPS").ok().and_then(|v| v.parse().ok());
+    let mut flip_keys: Vec<(u64, u16, bool, Option<u128>)> = Vec::new();
+    let scripts: Vec<_> = std::env::var("DIDJ_HLE_THEN").unwrap_or_default().split(';').map(parse).collect();
     let t = std::time::Instant::now();
     // DIDJ_HLE_WAV=<file> saves the sound written to /dev/dsp; DIDJ_HLE_LOG=1
     // prints when each block of it arrived (host ms, instructions).
@@ -117,7 +131,11 @@ fn main() {
     let mut left = millions * 1_000_000;
     let stop = loop {
         let now = if keys_ms { t.elapsed().as_millis() as u64 } else { p.executed };
-        while let Some(&(at, code, down, ms)) = keys.peek()
+        // DIDJ_HLE_TRACE_FROM=<ms or millions, as the keys>: the trace from then.
+        if std::env::var("DIDJ_HLE_TRACE_FROM").ok().and_then(|v| v.parse::<u64>().ok()).is_some_and(|f| now >= f * unit) {
+            p.trace = true;
+        }
+        while let Some(&(at, code, down, ms)) = keys.first()
             && at <= now
         {
             eprintln!("[didjhle] key {code} {} at {} ms", if down { "down" } else { "up" }, t.elapsed().as_millis());
@@ -125,7 +143,14 @@ fn main() {
             if let Some(ms) = ms {
                 ups.push((t.elapsed().as_millis() + ms, code));
             }
-            keys.next();
+            keys.remove(0);
+        }
+        while let Some(&(at, code, down, _)) = flip_keys.first()
+            && at <= p.m.bus.flips
+        {
+            eprintln!("[didjhle] key {code} {} at flip {}", if down { "down" } else { "up" }, p.m.bus.flips);
+            p.key(code, down);
+            flip_keys.remove(0);
         }
         while let Some(i) = ups.iter().position(|&(at, _)| at <= t.elapsed().as_millis()) {
             let (_, code) = ups.remove(i);
@@ -136,7 +161,19 @@ fn main() {
         // thread and PC after each (a cheap profile).
         let sampling = pcs.is_some_and(|(a, b)| (a..b).contains(&(p.executed / 1_000_000)));
         let tweening = tween.is_some() && frames_dir.is_some() && now >= frames_from * unit;
-        let step = left.min(if sampling || tweening { 1_000_000 } else { 10_000_000 });
+        if let Some(&(i, art)) = after.peek()
+            && screen_diff(&p.m.bus.frame().2, art) < 3.0
+        {
+            eprintln!("[didjhle] screen {i} matched at {} ms, {} million instructions", t.elapsed().as_millis(), p.executed / 1_000_000);
+            let (list, base, per) = if flips_from.is_some_and(|n| i >= n) { (&mut flip_keys, p.m.bus.flips, unit) } else { (&mut keys, now, 1) };
+            list.extend(scripts.get(i).into_iter().flatten().map(|&(at, code, down, ms)| (at / per + base, code, down, ms)));
+            list.sort_by_key(|k| k.0);
+            after.next();
+        }
+        // Frames are looked at after each step: 10 million instructions take
+        // 200 ms of a program that mostly sleeps.
+        let recording = frames_dir.is_some() && now >= frames_from * unit;
+        let step = left.min(if sampling || tweening || recording || after.peek().is_some() { 1_000_000 } else { 10_000_000 });
         let before = p.executed;
         let stop = p.run(step);
         if sampling {
@@ -169,7 +206,7 @@ fn main() {
             let (w, h, pixels) = p.m.bus.frame_hd();
             if pixels[..] != last_frame[..] {
                 last_frame = pixels.to_vec();
-                eprintln!("[mlc] {} ms: {}", t.elapsed().as_millis(), [0xC000_4000u32, 0xC000_4024, 0xC000_4038, 0xC000_4058, 0xC000_406C, 0xC000_407C, 0xC000_408C].map(|a| format!("{:08X}", p.m.bus.reg(a))).join(" "));
+                eprintln!("[mlc] {} ms (programs {:.1}, flip {} at {:.1}): {}", t.elapsed().as_millis(), p.program_time().as_secs_f64() * 1000.0, p.last_flip.0, p.last_flip.1.as_secs_f64() * 1000.0, [0xC000_4000u32, 0xC000_4024, 0xC000_4038, 0xC000_4058, 0xC000_406C, 0xC000_407C, 0xC000_408C].map(|a| format!("{:08X}", p.m.bus.reg(a))).join(" "));
                 save_png(&format!("{dir}/{:06}.png", t.elapsed().as_millis()), w, h, &last_frame);
             }
         }
@@ -209,6 +246,27 @@ fn main() {
         let (w, h, pixels) = p.m.bus.frame_hd();
         save_png(&path, w, h, &pixels);
     }
+}
+
+/// A PNG as 0x00RRGGBB pixels.
+fn read_png(path: &str) -> Vec<u32> {
+    let mut dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).expect("can't open the PNG")));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info().expect("not a PNG");
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let info = r.next_frame(&mut buf).expect("bad PNG");
+    let n = info.color_type.samples();
+    buf[..info.buffer_size()].chunks(n).map(|c| if n >= 3 { u32::from_be_bytes([0, c[0], c[1], c[2]]) } else { u32::from_be_bytes([0, c[0], c[0], c[0]]) }).collect()
+}
+
+/// The mean difference of two pictures' red, green and blue (0-255),
+/// infinite when their sizes differ.
+fn screen_diff(px: &[u32], art: &[u32]) -> f64 {
+    if px.len() != art.len() {
+        return f64::INFINITY;
+    }
+    let sum: u64 = px.iter().zip(art).map(|(a, b)| [16, 8, 0].iter().map(|s| ((a >> s) as u8).abs_diff((b >> s) as u8) as u64).sum::<u64>()).sum();
+    sum as f64 / (px.len() * 3) as f64
 }
 
 fn save_png(path: &str, w: usize, h: usize, pixels: &[u32]) {

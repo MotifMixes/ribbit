@@ -25,6 +25,16 @@ fn cart_art(path: &str) -> Vec<u8> {
         .expect("no art on the cartridge")
 }
 
+/// The mean difference of two pictures' red, green and blue (0-255),
+/// infinite when their sizes differ.
+fn screen_diff(px: &[u32], art: &[u32]) -> f64 {
+    if px.len() != art.len() {
+        return f64::INFINITY;
+    }
+    let sum: u64 = px.iter().zip(art).map(|(a, b)| [16, 8, 0].iter().map(|s| ((a >> s) as u8).abs_diff((b >> s) as u8) as u64).sum::<u64>()).sum();
+    sum as f64 / (px.len() * 3) as f64
+}
+
 /// A PNG as ARGB pixels.
 fn read_art(png: &[u8]) -> ribbit_didj::autostart::Art {
     let mut dec = png::Decoder::new(std::io::Cursor::new(png));
@@ -148,13 +158,27 @@ fn main() {
     let skip_from: Option<u64> = std::env::var("DIDJ_SKIP").ok().and_then(|v| v.parse().ok());
     let (mut lap, mut lap_m, mut lap_flips, mut lap_instr) = (std::time::Instant::now(), 0, 0, 0);
     let mut wav: Vec<u8> = Vec::new();
-    // DIDJ_KEYS="50000:RIGHT 60000:A": at that many million cycles (the
-    // run's count), hold a button for 30 million.
-    let keys: Vec<(u64, u32)> = std::env::var("DIDJ_KEYS")
+    // DIDJ_KEYS="50000:RIGHT 60000:A+90": at that many million cycles (the
+    // run's count), hold a button for 30 million (or the number after +).
+    // DIDJ_KEYS_AFTER=<png>: the times (and holds, 80 by default) are ms of
+    // Didj time from when the screen first looks like that picture (its
+    // size, mean difference under 3), to press keys at the same moment as
+    // didjhle's DIDJ_HLE_KEYS_AFTER. "a.png;b.png" with DIDJ_KEYS="<keys>;
+    // <keys>": the second list from when b.png shows after a.png.
+    // DIDJ_KEYS_FLIPS=<n>: from the n-th list on (0 = the first), times and
+    // holds count frames shown (MLC flips), so both runs give a key to the
+    // same game frame (still screens don't flip: menus stay in ms).
+    let flips_from: Option<usize> = std::env::var("DIDJ_KEYS_FLIPS").ok().and_then(|v| v.parse().ok());
+    let mut flip_keys: Vec<(u64, u64, u32)> = Vec::new();
+    let afters: Vec<_> = std::env::var("DIDJ_KEYS_AFTER").map_or(Vec::new(), |v| v.split(';').map(|p| read_art(&std::fs::read(p).expect("can't read DIDJ_KEYS_AFTER"))).collect());
+    let mut after = afters.iter().enumerate().peekable();
+    let scripts: Vec<Vec<(u64, Option<u64>, u32)>> = std::env::var("DIDJ_KEYS")
         .unwrap_or_default()
-        .split_whitespace()
+        .split(';')
+        .map(|list| list.split_whitespace()
         .map(|k| {
             let (at, name) = k.split_once(':').expect("DIDJ_KEYS entries are <millions>:<button>");
+            let (name, hold) = name.split_once('+').map_or((name, None), |(n, h)| (n, Some(h.parse().expect("bad DIDJ_KEYS hold"))));
             use ribbit_didj::machine::button::*;
             let bit = match name {
                 "LEFT" => LEFT,
@@ -171,9 +195,11 @@ fn main() {
                 "POWER" => POWER,
                 _ => panic!("unknown button {name}"),
             };
-            (at.parse().expect("bad DIDJ_KEYS time"), bit)
+            (at.parse().expect("bad DIDJ_KEYS time"), hold, bit)
         })
+        .collect())
         .collect();
+    let mut keys: Vec<(u64, u64, u32)> = if afters.is_empty() { scripts[0].iter().map(|&(at, hold, bit)| (at, hold.unwrap_or(30), bit)).collect() } else { Vec::new() };
     // DIDJ_START=<png>: start the game with this art (its meta.inf
     // LargeIcon or PreviewImage) from the menu, as the app does; "cart":
     // the cartridge's game.
@@ -185,7 +211,23 @@ fn main() {
     let per_frame = (didj.cpu_hz() / 60 / 1_000_000).max(1);
     let mut auto_buttons = 0;
     for m in 0..millions {
-        didj.bus.buttons = keys.iter().filter(|&&(at, _)| (at..at + 30).contains(&m)).fold(0, |b, &(_, k)| b | k);
+        if let Some(&(i, art)) = after.peek()
+            && m % per_frame == 0
+            && screen_diff(&didj.bus.frame().2, &art.pixels) < 3.0
+        {
+            println!("screen {i} matched at {m} million cycles");
+            let millions = |ms: u64| ms * didj.cpu_hz() / 1_000_000_000;
+            let script = scripts.get(i).into_iter().flatten();
+            if flips_from.is_some_and(|n| i >= n) {
+                let f = didj.bus.flips;
+                flip_keys.extend(script.map(|&(at, hold, bit)| (f + at, hold.unwrap_or(2), bit)));
+            } else {
+                keys.extend(script.map(|&(at, hold, bit)| (m + millions(at), millions(hold.unwrap_or(80)), bit)));
+            }
+            after.next();
+        }
+        didj.bus.buttons = keys.iter().filter(|&&(at, hold, _)| (at..at + hold).contains(&m)).fold(0, |b, &(_, _, k)| b | k);
+        didj.bus.buttons |= flip_keys.iter().filter(|&&(at, hold, _)| (at..at + hold).contains(&didj.bus.flips)).fold(0, |b, &(_, _, k)| b | k);
         if let Some(a) = &mut auto
             && m % per_frame == 0
         {
