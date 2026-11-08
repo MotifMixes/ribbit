@@ -28,7 +28,7 @@ bottom left, centre, about 16 px in; it worked by script too).
 |---|---|
 | SDRAM | 64 MB at 0x8000_0000 (no shadow mode; kernel `PHYS_OFFSET` 0x8000_0000) |
 | Boot flash | 512 KB NOR at 0, 8-bit: NOR_Boot 0x7E000, MfgData0 4 KB, MfgData1 4 KB (kernel table). Found by jedec_probe; Ribbit answers as SST39LF040 (0xBF 0xD7), INFERRED from the layout |
-| NAND | 8 Gbit SLC (board_ids.h), 2 KiB pages, 128 KiB blocks, at 0x2C00_0000; Ribbit: 1 GB, answering READ ID as Samsung K9K8G08 (EC D3 51 95 58), GUESS |
+| NAND | 512 MB (4 Gbit) SLC, 2 KiB pages, 128 KiB blocks, at 0x2C00_0000. EVIDENCE: a real unit's /proc/mtd ends at 0x2000_0000 (Bulk 0x1A00_0000, ubi_bulk 0x1945_5000, Cartridge 64 MB in 16 KiB blocks); board_ids.h names an 8 Gbit part, and Ribbit used 1 GB until 2026-11-08. READ ID: Samsung K9F4G08 (EC DC 10 95 54), GUESS |
 | Screen | 320x240 (ILI9322 module), MLC layer at `mlc_fb=0x82E00000` |
 | Board ID | in the Alive scratch register (bits 8-12); retail values 0x01, 0x02, 0x06, 0x07, 0x0A (board_ids.h). Ribbit: 0x02, GUESS |
 

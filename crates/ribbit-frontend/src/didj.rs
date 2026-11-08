@@ -255,10 +255,21 @@ impl DidjSession {
     /// its NAND and NOR flash before. Takes seconds: the app runs it on a
     /// worker thread, then `start_explorer`.
     pub fn build_explorer(dir: &Path, save_dir: &Path) -> anyhow::Result<ExplorerBuilt> {
-        let original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
+        let mut original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
         let save_path = explorer_save_file(dir, save_dir);
-        let image = format!("{:08x}", original.fingerprint());
+        let mut image = format!("{:08x}", original.fingerprint());
         let image_path = save_path.with_extension("nandimage");
+        // A save made on the 1 GB NAND Ribbit had before 2026-11-08 goes on
+        // with it, so the player's profile and games stay.
+        if let Ok(saved) = std::fs::read_to_string(&image_path)
+            && saved != image
+            && let Ok(old) = ribbit_didj::explorer::nand_from_packages_blocks(dir, ribbit_didj::explorer::NAND_BLOCKS_1GB)
+            && saved == format!("{:08x}", old.fingerprint())
+        {
+            tracing::info!(target: "ribbit::saves", "{} was made on the 1 GB NAND; it goes on using it", save_path.display());
+            image = saved;
+            original = old;
+        }
         let mut flash = original.clone();
         // A save made on another image would mix two file system layouts:
         // set aside (the Explorer's files aren't carried over yet).

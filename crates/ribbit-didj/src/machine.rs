@@ -584,8 +584,15 @@ impl Bus {
                 // Didj's kernel log, "ST Micro NAND 256MiB 3,3V 8-bit");
                 // the bytes after them are UNKNOWN (these give 2 KiB pages,
                 // 64-byte spare areas and 128 KiB blocks). The Explorer's
-                // 1 GB: GUESS, Samsung K9K8G08 (8 Gbit SLC, 128 KiB blocks).
-                let id = if self.nand.size() > nand::SIZE { [0xEC, 0xD3, 0x51, 0x95, 0x58] } else { [0x2C, 0xDA, 0x10, 0x95, 0x44] };
+                // 512 MB (explorer::NAND_BLOCKS): GUESS, Samsung K9F4G08
+                // (4 Gbit SLC, same page, spare and block sizes); the maker
+                // is UNKNOWN. Saves made on the 1 GB Ribbit used before
+                // keep it, so it answers as Samsung K9K8G08 (8 Gbit).
+                let id = match self.nand.size() {
+                    s if s > 512 << 20 => [0xEC, 0xD3, 0x51, 0x95, 0x58],
+                    s if s > nand::SIZE => [0xEC, 0xDC, 0x10, 0x95, 0x54],
+                    _ => [0x2C, 0xDA, 0x10, 0x95, 0x44],
+                };
                 let b = id.get(c.pos).copied().unwrap_or(0);
                 c.pos += 1;
                 b

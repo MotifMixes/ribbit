@@ -22,8 +22,12 @@ pub const PARTITIONS: [(&str, usize); 5] =
 pub const RAM_BASE: u32 = 0x8000_0000;
 pub const SDRAM_SIZE: usize = 64 << 20;
 
-/// 8 Gbit SLC NAND (board_ids.h): 1 GB of 128 KiB blocks.
-pub const NAND_BLOCKS: usize = 8192;
+/// 512 MB of 128 KiB blocks. EVIDENCE: a real Explorer's /proc/mtd ends at
+/// 0x2000_0000 (Bulk 0x1A00_0000 from 0x0600_0000; ubi_bulk 0x1945_5000 in
+/// LEBs of 0x1F800), though board_ids.h names an 8 Gbit part. Ribbit had
+/// 1 GB until 2026-11-08: saves made on it go on using it (NAND_BLOCKS_1GB).
+pub const NAND_BLOCKS: usize = 4096;
+pub const NAND_BLOCKS_1GB: usize = 8192;
 
 /// The board ID Emerald Boot reports (mach-lf1000/board_ids.h): Leapster
 /// Explorer, no TV out, no RTC supercap. GUESS: which board retail units
@@ -171,7 +175,12 @@ pub fn install_lf2(tree: &mut Tree, lf2: &[u8]) -> Result<(), String> {
 /// Empty: an empty UBI for Bulk), and the `.lf2` packages installed in
 /// Bulk (UBIFS, as lfpkg unpacks them).
 pub fn nand_from_packages(dir: &std::path::Path) -> Result<Nand, String> {
-    let mut flash = Nand::with_blocks(NAND_BLOCKS);
+    nand_from_packages_blocks(dir, NAND_BLOCKS)
+}
+
+/// `nand_from_packages` on a NAND of `blocks` blocks.
+pub fn nand_from_packages_blocks(dir: &std::path::Path, blocks: usize) -> Result<Nand, String> {
+    let mut flash = Nand::with_blocks(blocks);
     let mut written = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().map(|e| e.path()).collect();
     entries.sort();
