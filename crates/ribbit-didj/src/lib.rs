@@ -34,6 +34,7 @@ pub mod hle;
 pub mod fonthd;
 pub mod texup;
 pub mod i2c;
+pub mod idle;
 pub mod jffs2;
 pub mod machine;
 pub mod mlc;

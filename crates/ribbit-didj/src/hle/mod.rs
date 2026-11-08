@@ -556,6 +556,11 @@ impl Process {
         (d.out.drain(..).collect(), d.rate, d.channels)
     }
 
+    /// AppManager's idle timer (`crate::idle`), in the running process.
+    pub fn idle_tick(&mut self, timer: &mut crate::idle::IdleTimer, keep_awake: bool) {
+        timer.tick(&mut self.m.bus.sdram, self.g.mem.l1, keep_awake);
+    }
+
     /// Runs up to `budget` instructions (all tasks together), or until init
     /// (the first program) exits, a program crashes, or nothing can run.
     pub fn run(&mut self, budget: u64) -> Stop {

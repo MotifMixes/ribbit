@@ -951,7 +951,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         // Power.
         if ui
             .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
-            .on_hover_text("Like the real Leapster, turn off after a while with nothing pressed (about 15 minutes; 5 on the Leapster TV). Ribbit then closes the game. Off: Ribbit keeps it on.")
+            .on_hover_text("Like the real console, turn off after a while with nothing pressed (Leapster about 15 minutes, Leapster TV 5, Didj 7). Ribbit then closes the game. Off: Ribbit keeps it on.")
             .changed()
         {
             actions.push(Action::SettingsChanged);

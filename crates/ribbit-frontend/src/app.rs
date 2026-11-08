@@ -1037,6 +1037,7 @@ impl App {
                     self.ui.toast(format!("Didj started without {}: add the .lfp to its folder to have it", d.extras_missing.join(" and ")));
                 }
                 d.set_dither(self.settings.didj_dither);
+                d.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 self.didj = Some(d);
                 self.apply_didj_usb();
                 self.paused = false;
@@ -1984,6 +1985,7 @@ impl App {
                     d.set_frame_skip(self.settings.didj_frame_skip);
                     d.set_hd(self.settings.didj_hd.clamp(1, 4));
                     d.set_dither(self.settings.didj_dither);
+                    d.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                     d.set_smooth(self.settings.didj_smooth);
                 }
             }
@@ -2950,6 +2952,11 @@ impl App {
             z.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
             self.speed_percent = z.speed_percent();
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
+        // It shut down for idling: closed, as a Leapster that did.
+        if self.didj.as_ref().is_some_and(|d| d.take_idle_off()) {
+            self.end_session();
             return;
         }
         if let Some(d) = &self.didj {

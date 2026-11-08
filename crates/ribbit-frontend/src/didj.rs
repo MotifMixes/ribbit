@@ -80,6 +80,11 @@ struct Shared {
     /// The Didj kept turning itself off right after starting, so it was
     /// left off (`run`); the app tells the player once.
     gave_up: AtomicBool,
+    /// "Turn off when idle" off: AppManager's idle timer is kept at 0.
+    keep_awake: AtomicBool,
+    /// It shut down for idling with that setting on: it stays off and the
+    /// app closes it.
+    idle_off: AtomicBool,
     /// On the PC's USB: the USB/IP server whose client is the cable
     /// (`pump_usb`), and news of the link for the app.
     usb: Mutex<Option<crate::emu::UsbServer>>,
@@ -234,6 +239,8 @@ impl DidjSession {
             dither: AtomicBool::new(false),
             sink: Mutex::new(sink),
             gave_up: AtomicBool::new(false),
+            keep_awake: AtomicBool::new(true),
+            idle_off: AtomicBool::new(false),
             usb: Mutex::new(None),
             usb_news: Mutex::new(None),
             usb_host: AtomicBool::new(false),
@@ -309,6 +316,8 @@ impl DidjSession {
             dither: AtomicBool::new(false),
             sink: Mutex::new(sink),
             gave_up: AtomicBool::new(false),
+            keep_awake: AtomicBool::new(true),
+            idle_off: AtomicBool::new(false),
             usb: Mutex::new(None),
             usb_news: Mutex::new(None),
             usb_host: AtomicBool::new(false),
@@ -349,6 +358,17 @@ impl DidjSession {
     /// itself off right after starting (see `run`).
     pub fn take_gave_up(&self) -> bool {
         self.shared.gave_up.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether the Didj may shut itself down for idling ("Turn off when
+    /// idle"; a real one does after 7 minutes).
+    pub fn set_turn_off_when_idle(&self, on: bool) {
+        self.shared.keep_awake.store(!on, Ordering::Relaxed);
+    }
+
+    /// True once after it shut down for idling (see `idle_off`).
+    pub fn take_idle_off(&self) -> bool {
+        self.shared.idle_off.swap(false, Ordering::Relaxed)
     }
 
     /// Offers the Didj on the PC's USB through `server`, or stops (the
@@ -628,6 +648,8 @@ fn run(s: &Shared, art: Option<Art>) {
     let (mut flips, mut since_flip) = (0u64, 0u32);
     // Power-offs in a row that came within a minute of starting.
     let mut quick_offs = 0;
+    // AppManager's idle timer, looked at about once a second.
+    let (mut idle, mut idle_frames) = (ribbit_didj::idle::IdleTimer::default(), 0u32);
     while !s.quit.load(Ordering::Relaxed) {
         if !s.running.load(Ordering::Relaxed) {
             if let Some(h) = s.hle.lock().unwrap().as_mut() {
@@ -699,6 +721,21 @@ fn run(s: &Shared, art: Option<Art>) {
                 s.serial.output(&out.chars().map(|c| c as u8).collect::<Vec<u8>>());
             }
             d.bus.uart.iter_mut().for_each(String::clear);
+            idle_frames += 1;
+            if idle_frames as f64 >= FPS && !s.explorer && !d.bus.powered_off {
+                idle_frames = 0;
+                let ttb = d.cpu.cp15.ttb;
+                idle.tick(&mut d.bus.sdram, ttb, s.keep_awake.load(Ordering::Relaxed));
+            }
+            // It shut down for idling, which the player asked for: it stays
+            // off.
+            if d.bus.powered_off && idle.near_shutdown() && !s.gave_up.load(Ordering::Relaxed) {
+                tracing::info!(target: "ribbit::didj", "the Didj shut down for idling");
+                s.serial.note("--- Ribbit: the Didj shut down for idling ---\n");
+                // In this order: the app looks at idle_off first.
+                s.idle_off.store(true, Ordering::Relaxed);
+                s.gave_up.store(true, Ordering::Relaxed);
+            }
             // The system turned itself off (after installing a cartridge's
             // update, as a real Didj does): on again, as its owner would, and
             // the game started again. Not a third time in a row within a
@@ -817,6 +854,9 @@ const HLE_KEYS: [(u32, u16); 12] = {
 /// player's files on /Didj go to the same save as the other modes'.
 struct Hle {
     p: ribbit_didj::hle::Process,
+    /// AppManager's idle timer and when it was last looked at.
+    idle: ribbit_didj::idle::IdleTimer,
+    idle_at: Instant,
     dir: PathBuf,
     cart: Option<Vec<u8>>,
     mode: Mode,
@@ -874,6 +914,8 @@ impl Hle {
             flips: (0, now, now),
             started: now,
             quick_stops: 0,
+            idle: Default::default(),
+            idle_at: Instant::now(),
             off: false,
             base: None,
         };
@@ -948,6 +990,10 @@ impl Hle {
             self.p.m.bus.ga3d.hd.set_scale(hd);
         }
         self.p.m.bus.ga3d.dither = s.dither.load(Ordering::Relaxed);
+        if self.idle_at.elapsed() >= Duration::from_secs(1) {
+            self.idle_at = Instant::now();
+            self.p.idle_tick(&mut self.idle, s.keep_awake.load(Ordering::Relaxed));
+        }
         if self.p.m.bus.ga3d.tween().is_some() != self.smooth {
             self.p.m.bus.ga3d.set_tween(self.smooth);
         }
@@ -999,6 +1045,13 @@ impl Hle {
     /// row within a minute of starting (as `run` does).
     fn stopped(&mut self, s: &Shared, stop: ribbit_didj::hle::Stop) {
         tracing::warn!(target: "ribbit::didj", "Enhanced (new) stopped: {stop:?}");
+        // It shut down for idling, which the player asked for: it stays off.
+        if self.idle.near_shutdown() {
+            s.serial.note("--- Ribbit: the Didj shut down for idling ---\n");
+            s.idle_off.store(true, Ordering::Relaxed);
+            self.off = true;
+            return;
+        }
         let quick_stops = if self.started.elapsed() < Duration::from_secs(60) { self.quick_stops + 1 } else { 0 };
         if quick_stops >= 3 {
             s.serial.note(&format!("--- Ribbit: Enhanced (new) stopped ({stop:?}); left off ---\n"));
@@ -1378,6 +1431,52 @@ mod tests {
     /// programs write to /Didj reaches the save, where the other modes find
     /// it (carry::user_files). RIBBIT_DIDJ_DIR: a folder of Didj packages;
     /// RIBBIT_DIDJ_SHOT=<file.png> saves the picture.
+    /// "Turn off when idle" on all three modes, in real time (9 minutes):
+    /// off (the default), the Didj is still on past its 7 minutes; on, it
+    /// shuts down, stays off and the app is told. RIBBIT_DIDJ_DIR as above.
+    #[test]
+    #[ignore]
+    fn didj_idle() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_DIDJ_DIR").expect("RIBBIT_DIDJ_DIR"));
+        let modes = [("original", false, false), ("enhanced", true, false), ("new", true, true)];
+        let runs: Vec<_> = modes
+            .into_iter()
+            .flat_map(|m| [(m, false), (m, true)])
+            .map(|((name, enhanced, hle), turn_off)| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let saves = std::env::temp_dir().join(format!("ribbit-idle-{name}-{turn_off}"));
+                    let _ = std::fs::remove_dir_all(&saves);
+                    let mode = Mode { enhanced, cpu_scale: 1, frame_skip: false, hd: 1, hle, smooth: false };
+                    let didj = DidjSession::start(&dir, &saves, None, None, None, mode, Arc::new(crate::serial::Serial::default())).unwrap();
+                    didj.set_turn_off_when_idle(turn_off);
+                    let t = Instant::now();
+                    let mut off_at = None;
+                    while t.elapsed() < Duration::from_secs(540) && off_at.is_none() {
+                        std::thread::sleep(Duration::from_millis(200));
+                        if didj.take_idle_off() {
+                            off_at = Some(t.elapsed().as_secs());
+                        }
+                    }
+                    // Still off a while later (not started again), or still on.
+                    std::thread::sleep(Duration::from_secs(10));
+                    let powered_off = didj.shared.didj.lock().unwrap().bus.powered_off;
+                    let hle_off = didj.shared.hle.lock().unwrap().as_ref().map(|h| h.off);
+                    let gave_up = didj.shared.gave_up.load(Ordering::Relaxed);
+                    eprintln!("{name} turn_off={turn_off}: idle off at {off_at:?} s, powered_off {powered_off}, hle off {hle_off:?}, gave_up {gave_up}, speed {:.0}%", didj.speed_percent());
+                    didj.stop();
+                    let _ = std::fs::remove_dir_all(&saves);
+                    (name, turn_off, off_at, hle_off.unwrap_or(powered_off))
+                })
+            })
+            .collect();
+        for r in runs {
+            let (name, turn_off, off_at, off) = r.join().unwrap();
+            assert_eq!(off_at.is_some(), turn_off, "{name} turn_off={turn_off}: idle off at {off_at:?}");
+            assert_eq!(off, turn_off, "{name} turn_off={turn_off}: off {off}");
+        }
+    }
+
     #[test]
     #[ignore]
     fn didj_hle_session() {

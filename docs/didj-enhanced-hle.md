@@ -325,8 +325,15 @@ in-between option (phase 7).
     didjhle's steps took minutes once only a 2 ms poll loop was left.
   - /dev/dpc (252,0): backlight (virtual -128..127 and physical), brightness and contrast kept and read
     back; nothing drawn (nor in Original).
-  Left: the app turns a Didj that turned itself off on again (for cartridge updates), so after the idle
-  shutdown it starts again.
+  "Turn off when idle" (the Leapster's setting, off by default) now covers the Didj, all three modes
+  (ribbit_didj::idle): CAppManager::UpdateInactivity in libLightningBase.so adds the time since its last
+  call to the static inactivityTimer (offset 0x48458), zeroed by a button: past 120 s it dims, past 420 s
+  (600 s paused) it shuts down. Off: about once a second Ribbit zeroes the timer through the running
+  process's page tables (library found by its ELF header, the function's first instructions and the
+  relocated literal; other firmware is left alone). On: it shuts down, stays off (a timer reading of
+  400 s or more tells it from a cartridge update's power-off) and the app closes it. Test
+  `didj::tests::didj_idle` (RIBBIT_DIDJ_DIR, ignored, 9 minutes): on, off at 424-434 s and still off; off,
+  still on after 9 minutes, speed 100%, on Original, Enhanced and Enhanced (new).
 
 ## Known risks
 
