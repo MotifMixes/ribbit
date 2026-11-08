@@ -75,7 +75,8 @@ in-between option (phase 7).
   wait4, CLONE_*TID), futex WAIT/WAKE/REQUEUE/CMP_REQUEUE/WAKE_OP, pipes, nanosleep/yield, POSIX message
   queues (mq_open/unlink/timedsend/timedreceive/getsetattr), sched_* (stored only: round robin, no
   priorities). busybox sh scripts with pipes, `$(...)`, sleep work. Not done: signal delivery (handlers
-  stored, fatal signals end processes), poll/select, AF_UNIX sockets, mq_notify, O_CLOEXEC on exec.
+  stored, fatal signals end processes; DONE 2026-11-08, see Status), poll/select, AF_UNIX sockets,
+  mq_notify, O_CLOEXEC on exec.
 - AppManager (`. /etc/profile; exec AppManager`) loads Brio, makes its event queue and tasks, then asserts
   "CButtonModule::LightningButtonTask: cart read failed": first missing file is
   /sys/devices/platform/lf1000-nand/cartridge. Phase 4 (devices, sysfs, /proc) starts there.
@@ -303,6 +304,29 @@ in-between option (phase 7).
   in when the game reads the clock within a frame; not visible in play.
   didjhle's frames were taken after 10-million-instruction steps, 200 ms apart while a game sleeps (Sonic
   looked like 5 fps); they are now looked at every million while recording.
+- Idle shutdown (2026-11-08): left on the menu, AppManager dims the screen (/dev/dpc
+  DPC_IOCTBACKLIGHTVIRT) and after 420000 ms "System shutting down due to inactivity", shows "Your Didj
+  is shutting down." and calls Brio's Shutdown(), which is exit(0) (libPower.so; launch_main then runs
+  poweroff). Original powers off at 433 s from power-on, the HLE's AppManager exits at 423 s (no boot).
+  "ShutdownTimeMS" is not the idle time: it is monitord's 12 s grace after a power or USB event
+  (opendidj packages/monitord), which the HLE has no part of (its socket fails). Fixed on the way:
+  - Signal delivery (hle/signal.rs): AppManager's exit cancels its polling thread (NPTL: tgkill SIGCANCEL
+    32, si_code SI_TKILL) and joins it; the signal was dropped, so it waited for ever. Handlers per
+    process (reset on exec, copied on fork), masks and pending signals per thread and per process, the
+    kernel's frames (sigframe 752 bytes, rt_sigframe 880: siginfo, ucontext with sigcontext at +20 and
+    the mask at +104), sigreturn/rt_sigreturn (or the vector page's KERN_SIGRETURN_CODE without
+    SA_RESTORER), rt_sigprocmask; a waiting call ends with EINTR, or runs again after the handler with
+    SA_RESTART (never poll/select). busybox sh's trap and wait interrupted by a signal behave as on
+    Original (wait returns at the signal with the same status).
+  - A process that ended never gave back its pages and page table (60 tables: a shell loop's forks
+    failed with "cannot fork"); end_group releases them.
+  - When every thread waits for a time more than 10 ms off, `run` returns (Budget) and waits for it in
+    steps (`wait_until`) instead of sleeping inside: the app kept no frames and buttons meanwhile, and
+    didjhle's steps took minutes once only a 2 ms poll loop was left.
+  - /dev/dpc (252,0): backlight (virtual -128..127 and physical), brightness and contrast kept and read
+    back; nothing drawn (nor in Original).
+  Left: the app turns a Didj that turned itself off on again (for cartridge updates), so after the idle
+  shutdown it starts again.
 
 ## Known risks
 

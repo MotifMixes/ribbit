@@ -13,6 +13,7 @@ mod mlc;
 pub mod elf;
 pub mod mem;
 mod state;
+mod signal;
 mod sysfs;
 mod task;
 
@@ -204,8 +205,8 @@ pub struct Process {
     #[serde(with = "state::shared_map")]
     queues: HashMap<String, std::sync::Arc<std::sync::Mutex<task::Mq>>>,
     next_tid: u32,
-    /// rt_sigaction handlers by signal (0 default, 1 ignore).
-    handlers: Vec<u32>,
+    /// The running thread's signal mask and the signals sent to it.
+    sig: signal::Signals,
     /// What the programs wrote to the console.
     pub console: Vec<u8>,
     /// Init's (pid 1's) exit code, once it has exited.
@@ -245,6 +246,11 @@ pub struct Process {
     /// Showing the boot splash: nothing runs before then.
     #[serde(with = "state::inst_opt")]
     boot_until: Option<std::time::Instant>,
+    /// Every thread waits for a time further off than `WAIT_STEP`: `run`
+    /// returns while the host waits for it (`schedule`), so the caller
+    /// keeps drawing and taking buttons.
+    #[serde(skip)]
+    wait_until: Option<std::time::Instant>,
     /// Processor cycles the 3D chip, DMA and frame timing have had: they
     /// follow the host clock, as the programs' clocks do.
     ticked: u64,
@@ -306,6 +312,8 @@ impl Process {
                 tgid: 1,
                 ppid: 0,
                 threads: 1,
+                actions: vec![signal::Action::default(); 65],
+                pending: Vec::new(),
             },
             tid: 1,
             tls: 0,
@@ -320,7 +328,7 @@ impl Process {
             queues: HashMap::new(),
             sched: HashMap::new(),
             next_tid: 2,
-            handlers: vec![0; 65],
+            sig: signal::Signals::default(),
             console: Vec::new(),
             exit: None,
             executed: 0,
@@ -339,6 +347,7 @@ impl Process {
             hz: 0,
             idle: false,
             boot_until: None,
+            wait_until: None,
             ticked: 0,
             frame_hz: std::env::var("DIDJ_HLE_MLC_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(60).max(1),
             m,
@@ -402,6 +411,10 @@ impl Process {
         self.g.brk = exe.end;
         self.tls = 0;
         self.clear_tid = 0;
+        // Handlers are gone with the old program; ignored stays ignored.
+        for a in self.g.actions.iter_mut().filter(|a| a.handler > 1) {
+            *a = signal::Action::default();
+        }
 
         self.mem().map(STACK_TOP - STACK_SIZE, STACK_SIZE);
         let mut top = STACK_TOP;
@@ -555,6 +568,15 @@ impl Process {
             self.boot_until = None;
             self.on_time(until);
         }
+        if let Some(until) = self.wait_until {
+            let now = self.host() + self.late;
+            if now < until {
+                std::thread::sleep((until - now).min(task::WAIT_STEP));
+                return Stop::Budget;
+            }
+            self.wait_until = None;
+            self.on_time(until);
+        }
         // Every thread waited with no deadline: the time went by meanwhile.
         if std::mem::take(&mut self.idle) {
             let host = self.host();
@@ -573,12 +595,15 @@ impl Process {
                 slice = 0;
                 self.pace();
                 if !self.schedule() {
-                    return Stop::Blocked;
+                    return if self.wait_until.is_some() { Stop::Budget } else { Stop::Blocked };
                 }
                 continue;
             }
             if left == 0 {
                 return Stop::Budget;
+            }
+            if self.signal_waiting() && self.deliver() {
+                continue;
             }
             // Another thread's processor, or changed tables: the TLB and
             // the JIT's tables go.
@@ -602,6 +627,11 @@ impl Process {
                     }
                     KUSER_CMPXCHG => self.cmpxchg(),
                     KUSER_MEMORY_BARRIER => self.return_to_lr(),
+                    // A handler's return without SA_RESTORER.
+                    signal::SIGRETURN_CODE | signal::RT_SIGRETURN_CODE => {
+                        let _ = self.sigreturn(pc == signal::RT_SIGRETURN_CODE);
+                        self.skip_result = false;
+                    }
                     _ => {
                         // The exception's lr: the faulting instruction + 4
                         // (+ 8 for a data abort).
@@ -734,8 +764,9 @@ impl Process {
             11 => self.execve(a[0], a[1], a[2]),
             7 => self.wait4(a[0], a[1], a[2], 0),
             114 => self.wait4(a[0], a[1], a[2], a[3]),
-            37 | 238 => self.kill(a[0], a[1]),
-            268 => self.kill(a[1], a[2]),
+            37 => self.kill(a[0], a[1], false),
+            238 => self.kill(a[0], a[1], true),
+            268 => self.kill(a[1], a[2], true),
             42 => self.pipe(a[0]),
             240 => self.futex(a),
             154 => self.sched_set(a[0], None, a[1]),
@@ -830,7 +861,10 @@ impl Process {
             142 => self.select(a),
             163 => self.mremap(a[0], a[1], a[2], a[3]),
             174 => self.sigaction(a[0], a[1], a[2]),
-            175 | 186 => Ok(0), // signal masks, alternate stacks: none delivered yet
+            175 => self.sigprocmask(a[0], a[1], a[2]),
+            119 => self.sigreturn(false),
+            173 => self.sigreturn(true),
+            186 => Ok(0), // alternate stacks: handlers run on the thread's own
             183 => self.getcwd(a[0], a[1]),
             191 => self.getrlimit(a[0], a[1]),
             192 => self.mmap2(a),
@@ -1606,19 +1640,6 @@ impl Process {
             return Err(EINVAL);
         }
         self.sched.insert(tid, (policy, prio));
-        Ok(0)
-    }
-
-    /// rt_sigaction: handlers are kept (not called yet; see `kill`).
-    fn sigaction(&mut self, sig: u32, act: u32, old: u32) -> Result<u32, i32> {
-        let Some(&cur) = self.handlers.get(sig as usize) else { return Err(EINVAL) };
-        if old != 0 {
-            self.mem().write_bytes(old, &[0; 20]);
-            self.mem().put32(old, cur);
-        }
-        if act != 0 {
-            self.handlers[sig as usize] = self.mem().get32(act).ok_or(EFAULT)?;
-        }
         Ok(0)
     }
 

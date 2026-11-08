@@ -7,7 +7,7 @@
 //! switch moves them in and out (no copying).
 
 use super::mem::{Mem, Space};
-use super::{EAGAIN, EFAULT, Fd, Process, err};
+use super::{EAGAIN, EFAULT, EINVAL, Fd, Process, err};
 use ribbit_arm::Arm;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 
 /// Instructions a task runs before the next one gets a turn.
 pub(super) const SLICE: u32 = 20_000;
+
+/// The longest the host sleeps inside `run` when every thread waits;
+/// longer waits return to the caller in steps of this (`wait_until`).
+pub(super) const WAIT_STEP: Duration = Duration::from_millis(10);
 
 /// The kernel's timer tick: 10 ms (HZ 100; DIDJ_HLE_TICK_US=<n> for others).
 fn tick_ns() -> u64 {
@@ -47,6 +51,9 @@ pub(super) struct Group {
     pub ppid: u32,
     /// Threads still running; 0 once it has exited.
     pub threads: u32,
+    /// rt_sigaction's, by signal; signals sent to the process (kill).
+    pub actions: Vec<super::signal::Action>,
+    pub pending: Vec<super::signal::Pending>,
 }
 
 /// A thread not running now.
@@ -58,6 +65,7 @@ pub(super) struct Task {
     pub tls: u32,
     pub clear_tid: u32,
     pub wait: Option<Wait>,
+    pub sig: super::signal::Signals,
 }
 
 /// What a task is blocked on.
@@ -193,6 +201,8 @@ impl Process {
                 tgid: tid,
                 ppid: self.g.tgid,
                 threads: 1,
+                actions: self.g.actions.clone(),
+                pending: Vec::new(),
             };
             if flags & CLONE_CHILD_SETTID != 0 {
                 Space { mem: &mut child.mem, bus: &mut self.m.bus, frames: &mut self.frames }.put32(ctid, tid);
@@ -202,7 +212,8 @@ impl Process {
         };
         let clear_tid = if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 };
         let tls = if flags & CLONE_SETTLS != 0 { tls } else { self.tls };
-        self.tasks.push(Task { tid, tgid, cpu, tls, clear_tid, wait: None });
+        let sig = self.sig.inherit();
+        self.tasks.push(Task { tid, tgid, cpu, tls, clear_tid, wait: None, sig });
         Ok(tid)
     }
 
@@ -271,6 +282,9 @@ impl Process {
     fn end_group(&mut self, status: u32) {
         self.g.threads = 0;
         self.g.fds.clear();
+        // Its pages and page table go back to the pool (60 tables: a shell
+        // loop's forks ran out).
+        self.mem().release();
         let (pid, ppid) = (self.g.tgid, self.g.ppid);
         if pid == 1 {
             self.exit = Some(if status & 0x7F != 0 { 128 + (status & 0x7F) as i32 } else { (status >> 8) as i32 });
@@ -317,22 +331,24 @@ impl Process {
         Ok(0)
     }
 
-    /// kill/tkill/tgkill. Signals aren't delivered to handlers yet: one
-    /// that would end a process ends it, the rest are logged and dropped.
-    pub(super) fn kill(&mut self, pid: u32, sig: u32) -> Result<u32, i32> {
+    /// kill (to a process) or tkill/tgkill (`thread`, to one thread): a
+    /// handler runs (signal.rs), an ignored signal goes, and one whose
+    /// default is to end the process ends it.
+    pub(super) fn kill(&mut self, pid: u32, sig: u32, thread: bool) -> Result<u32, i32> {
         let exists = pid == self.g.tgid || pid == self.tid || self.groups.contains_key(&pid) || self.tasks.iter().any(|t| t.tid == pid);
         if !exists {
             return Err(ESRCH);
         }
-        let fatal = matches!(sig, 1..=3 | 6 | 9 | 11 | 13 | 14 | 15);
+        if sig > 64 {
+            return Err(EINVAL);
+        }
         if sig == 0 {
             return Ok(0);
         }
-        if !fatal || self.handlers.get(sig as usize).is_some_and(|&h| h > 1) {
-            self.log_once(format!("signal {sig} to {pid}: not delivered (signal handlers not done yet)"));
+        let tgid = if pid == self.tid { self.g.tgid } else { self.tasks.iter().find(|t| t.tid == pid).map_or(pid, |t| t.tgid) };
+        if self.send_signal(tgid, thread.then_some(pid), sig) {
             return Ok(0);
         }
-        let tgid = if pid == self.tid { self.g.tgid } else { self.tasks.iter().find(|t| t.tid == pid).map_or(pid, |t| t.tgid) };
         if tgid == self.g.tgid {
             self.exit_group(sig);
         } else if let Some(mut g) = self.groups.remove(&tgid) {
@@ -769,6 +785,7 @@ impl Process {
                 tls: self.tls,
                 clear_tid: self.clear_tid,
                 wait: self.block.take(),
+                sig: std::mem::take(&mut self.sig),
             };
             self.tasks.push(t);
             self.alive = false;
@@ -788,7 +805,15 @@ impl Process {
             match earliest {
                 Some(u) => {
                     // To the host's time less pauses only, so `late` shrinks.
-                    std::thread::sleep(u.saturating_duration_since(self.host() + self.late));
+                    let wait = u.saturating_duration_since(self.host() + self.late);
+                    if wait > WAIT_STEP {
+                        // A long wait (after AppManager's idle shutdown a
+                        // thread slept on and run() never came back): `run`
+                        // waits for it in steps.
+                        self.wait_until = Some(u);
+                        return false;
+                    }
+                    std::thread::sleep(wait);
                     self.on_time(u);
                 }
                 None => {
@@ -801,6 +826,11 @@ impl Process {
 
     /// Whether parked task `i` can run now; its call's result is set.
     fn wake(&mut self, i: usize, now: Instant) -> bool {
+        if !self.tasks[i].sig.pending.is_empty() || self.tasks[i].tgid == self.g.tgid && !self.g.pending.is_empty() || self.groups.get(&self.tasks[i].tgid).is_some_and(|g| !g.pending.is_empty()) {
+            if self.interrupt(i) {
+                return true;
+            }
+        }
         let tgid = self.tasks[i].tgid;
         let (ready, r0) = match &self.tasks[i].wait {
             None | Some(Wait::Yield) => (true, None),
@@ -848,6 +878,7 @@ impl Process {
         self.tid = t.tid;
         self.tls = t.tls;
         self.clear_tid = t.clear_tid;
+        self.sig = t.sig;
         self.block = None;
         self.alive = true;
     }

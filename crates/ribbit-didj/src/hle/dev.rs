@@ -34,6 +34,8 @@ pub(super) enum Device {
     Mlc,
     /// /dev/layerN, one of its layers.
     Layer(u8),
+    /// /dev/dpc, the display's timing and the LCD's backlight.
+    Dpc,
     /// A node Ribbit doesn't model yet: (major << 8) | minor.
     Other(u32),
 }
@@ -52,6 +54,7 @@ impl Device {
             (14, 3) => Device::Dsp,
             (super::mlc::MAJOR, 0) => Device::Mlc,
             (super::mlc::LAYER_MAJOR, m) if m < super::mlc::LAYERS as u32 => Device::Layer(m as u8),
+            (252, 0) => Device::Dpc,
             _ => Device::Other(rdev),
         })
     }
@@ -113,6 +116,20 @@ pub(super) struct Devices {
     /// keypad's SW_TABLET_MODE is the cartridge detect.
     pub switches: [u8; 3],
     pub dsp: Dsp,
+    pub dpc: Dpc,
+}
+
+/// What /dev/dpc keeps (drivers/lf1000/dpc/main.c): the values are only
+/// stored and read back, as Ribbit doesn't draw the backlight (nor in
+/// Original). AppManager dims the screen this way before its idle
+/// shutdown and restores it after.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct Dpc {
+    /// The backlight in the kernel's "virtual" range -128..127 (0 the
+    /// middle); the physical PWM value is 2v + 256 on board 3.
+    pub backlight: i32,
+    pub brightness: u32,
+    pub contrast: u32,
 }
 
 /// The keypad's key codes (drivers/input/keyboard/lf1000-keypad.c), on
@@ -240,7 +257,7 @@ impl Process {
                 if out.is_empty() { Err(EINVAL) } else { Ok(out) }
             }
             Device::Dsp => Ok(Vec::new()),
-            Device::Other(_) | Device::Mlc | Device::Layer(_) | Device::Ga3d | Device::PhysMem => Ok(Vec::new()),
+            Device::Other(_) | Device::Dpc | Device::Mlc | Device::Layer(_) | Device::Ga3d | Device::PhysMem => Ok(Vec::new()),
         }
     }
 
@@ -290,12 +307,58 @@ impl Process {
         }
     }
 
+    /// /dev/dpc's ioctls (dpc_ioctl.h, magic 'd'): the settings programs
+    /// change; the timing ones (sync, clocks, mode) are taken and ignored.
+    fn dpc_ioctl(&mut self, cmd: u32, arg: u32) -> Result<u32, i32> {
+        let dpc = &mut self.dev.dpc;
+        match cmd & 0xFFFF {
+            0x6400..=0x6406 => Ok(0),
+            0x6407 => {
+                dpc.contrast = arg;
+                Ok(0)
+            }
+            0x6408 => {
+                dpc.brightness = arg;
+                Ok(0)
+            }
+            // DPC_IOCTBACKLIGHT / QBACKLIGHT: the physical value.
+            0x640A => {
+                dpc.backlight = (arg as i32 - 256) / 2;
+                Ok(0)
+            }
+            0x640B => Ok((dpc.backlight * 2 + 256) as u32),
+            0x640C => Ok(dpc.brightness),
+            0x640D => Ok(dpc.contrast),
+            // DPC_IOCTBACKLIGHTVIRT: the value itself, -128..127.
+            0x640E => {
+                let v = arg as i32;
+                if !(-128..=127).contains(&v) {
+                    return Err(EINVAL);
+                }
+                dpc.backlight = v;
+                Ok(0)
+            }
+            // DPC_IOCQBACKLIGHTVIRT: written to the argument.
+            0x640F => {
+                let v = dpc.backlight as u32;
+                if self.mem().put32(arg, v) { Ok(0) } else { Err(EFAULT) }
+            }
+            _ => {
+                if self.logged.insert(format!("ioctl Dpc {cmd:08X}")) {
+                    eprintln!("[hle] dpc ioctl {cmd:08X} not handled");
+                }
+                Err(ENOTTY)
+            }
+        }
+    }
+
     pub(super) fn dev_ioctl(&mut self, d: Device, cmd: u32, arg: u32) -> Result<u32, i32> {
         match d {
             Device::Input(n) => self.evdev_ioctl(n, cmd, arg),
             Device::Dsp => self.dsp_ioctl(cmd, arg),
             Device::Mlc => self.mlc_ioctl(cmd, arg),
             Device::Layer(n) => self.layer_ioctl(n, cmd, arg),
+            Device::Dpc => self.dpc_ioctl(cmd, arg),
             _ => {
                 if self.logged.insert(format!("ioctl {d:?} {cmd:08X}")) {
                     eprintln!("[hle] ioctl {cmd:08X} on {d:?} not handled");
