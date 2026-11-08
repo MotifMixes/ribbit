@@ -74,7 +74,7 @@ pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
     if what == Pick::RomFolder {
         let game = d
             .set_title("Choose any game in your games folder (its folder is added)")
-            .add_filter("Games", &["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img", "didj"])
+            .add_filter("Games", &["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img", "didj", "lbk"])
             .add_filter("All files", &["*"])
             .pick_file()?;
         return game.parent().map(Path::to_path_buf);

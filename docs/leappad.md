@@ -574,8 +574,9 @@ Leapster recording), fed from the LeapPad's registers (`crates/ribbit-leappad/sr
   | `F400-F427` | 20 words written by DSPInit (0x49FD) while the processor is held (`FC3D` = 09/08, then 05/04): UNKNOWN (coefficients or a small program: 25D2, B5E4, 6664, CEC0 …) |
   | `F462 + 4n` | start, physical byte address: two little-endian words, high word first |
   | `F482 + 4n` | voices 0-4: end index and loop index (low halves; the high half is the start's). Voice 5: absolute end. Same word order |
-  | `F49E + 2n` | pitch, voices 0-4 (3F88 for effects; notes vary) |
-  | `F4B8 + 2n` | voices 0-4: a value from the sound's descriptor (00C8, 0400, 0500): UNKNOWN (an envelope rate?) |
+  | `F49E + 2n` | note volume, voices 0-5 (first read as the pitch, wrongly: "Music" below) |
+  | `F4AE + 2n` | pitch, voices 0-4 (0x8000 = one sample a step) |
+  | `F4B8 + 2n` | release rate, from the sound's descriptor (`+12`; 00C8, 0400, 0500) |
   | `F4C2 + 2n` | volume, 7FFF at start. Voice 5's (`F4CC`) is set per sound from the descriptor instead (0400, 0500) |
   | `F4D2 + 2n` | copied from `F4F4 + 2n` before an `08h \| n` command; set to the pitch at start when the voice's flag bit 4 is set: UNKNOWN |
 
@@ -585,7 +586,8 @@ Leapster recording), fed from the LeapPad's registers (`crates/ribbit-leappad/sr
   * `+04`: end (32 bits, voice 5 only);
   * `+08`: loop index; `+0A`: end index (voices 0-4);
   * `+0C`: a 32-bit value, multiplied by a per-note entry of the table at kernel 0x2153 to give the note's length
-    in EX1 ticks (`F038 + 0Eh × n`);
+    in EX1 ticks (`F038 + 0Eh × n`). HYPOTHESIS (community reading, not tested): a big-endian 32-bit float
+    pitch (42 FA 7E D2 = 125.25), with `+10` the lowest note;
   * `+11`: highest note; `+12`: the `F4B8` value (voice 5: its volume).
 * **Commands (EVIDENCE for when the kernel sends them, HYPOTHESIS for what they do):**
   * `80h | n`, start: Ribbit latches the shared RAM above and starts the voice.
@@ -696,7 +698,19 @@ use**; the ILA2 base remains supported.
 
 **Cartridges:** 20 in `LeapPad_Reading_System_Archive/` (archive.org item of that name), 1-4 MB. Four match MAME:
 500-00406, 500-00730, 500-01148 and 500-11374. The rest are not in MAME's list. 500-00263 and 500-00973-B are the
-same dump. Two are Quantum LeapPad cartridges and one is Mind Station; those are other systems, not tried yet.
+same dump. Two are Quantum LeapPad cartridges (read, above, but not run; said to use the same cartridges as the
+original, UNTESTED) and one is Mind Station.
+
+**Other bases (reported by a player, 2026-10, not in the user's set):** an 8 MB "Plus Microphone" base boots
+cartridges in Ribbit (a checksum sits at its end; it may not be trimmed). The My First LeapPad base boots but
+says "Whoops! That's not a My First LeapPad cartridge" to standard cartridges. None of the dumped bases holds a
+book of its own: the ILA2 base's sound tables hold only the start-up jingle, so Ribbit calls a session without a
+cartridge "no cartridge".
+
+**LBK files:** what the Mind Station software writes when it dumps a cartridge (`ms2002 <file>.lbk /save`): the
+ROM after a 0x13C-byte header. Ribbit drops the header when the boot stub sits at 0x13C (`unwrap_lbk`) and keeps
+the first 4 MB; bigger images come as several chunks, each after its own header. The header's fields are
+UNKNOWN (no LBK file in the user's set).
 
 None of these files may be committed (`.gitignore` covers `*.bin`, `*.zip`).
 

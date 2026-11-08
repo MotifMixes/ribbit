@@ -58,11 +58,35 @@ const BOOT_STUB: [u8; 14] = [0x02, 0x00, 0x03, 0x90, 0xFC, 0x06, 0xE0, 0xF8, 0xA
 /// cartridge check ("Cart found:"); cartridges, which bring their own
 /// kernel, do not.
 pub fn identify(data: &[u8]) -> Option<Image> {
+    let data = data.get(lbk_header(data)..)?;
     if data.len() < 0x2_0000 || data[..BOOT_STUB.len()] != BOOT_STUB {
         return None;
     }
     let base = data.windows(11).any(|w| w == b"Cart found:");
     Some(if base { Image::BaseRom } else { Image::Cartridge })
+}
+
+/// An LBK ("Leap Back-Up") file, what the Mind Station software writes when
+/// it dumps a cartridge, is the ROM after a 0x13C-byte header (community
+/// tools strip it the same way; no LBK file in the user's set, so the
+/// header's own fields are UNKNOWN). Returns the header's length: 0x13C when
+/// the boot stub sits there and not at 0, else 0.
+fn lbk_header(data: &[u8]) -> usize {
+    const LBK: usize = 0x13C;
+    let stub_at = |o: usize| data.get(o..o + BOOT_STUB.len()) == Some(&BOOT_STUB[..]);
+    if !stub_at(0) && stub_at(LBK) { LBK } else { 0 }
+}
+
+/// Turns an LBK file into the plain ROM: the header goes, and so does
+/// anything past 4 MB, the most a LeapPad cartridge holds (LBK files of
+/// bigger images come in chunks, each after its own header). Plain ROMs are
+/// left alone.
+pub fn unwrap_lbk(data: &mut Vec<u8>) {
+    let header = lbk_header(data);
+    if header > 0 {
+        data.drain(..header);
+        data.truncate(0x40_0000);
+    }
 }
 
 /// A cartridge's sparse checksum, as the base checks it before running the
@@ -253,6 +277,20 @@ mod tests {
         let sum = (0..len).step_by(997).fold(0u16, |s, i| s.wrapping_add(c[i as usize] as u16));
         c[len as usize..len as usize + 2].copy_from_slice(&sum.to_be_bytes());
         c
+    }
+
+    #[test]
+    fn an_lbk_file_is_its_rom_after_the_header() {
+        let mut rom = cart(0x1F_0000);
+        rom[..BOOT_STUB.len()].copy_from_slice(&BOOT_STUB);
+        let mut lbk = vec![0x4C; 0x13C];
+        lbk.extend_from_slice(&rom);
+        assert_eq!(identify(&lbk), Some(Image::Cartridge));
+        unwrap_lbk(&mut lbk);
+        assert_eq!(lbk, rom);
+        // A plain ROM is left alone.
+        unwrap_lbk(&mut lbk);
+        assert_eq!(lbk, rom);
     }
 
     #[test]

@@ -203,7 +203,9 @@ pub mod button {
     pub const VOLUME_UP: u32 = 1 << 14;
     pub const VOLUME_DOWN: u32 = 1 << 15;
     /// The Explorer's port C pin for each button (gpio_map.h EMERALD_*;
-    /// MENU is Home, KEY_ENTER on both).
+    /// MENU is Home. The kernel picks the key code, not Ribbit: KEY_M on the
+    /// Didj (opendidj lf1000-keypad.c) and in evtest on a real Explorer,
+    /// KEY_ENTER in the Explorer kernel source in hand).
     pub const EXPLORER: [(u32, u32); 14] = [
         (DOWN, 0), (RIGHT, 1), (VOLUME_DOWN, 2), (A, 3), (PAUSE, 4), (HINT, 5), (R, 6),
         (VOLUME_UP, 7), (LEFT, 8), (UP, 9), (BRIGHTNESS, 10), (B, 11), (MENU, 12), (L, 13),

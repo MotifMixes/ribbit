@@ -85,7 +85,7 @@ All SOURCED. How these lines map onto ARC vector numbers and levels needs confir
 | `0x0301_0000-0x0302_FFFF` | v1.5 BIOS clear-screen writes overrun VRAM here. MAME discards them | SOURCED; real behaviour UNKNOWN | S1 |
 | `0x3C00_0000-0x3C1F_FFFF` | SDRAM, 2 MiB (ISSI IS42S16100 on the PCB) | SOURCED (three sources) | S1, S6, S7 |
 | `0x3C20_0000-0x3FFF_FFFF` | MAME maps RAM here (for the Leapster 2's 16 MiB). On the original this is UNKNOWN: mirror, open bus or fault | CONFLICT | S1 |
-| `0x3C80_0000` | "SDCD" region (Leapster 2 SD-card games). Not applicable | SOURCED | S6 |
+| `0x3C80_0000` | "SDCD" region: Leapster 2 SD-card games are loaded here, the upper 8 MiB of its 16 MiB RAM, code at `0x3C80_2000` (so SD games are at most 8 MiB). Not on the original. Ribbit: inside `RAM_SIZE_LEAPSTER2` | SOURCED (S6, community reports) | S6 |
 | `0x5000_0000`, `0x6000_0000`, `0x7000_0000` | Possibly extra cartridge ports (the factory test screen lists 3-4 slots) | HYPOTHESIS | S6 |
 | `0x8000_0000-` | Cartridge ROM (4/8/16 MiB) | VERIFIED: cart pointers are `0x80xx_xxxx` | S1, S6, A1 |
 
@@ -145,6 +145,21 @@ metadata. `value` either points to a NUL-terminated string or is an immediate:
 | 0x0D | builder name (not reproduced here) |
 
 Tags `0x1005`, `0x1006`, `0x100C` and `0x2000` point to data whose meaning is UNKNOWN.
+
+### Size, checksum and LBK tags
+
+* **Checksum (VERIFIED, US v2.1 BIOS at 0x4003_AFF4, on 5 dumps):** the wrapping sum of the little-endian u32 at
+  every 3988th address from `[0x11C]` (the cart's start, 0x8000_0000) to `[0x120]` (its end), stored at the
+  address in `[0x128]` (`[0x120]` + 4). The BIOS refuses a cart whose sum differs. The image's real size is
+  `[0x120]` + 0xC - `[0x11C]`; the rest of a dump is fill. Community reports (UNTESTED): code starts at 0x2000,
+  the smallest bootable image is 0x3A0 bytes, and the Leapster 2 skips the header checks for SD-card games.
+* **LBK tags (VERIFIED, 2026-10-25):** some community dumps (Cars Supercharged, four Counting on Zero builds)
+  have a 24-byte ASCII tag, "LBK" and 21 hex digits, spliced in at 0x400000 by the tool that joined the dump's
+  two 4 MiB halves (Mind Station "Leap Back-Up" files are written in such chunks). Everything after it sits 24
+  bytes late: the BIOS asks for a cartridge, or the game crashes. Ribbit removes such tags at every 4 MiB
+  boundary when it loads a cart, pads the end with the dump's last byte, and rewrites the checksum word if the
+  tag had pushed it off the end (`cartridge::strip_lbk_tags`). On all 5 the result is byte for byte the
+  checksum-verified repair.
 
 ### Content: VERIFIED (A1)
 

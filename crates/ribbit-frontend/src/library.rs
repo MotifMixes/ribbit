@@ -17,7 +17,7 @@ use ribbit_memory::known::Hardware;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-const EXTENSIONS: [&str; 9] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img", "didj"];
+const EXTENSIONS: [&str; 10] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img", "didj", "lbk"];
 /// Folder depth scanned below each ROM folder.
 const MAX_DEPTH: usize = 3;
 /// Art: emulated time searched for the title card, and how often to look.
@@ -946,7 +946,11 @@ fn classify(path: &Path) -> Option<Found> {
     // LeapPad images start with the same 8051 boot stub; a base ROM is not
     // a game (it is opened with File > Open BIOS).
     match ribbit_leappad::identify(&data) {
-        Some(ribbit_leappad::Image::Cartridge) => return Some(Found::LeapPad(describe_leappad(path, &data))),
+        Some(ribbit_leappad::Image::Cartridge) => {
+            let mut rom = data;
+            ribbit_leappad::unwrap_lbk(&mut rom);
+            return Some(Found::LeapPad(describe_leappad(path, &rom)));
+        }
         Some(ribbit_leappad::Image::BaseRom) => return None,
         None => {}
     }

@@ -1104,7 +1104,7 @@ impl App {
     /// library, if any): the console starts from its system packages when
     /// they are found, otherwise only its controls work.
     /// Plays the original LeapPad: its base ROM (`leappad_bios`) with a
-    /// cartridge, or none (its built-in book).
+    /// cartridge, or none.
     fn start_leappad(&mut self, cart: Option<PathBuf>) {
         let Some(bios) = self.settings.leappad_bios.clone() else {
             return self.ui.problem(

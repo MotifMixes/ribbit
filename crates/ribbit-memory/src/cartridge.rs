@@ -87,7 +87,10 @@ pub struct Cartridge {
 }
 
 impl Cartridge {
-    pub fn from_bytes(rom: Vec<u8>) -> Result<Self, CartridgeError> {
+    pub fn from_bytes(mut rom: Vec<u8>) -> Result<Self, CartridgeError> {
+        if strip_lbk_tags(&mut rom) > 0 {
+            repair_checksum(&mut rom);
+        }
         if rom.is_empty() {
             return Err(CartridgeError::Empty);
         }
@@ -133,6 +136,62 @@ impl Cartridge {
         let text = &bytes[..bytes.iter().position(|&b| b == 0)?];
         let ok = !text.is_empty() && text.iter().all(|&b| (0x20..0x7F).contains(&b));
         ok.then(|| String::from_utf8_lossy(text).trim().to_string())
+    }
+}
+
+/// The tag a dumping tool leaves where it joined two 4 MB halves: "LBK" and
+/// 21 hex digits ("LBK00000014000000" + the half's last offset). VERIFIED on
+/// 5 community dumps (Cars Supercharged, 4 Counting on Zero builds, user's
+/// downloads 2026-10-25): each had one at 0x400000, and everything after it
+/// sat 24 bytes late, so the BIOS refused the cart or the game crashed.
+const LBK_TAG_LEN: usize = 24;
+
+/// Removes the LBK tags at 4 MB boundaries and pads the end with the dump's
+/// last byte (its fill), as the cart had it. Returns how many were removed.
+/// Removing the tag and padding gave files identical to checksum-verified
+/// repairs of all 5 dumps, except the one that filled all 8 MB: its last 24
+/// bytes, the checksum word among them, were pushed off the end.
+pub fn strip_lbk_tags(rom: &mut Vec<u8>) -> usize {
+    let is_tag = |t: &[u8]| t.len() == LBK_TAG_LEN && t.starts_with(b"LBK") && t[3..].iter().all(u8::is_ascii_hexdigit);
+    let mut removed = 0;
+    let mut at = 0x40_0000;
+    while at + LBK_TAG_LEN <= rom.len() {
+        if is_tag(&rom[at..at + LBK_TAG_LEN]) {
+            let fill = *rom.last().unwrap();
+            rom.drain(at..at + LBK_TAG_LEN);
+            rom.resize(rom.len() + LBK_TAG_LEN, fill);
+            removed += 1;
+        }
+        at += 0x40_0000;
+    }
+    removed
+}
+
+/// The cartridge checksum the BIOS checks before it runs a cart, as
+/// (calculated, stored, offset of the stored word). VERIFIED (US v2.1 BIOS
+/// at 0x4003AFF4; matches on the 5 repaired dumps above): the wrapping sum
+/// of the little-endian u32 at every 3988th address from [0x11C] to [0x120],
+/// stored at the address held in [0x128].
+pub fn checksum(rom: &[u8]) -> Option<(u32, u32, usize)> {
+    let word = |o: usize| Some(u32::from_le_bytes(rom.get(o..o + 4)?.try_into().ok()?));
+    let off = |a: u32| a.checked_sub(map::CART_BASE).map(|o| o as usize);
+    let (start, end, at) = (word(0x11C)?, word(0x120)?, off(word(0x128)?)?);
+    if start > end || off(start)? > rom.len() || off(end)? + 4 > rom.len() {
+        return None;
+    }
+    let mut sum = 0u32;
+    for a in (start..=end).step_by(3988) {
+        sum = sum.wrapping_add(word(off(a)?)?);
+    }
+    Some((sum, word(at)?, at))
+}
+
+/// Writes the calculated checksum over a stored one that differs.
+fn repair_checksum(rom: &mut [u8]) {
+    if let Some((calc, stored, at)) = checksum(rom) {
+        if calc != stored {
+            rom[at..at + 4].copy_from_slice(&calc.to_le_bytes());
+        }
     }
 }
 
@@ -321,6 +380,31 @@ mod tests {
         rom[0x24..0x28].copy_from_slice(&0x9000_0000u32.to_le_bytes());
         let cart = Cartridge::from_bytes(rom).unwrap();
         assert_eq!(cart.header().unwrap_err(), &HeaderError::BadPointer { ptr: 0x9000_0000 });
+    }
+
+    #[test]
+    fn lbk_tag_removed_and_checksum_repaired() {
+        // An 8 MB cart whose data fills it: checksum over 0..=0x7FFFF4,
+        // stored at 0x7FFFF8, as on the Counting on Zero UK dump.
+        let mut good: Vec<u8> = (0..0x80_0000u32).map(|i| (i * 7 >> 3) as u8).collect();
+        good[0x11C..0x120].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        good[0x120..0x124].copy_from_slice(&0x807F_FFF4u32.to_le_bytes());
+        good[0x128..0x12C].copy_from_slice(&0x807F_FFF8u32.to_le_bytes());
+        let (calc, _, at) = checksum(&good).unwrap();
+        good[at..at + 4].copy_from_slice(&calc.to_le_bytes());
+
+        let mut dump = good.clone();
+        dump.splice(0x40_0000..0x40_0000, b"LBK0000001400000003fffff".iter().copied());
+        dump.truncate(0x80_0000);
+        let cart = Cartridge::from_bytes(dump).unwrap();
+        let rom = cart.rom();
+        assert_eq!(rom[..0x7F_FFE8], good[..0x7F_FFE8]);
+        let (calc, stored, _) = checksum(rom).unwrap();
+        assert_eq!(calc, stored);
+        // No tag: left alone, even with a bad checksum.
+        let mut bad = good.clone();
+        bad[at] ^= 1;
+        assert_eq!(Cartridge::from_bytes(bad.clone()).unwrap().rom(), &bad[..]);
     }
 
     #[test]

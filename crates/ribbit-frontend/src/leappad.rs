@@ -61,7 +61,8 @@ pub struct LeapPadSession {
     pub series: Option<String>,
     /// When it was started (Unix seconds, for Discord).
     pub started: u64,
-    /// The cartridge file (None: the pad's own built-in book).
+    /// The cartridge file (None: no cartridge; the dumped base ROMs hold no
+    /// book of their own, only the start-up jingle).
     pub cart: Option<PathBuf>,
     eeprom_path: PathBuf,
     pub book: Option<Book>,
@@ -174,6 +175,7 @@ impl LeapPadSession {
         let mut repaired = false;
         if let Some(c) = cart {
             let mut data = std::fs::read(c).with_context(|| format!("reading {}", c.display()))?;
+            ribbit_leappad::unwrap_lbk(&mut data);
             if ribbit_leappad::identify(&data) != Some(ribbit_leappad::Image::Cartridge) {
                 anyhow::bail!("{} is not a LeapPad cartridge", c.display());
             }
@@ -220,7 +222,7 @@ impl LeapPadSession {
         })?;
         let (series, title) = match cart {
             Some(c) => c.file_stem().map_or_else(|| (None, "LeapPad".into()), |s| book_series(&book_title(&s.to_string_lossy()))),
-            None => (None, "LeapPad (built-in book)".into()),
+            None => (None, "LeapPad (no cartridge)".into()),
         };
         Ok(LeapPadSession {
             shared,
@@ -860,7 +862,7 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
                      Open book), or Ribbit's test book."
                 )
             } else {
-                "The pad is running its own built-in book. No virtual book is open.".to_string()
+                "The pad is running without a cartridge. No virtual book is open.".to_string()
             };
             let galley = p.layout(msg, font.clone(), INK, page.width() * 0.85);
             p.galley(page.center() - galley.size() / 2.0, galley, INK);

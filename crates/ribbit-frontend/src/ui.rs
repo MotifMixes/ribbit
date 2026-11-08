@@ -58,7 +58,7 @@ pub enum Action {
     KeepZippitySaves(PathBuf),
     /// Open the RockIt Twist research preview (no package).
     OpenTwist,
-    /// Turn on the original LeapPad with no cartridge (its built-in book).
+    /// Turn on the original LeapPad with no cartridge.
     StartLeapPad,
     /// Open this virtual book on the running LeapPad.
     OpenLeapPadBook(PathBuf),
@@ -1094,7 +1094,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         // The original LeapPad's own items.
         sub_menu(ui, "LeapPad (1999)", |ui| {
             if ui
-                .button("Turn on (built-in book)")
+                .button("Turn on (no cartridge)")
                 .on_hover_text("The pad with no cartridge. Needs its base ROM: open it with Open BIOS…")
                 .clicked()
             {
@@ -2650,9 +2650,9 @@ fn games_folder_button(ui: &mut egui::Ui, settings: &Settings, actions: &mut Vec
 /// and menu (the Leapster 2's main menu, the Zippity's built-in games, the
 /// RockIt Twist's menu). On the Leapster page, the console chosen there.
 fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
-    // The LeapPad's page: the pad alone runs its built-in book.
+    // The LeapPad's page: the pad can be turned on without a cartridge.
     if tab == Some(Family::LeapPad) {
-        if settings.leappad_bios.is_some() && power_button(ui, "Turn on the LeapPad without a cartridge (its built-in book)") {
+        if settings.leappad_bios.is_some() && power_button(ui, "Turn on the LeapPad without a cartridge") {
             actions.push(Action::StartLeapPad);
         }
         return;

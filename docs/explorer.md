@@ -122,7 +122,7 @@ Language Selection). `/etc/init.d/touchscreen` loads lf1000_ts2 only if
 
 Buttons: port C, low while pressed (lf1000-keypad.c), pins (gpio_map.h EMERALD_*):
 Down 0, Right 1, Volume down 2, A 3, Pause 4, Hint 5, R 6, Volume up 7, Left 8, Up 9,
-Brightness 10, B 11, Home 12 (KEY_ENTER), L 13. Pin 14 (external power / LFP100
+Brightness 10, B 11, Home 12 (the kernel's key code: KEY_ENTER in the Explorer kernel source in hand, KEY_M in evtest on a real Explorer and on the Didj), L 13. Pin 14 (external power / LFP100
 interrupt) reads high, pin 18 (headphones) low. Ribbit keeps the Didj's `button` bits
 and maps them (`button::EXPLORER`; VOLUME_UP/DOWN are extra bits).
 
