@@ -334,6 +334,21 @@ in-between option (phase 7).
   400 s or more tells it from a cartridge update's power-off) and the app closes it. Test
   `didj::tests::didj_idle` (RIBBIT_DIDJ_DIR, ignored, 9 minutes): on, off at 424-434 s and still off; off,
   still on after 9 minutes, speed 100%, on Original, Enhanced and Enhanced (new).
+- Didji Racing (2026-11-08): the HLE's frames show the menus, mini-games and race as Original does, also
+  with HD 3x, by eye at full size (the two runs' rounds and moments differ, so not pixel for pixel). The
+  faults were in the in-between pictures (ga3d/tween.rs), found by how far one is from both its frames
+  (scratchpad twm.py), from 13.6 above the frames' own difference to 0 on the mini-games:
+  - The row of letter tiles slid half a tile when the cursor blinked: identical tiles, drawn in another
+    order, paired by order with their neighbours. Now each pairs with one about in its place
+    (`nearest_alike`: within 6 pixels, the same picture first). Only about in place, so a fast scroll over
+    repeating tiles keeps its order.
+  - The swinging hose broke into shards: a new animation frame's pieces each flew to another's place. One
+    showing another part of the texture now blends only as a whole and not far (`blends`, also in
+    `blend_clip`: 12 pixels, corners within 1.5), otherwise it is drawn where it ends.
+  Checked: Sonic at speed, right by eye. Not checked with in-between frames: the race itself (the window
+  missed it), moving 3D games. Left: when Tune-Up's timer ends, one in-between picture shows two white
+  bars by the emptied avatar panel (not in either frame). The player's white square on that panel (report
+  of 2026-10-31) is not this: it came on 1.7.0, before in-between frames; still not reproduced.
 
 ## Known risks
 

@@ -107,9 +107,18 @@ pub struct Saved {
 /// console pixels (beyond it, a different thing drawn in the same place
 /// in the list, or a jump).
 const MAX_MOVE: f32 = 48.0;
+/// The farthest a new animation frame moves and is still blended, and how
+/// much its corners may differ in that (console pixels).
+const ANIMATED_MOVE: f32 = 12.0;
+const RIGID: f32 = 1.5;
 /// How far ahead the two lists are searched to line them up again after
 /// something appears or goes.
 const RESYNC: usize = 64;
+/// Closer than this (console pixels) is the same place.
+const STILL: f32 = 0.5;
+/// Closer than this counts as about the same place, for things that may
+/// have changed picture (a selected tile sits a little apart).
+const SAME_PLACE: f32 = 6.0;
 
 /// For each operation of `b`, the operation of `a` it is (by key, in order).
 /// Two with the same key but other texture coordinates pair only when no
@@ -148,7 +157,62 @@ fn line_up(a: &Frame, b: &Frame) -> Vec<Option<usize>> {
             (None, None) => (i, j) = (i + 1, j + 1),
         }
     }
+    nearest_alike(a, b, &mut pairs);
     pairs
+}
+
+/// Where an operation is on screen, in console pixels (about, for the
+/// clipper's: its centre with x and y from -1 to 1); None when it has no
+/// place or is behind the eye.
+fn place(kind: &Kind) -> Option<(f32, f32)> {
+    match kind {
+        Kind::Clip(out, _) => {
+            let w = out.iter().map(|v| v[0][3]).fold(f32::MAX, f32::min);
+            if w <= 0.0 {
+                return None;
+            }
+            let at = |c: usize| out.iter().map(|v| v[0][c] / v[0][3]).sum::<f32>() / 3.0;
+            Some((at(0) * 160.0, at(1) * 120.0))
+        }
+        Kind::Triangle(v, _) => Some((v.iter().map(|v| v[0]).sum::<f32>() / 3.0, v.iter().map(|v| v[1]).sum::<f32>() / 3.0)),
+        Kind::Rectangle(p, q) => Some(((p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0)),
+        Kind::Fill | Kind::Lut => None,
+    }
+}
+
+/// Things that look the same (a row of letter tiles) can be drawn in another
+/// order from one frame to the next (Didji Racing draws the row around its
+/// blinking cursor): by order alone each pairs with its neighbour and the
+/// whole row slides half a tile in the picture between. Each pairs instead
+/// with the one of its kind still in its place, so what didn't move doesn't.
+fn nearest_alike(a: &Frame, b: &Frame, pairs: &mut [Option<usize>]) {
+    let far = |i: usize, at: (f32, f32)| place(&a.ops[i].kind).map_or(f32::MAX, |p| (p.0 - at.0).abs() + (p.1 - at.1).abs());
+    let uvs_a: Vec<u64> = (0..a.ops.len()).map(|i| a.uvs(i)).collect();
+    for (j, pair) in pairs.iter_mut().enumerate() {
+        let (Some(i), Some(at)) = (*pair, place(&b.ops[j].kind)) else { continue };
+        let uvs = b.uvs(j);
+        // Only one about in the same place: scrolling rows of the same tile
+        // must keep their order, or a fast scroll goes backwards in the
+        // picture between. Nearest first and, as near, one that shows the
+        // same picture (a tile, not the blinking cursor over it); a tile
+        // that changes picture where it is (the selected one) is still
+        // that tile, not the next one along that looks like it.
+        let score = |c: usize| far(c, at) + if uvs_a[c] == uvs { 0.0 } else { 0.25 };
+        if far(i, at) < STILL && uvs_a[i] == uvs {
+            continue;
+        }
+        let key = b.key(j);
+        let mut best = (score(i), i);
+        for c in i.saturating_sub(RESYNC)..(i + RESYNC).min(a.ops.len()) {
+            if far(c, at) < SAME_PLACE && a.key(c) == key {
+                let d = score(c);
+                if d < best.0 {
+                    best = (d, c);
+                }
+            }
+        }
+        *pair = Some(best.1);
+    }
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -232,17 +296,18 @@ impl Ga3d {
         for (k, op) in b.ops.iter().enumerate() {
             self.regs[..REGS].copy_from_slice(&b.regs[op.regs]);
             let from = pairs[k].map(|i| a.ops[i].kind);
+            let same_look = pairs[k].is_some_and(|i| a.uvs(i) == b.uvs(k));
             match op.kind {
                 Kind::Clip(mut out, invcull) => {
                     if let Some(Kind::Clip(old, _)) = from {
-                        out = blend_clip(&old, &out, t, &self.regs);
+                        out = blend_clip(&old, &out, t, &self.regs, same_look);
                     }
                     self.out = out;
                     self.clip_and_draw(invcull, mem);
                 }
                 Kind::Triangle(mut v, invcull) => {
                     if let Some(Kind::Triangle(old, _)) = from
-                        && near(&old, &v)
+                        && blends(&old, &v, same_look)
                     {
                         for (n, o) in v.iter_mut().zip(&old) {
                             n[0] = lerp(o[0], n[0], t);
@@ -253,7 +318,7 @@ impl Ga3d {
                 }
                 Kind::Rectangle(mut p, mut q) => {
                     if let Some(Kind::Rectangle(op, oq)) = from
-                        && near(&[op, oq], &[p, q])
+                        && blends(&[op, oq], &[p, q], same_look)
                     {
                         for (n, o) in [(&mut p, op), (&mut q, oq)] {
                             n[0] = lerp(o[0], n[0], t);
@@ -280,10 +345,29 @@ fn near<const N: usize>(a: &[Vertex; N], b: &[Vertex; N]) -> bool {
     a.iter().zip(b).all(|(a, b)| (a[0] - b[0]).abs() <= MAX_MOVE && (a[1] - b[1]).abs() <= MAX_MOVE)
 }
 
+/// Whether a screen-space operation blends from `a` to `b`. One showing
+/// another part of a texture (`same_look` false) is a new animation frame:
+/// a sprite in one piece moves as a whole and not far; the pieces of one
+/// cut up (Didji Racing's swinging hose) would each fly to another piece's
+/// place, shards in the picture between, so they are drawn where they end.
+fn blends<const N: usize>(a: &[Vertex; N], b: &[Vertex; N], same_look: bool) -> bool {
+    if same_look {
+        return near(a, b);
+    }
+    let moved = |i: usize| (b[i][0] - a[i][0], b[i][1] - a[i][1]);
+    let (dx, dy) = moved(0);
+    dx.abs() <= ANIMATED_MOVE
+        && dy.abs() <= ANIMATED_MOVE
+        && (1..N).all(|i| {
+            let (x, y) = moved(i);
+            (x - dx).abs() <= RIGID && (y - dy).abs() <= RIGID
+        })
+}
+
 /// The clipper's triangle with its positions blended, when each vertex is
-/// in front (w > 0) in both and moved no more than `MAX_MOVE` on screen;
-/// the newer one otherwise.
-fn blend_clip(old: &[[[f32; 4]; 3]; 3], new: &[[[f32; 4]; 3]; 3], t: f32, regs: &[u32]) -> [[[f32; 4]; 3]; 3] {
+/// in front (w > 0) in both and moved no more than `MAX_MOVE` on screen
+/// (a new animation frame: as `blends`); the newer one otherwise.
+fn blend_clip(old: &[[[f32; 4]; 3]; 3], new: &[[[f32; 4]; 3]; 3], t: f32, regs: &[u32], same_look: bool) -> [[[f32; 4]; 3]; 3] {
     let (height, width) = (f24(regs[VPORTBOT + 1]).abs(), f24(regs[VPORTBOT + 3]).abs());
     let screen = |p: &[f32; 4]| [width * p[0] / p[3], height * p[1] / p[3]];
     let ok = old.iter().zip(new).all(|(o, n)| {
@@ -296,6 +380,22 @@ fn blend_clip(old: &[[[f32; 4]; 3]; 3], new: &[[[f32; 4]; 3]; 3], t: f32, regs: 
     });
     if !ok {
         return *new;
+    }
+    if !same_look {
+        let moved = |i: usize| {
+            let (so, sn) = (screen(&old[i][0]), screen(&new[i][0]));
+            (sn[0] - so[0], sn[1] - so[1])
+        };
+        let (dx, dy) = moved(0);
+        let whole = dx.abs() <= ANIMATED_MOVE
+            && dy.abs() <= ANIMATED_MOVE
+            && (1..3).all(|i| {
+                let (x, y) = moved(i);
+                (x - dx).abs() <= RIGID && (y - dy).abs() <= RIGID
+            });
+        if !whole {
+            return *new;
+        }
     }
     let mut v = *new;
     for (n, o) in v.iter_mut().zip(old) {
@@ -363,4 +463,79 @@ fn save(b: &Frame, mem: &Mem) -> (Vec<(usize, Vec<u8>)>, std::collections::BTree
         }
     }
     (out, tiles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sprite at `x`, with texture coordinate `u` (what it shows).
+    fn sprite(x: f32, u: f32) -> Kind {
+        let mut p: Vertex = [0.0; 12];
+        p[0] = x;
+        p[8] = u;
+        let mut q = p;
+        q[0] = x + 20.0;
+        Kind::Rectangle(p, q)
+    }
+
+    fn frame(ops: &[Kind]) -> Frame {
+        let mut f = Frame::default();
+        for &k in ops {
+            f.push(k, &[0; REGS]);
+        }
+        f
+    }
+
+    #[test]
+    fn a_row_drawn_in_another_order_stays_put() {
+        let a = frame(&[sprite(0.0, 1.0), sprite(40.0, 1.0), sprite(80.0, 1.0)]);
+        let b = frame(&[sprite(40.0, 1.0), sprite(80.0, 1.0), sprite(0.0, 1.0)]);
+        assert_eq!(line_up(&a, &b), vec![Some(1), Some(2), Some(0)]);
+    }
+
+    fn at(x: f32, y: f32) -> Vertex {
+        let mut v: Vertex = [0.0; 12];
+        v[0] = x;
+        v[1] = y;
+        v
+    }
+
+    #[test]
+    fn a_new_animation_frame_blends_only_as_a_whole() {
+        let old = [at(0.0, 0.0), at(16.0, 16.0)];
+        // A walking sprite: the same size, a little further on.
+        assert!(blends(&old, &[at(4.0, 0.0), at(20.0, 16.0)], false));
+        // A piece taking another piece's place.
+        assert!(!blends(&old, &[at(30.0, 5.0), at(46.0, 21.0)], false));
+        // Another shape.
+        assert!(!blends(&old, &[at(0.0, 0.0), at(24.0, 8.0)], false));
+        // The same picture may go further.
+        assert!(blends(&old, &[at(30.0, 5.0), at(46.0, 21.0)], true));
+    }
+
+    #[test]
+    fn a_blinking_cursor_does_not_take_the_tile_under_it() {
+        // Older: tile, cursor over it, tile. Newer: the two tiles.
+        let a = frame(&[sprite(0.0, 2.0), sprite(40.0, 9.0), sprite(40.0, 1.0)]);
+        let b = frame(&[sprite(0.0, 2.0), sprite(40.0, 1.0)]);
+        assert_eq!(line_up(&a, &b), vec![Some(0), Some(2)]);
+    }
+
+    #[test]
+    fn a_tile_that_changes_picture_stays_where_it_is() {
+        // The selected tile (picture 2) becomes a normal one (picture 1); the
+        // next normal one is 40 pixels along.
+        let a = frame(&[sprite(0.0, 2.0), sprite(40.0, 1.0)]);
+        let b = frame(&[sprite(0.0, 1.0), sprite(40.0, 1.0)]);
+        // (The other, left without a partner, is simply drawn where it is.)
+        assert_eq!(line_up(&a, &b)[0], Some(0));
+    }
+
+    #[test]
+    fn a_moving_sprite_still_pairs_with_itself() {
+        let a = frame(&[sprite(10.0, 1.0), sprite(100.0, 2.0)]);
+        let b = frame(&[sprite(14.0, 1.0), sprite(104.0, 2.0)]);
+        assert_eq!(line_up(&a, &b), vec![Some(0), Some(1)]);
+    }
 }
