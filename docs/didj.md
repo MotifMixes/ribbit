@@ -332,7 +332,14 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
   Textures: TEXSUBSEGMENT {segment, page[4:2]} + TEXINFO page[1:0]; a page is 1024 x 512 bytes, 32 to a
   segment in 2 x 2 groups. The menu uses R4G4B4A4 (mode 41) textures modulated by the vertex colour, alpha test
   GREATER 0, alpha blending (source alpha, 1 - source alpha) and Z LESS.
-- Not modelled yet: fog, dithering, mipmaps, tile-indexed textures, the Z-valid buffer, interrupts, timing.
+- Dithering: RENDERSTATE bit 11 (GRP3D_DITHERENB, data book ch. 22: R8G8B8 to R5G6B5), set per game. On real
+  units Sonic, Foster's Home and Clone Wars show a pattern and Fists of Foam none (community reports). Ribbit
+  honours the bit with the setting "3D dithering (original)" (off by default: colours rounded). The pattern
+  itself isn't documented: GUESS, a 4x4 ordered (Bayer) one. Checked 2026-11-08 (didjboot `DIDJ_DITHER=1`, title
+  screens): Sonic sets the bit, 40% of pixels change by one step of red, green or blue; Fists of Foam sets it
+  too, but only green moves (one step of 6 bits; its art is 5 bits a colour, exact in red and blue), which
+  would be hard to see and fits "no pattern".
+- Not modelled yet: fog, mipmaps, tile-indexed textures, the Z-valid buffer, interrupts, timing.
   Memory fill's value: GUESS bits 0-15 (the data book says 8-15).
 
 `didjboot` with `DIDJ_FRAMES=<folder>` saves the screen every 100 million instructions when it changed, and

@@ -432,6 +432,10 @@ pub struct Ga3d {
     /// HD pixels read upscaled textures (with HD drawing on).
     #[serde(skip)]
     pub hd_textures: bool,
+    /// Dither where a game asks for it (RENDERSTATE bit 11), as the real
+    /// engine does; off, the colours are rounded (smoother). A setting.
+    #[serde(skip)]
+    pub dither: bool,
     /// Text the font module drew lately (`fonthd`): textures holding it
     /// are drawn again from its outlines.
     #[serde(skip)]
@@ -632,6 +636,7 @@ impl Default for Ga3d {
             up_cache: Default::default(),
             epoch: 0,
             hd_textures: true,
+            dither: false,
             text: Default::default(),
             tween: None,
         }
@@ -1433,7 +1438,8 @@ impl Ga3d {
     }
 
     fn state(&self) -> State {
-        let rs = self.regs[RENDERSTATE];
+        // Dithering only with the setting on (`dither`).
+        let rs = self.regs[RENDERSTATE] & !((!self.dither as u32) << 11);
         let r = |i: usize| self.regs[i];
         let (rt1, rt2) = (r(RENDTRG0 + 1), r(RENDTRG0 + 2));
         State {
@@ -1450,9 +1456,22 @@ impl Ga3d {
 
 }
 
+/// A 4x4 ordered-dither matrix, as offsets in [0, 1) added before the
+/// colour is cut to 5 or 6 bits.
+const BAYER4: [[f32; 4]; 4] = {
+    let m = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    let mut out = [[0.0; 4]; 4];
+    let mut i = 0;
+    while i < 16 {
+        out[i / 4][i % 4] = (m[i / 4][i % 4] as f32 + 0.5) / 16.0;
+        i += 1;
+    }
+    out
+};
+
 impl Raster<'_> {
     /// The pixel pipeline: depth test, texture blending, alpha test, alpha
-    /// blending, writing (R5G6B5). Fog and dithering aren't modelled yet.
+    /// blending, dithering, writing (R5G6B5). Fog isn't modelled yet.
     /// The outcome, as an index into `pixels`.
     fn pixel(&self, st: &State, x: u32, y: u32, p: &Vertex, mem: Shared, d: &impl Dest) -> usize {
         let rs = st.rs;
@@ -1499,7 +1518,15 @@ impl Raster<'_> {
                 colour[c] = (src[c] * factor(ab & 31, c) + dst[c] * factor(ab >> 5 & 31, c)).clamp(0.0, 1.0);
             }
         }
-        let q = |c: f32, bits: u32| round_u32(c * ((1 << bits) - 1) as f32);
+        // Dithering (data book ch. 22, "Dithering": GRP3D_DITHERENB, bit 11,
+        // R8G8B8 to R5G6B5; VERIFIED per game on real units: Sonic, Foster's
+        // Home and Clone Wars show a pattern, Fists of Foam none). The
+        // pattern isn't documented: GUESS, a 4x4 ordered (Bayer) one.
+        let bias = if rs >> 11 & 1 != 0 { BAYER4[(y & 3) as usize][(x & 3) as usize] } else { 0.5 };
+        let q = |c: f32, bits: u32| {
+            let max = ((1 << bits) - 1) as f32;
+            ((c * max + bias) as u32).min(max as u32)
+        };
         d.write(addr, (q(colour[0], 5) << 11 | q(colour[1], 6) << 5 | q(colour[2], 5)) as u16, st.rt >> 27 & 1 != 0, mem);
         if rs >> 9 & 1 != 0 {
             d.write(zaddr, z as u16, st.zb >> 27 & 1 != 0, mem);

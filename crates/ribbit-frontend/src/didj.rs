@@ -74,6 +74,8 @@ struct Shared {
     frame_skip: AtomicBool,
     /// HD drawing scale (1 off).
     hd: AtomicU32,
+    /// The 3D engine dithers where games ask for it (`Ga3d::dither`).
+    dither: AtomicBool,
     sink: Mutex<Option<AudioSink>>,
     /// The Didj kept turning itself off right after starting, so it was
     /// left off (`run`); the app tells the player once.
@@ -229,6 +231,7 @@ impl DidjSession {
             cpu_max: AtomicU32::new(mode.cpu_scale.max(1) * 1000),
             frame_skip: AtomicBool::new(mode.frame_skip),
             hd: AtomicU32::new(mode.hd),
+            dither: AtomicBool::new(false),
             sink: Mutex::new(sink),
             gave_up: AtomicBool::new(false),
             usb: Mutex::new(None),
@@ -303,6 +306,7 @@ impl DidjSession {
             cpu_max: AtomicU32::new(1000),
             frame_skip: AtomicBool::new(false),
             hd: AtomicU32::new(1),
+            dither: AtomicBool::new(false),
             sink: Mutex::new(sink),
             gave_up: AtomicBool::new(false),
             usb: Mutex::new(None),
@@ -484,6 +488,11 @@ impl DidjSession {
     /// frame.
     pub fn set_hd(&self, scale: u32) {
         self.shared.hd.store(scale, Ordering::Relaxed);
+    }
+
+    /// 3D dithering as on the real engine, from the next frame.
+    pub fn set_dither(&self, on: bool) {
+        self.shared.dither.store(on, Ordering::Relaxed);
     }
 
     /// Frame skipping on or off (from the game's next frame).
@@ -668,6 +677,7 @@ fn run(s: &Shared, art: Option<Art>) {
             if d.bus.ga3d.hd.scale != hd.clamp(1, 4) {
                 d.bus.ga3d.hd.set_scale(hd);
             }
+            d.bus.ga3d.dither = s.dither.load(Ordering::Relaxed);
             let cycles = d.cpu_hz() / FPS as u64;
             let typed = s.serial.take_input();
             d.bus.uart_rx.extend(typed);
@@ -937,6 +947,7 @@ impl Hle {
         if self.p.m.bus.ga3d.hd.scale != hd.clamp(1, 4) {
             self.p.m.bus.ga3d.hd.set_scale(hd);
         }
+        self.p.m.bus.ga3d.dither = s.dither.load(Ordering::Relaxed);
         if self.p.m.bus.ga3d.tween().is_some() != self.smooth {
             self.p.m.bus.ga3d.set_tween(self.smooth);
         }

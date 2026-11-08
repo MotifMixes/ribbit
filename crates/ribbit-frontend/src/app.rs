@@ -1036,6 +1036,7 @@ impl App {
                 if !d.extras_missing.is_empty() && self.settings.didj_extras_notice {
                     self.ui.toast(format!("Didj started without {}: add the .lfp to its folder to have it", d.extras_missing.join(" and ")));
                 }
+                d.set_dither(self.settings.didj_dither);
                 self.didj = Some(d);
                 self.apply_didj_usb();
                 self.paused = false;
@@ -1085,6 +1086,7 @@ impl App {
         match built.and_then(|b| crate::didj::DidjSession::start_explorer(b, sink, self.ui.serial.clone())) {
             Ok(d) => {
                 self.fit_window = FIT_TRIES;
+                d.set_dither(self.settings.didj_dither);
                 self.didj = Some(d);
                 self.paused = false;
                 if let Some(a) = &mut self.audio {
@@ -1981,6 +1983,7 @@ impl App {
                 if let Some(d) = &self.didj {
                     d.set_frame_skip(self.settings.didj_frame_skip);
                     d.set_hd(self.settings.didj_hd.clamp(1, 4));
+                    d.set_dither(self.settings.didj_dither);
                     d.set_smooth(self.settings.didj_smooth);
                 }
             }

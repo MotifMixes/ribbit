@@ -1253,6 +1253,12 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                     .changed();
             }
             changed |= ui
+                .checkbox(&mut settings.didj_dither, "3D dithering (original)")
+                .on_hover_text(
+                    "The dot pattern a real Didj's 3D engine puts in the colours of games that ask for it (Sonic,                      Foster's Home, Clone Wars; not Fists of Foam). The exact pattern is a guess. Off: colours                      rounded, smoother. At once.",
+                )
+                .changed();
+            changed |= ui
                 .add_enabled(mode == 1, egui::Checkbox::new(&mut settings.didj_smooth, "Smooth motion (Enhanced (new))"))
                 .on_hover_text(
                     "In-between frames: between two of the game's frames, Ribbit draws the picture again with \

@@ -95,6 +95,9 @@ fn main() {
         didj.bus.ga3d.hd.set_scale(n);
     }
     didj.bus.ga3d.hd_textures = std::env::var("DIDJ_HD_TEX").map_or(true, |v| v != "0");
+    // DIDJ_DITHER=1: the 3D engine dithers where games ask (the app's
+    // "3D dithering (original)").
+    didj.bus.ga3d.dither = std::env::var("DIDJ_DITHER").is_ok_and(|v| v == "1");
     // DIDJ_FONT_LOG=1: prints each glyph the font module draws (HD on).
     let font_log = std::env::var_os("DIDJ_FONT_LOG").is_some();
     didj.fonts.log = font_log;

@@ -236,6 +236,10 @@ pub struct Settings {
     /// with its textures upscaled (1 off; experimental).
     #[serde(default = "default_didj_hd")]
     pub didj_hd: u32,
+    /// Didj: the 3D engine dithers where games ask for it, as the real one
+    /// does (off: colours rounded, smoother). At once.
+    #[serde(default)]
+    pub didj_dither: bool,
     /// Didj: the system package (DIDJ-0x000E0003….lfp) last started, for a
     /// cartridge opened from a folder that doesn't hold the firmware.
     #[serde(default)]
@@ -320,6 +324,7 @@ impl Default for Settings {
             didj_enhanced: true,
             didj_hle: false,
             didj_smooth: true,
+            didj_dither: false,
             didj_cpu_scale: default_didj_cpu_scale(),
             didj_frame_skip: false,
             didj_hd: default_didj_hd(),
