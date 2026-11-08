@@ -786,8 +786,15 @@ impl Process {
                 }
             }
             match earliest {
-                Some(u) => std::thread::sleep(u.saturating_duration_since(now)),
-                None => return false,
+                Some(u) => {
+                    // To the host's time less pauses only, so `late` shrinks.
+                    std::thread::sleep(u.saturating_duration_since(self.host() + self.late));
+                    self.on_time(u);
+                }
+                None => {
+                    self.idle = true;
+                    return false;
+                }
             }
         }
     }

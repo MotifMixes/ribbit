@@ -140,7 +140,7 @@ fn main() {
         let before = p.executed;
         let stop = p.run(step);
         if sampling {
-            eprintln!("[pc] {} {:08X}", p.tid(), p.cpu.r[15]);
+            eprintln!("[pc] {} {:08X} {} ms", p.tid(), p.cpu.r[15], t.elapsed().as_millis());
         }
         // DIDJ_HLE_FPS=1: the frames shown in each second (as didjboot's
         // DIDJ_SPEED counts them).

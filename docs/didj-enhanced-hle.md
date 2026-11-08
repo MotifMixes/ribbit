@@ -197,7 +197,8 @@ in-between option (phase 7).
   near the edge. Not a bug to chase further; what real hardware does is UNKNOWN (ask the user to check).
   FIXED with it: `hle_tick` set `frame_cycles` to 0 when a frame came, losing the rest; HLE ticks span whole
   sleeps, so frames slipped onto the 10 ms ticks. The rest is now kept (`%=`).
-- No lag, same pace (2026-11-07, the user: "any fps, keep the speed"): the HLE runs the 3D chip 4 times as fast
+- No lag, same pace (2026-11-07, the user: "any fps, keep the speed"): the HLE ran the 3D chip 4 times as fast
+  (REVERTED 2026-11-08 to the real speed, see the comparison below)
   (`Ga3d::speed_up`, didjhle DIDJ_HLE_GA3D=<n>, 1 = real). Checked by holding Right for 3 s of host time:
   JetPack 25-33 -> 60 fps, same distance (231 vs 224 px at 1x/2x); Clone Wars first level 20 -> 38-41 fps
   (55-62 while turning), same place at the end (frames differ by 1.0 of 255, as much as 0.4 s apart standing).
@@ -257,6 +258,36 @@ in-between option (phase 7).
   `didj_hle_states` (RIBBIT_DIDJ_CART/SAVE/KEYS/WAIT/SHOT_DIR): Clone Wars' crawl saved and loaded, picture
   identical, state 1.5 s (first: builds the base tree), load 0.3 s.
   Left: player checks in the app (menu, JetPack, Clone Wars, smoothness, states).
+- Cartridge sweep (2026-11-08, didjhle, the app's MOTIF save carried, Clone Wars' key path then A every 800
+  million to 15 billion): all 14 other carts start and run with no HLE change: Didji Racing (Raceway garage),
+  Foster's (phone keypad), Hannah Montana, High School Musical (story scenes), Indiana Jones (first level),
+  Nancy Drew (room), NeoPets (name keyboard), Nicktoons (SpongeBob scene), Sonic (title, "Press A"), SpongeBob
+  (story), Jedi Trials (first level), Super Chicks, Tinker Bell (tutorial), Wolverine (comic intro). Indiana
+  Jones, Nicktoons, Sonic, SpongeBob and Jedi Trials sleep most of the time (~45 M instructions/s, sound as
+  long as the run): paced by the clock, not stuck.
+- Compared with Original (2026-11-08; scratchpad scripts: both runs with no input once the cart starts, Original
+  by autostart, frames by cycles; each HLE screen held 0.3 s matched in order to Original's): every cart's
+  screens are Original's pixel for pixel (80x60 mean difference 0; the rest are fades or attract demos caught
+  at another moment). Found and fixed:
+  - Nancy Drew showed black between its logos, Original white: every layer off shows the MLC background, which
+    lightning-boot sets white (mlc.c) and the kernel keeps; the HLE now sets it in `mlc_init`.
+  - NeoPets' title fades (51 pictures, a step when 40 ms have passed by gettimeofday) took 2.5 s, Original 2.0;
+    its still screens 4.06 s, Original 4.84. Cause: the 3D chip at 4x. Its draw loop (flip; draw; nanosleep(0)
+    until MLC_IOCQDIRTY is clear) then took 20, 20, 10 ms with the 60 Hz frames, so 40 ms came 50 ms apart.
+    At 1x it is 40 ms, 2.0 s and 4.84 s, as Original. The user chose the real speed for every game, smooth
+    motion from in-between frames (JetPack back to 25-33 game frames).
+  - The programs' clock followed the host's while code ran (the same work read 0.2 ms one frame and 0.4 the
+    next) and the host woke late from sleeps. Now `clock()` goes on with the instructions at 393 MHz from where
+    it last met the host (`anchor`), the scheduler's sleep ends with the clock exactly on the deadline
+    (`on_time`; up to 100 ms of host lag caught up by shorter sleeps, more is lost as a pause), and `pace()`
+    waits when the programs run ahead or jumps when more than 20 ms behind. Frame gaps are now exact (40.0 ms).
+  Timing: the games line up with Original within 1-1.5 s over their intros (the start differs by the keys);
+  loading is host-bound (about 344 M instructions/s against Original's 394 in Didji Racing) or faster (Clone
+  Wars' logos 2.6 s, Original 3.1: files come without the NAND, UBI and FAT work). Sound, lined up by the
+  picture: correlation 0.6-0.87 within 0.35 s, the same level (Didji Racing, Super Chicks, SpongeBob, Nancy
+  Drew, Nicktoons, Sonic, Jedi Trials, Fosters, Indiana Jones, Hannah Montana, NeoPets); Clone Wars, High
+  School Musical, Tinker Bell and Wolverine not lined up (Original's autostart started them ~8 s later).
+  Gameplay with input is NOT compared yet.
 
 ## Known risks
 

@@ -86,8 +86,11 @@ impl Process {
     }
 
     /// What lf1000_mlc_probe sets up at boot: clocks, 320x240, video layer
-    /// priority first, each layer's frame buffer, the MLC on.
+    /// priority first, each layer's frame buffer, the MLC on. The kernel
+    /// keeps lightning-boot's white background (mlc.c), which shows while
+    /// every layer is off (Nancy Drew between its logos).
     pub(super) fn mlc_init(&mut self) {
+        self.mlc_write(BGCOLOR, 0xFF_FFFF);
         // PCLKMODE_ONLYWHENCPUACCESS (0) << 3 | BCLKMODE_DYNAMIC (2).
         self.mlc_change(CLKENB, |v| v & !0xF | 2);
         self.mlc_write(SCREENSIZE, (240 - 1) << 16 | (320 - 1));

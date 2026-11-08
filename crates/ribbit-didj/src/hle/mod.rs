@@ -224,6 +224,20 @@ pub struct Process {
     paused: std::time::Duration,
     #[serde(skip)]
     paused_at: Option<std::time::Instant>,
+    /// How late the host woke the last time every thread waited, also
+    /// taken off the host clock (`on_time`).
+    #[serde(skip)]
+    late: std::time::Duration,
+    /// The programs' clock when `anchor_executed` instructions had run: it
+    /// goes on with the instructions, at the processor's clock (`hz`), and
+    /// meets the host's whenever every thread waits (`clock`).
+    #[serde(with = "state::inst")]
+    anchor: std::time::Instant,
+    anchor_executed: u64,
+    hz: u64,
+    /// Every thread waited for something with no deadline (`schedule`).
+    #[serde(skip)]
+    idle: bool,
     /// Showing the boot splash: nothing runs before then.
     #[serde(with = "state::inst_opt")]
     boot_until: Option<std::time::Instant>,
@@ -268,9 +282,12 @@ impl Process {
         let mut m = crate::machine::Didj::with_sdram(crate::nand::Nand::erased(), mem::SDRAM);
         let frames = Frames::new(&mut m.bus, KUSER_VERSION);
         set_up_jit(&mut m);
-        // The 3D chip 4 times as fast (DIDJ_HLE_GA3D=<n>; 1 is the real one): frames never
-        // wait on drawing. JetPack Heroes went from 25-33 to 60 fps, its play at the same pace.
-        m.bus.ga3d.speed_up = std::env::var("DIDJ_HLE_GA3D").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+        // The 3D chip at the real one's speed (DIDJ_HLE_GA3D=<n>: n times as fast). 4 gave
+        // JetPack Heroes 60 fps for 25-33, but NeoPets' title fades (a step when 40 ms have
+        // passed) then came every 50 ms: its loops were no longer 20 ms. At 1 every cart
+        // keeps its pace; smooth motion comes from in-between frames (user, 2026-11-08).
+        m.bus.ga3d.speed_up = std::env::var("DIDJ_HLE_GA3D").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let start = std::time::Instant::now();
         let mut p = Self {
             cpu,
             vfs,
@@ -307,10 +324,15 @@ impl Process {
             dev: dev::Devices::default(),
             poll_until: HashMap::new(),
             trace: false,
-            start: std::time::Instant::now(),
+            start,
             epoch: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default(),
             paused: std::time::Duration::ZERO,
             paused_at: None,
+            late: std::time::Duration::ZERO,
+            anchor: start,
+            anchor_executed: 0,
+            hz: 0,
+            idle: false,
             boot_until: None,
             ticked: 0,
             frame_hz: std::env::var("DIDJ_HLE_MLC_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(60).max(1),
@@ -320,6 +342,7 @@ impl Process {
             tlb_generation: 0,
         };
         p.mlc_init();
+        p.hz = p.m.hle_cpu_hz();
         p
     }
 
@@ -425,11 +448,57 @@ impl Process {
     }
 
     /// The thread that ran last.
-    /// The host clock less the time spent paused: what every deadline and
-    /// clock of the programs follows.
+    /// What every deadline and clock of the programs follows: from the
+    /// last time they met the host's clock (`anchor`), the instructions run
+    /// at the processor's clock. On the host's clock alone, the same code
+    /// took 0.2 ms one frame and 0.4 the next, and a game timing its
+    /// frames by gettimeofday saw 39.9 ms for 40 one frame in two and
+    /// waited a loop more (NeoPets' title fades at 20 fps, Original 25);
+    /// on a Didj, as in Original, the same code takes the same time.
     fn clock(&self) -> std::time::Instant {
+        let ran = self.executed - self.anchor_executed;
+        self.anchor + std::time::Duration::from_nanos((ran as u128 * 1_000_000_000 / self.hz.max(1) as u128) as u64)
+    }
+
+    /// The host clock less the time spent paused and `late`.
+    fn host(&self) -> std::time::Instant {
         let now = self.paused_at.unwrap_or_else(std::time::Instant::now);
-        now.checked_sub(self.paused).unwrap_or(self.start)
+        now.checked_sub(self.paused + self.late).unwrap_or(self.start)
+    }
+
+    /// The programs' clock reads `t` from here on.
+    fn set_clock(&mut self, t: std::time::Instant) {
+        self.anchor = t;
+        self.anchor_executed = self.executed;
+    }
+
+    /// Back from sleeping until `u` with every thread waiting: no program
+    /// saw the clock meanwhile, so it reads `u` exactly, as on a Didj,
+    /// where a sleep ends on the tick. The host wakes late, or its own work
+    /// (drawing, system calls) put the programs behind (`late`, taken off
+    /// the next sleeps); more than 100 ms (a host slower than a Didj) is
+    /// time lost, as a pause is.
+    pub(super) fn on_time(&mut self, u: std::time::Instant) {
+        if self.paused_at.is_none() {
+            let host = std::time::Instant::now().checked_sub(self.paused).unwrap_or(self.start);
+            let late = host.saturating_duration_since(u);
+            self.late = late.min(std::time::Duration::from_millis(100));
+            self.paused += late - self.late;
+        }
+        self.set_clock(u.max(self.clock()));
+    }
+
+    /// Keeps the programs' clock with the host's while they run: waits when
+    /// it is ahead (a host faster than a Didj), jumps when it is more than
+    /// 20 ms behind (a slower one; programs spinning on gettimeofday then
+    /// still keep time).
+    fn pace(&mut self) {
+        let (clock, host) = (self.clock(), self.host());
+        if clock > host + std::time::Duration::from_millis(1) {
+            std::thread::sleep(clock - host);
+        } else if host > clock + std::time::Duration::from_millis(20) {
+            self.set_clock(host);
+        }
     }
 
     fn since_start(&self) -> std::time::Duration {
@@ -468,12 +537,18 @@ impl Process {
     /// (the first program) exits, a program crashes, or nothing can run.
     pub fn run(&mut self, budget: u64) -> Stop {
         if let Some(until) = self.boot_until {
-            let now = self.clock();
+            let now = self.host();
             if now < until {
                 std::thread::sleep((until - now).min(std::time::Duration::from_millis(10)));
                 return Stop::Budget;
             }
             self.boot_until = None;
+            self.on_time(until);
+        }
+        // Every thread waited with no deadline: the time went by meanwhile.
+        if std::mem::take(&mut self.idle) {
+            let host = self.host();
+            self.set_clock(host.max(self.clock()));
         }
         let mut left = budget;
         let mut slice = 0;
@@ -483,6 +558,7 @@ impl Process {
             }
             if !self.alive || self.block.is_some() || slice >= task::SLICE {
                 slice = 0;
+                self.pace();
                 if !self.schedule() {
                     return Stop::Blocked;
                 }
@@ -607,7 +683,7 @@ impl Process {
         if self.trace {
             let note = if self.block.is_some() { " (waits)" } else { "" };
             let path = path.map(|p| format!(" \"{p}\"")).unwrap_or_default();
-            eprintln!("[hle {}] {}{path} {a:08X?} = {:#X}{note}", self.tid, name(n), result);
+            eprintln!("[hle {} {:.1}] {}{path} {a:08X?} = {:#X}{note}", self.tid, self.since_start().as_secs_f64() * 1000.0, name(n), result);
         }
         if std::mem::take(&mut self.skip_result) || !self.alive {
             return;
