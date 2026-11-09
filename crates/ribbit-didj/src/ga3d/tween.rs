@@ -10,6 +10,7 @@
 //! so the game never sees it; with HD drawing on, so are the HD store's
 //! tiles under them.
 
+use std::collections::HashMap;
 use super::*;
 
 /// The registers an operation is drawn with: the pixel pipeline's, the
@@ -158,7 +159,86 @@ fn line_up(a: &Frame, b: &Frame) -> Vec<Option<usize>> {
         }
     }
     nearest_alike(a, b, &mut pairs);
+    follow_layers(a, b, &mut pairs);
     pairs
+}
+
+/// How far an operation moved from `from` to `to`, in console pixels.
+fn moved(from: &Kind, to: &Kind) -> Option<(f32, f32)> {
+    let (from, to) = (place(from)?, place(to)?);
+    Some((to.0 - from.0, to.1 - from.1))
+}
+
+/// A scrolling layer moves as one, whatever order it is drawn in. Every
+/// picture votes for each way it could have moved (to each place that same
+/// picture was), and each then pairs with the place the most votes agree on:
+/// lists that shift lose nothing, and a tile of a repeating wall doesn't
+/// take its identical neighbour, a tile's width away, which opened gaps.
+fn follow_layers(a: &Frame, b: &Frame, pairs: &mut [Option<usize>]) {
+    let eighths = |m: (f32, f32)| ((m.0 * 8.0).round() as i32, (m.1 * 8.0).round() as i32);
+    let mut same_look: HashMap<_, Vec<usize>> = HashMap::new();
+    for i in 0..a.ops.len() {
+        if place(&a.ops[i].kind).is_some() {
+            same_look.entry((a.key(i), a.uvs(i))).or_default().push(i);
+        }
+    }
+    let candidates = |j: usize| -> Vec<(usize, (f32, f32))> {
+        same_look.get(&(b.key(j), b.uvs(j))).map_or(Vec::new(), |list| {
+            let moves = list.iter().filter_map(|&i| Some((i, moved(&a.ops[i].kind, &b.ops[j].kind)?)));
+            moves.filter(|(_, m)| m.0.abs() <= MAX_MOVE && m.1.abs() <= MAX_MOVE).collect()
+        })
+    };
+    let mut votes: HashMap<(i32, i32), u32> = HashMap::new();
+    for j in 0..b.ops.len() {
+        for (_, m) in candidates(j) {
+            *votes.entry(eighths(m)).or_default() += 1;
+        }
+    }
+    for (j, pair) in pairs.iter_mut().enumerate() {
+        // Most votes; a move only it has (3D, each triangle its own): the
+        // one in the list's order; then the shortest.
+        let score = |&(i, m): &(usize, (f32, f32))| {
+            let count = votes[&eighths(m)];
+            (count, count == 1 && *pair == Some(i), -(m.0.abs() + m.1.abs()))
+        };
+        // A move only one picture could make is no layer's: one that changed
+        // picture in its place keeps its pair, not one that looks like it now.
+        if let Some(&(i, m)) = candidates(j).iter().max_by(|x, y| score(x).partial_cmp(&score(y)).unwrap())
+            && (votes[&eighths(m)] > 1 || pair.is_none())
+        {
+            *pair = Some(i);
+        }
+    }
+}
+
+/// How far to take back an operation that has no earlier self to blend from
+/// (a tile that changed picture, one half of a quad) so that it stays with
+/// what is drawn around it: as its neighbour in the list moved. Only for one
+/// or two in a row: more is a sprite, which has its own motion.
+fn with_neighbours(a: &Frame, b: &Frame, pairs: &[Option<usize>]) -> Vec<Option<(f32, f32)>> {
+    let same = |j: usize| pairs[j].is_some_and(|i| a.key(i) == b.key(j) && a.uvs(i) == b.uvs(j));
+    let drawn = |j: usize| place(&b.ops[j].kind).is_some();
+    let mut shifts = vec![None; b.ops.len()];
+    let mut j = 0;
+    while j < b.ops.len() {
+        if !drawn(j) || same(j) {
+            j += 1;
+            continue;
+        }
+        let start = j;
+        while j < b.ops.len() && drawn(j) && !same(j) {
+            j += 1;
+        }
+        if j - start > 2 {
+            continue;
+        }
+        let beside = |n: usize| drawn(n) && b.key(n) == b.key(start);
+        let neighbour = (start > 0 && beside(start - 1)).then(|| start - 1).or((j < b.ops.len() && beside(j)).then_some(j));
+        let Some(n) = neighbour else { continue };
+        let Some(m) = pairs[n].and_then(|i| moved(&a.ops[i].kind, &b.ops[n].kind)) else { continue };
+        shifts[start..j].fill(Some(m));
+    }
+    shifts
 }
 
 /// Where an operation is on screen, in console pixels (about, for the
@@ -290,17 +370,63 @@ impl Ga3d {
         let (mem_saved, tiles) = save(b, mem);
         let saved = Saved { mem: mem_saved, hd: if self.hd.on() { self.hd.save(tiles) } else { Vec::new() } };
         let pairs = line_up(a, b);
+        let shifts = with_neighbours(a, b, &pairs);
+        // TEMPTW: TWEEN_DUMP=1 prints, per in-between picture, one line per
+        // drawn op (kind, where, how big, which op it paired with, its move
+        // and back-shift). The timer-end glitch is the last picture before
+        // the Tune-Up screen changes; grab the tail of stderr.
+        if std::env::var_os("TWEEN_DUMP").is_some() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static PIC: AtomicU64 = AtomicU64::new(0);
+            let n = PIC.fetch_add(1, Ordering::Relaxed);
+            let span = |kind: &Kind| -> (f32, f32) {
+                match kind {
+                    Kind::Rectangle(p, q) => ((q[0] - p[0]).abs(), (q[1] - p[1]).abs()),
+                    Kind::Triangle(v, _) => {
+                        let ext = |c: usize| v.iter().map(|x| x[c]).fold(f32::MIN, f32::max) - v.iter().map(|x| x[c]).fold(f32::MAX, f32::min);
+                        (ext(0), ext(1))
+                    }
+                    _ => (f32::NAN, f32::NAN),
+                }
+            };
+            eprintln!("[pic {n}] t={t:.3} ops={}", b.ops.len());
+            for (k, op) in b.ops.iter().enumerate() {
+                let Some(at) = place(&op.kind) else { continue };
+                let tag = match op.kind {
+                    Kind::Clip(..) => "clip",
+                    Kind::Triangle(..) => "tri",
+                    Kind::Rectangle(..) => "rect",
+                    Kind::Fill => "fill",
+                    Kind::Lut => "lut",
+                };
+                let (w, h) = span(&op.kind);
+                let (pair, mv, look) =
+                    pairs[k].map_or((-1i64, (f32::NAN, f32::NAN), false), |i| (i as i64, moved(&a.ops[i].kind, &op.kind).unwrap_or((f32::NAN, f32::NAN)), a.uvs(i) == b.uvs(k)));
+                let sh = shifts[k].map_or(f32::NAN, |s| s.0);
+                eprintln!(
+                    "  [op {k}] {tag} at {:.1},{:.1} size {:.1}x{:.1} pair {pair} mv {:.2},{:.2} look {} shift {:.2} uv {:x}",
+                    at.0, at.1, w, h, mv.0, mv.1, look as u8, sh, b.uvs(k)
+                );
+            }
+        }
         // Everything the drawing touches that the game would see.
         let keep = (self.regs.clone(), self.lut, self.out, self.cost, self.pixels, self.triangles, self.trace.len(), self.skip);
         self.skip = false;
         for (k, op) in b.ops.iter().enumerate() {
             self.regs[..REGS].copy_from_slice(&b.regs[op.regs]);
-            let from = pairs[k].map(|i| a.ops[i].kind);
+            let from = if shifts[k].is_some() { None } else { pairs[k].map(|i| a.ops[i].kind) };
+            let back = shifts[k].map(|m| (m.0 * (1.0 - t), m.1 * (1.0 - t)));
             let same_look = pairs[k].is_some_and(|i| a.uvs(i) == b.uvs(k));
             match op.kind {
                 Kind::Clip(mut out, invcull) => {
                     if let Some(Kind::Clip(old, _)) = from {
                         out = blend_clip(&old, &out, t, &self.regs, same_look);
+                    }
+                    if let Some((x, y)) = back {
+                        for v in &mut out {
+                            v[0][0] -= x * v[0][3] / 160.0;
+                            v[0][1] -= y * v[0][3] / 120.0;
+                        }
                     }
                     self.out = out;
                     self.clip_and_draw(invcull, mem);
@@ -314,6 +440,12 @@ impl Ga3d {
                             n[1] = lerp(o[1], n[1], t);
                         }
                     }
+                    if let Some((x, y)) = back {
+                        for n in &mut v {
+                            n[0] -= x;
+                            n[1] -= y;
+                        }
+                    }
                     self.triangle(&v, invcull, mem);
                 }
                 Kind::Rectangle(mut p, mut q) => {
@@ -323,6 +455,12 @@ impl Ga3d {
                         for (n, o) in [(&mut p, op), (&mut q, oq)] {
                             n[0] = lerp(o[0], n[0], t);
                             n[1] = lerp(o[1], n[1], t);
+                        }
+                    }
+                    if let Some((x, y)) = back {
+                        for n in [&mut p, &mut q] {
+                            n[0] -= x;
+                            n[1] -= y;
                         }
                     }
                     self.rectangle(&p, &q, mem);
@@ -530,6 +668,27 @@ mod tests {
         let b = frame(&[sprite(0.0, 1.0), sprite(40.0, 1.0)]);
         // (The other, left without a partner, is simply drawn where it is.)
         assert_eq!(line_up(&a, &b)[0], Some(0));
+    }
+
+    #[test]
+    fn a_repeating_wall_scrolls_as_one() {
+        // Tiles of one picture 10 apart and a marked one, all moving -2, the
+        // list starting one tile later: by nearness or order some would take
+        // the tile beside them.
+        let row = |at: f32, n: usize, marked: f32| -> Vec<Kind> { (0..n).map(|k| sprite(at + 10.0 * k as f32, 0.0)).chain([sprite(marked, 0.5)]).collect() };
+        let (a, b) = (frame(&row(0.0, 8, 200.0)), frame(&row(8.0, 7, 198.0)));
+        let pairs = line_up(&a, &b);
+        for (j, pair) in pairs.iter().enumerate() {
+            assert_eq!(moved(&a.ops[pair.unwrap()].kind, &b.ops[j].kind), Some((-2.0, 0.0)), "op {j}");
+        }
+    }
+
+    #[test]
+    fn a_tile_with_a_new_picture_moves_with_its_neighbours() {
+        let a = frame(&[sprite(0.0, 0.0), sprite(10.0, 0.25), sprite(20.0, 0.5)]);
+        let b = frame(&[sprite(-2.0, 0.0), sprite(8.0, 0.75), sprite(18.0, 0.5)]);
+        let pairs = line_up(&a, &b);
+        assert_eq!(with_neighbours(&a, &b, &pairs), vec![None, Some((-2.0, 0.0)), None]);
     }
 
     #[test]

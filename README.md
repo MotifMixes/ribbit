@@ -87,7 +87,7 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
   spinner and slider, saves.
 * **Didj** (2008 Linux handheld, early): built from its own firmware packages; the menu, the built-in JetPack
   Heroes and cartridges play with picture, 3D engine and sound. An ARM JIT speeds it up on x86-64 PCs (Windows, Linux,
-  Intel Macs); Apple-silicon Macs and Android run it slower for now. Enhanced mode
+  Intel Macs); Apple-silicon Macs and Android run it slower for now. Original+ mode
   repairs its files after a crash instead of locking on the tune-up screen.
 * **LeapPad** (1999 book-and-pen pad, early): the real base ROM and book cartridges, including the first "Classic"
   books. Cartridges hold no page pictures, so Ribbit draws each page from the cartridge's own touch layout (its spots,

@@ -136,6 +136,12 @@ pub struct Settings {
     /// Console view: show each control's keyboard key on it, as a keycap
     /// that lights up when pressed.
     pub console_view_keys: bool,
+    /// EXPERIMENTAL: on an L-MAX, drive the TV video chip and show its
+    /// picture as the main screen with the handheld LCD in a corner inset.
+    /// None: automatic (on for the v2.2 BaseROM, which drives both screens;
+    /// off for v2.1, whose LCD blanks). Some(true/false): forced on/off.
+    #[serde(default)]
+    pub lmax_tv_output: Option<bool>,
     /// A folder written onto the RockIt Twist's internal storage at power-on
     /// (laid out like its F: drive), if one is chosen.
     pub twist_content: Option<PathBuf>,
@@ -294,6 +300,7 @@ impl Default for Settings {
             console_view: false,
             console_view_twist: true,
             console_view_keys: true,
+            lmax_tv_output: None,
             twist_content: None,
             leapster2_sd_folder: None,
             twist_usb: false,

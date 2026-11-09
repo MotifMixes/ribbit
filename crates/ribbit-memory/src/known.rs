@@ -10,7 +10,8 @@ pub enum Hardware {
     Leapster,
     /// EXPERIMENTAL: emulated with its TV video chip and controller link.
     LeapsterTv,
-    /// EXPERIMENTAL: runs on the original's model (TV output not emulated).
+    /// EXPERIMENTAL: runs on the original's model; the TV video chip can be
+    /// driven for its dual screen (TV picture + handheld LCD).
     LeapsterLmax,
     /// EXPERIMENTAL: 16 MB RAM, internal SPI flash, power-controller status.
     Leapster2,

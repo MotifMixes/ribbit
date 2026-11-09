@@ -69,6 +69,8 @@ pub enum Action {
     SetLeapster2Usb(bool),
     /// Offer the Didj on the PC's USB, or stop.
     SetDidjUsb(bool),
+    /// Turn the Didj on: start its menu with no cartridge.
+    TurnOnDidj,
     SetDidjSerialTcp(bool),
     ImportDidjSave(PathBuf),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
@@ -79,6 +81,9 @@ pub enum Action {
     SetSdFolder(Option<PathBuf>),
     /// The console view was turned on or off.
     ConsoleViewChanged,
+    /// L-MAX TV output (dual screen): None automatic, Some(on/off) forced.
+    /// Applies to a running L-MAX at once, and is saved.
+    SetLmaxTvOutput(Option<bool>),
     /// The update is installed: save, start the new version and quit.
     RestartForUpdate,
     /// Start or stop screen recording.
@@ -1091,6 +1096,39 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             actions.push(Action::SettingsChanged);
         }
         ui.separator();
+        // The L-MAX's TV output (dual screen).
+        sub_menu(ui, "L-MAX TV output", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Experimental. Drives the L-MAX's TV video chip and shows its picture as the \
+                     main screen, with the handheld LCD in a corner. The L-MAX can't tell a TV is \
+                     plugged in, so Ribbit decides. Applies at once.",
+                )
+                .weak(),
+            );
+            // 0 automatic, 1 on, 2 off.
+            let mut mode = match settings.lmax_tv_output {
+                None => 0u8,
+                Some(true) => 1,
+                Some(false) => 2,
+            };
+            let mut changed = ui
+                .radio_value(&mut mode, 0, "Automatic")
+                .on_hover_text("On for the v2.2 BaseROM, which drives the TV and the LCD together; off for v2.1, whose LCD blanks when a TV is attached.")
+                .changed();
+            changed |= ui.radio_value(&mut mode, 1, "On (show TV + LCD)").changed();
+            changed |= ui.radio_value(&mut mode, 2, "Off (LCD only)").changed();
+            if changed {
+                let choice = match mode {
+                    1 => Some(true),
+                    2 => Some(false),
+                    _ => None,
+                };
+                settings.lmax_tv_output = choice;
+                actions.push(Action::SetLmaxTvOutput(choice));
+            }
+        });
+        ui.separator();
         // The original LeapPad's own items.
         sub_menu(ui, "LeapPad (1999)", |ui| {
             if ui
@@ -1130,6 +1168,15 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             ui.label(egui::RichText::new("Open a LeapPad cartridge with Open Cartridge…").weak());
         });
         sub_menu(ui, "Didj", |ui| {
+            if ui
+                .add_enabled(info.didj_folder.is_some(), egui::Button::new("Turn on (no cartridge)"))
+                .on_hover_text("The Didj's own menu, no game in.")
+                .on_disabled_hover_text("No Didj found: add the folder that holds its firmware packages (DIDJ-0x….lfp, or one bios.didj) with \"Add games folder\".")
+                .clicked()
+            {
+                actions.push(Action::TurnOnDidj);
+                ui.close();
+            }
             match &info.didj_folder {
                 Some(dir) => {
                     if ui.button("Open the Didj folder").on_hover_text(dir.display().to_string()).clicked() {
@@ -1191,27 +1238,27 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 actions.push(Action::SettingsChanged);
             }
             ui.separator();
-            // 0 Enhanced, 1 Enhanced (new), 2 Original.
+            // 0 Original+, 1 Enhanced (new), 2 Original.
             let mut mode = if !settings.didj_enhanced { 2 } else { settings.didj_hle as u8 };
             let mut changed = ui
-                .radio_value(&mut mode, 0, "Enhanced")
-                .on_hover_text(
-                    "Fixes faults in the Didj's own software. After a crash or a power-off without a shutdown, \
-                     its file check only looked for faults and never repaired them, so even a harmless finding \
-                     locked the console on \"Your Didj needs a tune-up\" until LeapFrog Connect was used; and a \
-                     crash turned the console off. Enhanced repairs the files and goes back to the menu. It also \
-                     gives the system 50 MB of memory instead of 16 (fewer reloads and out-of-memory crashes) \
-                     and runs the processor faster when your PC has time to spare. From the next power-on.",
-                )
-                .changed();
-            changed |= ui
                 .radio_value(&mut mode, 1, "Enhanced (new, experimental)")
                 .on_hover_text(
                     "Runs the Didj's menu and games without its Linux system: Ribbit answers what they ask of it. \
                      Starts sooner, never lags, and motion is smooth at 60 frames a second (in-between frames). \
                      Saves are shared with the other modes. No USB or LeapFrog Connect and no save states here: \
-                     use Enhanced for those. Checked so far on the menu, JetPack Heroes and Star Wars: The Clone \
+                     use Original+ for those. Checked so far on the menu, JetPack Heroes and Star Wars: The Clone \
                      Wars. From the next power-on.",
+                )
+                .changed();
+            changed |= ui
+                .radio_value(&mut mode, 0, "Original+")
+                .on_hover_text(
+                    "Fixes faults in the Didj's own software. After a crash or a power-off without a shutdown, \
+                     its file check only looked for faults and never repaired them, so even a harmless finding \
+                     locked the console on \"Your Didj needs a tune-up\" until LeapFrog Connect was used; and a \
+                     crash turned the console off. Original+ repairs the files and goes back to the menu. It also \
+                     gives the system 50 MB of memory instead of 16 (fewer reloads and out-of-memory crashes) \
+                     and runs the processor faster when your PC has time to spare. From the next power-on.",
                 )
                 .changed();
             changed |= ui
@@ -1219,7 +1266,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 .on_hover_text("The Didj's software, memory and processor as LeapFrog shipped them. From the next power-on.")
                 .changed();
             ui.separator();
-            ui.label(egui::RichText::new("Processor (Enhanced)").weak());
+            ui.label(egui::RichText::new("Processor (Original+)").weak());
             ui.add_enabled_ui(mode == 0, |ui| {
                 for (scale, label) in [(1, "393 MHz (original)"), (2, "Up to 2× (786 MHz)"), (3, "Up to 3× (1.2 GHz)")] {
                     changed |= ui
@@ -1259,12 +1306,11 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 )
                 .changed();
             changed |= ui
-                .add_enabled(mode == 1, egui::Checkbox::new(&mut settings.didj_smooth, "Smooth motion (Enhanced (new))"))
-                .on_hover_text(
+                .add_enabled(false, egui::Checkbox::new(&mut settings.didj_smooth, "Smooth motion (Enhanced (new))"))
+                .on_disabled_hover_text(
                     "In-between frames: between two of the game's frames, Ribbit draws the picture again with \
                      everything moved part of the way, so games that run at 20-30 frames a second move as smoothly \
-                     as at 60, at their own speed. The picture is one game frame behind. Off: each game frame as \
-                     it was drawn (original). At once.",
+                     as at 60. Turned off for now while its motion is being fixed.",
                 )
                 .changed();
             if changed {
@@ -2663,6 +2709,16 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         }
         return;
     }
+    // The Didj's page: it boots from its firmware packages (DIDJ-0x….lfp or a
+    // bios.didj), not a Leapster BIOS, so it has its own start.
+    if tab == Some(Family::Didj) {
+        let have = library.games.iter().any(|g| g.family == Family::Didj && g.has_tag("System"))
+            || settings.didj_package.as_ref().is_some_and(|p| p.is_file());
+        if have && power_button(ui, "Turn on the Didj (its menu)") {
+            actions.push(Action::TurnOnDidj);
+        }
+        return;
+    }
     // The Explorer's page: its firmware package in the library is the console.
     if tab == Some(Family::Explorer) {
         let firmware = library.games.iter().find(|g| g.family == Family::Explorer && g.has_tag("System"));
@@ -2676,7 +2732,6 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     let console = match tab {
         Some(Family::Zippity) => Hardware::Zippity,
         Some(Family::RockItTwist) => Hardware::RockItTwist,
-        Some(Family::Didj) => Hardware::Didj,
         Some(Family::Explorer) => Hardware::Explorer,
         _ => library.selected_console(&settings.library_console),
     };

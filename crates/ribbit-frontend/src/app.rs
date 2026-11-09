@@ -527,6 +527,22 @@ impl App {
             self.ui.toast("HD vectors are not available with this BIOS");
         }
         machine.keep_awake = !self.settings.turn_off_when_idle;
+        // EXPERIMENTAL: on an L-MAX, drive the TV video chip (dual screen). The
+        // BIOS can't sense a TV, so it is forced per the setting; automatic is
+        // on for the v2.2 BaseROM (which drives both screens), off for v2.1
+        // (whose LCD blanks).
+        if machine.is_lmax() {
+            let auto = machine.firmware().known().is_some_and(|k| k.name.contains("v2.2"));
+            machine.set_lmax_tv_output(self.settings.lmax_tv_output.unwrap_or(auto));
+        }
+        tracing::info!(
+            target: "ribbit::boot",
+            "L-MAX TV output: is_lmax={} known={:?} setting={:?} chip_installed={}",
+            machine.is_lmax(),
+            machine.firmware().known().map(|k| k.name),
+            self.settings.lmax_tv_output,
+            machine.io.lmax_tv.is_some(),
+        );
         let mut saves = SavePaths::for_machine(&self.save_dir(), &machine);
         if saves.sd.is_some() {
             saves.sd_folder = self.settings.leapster2_sd_folder.clone().map(|d| Arc::new(crate::sdcard::Folder::new(d)));
@@ -1010,7 +1026,9 @@ impl App {
             frame_skip: self.settings.didj_frame_skip,
             hd: self.settings.didj_hd.clamp(1, 4),
             hle: enhanced && self.settings.didj_hle,
-            smooth: self.settings.didj_smooth,
+            // In-between frames are turned off for now (the current version made
+            // motion worse); the didj_smooth setting is ignored until it's fixed.
+            smooth: false,
         }
     }
 
@@ -1960,10 +1978,43 @@ impl App {
                     "Didj unplugged from USB".to_string()
                 });
             }
+            Action::TurnOnDidj => {
+                // The Didj's system package: in the library, last played, or in a games folder.
+                let package = self
+                    .library
+                    .games
+                    .iter()
+                    .find(|g| g.family == crate::library::Family::Didj && g.has_tag("System"))
+                    .map(|g| g.path.clone())
+                    .or_else(|| self.settings.didj_package.clone().filter(|p| p.is_file()))
+                    .or_else(|| self.settings.rom_folders.iter().find_map(|f| crate::didj::find_package(f, 3)));
+                match package {
+                    Some(package) => {
+                        let art = crate::didj::menu_art(&package, None);
+                        self.start_didj(package, None, art);
+                    }
+                    None => self.ui.problem(
+                        "No Didj to turn on",
+                        "Add the folder that holds the Didj's firmware packages (DIDJ-0x….lfp files, or one bios.didj holding them) with \"Add games folder\".",
+                        "",
+                    ),
+                }
+            }
             Action::ImportTwistZip(path) => self.import_twist_zip(path),
             Action::SdCard(job) => self.sd_card(job),
             Action::SetSdFolder(path) => self.set_sd_folder(path),
             Action::ConsoleViewChanged => self.console_view_changed(),
+            Action::SetLmaxTvOutput(choice) => {
+                self.settings.lmax_tv_output = choice;
+                self.save_settings();
+                if let Some(s) = &self.session {
+                    let mut m = s.emu.lock();
+                    if m.is_lmax() {
+                        let auto = m.firmware().known().is_some_and(|k| k.name.contains("v2.2"));
+                        m.set_lmax_tv_output(choice.unwrap_or(auto));
+                    }
+                }
+            }
             Action::Reset => self.reset(),
             Action::TogglePause => self.toggle_pause(),
             Action::Screenshot => self.screenshot(),
@@ -1986,7 +2037,8 @@ impl App {
                     d.set_hd(self.settings.didj_hd.clamp(1, 4));
                     d.set_dither(self.settings.didj_dither);
                     d.set_turn_off_when_idle(self.settings.turn_off_when_idle);
-                    d.set_smooth(self.settings.didj_smooth);
+                    // In-between frames off for now (see didj_mode); ignore the setting.
+                    d.set_smooth(false);
                 }
             }
             Action::ResumeAfterIdle => self.resume_after_idle(),
@@ -2485,7 +2537,7 @@ impl App {
             },
             (None, None, None) => match self.didj.as_ref().map(|d| d.save_state()) {
                 Some(Some(b)) => b,
-                Some(None) => return self.ui.toast("Save states aren't made in Didj Enhanced (new) yet: switch to Enhanced or Original (Emulation > Didj) for them"),
+                Some(None) => return self.ui.toast("Save states aren't made in Didj Enhanced (new) yet: switch to Original+ or Original (Emulation > Didj) for them"),
                 None => return,
             },
         };
@@ -2973,7 +3025,7 @@ impl App {
                 let explain = if self.settings.didj_enhanced {
                     "It turned itself off 3 times in a row soon after starting, so Ribbit left it off. Try starting the Didj's menu without a game, or another cartridge."
                 } else {
-                    "It turned itself off 3 times in a row soon after starting, so Ribbit left it off. In Original mode a Didj turns itself off when a game crashes; Enhanced mode (Emulation > Didj) goes back to the menu instead."
+                    "It turned itself off 3 times in a row soon after starting, so Ribbit left it off. In Original mode a Didj turns itself off when a game crashes; Original+ mode (Emulation > Didj) goes back to the menu instead."
                 };
                 self.ui.problem("The Didj keeps turning itself off", explain, "");
             }
@@ -3433,6 +3485,29 @@ impl App {
                 hd_frame = true;
             }
         }
+        // EXPERIMENTAL: the L-MAX's TV output (dual screen). render_frame left
+        // the handheld LCD in self.frame; render_tv gives the TV chip's
+        // picture, shown as the main screen with the LCD in a corner inset.
+        let lmax_tv = self.session.as_ref().and_then(|s| {
+            let m = s.emu.lock();
+            m.io.lmax_tv.as_ref().filter(|_| !m.is_leapster_tv()).map(|tvchip| {
+                // Diagnostic: how much the BIOS has touched the TV chip, once a
+                // second, so a run shows whether it is driving the TV at all.
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static TICK: AtomicU32 = AtomicU32::new(0);
+                if TICK.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
+                    tracing::info!(target: "ribbit::boot", "L-MAX TV chip: reads={} writes={}", tvchip.reads, tvchip.writes);
+                }
+                let mut tv = Box::new([0u32; WIDTH * HEIGHT]);
+                m.render_tv(&mut tv);
+                tv
+            })
+        });
+        let lmax_dual = lmax_tv.is_some();
+        if let Some(tv) = lmax_tv {
+            self.tv_frame.clear();
+            self.tv_frame.extend_from_slice(&tv[..]);
+        }
         if let Some(z) = &self.zippity {
             z.frame(&mut self.tv_frame);
         }
@@ -3456,6 +3531,9 @@ impl App {
             Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
         } else if let Some(size) = didj_size {
             Some(size)
+        } else if lmax_dual {
+            // The TV chip's 160x160 game picture is the main screen.
+            Some((WIDTH, HEIGHT))
         } else {
             None
         };
@@ -3671,8 +3749,15 @@ impl App {
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
         let lcd = (self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some())
             .then_some((self.lcd_px, display, self.settings.ai));
+        // The handheld LCD inset in the bottom-right corner of the TV picture.
+        let inset = lmax_dual.then(|| {
+            let (x, y, w, h) = self.lcd_px;
+            let s = (w.min(h) / 3.0).max(1.0);
+            let m = s * 0.08;
+            (x + w - s - m, y + h - s - m, s, s)
+        });
         let mut deltas = out.textures_delta;
-        let rendered = gpu.render(lcd, &jobs, &deltas, ppp);
+        let rendered = gpu.render(lcd, inset, &jobs, &deltas, ppp);
         // Handled by `render` (debug builds of egui panic when an unhandled
         // delta is dropped).
         deltas.clear();
@@ -3781,7 +3866,7 @@ impl App {
         if let Some(h) = self.current_hardware() {
             let mode = match h {
                 Hardware::Didj if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
-                Hardware::Didj if self.settings.didj_enhanced => " (Enhanced)",
+                Hardware::Didj if self.settings.didj_enhanced => " (Original+)",
                 Hardware::Didj => " (Original)",
                 _ => "",
             };

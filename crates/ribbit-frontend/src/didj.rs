@@ -387,7 +387,7 @@ impl DidjSession {
 
     /// Why USB isn't offered now (Enhanced (new) has no kernel to drive it).
     pub fn usb_unavailable(&self) -> Option<&'static str> {
-        self.is_hle().then_some("USB and LeapFrog Connect need the Didj's own system: switch to Enhanced or Original (Emulation > Didj)")
+        self.is_hle().then_some("USB and LeapFrog Connect need the Didj's own system: switch to Original+ or Original (Emulation > Didj)")
     }
 
     /// News of the USB link since last asked.
@@ -1172,12 +1172,10 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
     }
     let data = std::fs::read(path).ok()?;
     let id = ribbit_didj::package::identify(&name, &data)?;
-    let meta = ribbit_core::zip::entries(&data)
-        .ok()?
-        .into_iter()
-        .find(|e| e.name.to_ascii_lowercase().ends_with("meta.inf"))
-        .and_then(|e| ribbit_core::zip::read_entry(&data, &e).ok())
-        .map(|m| ribbit_didj::package::Meta::parse(&String::from_utf8_lossy(&m)))?;
+    let entries = ribbit_core::zip::entries(&data).ok()?;
+    let meta_entry = entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with("meta.inf"))?;
+    let meta = ribbit_didj::package::Meta::parse(&String::from_utf8_lossy(&ribbit_core::zip::read_entry(&data, meta_entry).ok()?));
+    let dir = meta_entry.name[..meta_entry.name.len() - "meta.inf".len()].to_string();
     if !meta.is_didj() {
         return None;
     }
@@ -1210,7 +1208,11 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
         details,
         tags: vec![tag.into()],
         key: format!("didj-{id}"),
-        art: Art::Missing,
+        art: if tag == "Game" {
+            card_art(&meta, |f| ribbit_core::zip::read_entry(&data, entries.iter().find(|e| e.name == format!("{dir}{f}"))?).ok())
+        } else {
+            Art::Missing
+        },
     })
 }
 
@@ -1333,10 +1335,77 @@ fn panel_art(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Ve
     if first.size[0] >= 256 { Some(first) } else { found.next().or(Some(first)) }
 }
 
+/// A game's library picture: what its panel shows (Tinker Bell and NeoPets
+/// have only a `LargeIcon`), else its `Icon`.
+fn card_art(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Vec<u8>>) -> crate::library::Art {
+    panel_art(meta, &read)
+        .or_else(|| crate::manual::decode_png(&read(meta.get("Icon")?)?))
+        .map_or(crate::library::Art::Missing, |art| crate::library::Art::Image(card_picture(&art)))
+}
+
+/// What a square library card shows of a Didj picture. The picture fills only
+/// part of its texture (a 256x128 one, with empty space right and below):
+/// that part, whole and in its own shape, over a blurred dark copy of itself
+/// so the card has no empty space.
+fn card_picture(art: &egui::ColorImage) -> egui::ColorImage {
+    const SIZE: usize = 512;
+    const BLUR: usize = 16;
+    let [w, h] = art.size;
+    let solid = |x: usize, y: usize| art.pixels[y * w + x].a() >= 128;
+    let columns: Vec<usize> = (0..w).filter(|&x| (0..h).any(|y| solid(x, y))).collect();
+    let rows: Vec<usize> = (0..h).filter(|&y| (0..w).any(|x| solid(x, y))).collect();
+    let (Some(&left), Some(&right), Some(&top), Some(&bottom)) = (columns.first(), columns.last(), rows.first(), rows.last()) else {
+        return art.clone();
+    };
+    let (cw, ch) = ((right - left + 1) as f32, (bottom - top + 1) as f32);
+    // Premultiplied red, green, blue and alpha at (x, y) in the picture.
+    let at = |x: f32, y: f32| -> [f32; 4] {
+        let (x, y) = ((x - 0.5).clamp(0.0, cw - 1.0) + left as f32, (y - 0.5).clamp(0.0, ch - 1.0) + top as f32);
+        let (x0, y0) = (x as usize, y as usize);
+        let (x1, y1) = ((x0 + 1).min(right), (y0 + 1).min(bottom));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let px = |x: usize, y: usize| art.pixels[y * w + x].to_array().map(f32::from);
+        let (a, b, c, d) = (px(x0, y0), px(x1, y0), px(x0, y1), px(x1, y1));
+        std::array::from_fn(|i| (a[i] * (1.0 - fx) + b[i] * fx) * (1.0 - fy) + (c[i] * (1.0 - fx) + d[i] * fx) * fy)
+    };
+    // The background: the picture cut to a square, in few pixels and darker.
+    let side = cw.min(ch);
+    let small: Vec<[f32; 4]> = (0..BLUR * BLUR)
+        .map(|i| {
+            let (u, v) = (((i % BLUR) as f32 + 0.5) / BLUR as f32, ((i / BLUR) as f32 + 0.5) / BLUR as f32);
+            at((cw - side) / 2.0 + u * side, (ch - side) / 2.0 + v * side)
+        })
+        .collect();
+    let back = |x: usize, y: usize| -> [f32; 4] {
+        let grid = |p: usize| ((p as f32 + 0.5) / SIZE as f32 * BLUR as f32 - 0.5).clamp(0.0, (BLUR - 1) as f32);
+        let (gx, gy) = (grid(x), grid(y));
+        let (x0, y0) = (gx as usize, gy as usize);
+        let (x1, y1) = ((x0 + 1).min(BLUR - 1), (y0 + 1).min(BLUR - 1));
+        let (fx, fy) = (gx - x0 as f32, gy - y0 as f32);
+        let (a, b, c, d) = (small[y0 * BLUR + x0], small[y0 * BLUR + x1], small[y1 * BLUR + x0], small[y1 * BLUR + x1]);
+        std::array::from_fn(|i| ((a[i] * (1.0 - fx) + b[i] * fx) * (1.0 - fy) + (c[i] * (1.0 - fx) + d[i] * fx) * fy) * 0.4)
+    };
+    let scale = SIZE as f32 / cw.max(ch);
+    let (fw, fh) = (cw * scale, ch * scale);
+    let (ox, oy) = ((SIZE as f32 - fw) / 2.0, (SIZE as f32 - fh) / 2.0);
+    let mut rgba = Vec::with_capacity(SIZE * SIZE * 4);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (px, py) = (x as f32 + 0.5 - ox, y as f32 + 0.5 - oy);
+            let under = back(x, y);
+            let over = if (0.0..fw).contains(&px) && (0.0..fh).contains(&py) { at(px / scale, py / scale) } else { [0.0; 4] };
+            let keep = 1.0 - over[3] / 255.0;
+            rgba.extend((0..3).map(|i| (over[i] + under[i] * keep) as u8));
+            rgba.push(255);
+        }
+    }
+    egui::ColorImage::from_rgba_unmultiplied([SIZE, SIZE], &rgba)
+}
+
 /// A Didj cartridge dump in the library, titled from the meta.inf of the
 /// game on it, its preview image as the art.
 pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
-    use crate::library::{Art, Family, Game};
+    use crate::library::{Family, Game};
     use ribbit_core::fatfs;
     // A raw dump, or an image of its FAT volume alone.
     let volume = if ribbit_didj::cart::is_volume(data) { std::borrow::Cow::Borrowed(data) } else { std::borrow::Cow::Owned(ribbit_didj::cart::volume(data)?) };
@@ -1345,12 +1414,12 @@ pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
         Some((e.name, ribbit_didj::package::Meta::parse(&String::from_utf8_lossy(&m))))
     })?;
     let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-    let title = meta.get("Name").map_or(stem, str::to_string);
-    let art = ["PreviewImage", "Icon"]
-        .iter()
-        .filter_map(|k| meta.get(k))
-        .find_map(|f| crate::manual::decode_png(&fatfs::read_file(&volume, &format!("{folder}/{f}"))?))
-        .map_or(Art::Missing, Art::Image);
+    let title = match meta.get("Name") {
+        // Foster's meta.inf has only its internal code name.
+        Some("MAC") => "Foster's Home for Imaginary Friends".to_string(),
+        name => name.map_or(stem, str::to_string),
+    };
+    let art = card_art(&meta, |f| fatfs::read_file(&volume, &format!("{folder}/{f}")));
     let mut details = vec![("System", "Didj".to_string())];
     for (label, key) in [("Name", "Name"), ("Version", "Version"), ("Product", "ProductID"), ("Publisher", "Publisher"), ("Developer", "Developer")] {
         if let Some(v) = meta.get(key) {
@@ -1475,6 +1544,26 @@ mod tests {
             assert_eq!(off_at.is_some(), turn_off, "{name} turn_off={turn_off}: idle off at {off_at:?}");
             assert_eq!(off, turn_off, "{name} turn_off={turn_off}: off {off}");
         }
+    }
+
+    #[test]
+    fn a_card_shows_the_whole_picture_without_stretching_it() {
+        // A red picture 180x109 in the corner of a 256x128 texture.
+        let mut rgba = vec![0u8; 256 * 128 * 4];
+        for y in 0..109 {
+            for x in 0..180 {
+                rgba[(y * 256 + x) * 4..][..4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        let card = card_picture(&egui::ColorImage::from_rgba_unmultiplied([256, 128], &rgba));
+        assert_eq!(card.size, [512, 512]);
+        let red = |x: usize, y: usize| card.pixels[y * 512 + x].r();
+        // Full width, centred; 512 * 109 / 180 = 310 high, so 101 above and below.
+        assert_eq!((red(0, 256), red(511, 256)), (255, 255));
+        assert_eq!((red(256, 103), red(256, 408)), (255, 255));
+        // The background is the same picture, darker, not empty.
+        assert_eq!(red(256, 90), (255.0 * 0.4) as u8);
+        assert!(card.pixels.iter().all(|c| c.a() == 255));
     }
 
     #[test]

@@ -339,6 +339,11 @@ pub struct Machine {
     pub interrupt_counts: [u64; 64],
     /// Set by `enable_experimental_mame_touch`; survives `reset`.
     touch_config: Option<io::touch::MameTouchConfig>,
+    /// EXPERIMENTAL: on an L-MAX, drive the TV video chip at 0x2400_0000
+    /// (`set_lmax_tv_output`), so `render_tv` has a picture. The L-MAX BIOS
+    /// can't sense a TV, so it is forced on here; survives `reset`. Does
+    /// nothing on a Leapster TV (the chip is always present there).
+    pub lmax_tv_output: bool,
     /// First (cycle, pc) at which the CPU executed from the cartridge window.
     pub first_cart_pc: Option<(u64, u32)>,
     /// Exact idle-loop fast-forwarding (on by default; `idle_skip = false`
@@ -467,6 +472,7 @@ impl Machine {
             clock: Clock::default(),
             interrupt_counts: [0; 64],
             touch_config: None,
+            lmax_tv_output: false,
             first_cart_pc: None,
             idle_skip: true,
             idle: IdleTracker::default(),
@@ -548,6 +554,28 @@ impl Machine {
     /// The TV video chip and controller link are present (Leapster TV).
     pub fn is_leapster_tv(&self) -> bool {
         self.io.tv_link.is_some()
+    }
+
+    /// This firmware is an L-MAX BaseROM.
+    pub fn is_lmax(&self) -> bool {
+        self.firmware.known().is_some_and(|k| k.hardware == ribbit_memory::known::Hardware::LeapsterLmax)
+    }
+
+    /// EXPERIMENTAL: drive (or stop driving) the L-MAX's TV video chip, so
+    /// `render_tv` has a picture while `render_lcd`/`render_frame` keep the
+    /// handheld LCD. Unlike `enable_leapster_tv` it installs no controller
+    /// link, so the main picture stays the LCD and `is_leapster_tv` stays
+    /// false. The choice survives `reset`.
+    pub fn set_lmax_tv_output(&mut self, on: bool) {
+        self.lmax_tv_output = on;
+        if self.is_leapster_tv() {
+            return;
+        }
+        if on {
+            self.io.lmax_tv.get_or_insert_with(Default::default);
+        } else {
+            self.io.lmax_tv = None;
+        }
     }
 
     /// EXPERIMENTAL: starts recording the BIOS's Flash edges for HD
@@ -732,6 +760,8 @@ impl Machine {
         self.install_touch();
         if self.firmware.is_leapster_tv() {
             self.install_leapster_tv();
+        } else if self.lmax_tv_output {
+            self.io.lmax_tv.get_or_insert_with(Default::default);
         }
         self.clock = Clock::new(self.clock.cpu_hz, self.clock.peripheral_hz);
     }

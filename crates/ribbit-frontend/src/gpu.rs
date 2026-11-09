@@ -818,9 +818,13 @@ impl Gpu {
     }
 
     /// Draws the LCD into `lcd` (None: no game screen) and egui on top.
+    /// `inset`, if set, draws the handheld LCD (always uploaded to
+    /// `bind_group`) as a small picture at that rect over the main one: the
+    /// L-MAX's dual screen, where the main picture is the TV output.
     pub fn render(
         &mut self,
         lcd: Option<LcdView>,
+        inset: Option<(f32, f32, f32, f32)>,
         paint_jobs: &[egui::ClippedPrimitive],
         textures: &egui::TexturesDelta,
         pixels_per_point: f32,
@@ -965,6 +969,20 @@ impl Gpu {
                             pass.set_bind_group(0, &self.bind_group, &[]);
                         }
                     }
+                    pass.draw(0..3, 0..1);
+                    pass.set_viewport(0.0, 0.0, fw, fh, 0.0, 1.0);
+                }
+            }
+            // The handheld LCD inset (L-MAX dual screen), drawn over the TV
+            // picture with the LCD's own look.
+            if let Some((x, y, w, h)) = inset {
+                let (fw, fh) = (self.config.width as f32, self.config.height as f32);
+                let (x0, y0) = (x.max(0.0), y.max(0.0));
+                let (w, h) = (w.min(fw - x0), h.min(fh - y0));
+                if w >= 1.0 && h >= 1.0 {
+                    pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
+                    pass.set_pipeline(&self.lcd);
+                    pass.set_bind_group(0, &self.bind_group, &[]);
                     pass.draw(0..3, 0..1);
                     pass.set_viewport(0.0, 0.0, fw, fh, 0.0, 1.0);
                 }
