@@ -14,6 +14,7 @@
 //! | Latency | UNKNOWN | modelled as immediate |
 //!
 //! | Device 0x20 = the cartridge save chip | VERIFIED-FW (use) + SOURCED (size) | Both BIOSes address device 0x20 only with a cartridge inserted (SpongeBob: 256 writes, addresses 0-0xFF); MAME routes non-0x26 commands to the cartridge NVRAM, 0x800 bytes, "exact NVRAM/EEPROM type unknown" |
+//! | A new cartridge's save chip reads 0x00 | VERIFIED-FW (one game) + SOURCED | The Batman: Multiply, Divide and Conquer never formats it: a name of "" is an empty slot and 0 lives means options not set yet. Read as 0xFF, empty slots hold invisible names and all progress is set, so everything is unlocked. MAME starts at 0. No real chip read yet |
 //!
 //! The BIOS device table gives four codes, 0x20/0x22/0x24/0x26 (type 0x2000
 //! plus 0x000/0x200/0x400/0x600). Commands for 0x22/0x24, and for 0x20 with
@@ -32,6 +33,8 @@ pub const CART_DEVICE: u32 = 0x20;
 pub const CART_SIZE: usize = 0x800;
 pub const SIZE: usize = 256;
 pub const ERASED: u8 = 0xFF;
+/// What a new cartridge's save chip reads (see the table above).
+pub const CART_BLANK: u8 = 0x00;
 const START_READ: u32 = 1;
 const START_WRITE: u32 = 2;
 
@@ -84,9 +87,9 @@ impl Eeprom {
         self.dirty = false;
     }
 
-    /// Inserts a cartridge save chip, erased or with saved contents.
+    /// Inserts a cartridge save chip, blank or with saved contents.
     pub fn insert_cart(&mut self, saved: Option<&[u8]>) {
-        let mut chip = vec![ERASED; CART_SIZE];
+        let mut chip = vec![CART_BLANK; CART_SIZE];
         if let Some(bytes) = saved {
             let n = bytes.len().min(CART_SIZE);
             chip[..n].copy_from_slice(&bytes[..n]);
@@ -217,6 +220,16 @@ mod tests {
             e.write(CONTROL_ADDR, 1, &mut intc);
         }
         assert_eq!(e.other_device_commands, 3);
+    }
+
+    #[test]
+    fn new_cart_chip_is_blank_and_saves_are_kept() {
+        let mut e = Eeprom::default();
+        e.insert_cart(None);
+        assert_eq!(e.cart.as_deref(), Some(&[CART_BLANK; CART_SIZE][..]));
+        e.insert_cart(Some(&[0xFF, 7]));
+        let chip = e.cart.as_ref().unwrap();
+        assert_eq!((&chip[..3], chip.len()), (&[0xFF, 7, CART_BLANK][..], CART_SIZE));
     }
 
     #[test]
