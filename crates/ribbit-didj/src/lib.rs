@@ -24,6 +24,7 @@
 pub mod autostart;
 pub mod brio;
 pub mod carry;
+pub mod connect;
 pub mod cart;
 pub mod dma;
 pub mod enhanced;
@@ -42,11 +43,13 @@ pub mod nand;
 pub mod linux_nand;
 pub mod nor;
 pub mod package;
+pub mod didj_import;
 pub mod tfs;
 pub mod timer;
 pub mod touch;
 pub mod ubi;
 pub mod ubifs;
+pub mod ubifs_read;
 pub mod udc;
 
 /// The internal NAND as LeapFrog Connect leaves it with the packages in

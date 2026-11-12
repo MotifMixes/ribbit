@@ -227,13 +227,40 @@ impl Process {
         let path = self.path_arg(path)?;
         let argv = self.str_array(argv)?;
         let envp = self.str_array(envp)?;
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let mut argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         let envp: Vec<&str> = envp.iter().map(String::as_str).collect();
-        match self.vfs.resolve(&self.g.cwd, &path, true) {
-            Ok(p) if self.vfs.get(&p).is_some() => {}
+        let real = match self.vfs.resolve(&self.g.cwd, &path, true) {
+            Ok(p) if self.vfs.get(&p).is_some() => p,
             Ok(_) => return Err(super::vfs::ENOENT),
             Err(e) => return Err(e),
-        }
+        };
+        // A script ("#!interpreter [argument]"): the kernel runs the
+        // interpreter with the script's path (binfmt_script).
+        let line = match self.vfs.get(&real).map(|n| &n.data) {
+            Some(super::vfs::Data::File(d)) if d.starts_with(b"#!") => {
+                let end = d.iter().position(|&b| b == b'\n').unwrap_or(d.len()).min(128);
+                Some(String::from_utf8_lossy(&d[2..end]).trim().to_string())
+            }
+            _ => None,
+        };
+        let (interp, arg) = match &line {
+            Some(l) => {
+                let (i, a) = l.split_once([' ', '\t']).map_or((l.as_str(), None), |(i, a)| (i, Some(a.trim())));
+                (Some(i.to_string()), a.filter(|a| !a.is_empty()).map(str::to_string))
+            }
+            None => (None, None),
+        };
+        let path = match &interp {
+            Some(i) => {
+                let mut v = vec![i.as_str()];
+                v.extend(arg.as_deref());
+                v.push(path.as_str());
+                v.extend(argv.iter().skip(1));
+                argv = v;
+                i.clone()
+            }
+            None => path.clone(),
+        };
         self.exec(&path, &argv, &envp).map_err(|e| {
             self.log_once(format!("execve {path}: {e}"));
             8 // ENOEXEC

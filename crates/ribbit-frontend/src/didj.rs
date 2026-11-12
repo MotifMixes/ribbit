@@ -100,6 +100,45 @@ struct Shared {
     /// Enhanced (new): the Didj's programs on the HLE, without its kernel
     /// (`Hle`). `didj` then only keeps the NAND the saves are written to.
     hle: Mutex<Option<Hle>>,
+    /// A Didj's save (`SaveTo`), written by `run` too whenever the
+    /// console has turned itself off cleanly (None: the Explorer's, which
+    /// `flush` alone writes).
+    save_to: Option<SaveTo>,
+}
+
+/// Where a Didj's NAND changes are kept: the image they are changes from,
+/// the save file and the image's fingerprint (`.nandimage`).
+struct SaveTo {
+    original: Arc<Nand>,
+    path: PathBuf,
+    image: String,
+}
+
+impl SaveTo {
+    /// Writes `flash`'s changes (through a temporary file, so a save is
+    /// never left half written).
+    fn write(&self, flash: &Nand) -> std::io::Result<()> {
+        let changes = flash.changes_from(&self.original);
+        write_save(&self.path, &self.image, &changes, Some(&ribbit_didj::carry::files_beyond(flash, &self.original)))
+    }
+}
+
+/// Writes a save's changes and the fingerprint of the image they are
+/// changes from, and a Didj's player's files beside them (`.files`,
+/// `carry::pack`: what is carried over if the image changes).
+fn write_save(path: &Path, image: &str, changes: &[u8], files: Option<&[(String, Vec<u8>)]>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, changes)?;
+    std::fs::rename(&tmp, path)?;
+    if let Some(files) = files {
+        let tmp = path.with_extension("files.tmp");
+        std::fs::write(&tmp, ribbit_didj::carry::pack(files, changes))?;
+        std::fs::rename(&tmp, path.with_extension("files"))?;
+    }
+    std::fs::write(path.with_extension("nandimage"), image)
 }
 
 /// How the console runs: Enhanced mode (`ribbit_didj::enhanced`: the
@@ -127,6 +166,9 @@ pub struct ExplorerBuilt {
     original: Nand,
     save_path: PathBuf,
     image: String,
+    dir: PathBuf,
+    /// The player's files carried over from a save made on another image.
+    carried: Option<usize>,
 }
 
 pub struct DidjSession {
@@ -137,7 +179,7 @@ pub struct DidjSession {
     pub started: u64,
     /// The NAND as built from the packages, and where the system's changes
     /// to it are kept.
-    original: Nand,
+    original: Arc<Nand>,
     save_path: PathBuf,
     /// `original`'s fingerprint, kept beside the save.
     image: String,
@@ -174,8 +216,14 @@ impl DidjSession {
         let mut flash = original.clone();
         let mut carried = None;
         if save_path.exists() && std::fs::read_to_string(&image_path).ok().as_deref() != Some(image.as_str()) {
+            // The player's files kept beside it (`.files`) when they were
+            // kept with this save, else what its blocks give back.
+            let kept = std::fs::read(save_path.with_extension("files")).ok();
             let aside = set_aside(&save_path);
-            let files = std::fs::read(&aside).map_err(|e| e.to_string()).and_then(|c| ribbit_didj::carry::user_files(&c, &original));
+            let files = std::fs::read(&aside).map_err(|e| e.to_string()).and_then(|c| match kept.as_deref().and_then(|k| ribbit_didj::carry::unpack(k, &c)) {
+                Some(files) => Ok(files),
+                None => ribbit_didj::carry::user_files(&c, &original),
+            });
             match files {
                 Ok(files) if !files.is_empty() => match ribbit_didj::nand_with_files(dir, true, &files) {
                     Ok((with, _)) => {
@@ -195,11 +243,14 @@ impl DidjSession {
             } else if ribbit_didj::carry::avatars_to_fix(&flash) {
                 // Didjis synced over USB: the menu takes them once their
                 // meta.inf says Device="Didj" (package::fix_avatar_meta).
-                let built = ribbit_didj::carry::user_files(&changes, &original).and_then(|files| ribbit_didj::nand_with_files(dir, true, &files));
-                match built {
-                    Ok((with, _)) => {
-                        tracing::info!(target: "ribbit::saves", "Didjis synced to the console made ready for its menu");
-                        flash = with;
+                // Fixed where they are, the rest of the console untouched:
+                // building the image again kept only files at paths the
+                // packages don't have (a player's profile didn't persist).
+                let mut fixed = flash.clone();
+                match ribbit_didj::carry::fix_avatars_in_place(&mut fixed) {
+                    Ok(n) => {
+                        tracing::info!(target: "ribbit::saves", "Didjis synced to the console made ready for its menu ({n})");
+                        flash = fixed;
                         carried = Some(0);
                     }
                     Err(e) => tracing::warn!(target: "ribbit::saves", "making synced Didjis ready: {e}"),
@@ -212,8 +263,8 @@ impl DidjSession {
             if let Some(d) = save_path.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            let _ = std::fs::write(&save_path, flash.changes_from(&original));
-            let _ = std::fs::write(&image_path, &image);
+            let changes = flash.changes_from(&original);
+            let _ = write_save(&save_path, &image, &changes, Some(&ribbit_didj::carry::files_beyond(&flash, &original)));
         }
         let hle = match mode.hle {
             true => {
@@ -225,6 +276,8 @@ impl DidjSession {
         let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced && !mode.hle));
         didj.set_cpu_scale(mode.cpu_scale);
         didj.bus.cart = cart;
+        let original = Arc::new(original);
+        let save_to = SaveTo { original: original.clone(), path: save_path.clone(), image: image.clone() };
         let shared = Arc::new(Shared {
             didj: Mutex::new(didj),
             frame: Mutex::new((SCREEN_W, SCREEN_H, vec![0; SCREEN_W * SCREEN_H])),
@@ -248,6 +301,7 @@ impl DidjSession {
             explorer: false,
             touch: Mutex::new(None),
             hle: Mutex::new(hle),
+            save_to: Some(save_to),
         });
         shared.serial.note("--- Ribbit: the Didj powers on ---
 ");
@@ -265,43 +319,74 @@ impl DidjSession {
     /// its NAND and NOR flash before. Takes seconds: the app runs it on a
     /// worker thread, then `start_explorer`.
     pub fn build_explorer(dir: &Path, save_dir: &Path) -> anyhow::Result<ExplorerBuilt> {
-        let mut original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
+        use ribbit_didj::explorer::{nand_from_packages_blocks, nand_with_files, NAND_BLOCKS, NAND_BLOCKS_1GB};
+        let original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
         let save_path = explorer_save_file(dir, save_dir);
-        let mut image = format!("{:08x}", original.fingerprint());
+        let image = format!("{:08x}", original.fingerprint());
         let image_path = save_path.with_extension("nandimage");
-        // A save made on the 1 GB NAND Ribbit had before 2026-11-08 goes on
-        // with it, so the player's profile and games stay.
-        if let Ok(saved) = std::fs::read_to_string(&image_path)
-            && saved != image
-            && let Ok(old) = ribbit_didj::explorer::nand_from_packages_blocks(dir, ribbit_didj::explorer::NAND_BLOCKS_1GB)
-            && saved == format!("{:08x}", old.fingerprint())
-        {
-            tracing::info!(target: "ribbit::saves", "{} was made on the 1 GB NAND; it goes on using it", save_path.display());
-            image = saved;
-            original = old;
-        }
         let mut flash = original.clone();
+        let mut carried = None;
         // A save made on another image would mix two file system layouts:
-        // set aside (the Explorer's files aren't carried over yet).
-        if save_path.exists() && std::fs::read_to_string(&image_path).ok().as_deref() != Some(image.as_str()) {
+        // the player's files on Bulk (profiles, progress, settings.cfg) are
+        // carried over to this image instead (`carry`), and the old save is
+        // kept beside it. A save made on the 1 GB NAND Ribbit had before
+        // 2026-11-08 moves to the 512 MB one: that image is built again,
+        // so every file the console wrote or changed comes along.
+        let saved_image = std::fs::read_to_string(&image_path).ok();
+        if save_path.exists() && saved_image.as_deref() != Some(image.as_str()) {
             let aside = set_aside(&save_path);
-            tracing::warn!(target: "ribbit::saves", "{} was made on another NAND image; kept as {}", save_path.display(), aside.display());
+            let files = std::fs::read(&aside).map_err(|e| e.to_string()).and_then(|changes| {
+                if let Some(old) = saved_image.and_then(|saved| nand_from_packages_blocks(dir, NAND_BLOCKS_1GB).ok().filter(|old| saved == format!("{:08x}", old.fingerprint()))) {
+                    let mut was = old.clone();
+                    was.apply_changes(&changes)?;
+                    Ok(ribbit_didj::carry::explorer_files_beyond(&was, &old))
+                } else {
+                    ribbit_didj::carry::explorer_user_files(&changes, &original)
+                }
+            });
+            match files {
+                Ok(files) if !files.is_empty() => match nand_with_files(dir, NAND_BLOCKS, &files) {
+                    Ok(with) => {
+                        tracing::info!(target: "ribbit::saves", "{} was made on another NAND image: {} files carried over, the old save kept as {}", save_path.display(), files.len(), aside.display());
+                        flash = with;
+                        carried = Some(files.values().filter(|e| !matches!(e.kind, ribbit_didj::ubifs::Kind::Dir)).count());
+                    }
+                    Err(e) => tracing::warn!(target: "ribbit::saves", "carrying {}'s files over: {e}", aside.display()),
+                },
+                Ok(_) => tracing::warn!(target: "ribbit::saves", "{} was made on another NAND image and holds no files to carry over; kept as {}", save_path.display(), aside.display()),
+                Err(e) => tracing::warn!(target: "ribbit::saves", "{}: {e}", aside.display()),
+            }
         } else if let Ok(changes) = std::fs::read(&save_path)
             && let Err(e) = flash.apply_changes(&changes)
         {
             tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
             flash = original.clone();
         }
+        if carried.is_some() {
+            // Written at once: the old save has been set aside.
+            if let Some(d) = save_path.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(&save_path, flash.changes_from(&original));
+            let _ = std::fs::write(&image_path, &image);
+        }
         let mut lx = ribbit_didj::explorer::boot(flash, ribbit_didj::explorer::CMDLINE).map_err(anyhow::Error::msg)?;
         if let Ok(nor) = std::fs::read(save_path.with_extension("nor")) {
             lx.bus.nor = Some(ribbit_didj::nor::Nor::new(nor));
         }
-        Ok(ExplorerBuilt { lx, original, save_path, image })
+        Ok(ExplorerBuilt { lx, original, save_path, image, carried, dir: dir.to_path_buf() })
     }
 
     /// Powers on the Leapster Explorer `build_explorer` made.
-    pub fn start_explorer(built: ExplorerBuilt, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>) -> anyhow::Result<Self> {
-        let ExplorerBuilt { lx, original, save_path, image } = built;
+    /// With `hle`, Enhanced (new): its programs run on `Hle` from the file
+    /// systems in its NAND, which `lx` then only keeps for the saves.
+    pub fn start_explorer(built: ExplorerBuilt, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>, hle: bool) -> anyhow::Result<Self> {
+        let ExplorerBuilt { lx, original, save_path, image, carried, dir } = built;
+        let hle = match hle {
+            true => Some(Hle::new_explorer(&dir, &lx.bus.nand, lx.bus.nor.as_ref().map(|n| &n.data[..]), None)?),
+            false => None,
+        };
+        let original = Arc::new(original);
         let shared = Arc::new(Shared {
             didj: Mutex::new(lx),
             frame: Mutex::new((SCREEN_W, SCREEN_H, vec![0; SCREEN_W * SCREEN_H])),
@@ -324,7 +409,8 @@ impl DidjSession {
             serial,
             explorer: true,
             touch: Mutex::new(None),
-            hle: Mutex::new(None),
+            hle: Mutex::new(hle),
+            save_to: None,
         });
         shared.serial.note("--- Ribbit: the Leapster Explorer powers on ---\n");
         let s = shared.clone();
@@ -333,7 +419,26 @@ impl DidjSession {
             run(&s, None)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Leapster Explorer".into(), started, original, save_path, image, extras_missing: Vec::new(), carried: None, explorer: true, dir: PathBuf::new(), cart: None })
+        Ok(Self { shared, thread: Some(thread), title: "Leapster Explorer".into(), started, original, save_path, image, extras_missing: Vec::new(), carried, explorer: true, dir, cart: None })
+    }
+
+    /// Puts a cartridge dump (raw, as `read_cart` gives it) in the
+    /// Explorer's slot, or takes the cartridge out (None), while it runs:
+    /// the kernel sees the detect pin change and the menu shows the game.
+    pub fn set_cart(&self, raw: Option<Vec<u8>>) -> Result<(), String> {
+        // Enhanced (new): the HLE's slot (its kernel files and /LF/Cart).
+        if let Some(h) = self.shared.hle.lock().unwrap().as_mut().filter(|h| h.explorer) {
+            h.p.explorer_cart(raw.as_deref())?;
+            h.cart = raw.clone();
+        }
+        let cart = raw.map(ribbit_didj::cart::Cart::new).transpose()?;
+        self.shared.didj.lock().unwrap().bus.cart = cart;
+        Ok(())
+    }
+
+    /// A cartridge is in the slot.
+    pub fn has_cart(&self) -> bool {
+        self.shared.didj.lock().unwrap().bus.cart.is_some()
     }
 
     /// The Explorer's stylus at `pos` on the screen (pixels; None lifts it).
@@ -375,7 +480,7 @@ impl DidjSession {
     /// cable comes out). The cable goes in when a USB/IP client imports it.
     pub fn set_usb(&self, server: Option<crate::emu::UsbServer>) {
         if let Some(srv) = &server {
-            srv.lock().unwrap().set_info(usb_device());
+            srv.lock().unwrap().set_info(if self.explorer { explorer_usb_device() } else { usb_device() });
         }
         let off = server.is_none();
         *self.shared.usb.lock().unwrap() = server;
@@ -463,6 +568,10 @@ impl DidjSession {
     fn hle_to_nand(&self) -> anyhow::Result<()> {
         let mut hle = self.shared.hle.lock().unwrap();
         let Some(h) = hle.as_mut() else { return Ok(()) };
+        if h.explorer {
+            let mut d = self.shared.didj.lock().unwrap();
+            return h.explorer_to_nand(&mut d);
+        }
         let files = h.user_files();
         if files == h.written {
             return Ok(());
@@ -478,6 +587,18 @@ impl DidjSession {
         if let Err(e) = self.hle_to_nand() {
             tracing::warn!(target: "ribbit::saves", "keeping the Didj's files: {e:#}");
         }
+        if mode.hle && self.explorer {
+            let cart = self.shared.hle.lock().unwrap().as_ref().and_then(|h| h.cart.clone());
+            let built = {
+                let d = self.shared.didj.lock().unwrap();
+                Hle::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), cart)
+            };
+            match built {
+                Ok(h) => *self.shared.hle.lock().unwrap() = Some(h),
+                Err(e) => tracing::error!(target: "ribbit::didj", "starting the Explorer's Enhanced (new): {e:#}"),
+            }
+            return;
+        }
         if mode.hle && !self.explorer {
             let files = ribbit_didj::carry::files_beyond(&self.shared.didj.lock().unwrap().bus.nand, &self.original);
             let built = Hle::new(&self.dir, self.cart.as_deref(), files, mode);
@@ -489,6 +610,8 @@ impl DidjSession {
             return;
         }
         *self.shared.hle.lock().unwrap() = None;
+        // Off the bus while it starts again (as in `run`).
+        unplug(&self.shared);
         let mut d = self.shared.didj.lock().unwrap();
         if self.explorer {
             power_on_again(&mut d, true);
@@ -527,13 +650,8 @@ impl DidjSession {
         if changes.is_empty() && !self.save_path.exists() {
             return Ok(());
         }
-        if let Some(dir) = self.save_path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = self.save_path.with_extension("tmp");
-        std::fs::write(&tmp, &changes)?;
-        std::fs::rename(&tmp, &self.save_path)?;
-        std::fs::write(self.save_path.with_extension("nandimage"), &self.image)?;
+        let files = (!self.explorer).then(|| ribbit_didj::carry::files_beyond(&self.shared.didj.lock().unwrap().bus.nand, &self.original));
+        write_save(&self.save_path, &self.image, &changes, files.as_deref())?;
         // The Explorer's NOR flash holds its factory data (Ribbit's touch
         // calibration among it): kept whole once the system has written it.
         let nor = self.shared.didj.lock().unwrap().bus.nor.as_ref().filter(|n| n.dirty).map(|n| n.data.clone());
@@ -582,6 +700,71 @@ fn set_aside(save: &Path) -> PathBuf {
     let _ = std::fs::rename(save, &aside);
     let _ = std::fs::remove_file(save.with_extension("nandimage"));
     aside
+}
+
+/// What a Didj save folder import brought (`import_didj_folder`).
+pub struct DidjFolderImport {
+    pub files: usize,
+    pub profiles: usize,
+    /// Games installed from their packages (copied beside this Didj's).
+    pub packages: usize,
+    /// The Didj's save before, if it had one.
+    pub backup: Option<PathBuf>,
+}
+
+/// The player's files in this Didj's save (none without one): read whole
+/// when it was made on `original`, else as `start` carries them.
+fn players_files(save: &Path, original: &Nand) -> Vec<(String, Vec<u8>)> {
+    let Ok(changes) = std::fs::read(save) else { return Vec::new() };
+    let image = format!("{:08x}", original.fingerprint());
+    if std::fs::read_to_string(save.with_extension("nandimage")).ok().as_deref() == Some(image.as_str()) {
+        let mut flash = original.clone();
+        if flash.apply_changes(&changes).is_ok() {
+            return ribbit_didj::carry::files_beyond(&flash, original);
+        }
+    }
+    let kept = std::fs::read(save.with_extension("files")).ok();
+    kept.as_deref().and_then(|k| ribbit_didj::carry::unpack(k, &changes)).or_else(|| ribbit_didj::carry::user_files(&changes, original).ok()).unwrap_or_default()
+}
+
+/// Brings a Didj save folder (`ribbit_didj::didj_import`: a copy of the
+/// Didj's /Didj tree, or a folder with it as `didj` or `assets/didj`)
+/// into this Didj's save: profiles,
+/// Didjis, themes, game progress and installed games, merged with the
+/// player's files the save has. Games it installed that this Didj lacks
+/// are installed from their packages (copied into an "Imported" folder
+/// beside this Didj's packages) when it kept them, else copied as files.
+/// The save before is kept as `.before-folder-import`. The Didj must be off.
+pub fn import_didj_folder(from: &Path, dir: &Path, save_dir: &Path) -> anyhow::Result<DidjFolderImport> {
+    let (original, _) = ribbit_didj::nand_and_extras_missing(dir, true).map_err(anyhow::Error::msg)?;
+    let import = ribbit_didj::didj_import::read(from, &original).map_err(anyhow::Error::msg)?;
+    if import.files.is_empty() && import.packages.is_empty() {
+        anyhow::bail!("{}: this Didj folder holds nothing of a player's (no profiles, Didjis or game progress)", from.display());
+    }
+    let save = save_file(dir, save_dir);
+    let ours = players_files(&save, &original);
+    std::fs::create_dir_all(save_dir)?;
+    let backup = save.with_extension("nandblocks.before-folder-import");
+    let had = save.exists();
+    if had {
+        std::fs::copy(&save, &backup)?;
+        let _ = std::fs::copy(save.with_extension("nandimage"), backup.with_extension("nandimage"));
+    }
+    let mut original = original;
+    if !import.packages.is_empty() {
+        let to = dir.join("Imported");
+        std::fs::create_dir_all(&to)?;
+        for p in &import.packages {
+            std::fs::copy(p, to.join(p.file_name().unwrap_or_default()))?;
+        }
+        original = ribbit_didj::nand_and_extras_missing(dir, true).map_err(anyhow::Error::msg)?.0;
+    }
+    let files = ribbit_didj::didj_import::merge(ours, &import);
+    let (flash, _) = ribbit_didj::nand_with_files(dir, true, &files).map_err(anyhow::Error::msg)?;
+    let changes = flash.changes_from(&original);
+    write_save(&save, &format!("{:08x}", original.fingerprint()), &changes, Some(&ribbit_didj::carry::files_beyond(&flash, &original)))?;
+    tracing::info!(target: "ribbit::saves", "Didj save folder {} imported: {} files, {} profiles, {} packages", from.display(), import.files.len(), import.profiles.len(), import.packages.len());
+    Ok(DidjFolderImport { files: import.files.len(), profiles: import.profiles.len(), packages: import.packages.len(), backup: had.then_some(backup) })
 }
 
 /// Makes `from` (a Didj save: a `.nandblocks` file, perhaps renamed, from
@@ -749,6 +932,18 @@ fn run(s: &Shared, art: Option<Art>) {
                     s.gave_up.store(true, Ordering::Relaxed);
                 }
             }
+            // Off cleanly (its file systems unmounted): the save written
+            // now, so what it has (a profile LeapFrog Connect synced, which
+            // ends with the cable pulled and the Didj shutting down) is kept
+            // even if Ribbit is then closed in a way that can't save.
+            if d.bus.powered_off
+                && let Some(to) = &s.save_to
+            {
+                match to.write(&d.bus.nand) {
+                    Ok(()) => tracing::info!(target: "ribbit::saves", "the Didj turned itself off: its NAND saved"),
+                    Err(e) => tracing::warn!(target: "ribbit::saves", "saving the Didj's NAND: {e}"),
+                }
+            }
             if d.bus.powered_off && !s.gave_up.load(Ordering::Relaxed) {
                 tracing::info!(target: "ribbit::didj", "the Didj turned itself off; turning it on again");
                 s.serial.note("--- Ribbit: the Didj turned itself off; on again ---
@@ -756,12 +951,7 @@ fn run(s: &Shared, art: Option<Art>) {
                 // Off the bus while it starts again: the PC sees the cable
                 // pulled (its client detaches), not a device that stopped
                 // answering ("USB device not recognized").
-                if s.usb_host.swap(false, Ordering::Relaxed)
-                    && let Some(srv) = s.usb.lock().unwrap().as_ref()
-                {
-                    srv.lock().unwrap().disconnect();
-                    *s.usb_news.lock().unwrap() = Some(crate::twist::UsbNews::Detached);
-                }
+                unplug(s);
                 power_on_again(&mut d, s.explorer);
                 auto = art.clone().map(AutoStart::new);
             }
@@ -831,6 +1021,10 @@ fn run(s: &Shared, art: Option<Art>) {
 
 
 /// The Didj's buttons (`button` bits) as the keypad's Linux key codes.
+/// The Explorer's volume buttons (lf1000-keypad: KEY_VOLUMEUP,
+/// KEY_VOLUMEDOWN, in its /proc/bus/input/devices bitmap).
+const EXPLORER_KEYS: [(u32, u16); 2] = [(button::VOLUME_UP, 115), (button::VOLUME_DOWN, 114)];
+
 const HLE_KEYS: [(u32, u16); 12] = {
     use ribbit_didj::hle::key;
     [
@@ -879,6 +1073,10 @@ struct Hle {
     /// The file tree as built (system and cartridge), that save states
     /// keep the changes from: built at the first state.
     base: Option<ribbit_didj::hle::vfs::Vfs>,
+    /// A Leapster Explorer (`new_explorer`): its root file system and Bulk
+    /// go to the NAND (`explorer_to_nand`), their fingerprints as last written.
+    explorer: bool,
+    written_fp: [u32; 2],
 }
 
 impl Hle {
@@ -918,14 +1116,71 @@ impl Hle {
             idle_at: Instant::now(),
             off: false,
             base: None,
+            explorer: false,
+            written_fp: [0; 2],
         };
         h.written = h.user_files();
         Ok(h)
     }
 
+    /// Enhanced (new) for the Leapster Explorer: its file systems out of
+    /// its NAND (`flash`, with the save applied) and NOR, started from
+    /// /sbin/init as its kernel would (rcS, then AppManager).
+    fn new_explorer(dir: &Path, flash: &Nand, nor: Option<&[u8]>, cart: Option<Vec<u8>>) -> anyhow::Result<Self> {
+        use ribbit_didj::hle;
+        let vfs = hle::explorer::system_from_nand(flash, nor).map_err(anyhow::Error::msg)?;
+        let written_fp = hle::explorer::fingerprints(&vfs);
+        let mut p = hle::Process::new_explorer(vfs);
+        if let Some(rle) = hle::explorer::splash_from_packages(dir) {
+            p.explorer_splash(&rle);
+        }
+        if let Some(raw) = &cart {
+            p.explorer_cart(Some(raw)).map_err(anyhow::Error::msg)?;
+        }
+        let envp = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/", "TERM=vt100"];
+        p.exec("/sbin/init", &["/sbin/init"], &envp).map_err(anyhow::Error::msg)?;
+        let now = Instant::now();
+        Ok(Self {
+            p,
+            dir: dir.to_path_buf(),
+            cart,
+            mode: Mode { enhanced: true, cpu_scale: 1, frame_skip: false, hd: 1, hle: true, smooth: false },
+            built: Default::default(),
+            written: Vec::new(),
+            keys: 0,
+            smooth: false,
+            flips: (0, now, now),
+            started: now,
+            quick_stops: 0,
+            idle: Default::default(),
+            idle_at: now,
+            off: false,
+            base: None,
+            explorer: true,
+            written_fp,
+        })
+    }
+
+    /// The Explorer's root file system and Bulk into the NAND `d` keeps for
+    /// the save, and its NOR, when they changed.
+    fn explorer_to_nand(&mut self, d: &mut Didj) -> anyhow::Result<()> {
+        use ribbit_didj::hle::explorer;
+        explorer::write_changed_to_nand(&self.p.vfs, &mut d.bus.nand, &mut self.written_fp).map_err(anyhow::Error::msg)?;
+        let nor = explorer::nor(&self.p.vfs);
+        if d.bus.nor.as_ref().is_none_or(|n| n.data != nor) {
+            let mut n = ribbit_didj::nor::Nor::new(nor);
+            n.dirty = true;
+            d.bus.nor = Some(n);
+        }
+        Ok(())
+    }
+
     /// The file tree as built, without the player's files (they go in the
     /// states as changes).
     fn base(&mut self) -> Result<&ribbit_didj::hle::vfs::Vfs, String> {
+        if self.base.is_none() && self.explorer {
+            self.base = Some(ribbit_didj::hle::explorer::system_from_packages(&self.dir)?);
+        }
         if self.base.is_none() {
             let mut vfs = ribbit_didj::hle::system_from_packages(&self.dir)?;
             if let Some(raw) = &self.cart {
@@ -979,12 +1234,17 @@ impl Hle {
         use ribbit_didj::hle::Stop;
         self.p.set_paused(false);
         let held = s.held.load(Ordering::Relaxed) | auto;
-        for &(bit, code) in &HLE_KEYS {
+        for &(bit, code) in HLE_KEYS.iter().chain(if self.explorer { &EXPLORER_KEYS[..] } else { &[] }) {
             if (held ^ self.keys) & bit != 0 {
                 self.p.key(code, held & bit != 0);
             }
         }
         self.keys = held;
+        // The Explorer's stylus (screen pixels).
+        if self.explorer {
+            let at = *s.touch.lock().unwrap();
+            self.p.stylus(at.map(|(x, y)| (x.clamp(0.0, 319.0) as i32, y.clamp(0.0, 239.0) as i32)));
+        }
         let hd = s.hd.load(Ordering::Relaxed) as usize;
         if self.p.m.bus.ga3d.hd.scale != hd.clamp(1, 4) {
             self.p.m.bus.ga3d.hd.set_scale(hd);
@@ -997,8 +1257,12 @@ impl Hle {
         if self.p.m.bus.ga3d.tween().is_some() != self.smooth {
             self.p.m.bus.ga3d.set_tween(self.smooth);
         }
+        // The Explorer's programs mostly wait in short polls (2 ms), so a
+        // run of a million instructions spans tens of ms of their paced
+        // clock: smaller steps keep the frames on time.
+        let step = if self.explorer { 100_000 } else { 1_000_000 };
         while !self.off && Instant::now() < until {
-            match self.p.run(1_000_000) {
+            match self.p.run(step) {
                 Stop::Budget => {}
                 // Every thread waits for something only the player can do.
                 Stop::Blocked => std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(2))),
@@ -1011,7 +1275,15 @@ impl Hle {
                 s.serial.output(&std::mem::take(&mut self.p.console));
             }
         }
-        let (sound, r, channels) = self.p.take_sound();
+        let (mut sound, r, channels) = self.p.take_sound();
+        // The Explorer's codec: its volume (the volume buttons) and mutes,
+        // as Original applies them.
+        if self.explorer {
+            let (l, rg) = self.p.m.bus.i2c.gain();
+            for (k, v) in sound.iter_mut().enumerate() {
+                *v = (*v as f32 * if k % 2 == 0 { l } else { rg }).clamp(-32768.0, 32767.0) as i16;
+            }
+        }
         stereo.clear();
         if r > 0 {
             if r as u64 != *rate {
@@ -1060,6 +1332,23 @@ impl Hle {
             return;
         }
         s.serial.note(&format!("--- Ribbit: Enhanced (new) stopped ({stop:?}); on again ---\n"));
+        if self.explorer {
+            let mut d = s.didj.lock().unwrap();
+            if let Err(e) = self.explorer_to_nand(&mut d) {
+                tracing::warn!(target: "ribbit::saves", "keeping the Explorer's files: {e:#}");
+            }
+            match Self::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), self.cart.clone()) {
+                Ok(mut h) => {
+                    h.quick_stops = quick_stops;
+                    *self = h;
+                }
+                Err(e) => {
+                    tracing::error!(target: "ribbit::didj", "starting Enhanced (new) again: {e:#}");
+                    self.off = true;
+                }
+            }
+            return;
+        }
         match Self::new(&self.dir, self.cart.as_deref(), self.user_files(), self.mode) {
             Ok(mut h) => {
                 h.smooth = self.smooth;
@@ -1114,6 +1403,26 @@ fn pump_usb(s: &Shared, d: &mut Didj) {
     }
 }
 
+/// Pulls the cable out if a PC has the console attached: its client is
+/// disconnected, so the PC sees the device go (not one that stopped
+/// answering while the console starts again: "USB device not recognized").
+fn unplug(s: &Shared) {
+    if s.usb_host.swap(false, Ordering::Relaxed)
+        && let Some(srv) = s.usb.lock().unwrap().as_ref()
+    {
+        srv.lock().unwrap().disconnect();
+        *s.usb_news.lock().unwrap() = Some(crate::twist::UsbNews::Detached);
+    }
+}
+
+/// The Leapster Explorer as USB/IP lists it (its device descriptor,
+/// VERIFIED with `EXPLORER=1 didjusb`: vendor 0x0F63, LeapFrog; product
+/// 0x0020; release 3.25; high speed; one mass-storage interface, SCSI,
+/// Bulk-Only: g_file_storage over /LF/fuse/dftp, /etc/init.d/dftp2).
+pub fn explorer_usb_device() -> ribbit_twist::usbip::DeviceInfo {
+    ribbit_twist::usbip::DeviceInfo { product: 0x0020, bcd_device: 0x0325, ..usb_device() }
+}
+
 /// The Didj as USB/IP lists it before a client imports it (its device
 /// descriptor, VERIFIED with examples/didjusb.rs: vendor 0x0F63, LeapFrog;
 /// product 0x0800; release 3.18; high speed; one mass-storage interface,
@@ -1132,33 +1441,49 @@ pub fn usb_device() -> ribbit_twist::usbip::DeviceInfo {
     }
 }
 
-/// Turns the Didj off with its power button, as a player would: Linux then
-/// unmounts its file systems before cutting the power. Stopping it without
+/// Turns the Didj off as a player would (`Didj::shut_down`: the USB cable
+/// pulled if it is in, then its power button): Linux then unmounts its
+/// file systems before cutting the power. Stopping it without
 /// this is pulling the batteries: a file being written is left half done,
 /// the next start's fsck finds it, and the console refuses to mount /Didj
 /// ("Download Failed"). Runs as fast as the host allows; gives up after
-/// 15 s (say, before the system has started).
+/// `POWER_OFF_LIMIT` (say, before the system has started).
 fn power_off(s: &Shared) {
     let mut d = s.didj.lock().unwrap();
-    let hz = d.cpu_hz();
     let t = Instant::now();
-    d.bus.buttons = button::POWER;
-    d.run(hz / 10);
-    d.bus.buttons = 0;
-    while !d.bus.powered_off && t.elapsed() < Duration::from_secs(15) {
-        d.run(hz / FPS as u64);
-        d.bus.dma.pcm.clear();
+    if d.bus.powered_off {
+        return;
     }
+    // With the cable in, it is pulled first (`Didj::shut_down`); the PC
+    // sees it go.
+    if s.usb_host.swap(false, Ordering::Relaxed)
+        && let Some(srv) = s.usb.lock().unwrap().as_ref()
+    {
+        srv.lock().unwrap().disconnect();
+    }
+    let usb = d.bus.udc.attached;
+    // Nothing to see meanwhile: the 3D engine's drawing is skipped.
+    d.bus.skip_frames = true;
+    // A game's shutdown takes 5 s and more of the console's time in
+    // Original mode (the cable's, 10 s); a slow PC needs longer than that.
+    let off = d.shut_down(&mut |d, cycles| {
+        d.run(cycles);
+        d.bus.dma.pcm.clear();
+        t.elapsed() < POWER_OFF_LIMIT
+    });
     // The shutdown's messages, for the serial console.
     if let Some(out) = d.bus.uart.first_mut().map(std::mem::take) {
         s.serial.output(&out.chars().map(|c| c as u8).collect::<Vec<u8>>());
     }
-    if d.bus.powered_off {
-        tracing::info!(target: "ribbit::saves", "Didj powered off in {:.1} s", t.elapsed().as_secs_f32());
+    if off {
+        tracing::info!(target: "ribbit::saves", usb, "Didj powered off in {:.1} s", t.elapsed().as_secs_f32());
     } else {
-        tracing::warn!(target: "ribbit::saves", "the Didj did not power off in 15 s; saving its NAND as it is");
+        tracing::warn!(target: "ribbit::saves", usb, "the Didj did not power off in {} s; saving its NAND as it is", POWER_OFF_LIMIT.as_secs());
     }
 }
+
+/// How long closing waits for the console to power off (`power_off`).
+const POWER_OFF_LIMIT: Duration = Duration::from_secs(40);
 
 /// What a Didj package (`DIDJ-0x...lfp`) is in the library: the Device
 /// Firmware package stands for the console (its menu); an application
@@ -1183,7 +1508,7 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
     let (title, tag) = match meta.get("Type").map(str::trim) {
         // The firmware package carries the kernel and root file system.
         Some("System") if product.eq_ignore_ascii_case("0x000E0003") => ("Didj".to_string(), "System"),
-        Some("Application") => (meta.get("Name").unwrap_or(&id).to_string(), "Game"),
+        Some("Application") => (ribbit_didj::connect::display_name(&meta, &id), "Game"),
         _ => return None,
     };
     let mut details = vec![("System", "Didj".to_string())];
@@ -1192,12 +1517,25 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
             details.push((label, v.to_string()));
         }
     }
+    // Its folder on the console (ProgramFiles/<folder>): matched with an
+    // installed copy, so a game is one card (`library::merge_installed`).
+    details.push(("Folder", dir.trim_end_matches('/').to_string()));
     let status = if tag == "Game" {
         "early emulation: Ribbit starts it from the Didj's menu (a console set up with a profile), built from the packages in this folder"
     } else {
         "early emulation: starts at the Didj's menu, built from the packages in this folder"
     };
     details.push(("Status", status.to_string()));
+    // A game beside the Didj's own packages is built into it; one elsewhere
+    // is installed on it when played (`didj_library`).
+    let shown = match tag {
+        "Game" if path.parent().and_then(|d| find_package(d, 0)).is_some() => "Built-in",
+        "Game" => {
+            details.push(("Install", "playing it installs it on the Didj first, as LeapFrog Connect would".to_string()));
+            "Not installed"
+        }
+        t => t,
+    };
     details.push(("File", path.display().to_string()));
     let mb = (data.len() as u64).div_ceil(1 << 20);
     Some(Game {
@@ -1206,11 +1544,12 @@ pub fn describe_package(path: &Path) -> Option<crate::library::Game> {
         title,
         subtitle: format!("{}  ·  {mb} MB", meta.get("Version").unwrap_or("")),
         details,
-        tags: vec![tag.into()],
+        tags: vec![shown.into()],
         key: format!("didj-{id}"),
         art: if tag == "Game" {
             card_art(&meta, |f| ribbit_core::zip::read_entry(&data, entries.iter().find(|e| e.name == format!("{dir}{f}"))?).ok())
         } else {
+            // The console: its icon (`console_icons`).
             Art::Missing
         },
     })
@@ -1250,7 +1589,7 @@ pub fn describe_explorer(path: &Path) -> Option<crate::library::Game> {
             details.push((label, v.to_string()));
         }
     }
-    details.push(("Status", "early emulation: starts Linux and the Explorer's own setup and menu, built from the packages in this folder; no cartridges yet".to_string()));
+    details.push(("Status", "early emulation: starts Linux and the Explorer's own setup and menu, built from the packages in this folder; Didj cartridges play in its slot".to_string()));
     details.push(("File", path.display().to_string()));
     let mb = (data.len() as u64).div_ceil(1 << 20);
     Some(Game {
@@ -1328,6 +1667,14 @@ pub fn menu_art(path: &Path, cart: Option<&[u8]>) -> Option<Art> {
     Some(Art { width: image.size[0], pixels })
 }
 
+/// `menu_art` for a game whose files `read` gives (one installed on the
+/// console: `didj_library`).
+pub(crate) fn menu_art_from(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Art> {
+    let image = panel_art(meta, read)?;
+    let pixels = image.pixels.iter().map(|c| u32::from_be_bytes([c.a(), c.r(), c.g(), c.b()])).collect();
+    Some(Art { width: image.size[0], pixels })
+}
+
 /// The picture a game's panel shows (`menu_art`), read with `read`.
 fn panel_art(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Vec<u8>>) -> Option<egui::ColorImage> {
     let mut found = ["LargeIcon", "PreviewImage"].into_iter().filter_map(|k| crate::manual::decode_png(&read(meta.get(k)?)?));
@@ -1337,7 +1684,7 @@ fn panel_art(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Ve
 
 /// A game's library picture: what its panel shows (Tinker Bell and NeoPets
 /// have only a `LargeIcon`), else its `Icon`.
-fn card_art(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Vec<u8>>) -> crate::library::Art {
+pub(crate) fn card_art(meta: &ribbit_didj::package::Meta, read: impl Fn(&str) -> Option<Vec<u8>>) -> crate::library::Art {
     panel_art(meta, &read)
         .or_else(|| crate::manual::decode_png(&read(meta.get("Icon")?)?))
         .map_or(crate::library::Art::Missing, |art| crate::library::Art::Image(card_picture(&art)))
@@ -1433,13 +1780,43 @@ pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
         path: path.to_path_buf(),
         family: Family::Didj,
         title,
-        subtitle: format!("Cartridge  ·  {}", meta.get("Version").map_or(String::new(), |v| format!("version {v}"))),
+        subtitle: meta.get("Version").map_or(String::new(), |v| format!("version {v}")),
         details,
         tags: vec!["Cartridge".into()],
         key: format!("didj-cart-{id}"),
         art,
     })
 }
+
+/// A Didj cartridge's entry on the Explorer's page: the Explorer plays
+/// them too (its firmware lists the Didj titles and patches some).
+pub fn on_explorer(didj: &crate::library::Game) -> crate::library::Game {
+    use crate::library::{Art, Family, Game};
+    let mut details = didj.details.clone();
+    for d in &mut details {
+        match d.0 {
+            "System" => d.1 = "Leapster Explorer (a Didj cartridge)".to_string(),
+            "Status" => d.1 = "early emulation: in the Explorer's slot, its menu shows the game; take it out from the Emulation menu".to_string(),
+            _ => {}
+        }
+    }
+    Game {
+        path: didj.path.clone(),
+        family: Family::Explorer,
+        title: didj.title.clone(),
+        subtitle: didj.subtitle.clone(),
+        details,
+        tags: vec![EXPLORER_CART_TAG.into()],
+        key: format!("explorer-{}", didj.key),
+        art: match &didj.art {
+            Art::Image(i) => Art::Image(i.clone()),
+            _ => Art::Missing,
+        },
+    }
+}
+
+/// The tag of `on_explorer` entries.
+pub const EXPLORER_CART_TAG: &str = "Didj cartridge";
 
 /// The dump at `path` if it is a Didj cartridge (zipped or not): the raw
 /// flash, or an image of its FAT volume alone, made into the raw flash.
@@ -1480,6 +1857,11 @@ fn renamed_package(path: &Path) -> Option<String> {
     ribbit_didj::package::identify(&name, &std::fs::read(path).ok()?)
 }
 
+/// The Leapster Explorer's Firmware Base package in `dir`, by its name.
+pub fn find_explorer_firmware(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| may_be_explorer_firmware(p))
+}
+
 /// The Didj's system package (the one the library lists as the console) in
 /// `dir` or up to `depth` folders below it, found by its name.
 pub fn find_package(dir: &Path, depth: u32) -> Option<PathBuf> {
@@ -1493,8 +1875,42 @@ pub fn find_package(dir: &Path, depth: u32) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[path = "didj_library_tests.rs"]
+mod library_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process's working set and private bytes in MB (Windows; zeros
+    /// elsewhere), for the Explorer's memory checks.
+    fn memory_mb() -> (f64, f64) {
+        #[cfg(windows)]
+        {
+            #[repr(C)]
+            #[derive(Default)]
+            struct Counters {
+                cb: u32,
+                faults: u32,
+                peak_ws: usize,
+                ws: usize,
+                quota: [usize; 4],
+                pagefile: usize,
+                peak_pagefile: usize,
+                private: usize,
+            }
+            unsafe extern "system" {
+                fn GetCurrentProcess() -> isize;
+                fn K32GetProcessMemoryInfo(process: isize, counters: *mut Counters, cb: u32) -> i32;
+            }
+            let mut c = Counters { cb: std::mem::size_of::<Counters>() as u32, ..Default::default() };
+            // SAFETY: a plain query into a struct of the size given.
+            unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+            (c.ws as f64 / 1048576.0, c.private as f64 / 1048576.0)
+        }
+        #[cfg(not(windows))]
+        (0.0, 0.0)
+    }
 
     /// Enhanced (new) in the app's session: the menu draws, and a file the
     /// programs write to /Didj reaches the save, where the other modes find
@@ -1596,7 +2012,7 @@ mod tests {
         eprintln!("stopped and saved in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
         let bytes = std::fs::read(&save).unwrap();
         eprintln!("save {} bytes", bytes.len());
-        let mut flash = original.clone();
+        let mut flash = (*original).clone();
         flash.apply_changes(&bytes).unwrap();
         let files = ribbit_didj::carry::files_beyond(&flash, &original);
         eprintln!("save holds {:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
@@ -1717,5 +2133,471 @@ mod tests {
             enc.write_header().unwrap().write_image_data(&rgb).unwrap();
         }
         didj.stop();
+    }
+
+    /// Leapster Explorer Enhanced (new) in a session as the app runs it:
+    /// starts from the packages (RIBBIT_EXPLORER_DIR), shows its menu, keeps
+    /// a file put on Bulk and one on the root file system in the usual save
+    /// (.nandblocks), and reads them back from it.
+    #[test]
+    #[ignore]
+    fn explorer_hle_session() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_EXPLORER_DIR").expect("RIBBIT_EXPLORER_DIR"));
+        let saves = std::env::temp_dir().join("ribbit-explorer-hle-test");
+        let _ = std::fs::remove_dir_all(&saves);
+        let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+        let lx = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), true).unwrap();
+        assert!(lx.is_hle());
+        std::thread::sleep(Duration::from_secs(12));
+        let mut px = Vec::new();
+        let (w, h) = lx.frame(&mut px);
+        let lit = px.iter().filter(|&&p| p != 0).count();
+        let (ws, private) = memory_mb();
+        eprintln!("picture {w}x{h}, {lit} pixels not black, speed {:.0}%, memory {ws:.0} MB working set, {private:.0} MB private", lx.speed_percent());
+        if let Ok(path) = std::env::var("RIBBIT_EXPLORER_SHOT") {
+            let mut enc = png::Encoder::new(std::fs::File::create(path).unwrap(), w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgb);
+            let rgb: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+            enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+        }
+        assert!(lit > w * h / 4);
+        {
+            let mut hle = lx.shared.hle.lock().unwrap();
+            let vfs = &mut hle.as_mut().unwrap().p.vfs;
+            vfs.add_file("/LF/Bulk/Data/ribbit-test.txt", b"hello".to_vec());
+            vfs.add_file("/flags/ribbit-test", b"flag".to_vec());
+        }
+        let (original, save) = (lx.original.clone(), lx.save_path.clone());
+        let t = Instant::now();
+        lx.stop();
+        eprintln!("stopped and saved in {:.0} ms, the save {} bytes", t.elapsed().as_secs_f64() * 1000.0, std::fs::metadata(&save).map_or(0, |m| m.len()));
+        let mut flash = (*original).clone();
+        flash.apply_changes(&std::fs::read(&save).unwrap()).unwrap();
+        let (root, bulk) = ribbit_didj::hle::explorer::files_in_nand(&flash).unwrap();
+        assert!(bulk.iter().any(|f| f.path == "/Data/ribbit-test.txt" && f.data == b"hello"));
+        assert!(root.iter().any(|f| f.path == "/flags/ribbit-test" && f.data == b"flag"));
+        // Started again from that save, the files are there.
+        let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+        let lx = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), true).unwrap();
+        let has = lx.shared.hle.lock().unwrap().as_ref().unwrap().p.vfs.get("/LF/Bulk/Data/ribbit-test.txt").is_some();
+        lx.stop();
+        assert!(has);
+    }
+
+    /// Original (the Explorer's kernel) started from `flash`: `commands`
+    /// typed at its serial console's shell, one per prompt, then the
+    /// console's output and the NAND as the kernel left it.
+    fn explorer_console(flash: Nand, commands: &[&str]) -> (String, Nand) {
+        let mut lx = ribbit_didj::explorer::boot(flash, ribbit_didj::explorer::CMDLINE).unwrap();
+        let mut commands = commands.iter().map(|c| format!("{c}\n")).collect::<Vec<_>>().into_iter().chain(["echo RIBBIT-END\n".to_string()]);
+        let (mut prompts, mut quiet, mut seen_len) = (0, 0, 0);
+        for _ in 0..8000 {
+            lx.run(1_000_000);
+            let out = lx.bus.uart.first().map_or("", |s| s.as_str());
+            quiet = if out.len() > seen_len { 0 } else { quiet + 1 };
+            seen_len = out.len();
+            if out.contains("\nRIBBIT-END") {
+                break;
+            }
+            let seen = out.matches("# ").count();
+            if seen > prompts && quiet >= 50 {
+                prompts = seen;
+                if let Some(c) = commands.next() {
+                    lx.bus.uart_rx.extend(c.bytes());
+                }
+            }
+        }
+        let out = lx.bus.uart.first().cloned().unwrap_or_default();
+        (out, std::mem::take(&mut lx.bus.nand))
+    }
+
+    /// Enhanced (new)'s saves are journal writes, as the Explorer's kernel
+    /// makes them: a file written in a session reaches a small save, quickly;
+    /// Original's kernel mounts it (no UBIFS error) and reads the file, and
+    /// writes its own; the next session in Enhanced (new) finds both, changes
+    /// one and removes another into the save Original's kernel left, and
+    /// Original reads that too. RIBBIT_EXPLORER_DIR as above.
+    #[test]
+    #[ignore]
+    fn explorer_hle_save_journal() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_EXPLORER_DIR").expect("RIBBIT_EXPLORER_DIR"));
+        let saves = std::env::temp_dir().join("ribbit-explorer-hle-journal");
+        let _ = std::fs::remove_dir_all(&saves);
+        let first: Vec<u8> = (0..20_000u32).map(|i| b"ribbit journal "[i as usize % 15]).collect();
+        let (bulk_file, root_file, lle_file) = ("/LF/Bulk/Data/ribbit-journal.txt", "/flags/ribbit-journal", "/LF/Bulk/Data/ribbit-lle.txt");
+        let session = |change: &dyn Fn(&mut ribbit_didj::hle::vfs::Vfs)| {
+            let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+            let lx = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), true).unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+            change(&mut lx.shared.hle.lock().unwrap().as_mut().unwrap().p.vfs);
+            let (original, save) = (lx.original.clone(), lx.save_path.clone());
+            let t = Instant::now();
+            lx.stop();
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            let changes = std::fs::read(&save).unwrap();
+            eprintln!("closed in {ms:.0} ms, the save {} bytes", changes.len());
+            let mut flash = (*original).clone();
+            flash.apply_changes(&changes).unwrap();
+            (flash, original, save, changes.len())
+        };
+        let file = |files: &[ribbit_didj::ubifs_read::File], p: &str| files.iter().find(|f| f.path == p).map(|f| f.data.clone());
+
+        // Enhanced (new): two files written.
+        let (flash, original, save, size) = session(&|vfs| {
+            vfs.add_file(bulk_file, first.clone());
+            vfs.add_file(root_file, b"flag".to_vec());
+        });
+        assert!(size < 2 << 20, "a small save: {size} bytes");
+        let (root, bulk) = ribbit_didj::hle::explorer::files_in_nand(&flash).unwrap();
+        assert_eq!(file(&bulk, "/Data/ribbit-journal.txt"), Some(first.clone()));
+        assert_eq!(file(&root, "/flags/ribbit-journal"), Some(b"flag".to_vec()));
+        // Carried over to another image from the save's blocks alone (the
+        // journal's: no master node, no index).
+        let carried = ribbit_didj::carry::explorer_user_files(&std::fs::read(&save).unwrap(), &original).unwrap();
+        assert!(matches!(carried.get("Data/ribbit-journal.txt").map(|e| &e.kind), Some(ribbit_didj::ubifs::Kind::File(d)) if *d == first), "carried: {:?}", carried.keys().collect::<Vec<_>>());
+
+        // Original reads them, and writes a file of its own.
+        let (out, flash) = explorer_console(flash, &[&format!("wc -c {bulk_file}"), &format!("tail -c 30 {bulk_file}"), &format!("cat {root_file}"), &format!("echo from-original > {lle_file}"), "sync", "dmesg | grep -c 'UBIFS error'"]);
+        assert!(out.contains(&format!("20000 {bulk_file}")), "Original reads the Bulk file:\n{out}");
+        assert!(out.contains(std::str::from_utf8(&first[first.len() - 30..]).unwrap()), "Original reads the Bulk file:\n{out}");
+        assert!(out.contains("\nflag"), "Original reads the root file:\n{out}");
+        assert!(out.contains("UBIFS error'\r\n0") || out.contains("UBIFS error'\n0"), "no UBIFS error:\n{out}");
+        // (Original's first start formats the root file system's blocks
+        // past LeapFrog's image: its save is big already.)
+        let lle_save = flash.changes_from(&original);
+        eprintln!("Original's save {} bytes", lle_save.len());
+        std::fs::write(&save, &lle_save).unwrap();
+
+        // Enhanced (new) from Original's save: both there; one changed
+        // (shorter), the other removed.
+        let second = b"second version".to_vec();
+        let (flash, _, _, size) = session(&|vfs| {
+            assert_eq!(vfs.get(lle_file).map(|n| n.size()), Some(14), "Original's file");
+            assert_eq!(vfs.get(bulk_file).map(|n| n.size()), Some(first.len() as u64));
+            vfs.add_file(bulk_file, second.clone());
+            vfs.remove(root_file);
+        });
+        assert!(size < lle_save.len() + (2 << 20), "a small change to the save: {size} bytes");
+        let (root, bulk) = ribbit_didj::hle::explorer::files_in_nand(&flash).unwrap();
+        assert_eq!(file(&bulk, "/Data/ribbit-journal.txt"), Some(second.clone()));
+        assert_eq!(file(&bulk, "/Data/ribbit-lle.txt"), Some(b"from-original\n".to_vec()));
+        assert_eq!(file(&root, "/flags/ribbit-journal"), None);
+
+        // And Original once more.
+        let (out, _) = explorer_console(flash, &[&format!("cat {bulk_file}"), &format!("ls {root_file}"), "dmesg | grep -c 'UBIFS error'"]);
+        assert!(out.contains("\nsecond version"), "Original reads the change:\n{out}");
+        assert!(out.contains("No such file"), "the root file is gone:\n{out}");
+        assert!(out.contains("UBIFS error'\r\n0") || out.contains("UBIFS error'\n0"), "no UBIFS error:\n{out}");
+    }
+
+    /// The Explorer's memory in a session: Original, or Enhanced (new) with
+    /// RIBBIT_EXPLORER_HLE=1; RIBBIT_EXPLORER_DIR as above. Prints the
+    /// working set and private bytes at the menu.
+    #[test]
+    #[ignore]
+    fn explorer_memory() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_EXPLORER_DIR").expect("RIBBIT_EXPLORER_DIR"));
+        let hle = std::env::var("RIBBIT_EXPLORER_HLE").is_ok_and(|v| v == "1");
+        let saves = std::env::temp_dir().join("ribbit-explorer-memory");
+        let _ = std::fs::remove_dir_all(&saves);
+        let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+        let (ws, private) = memory_mb();
+        eprintln!("built: {ws:.0} MB working set, {private:.0} MB private");
+        let lx = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), hle).unwrap();
+        std::thread::sleep(Duration::from_secs(15));
+        let (ws, private) = memory_mb();
+        eprintln!("{} running: {ws:.0} MB working set, {private:.0} MB private", if hle { "Enhanced (new)" } else { "Original" });
+        lx.stop();
+    }
+
+    /// Explorer Enhanced (new) save states: one made at the menu, a file
+    /// added, the state loaded (the file gone) and the programs going on.
+    #[test]
+    #[ignore]
+    fn explorer_hle_states() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_EXPLORER_DIR").expect("RIBBIT_EXPLORER_DIR"));
+        let saves = std::env::temp_dir().join("ribbit-explorer-hle-states");
+        let _ = std::fs::remove_dir_all(&saves);
+        let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+        let lx = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), true).unwrap();
+        std::thread::sleep(Duration::from_secs(12));
+        let mut before = Vec::new();
+        lx.frame(&mut before);
+        let t = Instant::now();
+        let state = lx.save_state().expect("a state");
+        eprintln!("state {} bytes in {:.0} ms", state.len(), t.elapsed().as_secs_f64() * 1000.0);
+        lx.shared.hle.lock().unwrap().as_mut().unwrap().p.vfs.add_file("/LF/Bulk/ribbit-state-test", b"x".to_vec());
+        std::thread::sleep(Duration::from_secs(2));
+        let t = Instant::now();
+        lx.load_state(&state).unwrap();
+        eprintln!("loaded in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        let gone = lx.shared.hle.lock().unwrap().as_ref().unwrap().p.vfs.get("/LF/Bulk/ribbit-state-test").is_none();
+        std::thread::sleep(Duration::from_secs(3));
+        let mut after = Vec::new();
+        lx.frame(&mut after);
+        let lit = after.iter().filter(|&&p| p != 0).count();
+        lx.stop();
+        assert!(gone);
+        assert!(lit > after.len() / 4);
+        assert_eq!(before, after, "the menu stands still: the same picture after the load");
+    }
+
+    /// A Didj cartridge in the Explorer's slot in Enhanced (new), put in at
+    /// the menu: CartManager mounts it at /LF/Cart through the HLE, and it
+    /// goes when taken out. RIBBIT_EXPLORER_DIR as above, RIBBIT_EXPLORER_CART
+    /// a Didj cartridge dump.
+    #[test]
+    #[ignore]
+    fn explorer_hle_cart() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_EXPLORER_DIR").expect("RIBBIT_EXPLORER_DIR"));
+        let cart = read_cart(Path::new(&std::env::var("RIBBIT_EXPLORER_CART").expect("RIBBIT_EXPLORER_CART"))).expect("a cartridge dump");
+        let saves = std::env::temp_dir().join("ribbit-explorer-hle-cart");
+        let _ = std::fs::remove_dir_all(&saves);
+        let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+        let lx = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), true).unwrap();
+        std::thread::sleep(Duration::from_secs(12));
+        lx.set_cart(Some(cart)).unwrap();
+        let mounted = || lx.shared.hle.lock().unwrap().as_ref().unwrap().p.vfs.list("/LF/Cart").len();
+        let t = Instant::now();
+        while mounted() == 0 && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let files = mounted();
+        eprintln!("/LF/Cart has {files} entries {:.1} s after the cartridge went in", t.elapsed().as_secs_f64());
+        lx.set_cart(None).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let after = mounted();
+        lx.stop();
+        assert!(files > 0);
+        assert_eq!(after, 0);
+    }
+
+    /// Save states and closing, in every mode: Original, Enhanced and
+    /// Enhanced (new), at the menu or (RIBBIT_DIDJ_CART, a cartridge dump)
+    /// in its game. A state made there loads and the console runs on (twice
+    /// over); then the session is closed as the app closes it, and the save
+    /// it left starts a console (Original mode) whose start finds its file
+    /// systems clean (no file check, no repair: no tune-up screen).
+    /// RIBBIT_DIDJ_SAVE: a set-up console's .nandblocks (its .nandimage
+    /// beside it); RIBBIT_DIDJ_WAIT: seconds before the state (25).
+    #[test]
+    #[ignore]
+    fn didj_states_and_close() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_DIDJ_DIR").expect("RIBBIT_DIDJ_DIR"));
+        let save = std::env::var("RIBBIT_DIDJ_SAVE").ok().map(PathBuf::from);
+        let cart = std::env::var("RIBBIT_DIDJ_CART").ok().map(PathBuf::from);
+        let wait = std::env::var("RIBBIT_DIDJ_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(25);
+        let modes = [("original", false, false), ("enhanced", true, false), ("new", true, true)];
+        let runs: Vec<_> = modes
+            .into_iter()
+            .map(|(name, enhanced, hle)| {
+                let (dir, save, cart) = (dir.clone(), save.clone(), cart.clone());
+                std::thread::spawn(move || {
+                    let saves = std::env::temp_dir().join(format!("ribbit-states-{name}"));
+                    let _ = std::fs::remove_dir_all(&saves);
+                    std::fs::create_dir_all(&saves).unwrap();
+                    if let Some(save) = &save {
+                        std::fs::copy(save, save_file(&dir, &saves)).unwrap();
+                        std::fs::copy(save.with_extension("nandimage"), save_file(&dir, &saves).with_extension("nandimage")).unwrap();
+                    }
+                    let dump = cart.as_deref().map(|p| read_cart(p).expect("a cartridge"));
+                    let art = cart.as_deref().and_then(|p| menu_art(p, dump.as_deref()));
+                    let mode = Mode { enhanced, cpu_scale: if enhanced { 2 } else { 1 }, frame_skip: false, hd: 1, hle, smooth: false };
+                    let didj = DidjSession::start(&dir, &saves, dump.clone(), None, art, mode, Arc::new(crate::serial::Serial::default())).unwrap();
+                    let flips = || match didj.shared.hle.lock().unwrap().as_ref() {
+                        Some(h) => h.p.m.bus.flips,
+                        None => didj.shared.didj.lock().unwrap().bus.flips,
+                    };
+                    let lit = || {
+                        let mut px = Vec::new();
+                        let (w, h) = didj.frame(&mut px);
+                        px.iter().filter(|&&p| p != 0).count() * 4 > w * h
+                    };
+                    std::thread::sleep(Duration::from_secs(wait));
+                    let mut ok = Vec::new();
+                    for round in 0..2 {
+                        let state = didj.save_state().expect("a state");
+                        std::thread::sleep(Duration::from_secs(3));
+                        let loaded = didj.load_state(&state);
+                        let before = flips();
+                        std::thread::sleep(Duration::from_secs(5));
+                        let (after, shown) = (flips(), lit());
+                        eprintln!("{name} round {round}: state {} bytes, loaded {loaded:?}, {} flips in 5 s, picture {shown}, speed {:.0}%", state.len(), after - before, didj.speed_percent());
+                        ok.push(loaded.is_ok() && after > before + 10 && shown);
+                    }
+                    let t = Instant::now();
+                    didj.stop();
+                    let closed = t.elapsed().as_secs_f32();
+                    // The next start, in Original mode (the one that shows the
+                    // tune-up screen), from the save the close left.
+                    let serial = Arc::new(crate::serial::Serial::default());
+                    let original = Mode { enhanced: false, cpu_scale: 1, frame_skip: false, hd: 1, hle: false, smooth: false };
+                    let again = DidjSession::start(&dir, &saves, dump, None, None, original, serial.clone()).unwrap();
+                    std::thread::sleep(Duration::from_secs(20));
+                    let text = serial.text();
+                    let checked = text.contains("fsck check on");
+                    let refused = text.contains("needs_repair");
+                    eprintln!("{name}: closed in {closed:.1} s; next start: file check {checked}, needs repair {refused}");
+                    again.stop();
+                    let _ = std::fs::remove_dir_all(&saves);
+                    (name, ok, checked || refused)
+                })
+            })
+            .collect();
+        for r in runs {
+            let (name, ok, unclean) = r.join().unwrap();
+            assert!(ok.iter().all(|&o| o), "{name}: state round trips {ok:?}");
+            assert!(!unclean, "{name}: the next start found the file systems unclean");
+        }
+    }
+
+    /// A Didj save folder, imported (`import_didj_folder`). It is made
+    /// up: Ribbit's own /Didj written out as a host
+    /// folder (assets/didj, its Data also as assets/factory/Data), with a
+    /// set-up console's player files over it (RIBBIT_DIDJ_SAVE, its
+    /// .nandimage beside it), profile 0 renamed IMPORTED, and a Didji as
+    /// Connect sends them (no Device line). Imported into a new Didj, the
+    /// profile, the Didji and the game progress are on the console in every
+    /// mode: Original and Enhanced (the console's shell lists them) and
+    /// Enhanced (new) (its files). RIBBIT_DIDJ_IMPORT_OUT: keep the save made
+    /// there (didj-<folder>.nandblocks) for didjboot.
+    #[test]
+    #[ignore]
+    fn didj_folder_import() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_DIDJ_DIR").expect("RIBBIT_DIDJ_DIR"));
+        let setup = PathBuf::from(std::env::var("RIBBIT_DIDJ_SAVE").expect("RIBBIT_DIDJ_SAVE"));
+        let root = std::env::temp_dir().join("ribbit-didj-folder-import");
+        let _ = std::fs::remove_dir_all(&root);
+        let didj = root.join("Backup").join("assets").join("didj");
+        let put = |base: &Path, p: &str, d: &[u8]| {
+            let f = base.join(p.trim_start_matches('/'));
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, d).unwrap();
+        };
+        let (original, _) = ribbit_didj::nand_and_extras_missing(&dir, true).unwrap();
+        let brio = ribbit_didj::nand::partition("Brio").unwrap();
+        let volume = ribbit_didj::ubi::read_volume(&original, brio, ribbit_didj::brio::volume_sectors(brio.size / ribbit_didj::nand::BLOCK) * 512);
+        for (p, d) in ribbit_core::fatfs::known_files(&volume, &|_| true) {
+            put(&didj, &p, &d);
+            if let Some(rest) = p.strip_prefix("/Data/") {
+                put(&root.join("Backup").join("assets").join("factory").join("Data"), rest, &d);
+            }
+        }
+        let mut flash = original.clone();
+        flash.apply_changes(&std::fs::read(&setup).unwrap()).unwrap();
+        let players = ribbit_didj::carry::files_beyond(&flash, &original);
+        let mut profile = None;
+        for (p, d) in &players {
+            let mut d = d.clone();
+            if p.eq_ignore_ascii_case("/Data/0/profile.dsc") {
+                let text = String::from_utf8_lossy(&d).into_owned();
+                let name = text.lines().find_map(|l| l.strip_prefix("Name=")).unwrap_or("").trim().to_string();
+                d = text.replacen(&format!("Name={name}"), "Name=IMPORTED", 1).into_bytes();
+                profile = Some(d.clone());
+            }
+            put(&didj, p, &d);
+        }
+        let profile = profile.expect("the set-up save has profile 0");
+        let didji = didj.join("Data").join("Avatars").join("Avatar7");
+        std::fs::create_dir_all(&didji).unwrap();
+        for e in std::fs::read_dir(didj.join("Data").join("Avatars").join("Avatar1")).unwrap().flatten().filter(|e| e.path().is_file()) {
+            std::fs::copy(e.path(), didji.join(e.file_name())).unwrap();
+        }
+        std::fs::write(didji.join("meta.inf"), b"Name=\"Zed\"
+DeviceTypes=\"DIDJ\"
+ProfileAccess=\"0\"
+").unwrap();
+        let game = players.iter().find(|(p, _)| p.to_ascii_lowercase().starts_with("/data/0/") && !p.to_ascii_lowercase().ends_with(".dsc") && !p.to_ascii_lowercase().ends_with(".log") && !p.to_ascii_lowercase().contains("backup")).expect("game progress").0.clone();
+        let saves = std::env::var("RIBBIT_DIDJ_IMPORT_OUT").map(PathBuf::from).unwrap_or_else(|_| root.join("saves"));
+        let _ = std::fs::remove_file(save_file(&dir, &saves));
+        let r = import_didj_folder(&root.join("Backup"), &dir, &saves).unwrap();
+        eprintln!("imported {} files, {} profiles, {} packages; game progress {game}", r.files, r.profiles, r.packages);
+        assert_eq!(r.profiles, 1);
+        let modes = [("original", false, false), ("enhanced", true, false), ("new", true, true)];
+        for (name, enhanced, hle) in modes {
+            let run = root.join(format!("saves-{name}"));
+            std::fs::create_dir_all(&run).unwrap();
+            for ext in ["nandblocks", "nandimage", "files"] {
+                std::fs::copy(save_file(&dir, &saves).with_extension(ext), save_file(&dir, &run).with_extension(ext)).unwrap();
+            }
+            let serial = Arc::new(crate::serial::Serial::default());
+            let mode = Mode { enhanced, cpu_scale: 1, frame_skip: false, hd: 1, hle, smooth: false };
+            let session = DidjSession::start(&dir, &run, None, None, None, mode, serial.clone()).unwrap();
+            let (has_profile, has_didji, has_game) = if hle {
+                std::thread::sleep(Duration::from_secs(5));
+                let h = session.shared.hle.lock().unwrap();
+                let files = h.as_ref().unwrap().p.vfs.files_under("/Didj");
+                let file = |path: &str| files.iter().find(|(p, _)| p.eq_ignore_ascii_case(path)).map(|(_, d)| d.to_vec());
+                let meta = file("/Data/Avatars/Avatar7/meta.inf").unwrap_or_default();
+                (file("/Data/0/profile.dsc") == Some(profile.clone()), String::from_utf8_lossy(&meta).contains("Device=\"Didj\""), file(&game).is_some())
+            } else {
+                std::thread::sleep(Duration::from_secs(25));
+                serial.type_bytes(format!("
+cat /Didj/Data/0/profile.dsc; cat /Didj/Data/Avatars/Avatar7/meta.inf; ls -l /Didj{game}
+").as_bytes());
+                std::thread::sleep(Duration::from_secs(5));
+                let text = serial.text();
+                (text.contains("Name=IMPORTED"), text.contains("Device=\"Didj\""), !text.contains("No such file"))
+            };
+            eprintln!("{name}: profile {has_profile}, Didji {has_didji}, game progress {has_game}");
+            session.stop();
+            assert!(has_profile && has_didji && has_game, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A real Didj save folder (RIBBIT_DIDJ_IMPORT_SAVE: a copied /Didj
+    /// tree, read only; RIBBIT_DIDJ_IMPORT_NAME: profile 0's name),
+    /// imported into a new Didj: in Original, Original+ (Enhanced) and
+    /// Enhanced (new) the profile is on the console, and still there after
+    /// closing and starting again. Pictures of Sign In go to
+    /// RIBBIT_DIDJ_SHOT_DIR (import-<mode>-<n>.png).
+    #[test]
+    #[ignore]
+    fn didj_folder_real_save() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_DIDJ_DIR").expect("RIBBIT_DIDJ_DIR"));
+        let from = PathBuf::from(std::env::var("RIBBIT_DIDJ_IMPORT_SAVE").expect("RIBBIT_DIDJ_IMPORT_SAVE"));
+        let name = std::env::var("RIBBIT_DIDJ_IMPORT_NAME").unwrap_or_else(|_| "IMPORTED".into());
+        let saves = std::env::temp_dir().join("ribbit-didj-folder-real");
+        let _ = std::fs::remove_dir_all(&saves);
+        let r = import_didj_folder(&from, &dir, &saves).unwrap();
+        eprintln!("imported {} files, {} profiles, {} packages", r.files, r.profiles, r.packages);
+        let shot = |didj: &DidjSession, file: &str| {
+            let Ok(shots) = std::env::var("RIBBIT_DIDJ_SHOT_DIR") else { return };
+            let mut px = Vec::new();
+            let (w, h) = didj.frame(&mut px);
+            let mut enc = png::Encoder::new(std::fs::File::create(Path::new(&shots).join(file)).unwrap(), w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgb);
+            let rgb: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+            enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+        };
+        for (mode_name, enhanced, hle) in [("original", false, false), ("originalplus", true, false), ("new", true, true)] {
+            let run = saves.join(mode_name);
+            std::fs::create_dir_all(&run).unwrap();
+            for ext in ["nandblocks", "nandimage", "files"] {
+                std::fs::copy(save_file(&dir, &saves).with_extension(ext), save_file(&dir, &run).with_extension(ext)).unwrap();
+            }
+            for n in 0..2 {
+                let serial = Arc::new(crate::serial::Serial::default());
+                let mode = Mode { enhanced, cpu_scale: 1, frame_skip: false, hd: 1, hle, smooth: false };
+                let session = DidjSession::start(&dir, &run, None, None, None, mode, serial.clone()).unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+                shot(&session, &format!("import-{mode_name}-{n}.png"));
+                let has = if hle {
+                    let h = session.shared.hle.lock().unwrap();
+                    let files = h.as_ref().unwrap().p.vfs.files_under("/Didj");
+                    files.iter().any(|(p, d)| p.eq_ignore_ascii_case("/Data/0/profile.dsc") && String::from_utf8_lossy(d).contains(&format!("Name={name}")))
+                } else {
+                    serial.type_bytes(b"
+cat /Didj/Data/0/profile.dsc /Didj/Base/settings.cfg
+");
+                    std::thread::sleep(Duration::from_secs(3));
+                    serial.text().contains(&format!("Name={name}"))
+                };
+                eprintln!("{mode_name} start {n}: profile {name} {has}");
+                session.stop();
+                assert!(has, "{mode_name} start {n}");
+            }
+        }
     }
 }

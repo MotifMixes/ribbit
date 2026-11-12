@@ -142,15 +142,32 @@ const SWIZZLE: [[u8; 4]; 32] = {
     t
 };
 
-/// Physical memory as the engine sees it: SDRAM from 0, and block
-/// addresses (`mlc::block_sdram`) from 0x2000_0000.
+/// Physical memory as the engine sees it: SDRAM from `base` (0 on the
+/// Didj, 0x8000_0000 on the Explorer), and block addresses
+/// (`mlc::block_sdram`) from `base` + 0x2000_0000.
 pub struct Mem<'a> {
     pub sdram: &'a mut [u8],
+    pub base: u32,
+}
+
+/// The SDRAM byte behind engine address `a` with SDRAM at `base`. Block
+/// addresses reach all of SDRAM (the Explorer's 64 MB too); one given
+/// without `base` (the segment alone in a register) is taken as block too.
+fn offset(a: u32, texture: bool, base: u32, len: usize) -> usize {
+    let end = BLOCK_END.max(BLOCK_BASE + len as u32);
+    let rel = a.wrapping_sub(base);
+    if (BLOCK_BASE..end).contains(&rel) {
+        block_sdram(rel, texture)
+    } else if base != 0 && (BLOCK_BASE..end).contains(&a) {
+        block_sdram(a, texture)
+    } else {
+        rel as usize
+    }
 }
 
 impl Mem<'_> {
-    fn offset(a: u32, texture: bool) -> usize {
-        if (BLOCK_BASE..BLOCK_END).contains(&a) { block_sdram(a, texture) } else { a as usize }
+    fn offset(&self, a: u32, texture: bool) -> usize {
+        offset(a, texture, self.base, self.sdram.len())
     }
 
     /// `size` bytes (within one 4-byte cell) at `a`, little-endian.
@@ -159,12 +176,12 @@ impl Mem<'_> {
     }
 
     fn read_as(&self, a: u32, size: u32, texture: bool) -> u32 {
-        let o = Self::offset(a, texture);
+        let o = self.offset(a, texture);
         (0..size as usize).fold(0, |v, i| v | (self.sdram.get(o + i).copied().unwrap_or(0) as u32) << (8 * i))
     }
 
     fn write16(&mut self, a: u32, v: u16, texture: bool) {
-        let o = Self::offset(a, texture);
+        let o = self.offset(a, texture);
         if let Some(b) = self.sdram.get_mut(o..o + 2) {
             b.copy_from_slice(&v.to_le_bytes());
         }
@@ -176,22 +193,23 @@ impl Mem<'_> {
 /// triangle's pixels are at different addresses, so the result doesn't
 /// depend on how its rows are split between threads.
 #[derive(Clone, Copy)]
-struct Shared<'a>(&'a [AtomicU8]);
+struct Shared<'a>(&'a [AtomicU8], u32);
 
 impl<'a> Shared<'a> {
     fn new(mem: &'a mut Mem) -> Self {
         // SAFETY: AtomicU8 has u8's size, alignment and bit validity, and
         // the borrow is exclusive while the view lives.
-        Shared(unsafe { &*(&raw mut *mem.sdram as *const [AtomicU8]) })
+        let base = mem.base;
+        Shared(unsafe { &*(&raw mut *mem.sdram as *const [AtomicU8]) }, base)
     }
 
     fn read_as(self, a: u32, size: u32, texture: bool) -> u32 {
-        let o = Mem::offset(a, texture);
+        let o = offset(a, texture, self.1, self.0.len());
         (0..size as usize).fold(0, |v, i| v | (self.0.get(o + i).map_or(0, |b| b.load(Ordering::Relaxed)) as u32) << (8 * i))
     }
 
     fn write16(self, a: u32, v: u16, texture: bool) {
-        let o = Mem::offset(a, texture);
+        let o = offset(a, texture, self.1, self.0.len());
         if let Some(b) = self.0.get(o..o + 2) {
             b[0].store(v as u8, Ordering::Relaxed);
             b[1].store((v >> 8) as u8, Ordering::Relaxed);
@@ -349,6 +367,9 @@ fn test(func: u32, new: u32, old: u32) -> bool {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ga3d {
     pub regs: Vec<u32>,
+    /// Where SDRAM starts (`Mem::base`), as of the last register write.
+    #[serde(skip)]
+    ram_base: u32,
     /// GTE working registers.
     work: [[f32; 4]; 16],
     /// GTE output vertices: position, colour (A R G B), texture coordinates.
@@ -610,6 +631,7 @@ impl Default for Ga3d {
     fn default() -> Self {
         Self {
             regs: vec![0; ((END - BASE) / 4) as usize],
+            ram_base: 0,
             work: [[0.0; 4]; 16],
             out: [[[0.0; 4]; 3]; 3],
             page: [0, 1],
@@ -683,6 +705,7 @@ impl Ga3d {
     /// A CPU write.
     pub fn write(&mut self, addr: u32, v: u32, mem: &mut Mem) {
         self.epoch += 1;
+        self.ram_base = mem.base;
         let i = ((addr - BASE) / 4) as usize;
         if i <= CMDQREAR && self.trace.len() < TRACE_MAX {
             // CPU writes to the queue registers, marked by bit 16.
@@ -1393,7 +1416,7 @@ impl Ga3d {
         for info in [Some(st.rt), (st.rs >> 9 & 1 != 0).then_some(st.zb)].into_iter().flatten() {
             for y in steps(y0, y1) {
                 for x in steps(x0, x1) {
-                    let tile = Mem::offset(pixel_addr(info >> 16 & 0x7FF, info & 0xFF, info >> 8 & 0xFF, x as u32, y as u32), false) >> TILE_SHIFT;
+                    let tile = offset(pixel_addr(info >> 16 & 0x7FF, info & 0xFF, info >> 8 & 0xFF, x as u32, y as u32), false, self.ram_base, len) >> TILE_SHIFT;
                     if let Some(w) = self.written.get_mut(tile / 64) {
                         added |= *w & 1 << (tile % 64) == 0;
                         *w |= 1 << (tile % 64);
@@ -1426,7 +1449,7 @@ impl Ga3d {
             let (bytes, lines) = (((i1 >> 16 & 0xFF) + 1) * 4, ((i1 >> 24) + 1) * 2);
             for v in (0..lines).step_by(16).chain([lines - 1]) {
                 for u in (0..bytes).step_by(32).chain([bytes - 1]) {
-                    let tile = Mem::offset(page_addr(sub >> 3, page, ou + u, ov + v), true) >> TILE_SHIFT;
+                    let tile = offset(page_addr(sub >> 3, page, ou + u, ov + v), true, self.ram_base, len) >> TILE_SHIFT;
                     if tile < len >> TILE_SHIFT && self.written.get(tile / 64).is_some_and(|w| w & 1 << (tile % 64) != 0) {
                         return true;
                     }

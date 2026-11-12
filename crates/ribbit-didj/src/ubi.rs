@@ -32,6 +32,11 @@ const VTBL_RECORD: usize = 172;
 /// Blocks UBI keeps back: for wear-levelling (WL_RESERVED_PEBS) and for
 /// bad-block handling (1% of the good blocks, at least 2: misc.c).
 const WL_RESERVED: usize = 1;
+/// The blocks UBI's EBA keeps for atomic LEB changes (EBA_RESERVED_PEBS):
+/// not given to a volume the kernel auto-resizes.
+const EBA_RESERVED: usize = 1;
+/// UBI_VTBL_AUTORESIZE_FLG, in a volume table record's flags (byte 144).
+const AUTORESIZE: u8 = 1;
 
 /// UBI's CRC-32: the usual polynomial, starting at 0xFFFFFFFF, without the
 /// final inversion.
@@ -184,12 +189,16 @@ pub fn cart_image(peb: usize, blocks: usize, data: &[u8]) -> Result<Vec<u8>, Str
 /// (None: unmapped): of two copies, the one with the higher sequence
 /// number (UBI writes a changed LEB to another block).
 pub fn lebs(flash: &Nand, part: Partition, count: usize) -> Vec<Option<usize>> {
+    lebs_of(flash, part, 0, count)
+}
+
+fn lebs_of(flash: &Nand, part: Partition, vol_id: u32, count: usize) -> Vec<Option<usize>> {
     let first = part.offset / nand::BLOCK;
     let mut lebs: Vec<Option<(usize, u64)>> = vec![None; count];
     for b in first..first + part.size / nand::BLOCK {
         let vid = flash.read(b * nand::BLOCK + VID_OFFSET, 64);
         let word = |at: usize| u32::from_be_bytes(vid[at..at + 4].try_into().unwrap());
-        if word(0) == VID_MAGIC && word(8) == 0 && crc(&vid[..60]) == word(60) {
+        if word(0) == VID_MAGIC && word(8) == vol_id && crc(&vid[..60]) == word(60) {
             let sqnum = u64::from_be_bytes(vid[40..48].try_into().unwrap());
             if let Some(slot) = lebs.get_mut(word(12) as usize)
                 && slot.is_none_or(|(_, s)| sqnum >= s)
@@ -199,6 +208,119 @@ pub fn lebs(flash: &Nand, part: Partition, count: usize) -> Vec<Option<usize>> {
         }
     }
     lebs.into_iter().map(|l| l.map(|(b, _)| b)).collect()
+}
+
+/// Writes LEB `lnum` of the user volume anew, as the kernel's UBI does
+/// when it changes one: `data` into a free erase block (an EC header and
+/// nothing else) with a sequence number above every other, then the
+/// block that held it erased (EC header with its count one up).
+pub fn write_leb(flash: &mut Nand, part: Partition, lnum: usize, data: &[u8]) -> Result<(), String> {
+    write_leb_of(flash, part, 0, 0, lnum, data)
+}
+
+/// `write_leb` for volume `vol_id` (its VID headers' compat byte `compat`).
+fn write_leb_of(flash: &mut Nand, part: Partition, vol_id: u32, compat: u8, lnum: usize, data: &[u8]) -> Result<(), String> {
+    if data.len() > LEB {
+        return Err(format!("{} bytes don't fit a LEB", data.len()));
+    }
+    let first = part.offset / nand::BLOCK;
+    let word = |h: &[u8], at: usize| u32::from_be_bytes(h[at..at + 4].try_into().unwrap());
+    let ec_of = |flash: &Nand, b: usize| {
+        let ec = flash.read(b * nand::BLOCK, 64);
+        (word(&ec, 0) == EC_MAGIC && crc(&ec[..60]) == word(&ec, 60)).then(|| u64::from_be_bytes(ec[8..16].try_into().unwrap()))
+    };
+    let (mut top, mut old, mut free, mut erased) = (0u64, None, None, None);
+    for b in first..first + part.size / nand::BLOCK {
+        let vid = flash.read(b * nand::BLOCK + VID_OFFSET, 64);
+        if word(&vid, 0) == VID_MAGIC && crc(&vid[..60]) == word(&vid, 60) {
+            let sqnum = u64::from_be_bytes(vid[40..48].try_into().unwrap());
+            top = top.max(sqnum);
+            if word(&vid, 8) == vol_id && word(&vid, 12) as usize == lnum && old.is_none_or(|(_, s)| sqnum >= s) {
+                old = Some((b, sqnum));
+            }
+        } else if free.is_none()
+            && vid.iter().all(|&x| x == 0xFF)
+            && let Some(ec) = ec_of(flash, b)
+            && flash.read(b * nand::BLOCK + DATA_OFFSET, LEB).iter().all(|&x| x == 0xFF)
+        {
+            free = Some((b, ec));
+        } else if erased.is_none() && !flash.is_written(b) {
+            erased = Some(b);
+        }
+    }
+    // A block never formatted (all erased, as past the end of LeapFrog's
+    // root file system image) is one UBI's attach would format.
+    let (b, ec) = free.or(erased.map(|b| (b, 1))).ok_or_else(|| format!("no free erase block on {}", part.name))?;
+    let mut page0 = [0xFFu8; nand::PAGE];
+    page0[..64].copy_from_slice(&ec_header(ec));
+    page0[VID_OFFSET..VID_OFFSET + 64].copy_from_slice(&vid_header(vol_id, compat, lnum as u32, top + 1));
+    flash.write(b * nand::BLOCK, &page0);
+    flash.write(b * nand::BLOCK + DATA_OFFSET, data);
+    if let Some((o, _)) = old {
+        let ec = ec_of(flash, o).unwrap_or(0) + 1;
+        flash.erase(o);
+        let mut page0 = [0xFFu8; nand::PAGE];
+        page0[..64].copy_from_slice(&ec_header(ec));
+        flash.write(o * nand::BLOCK, &page0);
+    }
+    Ok(())
+}
+
+/// The user volume's size in LEBs as UBI attaches it: the volume table's
+/// reserved count, or (the auto-resize flag set, as in LeapFrog's root file
+/// system image) every block it can have, as the kernel's first attach
+/// makes it (vtbl.c, `autoresize`: 678 on the Explorer's RFS, read back
+/// from a save). Also whether it is still to be resized.
+pub fn volume_size(flash: &Nand, part: Partition) -> Option<(usize, bool)> {
+    let record = layout_record(flash, part)?;
+    let reserved = u32::from_be_bytes(record[..4].try_into().unwrap()) as usize;
+    match record[144] & AUTORESIZE != 0 {
+        true => Some((available_blocks(part.size / nand::BLOCK) - EBA_RESERVED, true)),
+        false => Some((reserved, false)),
+    }
+}
+
+/// Volume table record 0 (the user volume) from the layout volume's newer
+/// copy whose CRC checks out.
+fn layout_record(flash: &Nand, part: Partition) -> Option<Vec<u8>> {
+    let first = part.offset / nand::BLOCK;
+    let mut best: Option<(u64, Vec<u8>)> = None;
+    for b in first..first + part.size / nand::BLOCK {
+        let vid = flash.read(b * nand::BLOCK + VID_OFFSET, 64);
+        let word = |at: usize| u32::from_be_bytes(vid[at..at + 4].try_into().unwrap());
+        if word(0) == VID_MAGIC && word(8) == LAYOUT_VOL_ID && crc(&vid[..60]) == word(60) {
+            let sqnum = u64::from_be_bytes(vid[40..48].try_into().unwrap());
+            let r = flash.read(b * nand::BLOCK + DATA_OFFSET, VTBL_RECORD);
+            let ok = crc(&r[..VTBL_RECORD - 4]) == u32::from_be_bytes(r[VTBL_RECORD - 4..].try_into().unwrap());
+            if ok && best.as_ref().is_none_or(|(s, _)| sqnum > *s) {
+                best = Some((sqnum, r));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// Resizes the user volume as the kernel's first attach does when the
+/// auto-resize flag is set (`volume_size`): both copies of the volume table
+/// written anew with the new size and the flag cleared. Nothing when it
+/// isn't set.
+pub fn autoresize(flash: &mut Nand, part: Partition) -> Result<(), String> {
+    let Some((size, true)) = volume_size(flash, part) else { return Ok(()) };
+    let lebs = lebs_of(flash, part, LAYOUT_VOL_ID, LAYOUT_BLOCKS);
+    let Some(Some(b)) = lebs.first() else { return Err("no volume table".into()) };
+    let mut table = flash.read(b * nand::BLOCK + DATA_OFFSET, LEB);
+    let r = &mut table[..VTBL_RECORD];
+    r[..4].copy_from_slice(&(size as u32).to_be_bytes());
+    r[144] &= !AUTORESIZE;
+    let c = crc(&r[..VTBL_RECORD - 4]);
+    r[VTBL_RECORD - 4..].copy_from_slice(&c.to_be_bytes());
+    while table.last() == Some(&0xFF) {
+        table.pop();
+    }
+    for copy in 0..LAYOUT_BLOCKS {
+        write_leb_of(flash, part, LAYOUT_VOL_ID, COMPAT_REJECT, copy, &table)?;
+    }
+    Ok(())
 }
 
 /// The volume's contents read back (unmapped LEBs as 0xFF), `len` bytes:
@@ -258,5 +380,26 @@ mod tests {
         assert_eq!(flash.read(b3 + VID_OFFSET, 4), [0xFF; 4]);
         assert_eq!(flash.read(b3, 4), [0x55, 0x42, 0x49, 0x23]);
         assert!(write_volume(&mut flash, brio, "ubi_Brio", &vec![0; 1757 * LEB]).is_err());
+    }
+
+    /// A LEB written anew reads back changed, in another block, and the
+    /// rest of the volume stays as it was.
+    #[test]
+    fn a_leb_is_written_anew() {
+        let brio = nand::partition("Brio").unwrap();
+        let mut flash = Nand::erased();
+        let mut data = vec![3u8; LEB * 2];
+        write_volume(&mut flash, brio, "ubi_Brio", &data).unwrap();
+        let was = lebs(&flash, brio, 2);
+        write_leb(&mut flash, brio, 1, &vec![9u8; LEB]).unwrap();
+        data[LEB..].fill(9);
+        assert_eq!(read_volume(&flash, brio, data.len()), data);
+        let now = lebs(&flash, brio, 2);
+        assert_eq!(now[0], was[0]);
+        assert_ne!(now[1], was[1]);
+        // The old block is free again: an EC header, its count one up.
+        let old = was[1].unwrap() * nand::BLOCK;
+        assert_eq!(flash.read(old + VID_OFFSET, 4), [0xFF; 4]);
+        assert_eq!(flash.read(old + 15, 1), [2]);
     }
 }

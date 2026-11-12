@@ -76,10 +76,10 @@ pub(super) struct Dsp {
     written: u64,
 }
 
-/// GUESS: the LF1000 driver's buffer, 4 fragments of 4096 bytes (the
-/// DMA moves 4096 bytes at a time, dma.rs); not read from the driver.
+/// The LF1000 driver's buffer (i2s/main.c AUDIO_FRAG_SIZE,
+/// AUDIO_NUM_FRAGS): 8 fragments of 4096 bytes.
 const FRAG_SIZE: u32 = 4096;
-const FRAGS: u32 = 4;
+const FRAGS: u32 = 8;
 
 impl Default for Dsp {
     fn default() -> Self {
@@ -201,6 +201,9 @@ impl Process {
     /// A key going down or up on the keypad (/dev/input/event2), as the
     /// driver reports it: EV_KEY then EV_SYN, stamped with the time of day.
     pub fn key(&mut self, code: u16, down: bool) {
+        if self.x.on {
+            return self.x_key(code, down);
+        }
         const KEYPAD: usize = 2;
         let bits = &mut self.dev.keys[KEYPAD][code as usize / 8];
         let bit = 1 << (code % 8);
@@ -257,6 +260,7 @@ impl Process {
                 if out.is_empty() { Err(EINVAL) } else { Ok(out) }
             }
             Device::Dsp => Ok(Vec::new()),
+            Device::Other(rdev) if self.x.on => self.x_read(rdev, nonblock, len),
             Device::Other(_) | Device::Dpc | Device::Mlc | Device::Layer(_) | Device::Ga3d | Device::PhysMem => Ok(Vec::new()),
         }
     }
@@ -267,6 +271,11 @@ impl Process {
             // position; not done yet.
             self.log_once(format!("write to /dev/layer{n}: dropped"));
         }
+        if let Device::Other(rdev) = d
+            && self.x.on
+        {
+            return self.x_write(rdev, nonblock, data);
+        }
         if d != Device::Dsp {
             return Ok(data.len());
         }
@@ -275,8 +284,9 @@ impl Process {
         let size = (FRAG_SIZE * FRAGS) as u64;
         let room = size - dsp.queued(now).min(size);
         // Non-blocking (PortAudio primes the buffer with silence until
-        // EAGAIN): what fits. Blocking: waits until it all fits.
-        let n = if nonblock { (data.len() as u64).min(room) } else { (data.len() as u64).min(size) } as usize & !1;
+        // EAGAIN): what fits. Blocking: as the driver's audio_write, one
+        // fragment's worth (at most 4096 bytes) once one is free.
+        let n = if nonblock { (data.len() as u64).min(room) } else { (data.len() as u64).min(FRAG_SIZE as u64) } as usize & !1;
         if nonblock && n == 0 {
             return Err(EAGAIN);
         }
@@ -303,6 +313,7 @@ impl Process {
             Device::Input(n) => (!self.dev.input[n].is_empty(), true, false),
             // Writable with a whole fragment free, as OSS reports it.
             Device::Dsp => (false, self.dev.dsp.queued(self.clock()) <= (FRAG_SIZE * (FRAGS - 1)) as u64, false),
+            Device::Other(rdev) if self.x.on => self.x_ready(rdev),
             _ => (true, true, false),
         }
     }
@@ -359,6 +370,7 @@ impl Process {
             Device::Mlc => self.mlc_ioctl(cmd, arg),
             Device::Layer(n) => self.layer_ioctl(n, cmd, arg),
             Device::Dpc => self.dpc_ioctl(cmd, arg),
+            Device::Other(rdev) if self.x.on => self.x_ioctl(rdev, cmd, arg),
             _ => {
                 if self.logged.insert(format!("ioctl {d:?} {cmd:08X}")) {
                     eprintln!("[hle] ioctl {cmd:08X} on {d:?} not handled");
@@ -429,36 +441,37 @@ impl Process {
                 Ok(0)
             }
             0xC004_5002 => {
-                // SPEED: GUESS, any rate is taken.
+                // SPEED: the LF1000 driver (i2s/main.c) plays 32000 Hz only
+                // and answers 32000 whatever is asked; the program then
+                // converts (Brio's mixer does).
                 let r = int_arg(self).ok_or(EFAULT)?;
-                if r != 0 {
-                    self.dev.dsp.rate = r;
-                }
-                let r = self.dev.dsp.rate;
-                self.put(arg, &r.to_le_bytes())
+                self.log_once(format!("dsp: {r} Hz asked, 32000 given"));
+                self.put(arg, &32000u32.to_le_bytes())
             }
-            0xC004_5003 => {
-                // STEREO
-                let s = int_arg(self).ok_or(EFAULT)?;
-                self.dev.dsp.channels = if s != 0 { 2 } else { 1 };
-                self.put(arg, &(self.dev.dsp.channels - 1).to_le_bytes())
-            }
+            0xC004_5003 => Ok(0), // STEREO: taken and ignored, as the driver
             0xC004_5004 => self.put(arg, &FRAG_SIZE.to_le_bytes()), // GETBLKSIZE
             0xC004_5005 => {
-                // SETFMT: 16-bit little-endian only.
+                // SETFMT: 16-bit little-endian, whatever is asked.
                 let f = int_arg(self).ok_or(EFAULT)?;
-                if f == AFMT_S16_LE {
-                    self.dev.dsp.format = f;
+                if f != AFMT_S16_LE {
+                    self.log_once(format!("dsp: format {f:X} asked, S16_LE given"));
                 }
-                self.put(arg, &self.dev.dsp.format.to_le_bytes())
+                self.put(arg, &AFMT_S16_LE.to_le_bytes())
             }
             0xC004_5006 => {
-                // CHANNELS
-                let c = int_arg(self).ok_or(EFAULT)?.clamp(1, 2);
-                self.dev.dsp.channels = c;
-                self.put(arg, &c.to_le_bytes())
+                // CHANNELS: always 2.
+                let c = int_arg(self).ok_or(EFAULT)?;
+                if c != 2 {
+                    self.log_once(format!("dsp: {c} channels asked, 2 given"));
+                }
+                self.put(arg, &2u32.to_le_bytes())
             }
-            0xC004_5009 | 0xC004_500A => Ok(0), // SUBDIVIDE, SETFRAGMENT: kept as is
+            0xC004_5009 => Ok(0), // SUBDIVIDE
+            0xC004_500A => {
+                // SETFRAGMENT: not changed; answers its fragments, selector 9.
+                int_arg(self).ok_or(EFAULT)?;
+                self.put(arg, &((FRAGS << 16) | 9).to_le_bytes())
+            }
             0x8004_500B => self.put(arg, &AFMT_S16_LE.to_le_bytes()), // GETFMTS
             0x8010_500C => {
                 // GETOSPACE: audio_buf_info.

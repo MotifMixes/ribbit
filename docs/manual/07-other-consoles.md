@@ -59,13 +59,14 @@ The menu, the built-in games, the videos and the sound work; the console keeps i
 
 ## Plugging a console into this PC (USB)
 
-**Emulation › Leapster 2: plug into this PC (USB)**, **Emulation › RockIt Twist › Plug into this PC (USB)** and **Emulation › Didj › Plug into this PC (USB)** offer the emulated console to your PC as a USB device through USB/IP, so programs such as LeapLoader (Leapster 2) or LeapFrog Connect (RockIt Twist, Didj) can talk to it. Then connect it with a USB/IP client:
+**Emulation › Leapster 2: plug into this PC (USB)**, **Emulation › RockIt Twist › Plug into this PC (USB)** , **Emulation › Didj › Plug into this PC (USB)** and **Emulation › Leapster Explorer › Plug into this PC (USB)** (experimental) offer the emulated console to your PC as a USB device through USB/IP, so programs such as LeapLoader (Leapster 2) or LeapFrog Connect (RockIt Twist, Didj, Leapster Explorer) can talk to it. Then connect it with a USB/IP client:
 
 - **Windows**: install usbip-win2 (`winget install usbip-win2`), then run `usbip attach -r 127.0.0.1 -b 1-1`.
 - **Linux**: the client is part of the kernel. Install the `usbip` tool (Ubuntu/Debian: `sudo apt install linux-tools-generic`; Fedora: `sudo dnf install usbip`), load its module once with `sudo modprobe vhci-hcd`, then run `sudo usbip attach -r 127.0.0.1 -b 1-1`. The Leapster 2 shows up as two drives (Leapster 2-RAM and Leapster 2-SD).
 - For the Leapster 2, wait about 7 seconds after plugging in before you attach: a running Leapster 2 restarts once, as a real one does.
 - The Didj is plugged in while `usbip attach` has it: its menu closes and it waits for the PC, as a real one does. Windows shows it as a LeapFrog Didj drive with no disk in it until LeapFrog Connect unlocks it. Detaching pulls the cable out: the Didj shuts down, and Ribbit turns it on again.
 - `usbip detach -p 0` (with `sudo` on Linux) unplugs it from the PC's side.
+- The Leapster Explorer shows its "connected to a computer" picture while `usbip attach` has it. Windows sees a LeapFrog Leapster Explorer drive of about 50 MB with no files on it: that is how LeapFrog Connect talks to it. If Windows offers to format it, say no. Whether LeapFrog Connect accepts the emulated Explorer hasn't been tried yet. Its save (`explorer-<folder>.nandblocks`) survives updates as the Didj's does: your profiles, pets and settings are carried over (the volume level and clock go back to their defaults).
 
 ## Didj (early emulation)
 
@@ -73,12 +74,13 @@ The Didj (2008) is LeapFrog's Linux handheld with NAND cartridges. Ribbit builds
 
 - The first start goes through the Didj's own setup (country, name, grade). After that, choosing a cartridge or a built-in game in the library starts it from the Didj's menu for you; press any button to take over.
 - What the console saves (players, progress, settings) is kept in the save folder. Save states work too.
-- Downloaded games and micromods are `.lfp` packages too: put them in the folder with the firmware packages, or in a folder inside it (such as `Micromods`). Renamed files (like `JetPack Heroes.lfp`) work too. Every micromod is installed, in `/Didj/Data/MDL`, the next time the Didj starts. Adding packages changes the Didj's internal memory. Your profiles, game progress and settings are carried over to it, and the old save is kept beside the new one as a `.other-image` file.
+- Downloaded games and micromods are `.lfp` packages too: put them in the folder with the firmware packages, or in a folder inside it (such as `Micromods`). Renamed files (like `JetPack Heroes.lfp`) work too. Every micromod is installed, in `/Didj/Data/MDL`, the next time the Didj starts. To add micromods: close the Didj, copy their `.lfp` files into the firmware folder (or a `Micromods` folder inside it), and start it again; find them in **My Didj › My Stuff › <game> › Micromods**. Your save (`didj-<folder>.nandblocks` in the saves folder) stays where it is: you don't copy or change anything there. Adding packages changes the Didj's internal memory. Your profiles, game progress and settings are carried over to it, and the old save is kept beside the new one as a `.other-image` file.
 - Cartridge dumps can be the raw chip (69,206,016 bytes, with spare areas) or an image of the cartridge's FAT volume alone (about 62 MB, often with no file extension); both show on the Didj tab. A cartridge opened from any other folder plays in the Didj from your games folders, or the one you played last.
 - Some cartridges install an update to the Didj the first time they are played, and the Didj then turns itself off. Ribbit turns it back on and starts the game again.
-- Closing the game presses the Didj's power button and waits for it to turn off, so its files are never left damaged.
+- Closing the game presses the Didj's power button and waits for it to turn off, so its files are never left damaged. If it is plugged into the PC (USB), it is unplugged first. Turning off takes a few seconds, up to about 10 in a game: let Ribbit close by itself, and don't end it from Task Manager, or what you did since the Didj last turned off is lost.
 - **Emulation › Didj › Enhanced** (the default) fixes faults in the Didj's own software: after a crash it repairs its files and goes back to the menu instead of locking on "Your Didj needs a tune-up"; it gets 50 MB of memory instead of 16; and its processor runs faster, up to 2× (or 3×, in the same menu), as far as your PC keeps up: never slower than a real Didj. **Original** runs it as LeapFrog shipped it. Both apply from the next power-on.
-- Your Didj's save is `didj-<folder>.nandblocks` in Ribbit's saves folder. It survives updates: when an update (or new packages) changes how the Didj's memory is built, Ribbit carries your files over. **Emulation › Didj › Import a Didj save…** brings in a save from another PC, or one an earlier version set aside (`.other-image`), into this Didj; the save it had is kept as `.before-import`.
+- **Emulation › Didj › Import a Didj save folder…** brings in a Didj's data copied to a PC, from a backup or another emulator: choose the copied `/Didj` folder (the one with `Data` in it: `Data/0`-`Data/2` with `profile.dsc`, `Data/Avatars`, game saves), or a folder that has it as `didj` or `assets/didj`. Its profiles, Didjis, colour themes, game progress and installed games are added to this Didj; a profile it has replaces this Didj's profile in the same place. Games it installed that this Didj doesn't have are installed from their packages when the folder has them (Ribbit copies them into an `Imported` folder beside your firmware packages). This Didj's save before is kept as `.before-folder-import`. Save states can't be brought over.
+- Your Didj's save is `didj-<folder>.nandblocks` in Ribbit's saves folder, with `didj-<folder>.files` beside it (your files on the Didj, used when the Didj's memory is built differently). Copy both when you move a save. It survives updates: when an update (or new packages) changes how the Didj's memory is built, Ribbit carries your files over. **Emulation › Didj › Import a Didj save…** brings in a save from another PC, or one an earlier version set aside (`.other-image`), into this Didj; the save it had is kept as `.before-import`.
 - Didjis (characters made in LeapFrog Connect's Didjerator) are `.lfp` packages too, named like `DIDJ-0x000e000f-00000E0000000001-000000.lfp`: put them in the folder with the firmware packages and they show among the characters (they belong to the profile they were made for, usually the first). Didjis synced to the Didj through **Plug into this PC (USB)** are kept in its save.
 - **Install a cartridge like a downloaded game:** make a folder named `Installed` inside the folder with the firmware packages and put cartridge dumps in it (zipped is fine). Each game is copied onto the Didj's own storage, so it shows under My Games without the cartridge. The Didj holds about 220 MB, so only a few games fit.
 - **A real Didj's memory:** a dump of a real console's NAND (`didj.nand`, or `mtd0` to `mtd7` from `nanddump`) in the firmware folder is started instead of the packages. Keep the Device Firmware package there too, so the library still lists the Didj.
@@ -94,6 +96,46 @@ The Didj (2008) is LeapFrog's Linux handheld with NAND cartridges. Ribbit builds
 | L / R (shoulder buttons) | the Leapster's volume buttons (LB / RB on a gamepad) |
 | Menu | Home |
 | Hint, Pause | Hint, Pause |
+
+### Didj: library, installing games, real Didjs
+
+Ribbit's Didj works like a console on your desktop: the **Didj** tab of the library shows every game it has, and one click starts it from the Didj's own menu in the mode chosen in **Emulation › Didj** (Original, Original+ or Enhanced (new)).
+
+- **Built-in**: games whose `.lfp` lies with the firmware packages (JetPack Heroes). They are part of the Didj.
+- **Installed**: games installed on the Didj, as LeapFrog Connect does. They live in the Didj's save, so they stay when Ribbit closes, and every mode has them.
+- **Cartridge**: cartridge dumps in your games folders. They play from the cartridge slot.
+- **Not installed**: a game's `.lfp` somewhere else in your games folders. Clicking it installs it on the Didj, then starts it.
+
+**Installing a game.** Use **Install game…** on the Didj tab or **Emulation › Didj › Install game (.lfp)…**, or drop an `.lfp` onto the window. A cartridge dump can be installed too (right-click its card, **Install on the Didj**, or choose the dump in Install game). The game then shows in the Didj's own menu (My Games) and in the library. A running Didj is turned off first and its saves are kept, the way a real Didj leaves its menu when plugged into Connect. Ribbit doesn't install onto a Didj that starts from a real NAND dump: it leaves your dump as it is.
+
+**Uninstalling.** Right-click an installed game: **Uninstall from the Didj** keeps its progress for when you install it again. **Uninstall and delete its saves** also removes its progress in every profile. Before each change, Ribbit keeps the Didj's previous save as `didj-<folder>.nandblocks.before-library` in the saves folder.
+
+**Your saves in every mode.** Original, Original+ and Enhanced (new) all use the same save (`didj-<folder>.nandblocks`). A profile or game progress made in one mode opens in the other two.
+
+#### Bringing a real Didj's files into Ribbit
+
+1. Plug your Didj into the PC with LeapFrog Connect running. Connect opens the Didj's drive (a drive letter, or the Didj's folder inside Connect's `Mnt` folder).
+2. Copy everything on that drive into a folder on your PC. Only read from the Didj.
+3. In Ribbit, choose **Emulation › Didj › Import from a real Didj…** and pick that folder.
+
+Your profiles (`Data/0`, `Data/1`, `Data/2`), Didjis (`Data/Avatars`), game progress and installed games (`ProgramFiles`) are added to Ribbit's Didj. A file with the same name replaces Ribbit's. The Didj's system files (`Base`) are left out. A NAND dump of a real Didj works too: put it in a folder as `didj.nand` and pick that folder. To play on the dump itself instead, put `didj.nand` in the firmware folder (see above).
+
+#### Copying Ribbit's files to a real Didj (UNTESTED ON HARDWARE)
+
+1. Choose **Emulation › Didj › Copy to a real Didj (export)…** and pick an empty folder. Ribbit writes `Didj/Data` and `Didj/ProgramFiles` there, laid out like a real Didj's drive, and a read-me. It never writes system files.
+2. **Back up your real Didj first:** copy everything on its drive to your PC, as in step 2 above.
+3. With LeapFrog Connect running and the Didj plugged in, copy `Data` and `ProgramFiles` from the export onto the Didj's drive, replacing files. Profile 0 replaces the real Didj's profile 0, and so on.
+4. Close Connect, or eject the drive, before you unplug the Didj.
+
+Nobody has tried this on a real Didj yet. If the Didj complains, put your backup back with Connect. **Emulation › Didj › Export as a NAND image…** writes the whole Didj as `didj.nand` (256 MB, a real Didj's layout). Ribbit can start from it, and it works as a backup. Don't try to write it to a real Didj: there is no safe way to do that.
+
+### Leapster Explorer: library, installing games
+
+The **Leapster Explorer** tab shows the console first. After it come its built-in apps, games installed on it (**Installed**), Didj cartridges (they play in its slot) and Explorer game packages (`.lf2`, `.lfp`) in your games folders (**Not installed**). Clicking a game turns the Explorer on. Pick the game in its menu. A game that isn't installed is installed first.
+
+- **Install game…** on the tab, **Emulation › Leapster Explorer › Install game (.lf2 / .lfp)…**, or dropping a package onto the window installs it the way LeapFrog Connect does. It stays when Ribbit closes. Right-click an installed game to uninstall it, with or without its saves.
+- **Export the Explorer's files…** writes your profiles, progress and installed games as `LF/Bulk` in a real Explorer's layout. A real Explorer offers no drive to copy them back to, so keep the export as a backup.
+- **Import from a real Explorer…** takes a copy of a real Explorer's `/LF/Bulk`, or a folder holding its NAND dump as `explorer.nand`. Untested with a real Explorer.
 
 ## LeapPad (early emulation)
 

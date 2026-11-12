@@ -16,9 +16,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// "HLE" 1: the first word of a state (Original's states start with their
-/// version, a small number, so neither loads the other's).
-const MAGIC: u32 = 0x454C_4801;
+/// "HLE" and a version: the first word of a state (Original's states start
+/// with their version, a small number, so neither loads the other's). 2:
+/// `mem::Frames`/`Mem` gained fields (shared pages, the Explorer's pool) and
+/// the /dev/dsp driver changed, so a version 1 state can't be read.
+const MAGIC: u32 = 0x454C_4802;
 
 thread_local! {
     /// The programs' clock when saving or loading: times go in from it.
@@ -213,6 +215,9 @@ impl Process {
     /// app has the programs paused are kept.
     pub fn load_state(&mut self, state: &[u8], base: &Vfs) -> Result<(), String> {
         if state.get(..4) != Some(&MAGIC.to_le_bytes()[..]) {
+            if state.get(1..4) == Some(&MAGIC.to_le_bytes()[1..]) {
+                return Err("this state is from another version of Enhanced (new)".into());
+            }
             return Err("this state isn't from Enhanced (new)".into());
         }
         let data = miniz_oxide::inflate::decompress_to_vec(&state[4..]).map_err(|_| "a damaged Didj state".to_string())?;

@@ -49,7 +49,7 @@ SUnreclaim:       1192 kB\nPageTables:         84 kB\nNFS_Unstable:        0 kB\
 CommitLimit:      8276 kB\nCommitted_AS:     1772 kB\nVmallocTotal:   368640 kB\nVmallocUsed:     15200 kB\n\
 VmallocChunk:   347132 kB\n";
 
-const CPUINFO: &str = "Processor\t: ARM926EJ-S-LF1000 rev 5 (v5l)\nBogoMIPS\t: 786.43\n\
+pub(super) const CPUINFO: &str = "Processor\t: ARM926EJ-S-LF1000 rev 5 (v5l)\nBogoMIPS\t: 786.43\n\
 Features\t: swp half fastmult edsp java \nCPU implementer\t: 0x41\nCPU architecture: 5TEJ\nCPU variant\t: 0x0\n\
 CPU part\t: 0x926\nCPU revision\t: 5\nCache type\t: write-back\nCache clean\t: cp15 c7 ops\n\
 Cache lockdown\t: format C\nCache format\t: Harvard\nI size\t\t: 16384\nI assoc\t\t: 4\nI line length\t: 32\n\

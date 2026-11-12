@@ -19,6 +19,8 @@ While Ribbit works through new games, the line under the heading says how many t
 - The tabs above the cards (**All games**, **Leapster**, **Zippity**…) show one console's games.
 - Type in **Search games** to narrow the list by title.
 - Click a card to play. The game you played last also shows large at the top.
+- On **All games**, each card has a small chip with the console it plays on (a Didj cartridge shows Didj and Explorer). Console cards (the Didj, the Explorer) come first, show the console, and **Turn on** the console with no game.
+- The **Didj** tab lists the Didj's built-in games, the games installed on it, cartridges and `.lfp` files, each marked so; the **Leapster Explorer** tab does the same for the Explorer. See "Didj: library, installing games, real Didjs" and "Leapster Explorer: library, installing games" in Other consoles.
 - Right-click a card (long-press on Android) for more: **Delete save data…** removes that game's progress, profiles and save states, after asking. A copy goes to the `backups` folder first.
 
 ## The console and the BIOS

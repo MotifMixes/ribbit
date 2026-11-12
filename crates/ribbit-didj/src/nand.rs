@@ -16,6 +16,8 @@
 //! data): 3 bytes per 256 data bytes, in spare bytes 40-63 (nand_oob_64).
 //! Pages written here get that ECC, as the console's kernel writes it.
 
+use std::sync::Arc;
+
 use crate::package::Firmware;
 
 pub const PAGE: usize = 0x800;
@@ -102,10 +104,13 @@ pub fn partition(name: &str) -> Option<Partition> {
 }
 
 /// The flash, data and spare area. Blocks never written read as erased
-/// (0xFF) and take no memory.
+/// (0xFF) and take no memory. Blocks are shared between clones and copied
+/// when one of them writes (copy on write): a running console's NAND and
+/// the image its save is compared with (`changes_from`) take the memory of
+/// one image and the blocks written since.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Nand {
-    blocks: Vec<Option<Box<[u8]>>>,
+    blocks: Vec<Option<Arc<Vec<u8>>>>,
 }
 
 impl Default for Nand {
@@ -144,8 +149,8 @@ impl Nand {
     }
 
     pub fn page_mut(&mut self, n: usize) -> &mut [u8] {
-        let b = self.blocks[n / PAGES_PER_BLOCK].get_or_insert_with(|| vec![0xFF; PAGE_RAW * PAGES_PER_BLOCK].into());
-        &mut b[n % PAGES_PER_BLOCK * PAGE_RAW..][..PAGE_RAW]
+        let b = self.blocks[n / PAGES_PER_BLOCK].get_or_insert_with(|| Arc::new(vec![0xFF; PAGE_RAW * PAGES_PER_BLOCK]));
+        &mut Arc::make_mut(b)[n % PAGES_PER_BLOCK * PAGE_RAW..][..PAGE_RAW]
     }
 
     /// Writes the factory's serial number (`UNIT_ID`) to an empty
@@ -158,6 +163,12 @@ impl Nand {
         }
         self.write(p.offset, &crate::jffs2::new_file(2, "UnitID.txt", UNIT_ID.as_bytes(), 0));
         true
+    }
+
+    /// Blocks `first..first + count` as `from` has them (shared, not
+    /// copied).
+    pub fn copy_blocks(&mut self, from: &Nand, first: usize, count: usize) {
+        self.blocks[first..first + count].clone_from_slice(&from.blocks[first..first + count]);
     }
 
     /// Whether block `n` was written since it was last erased.
@@ -176,7 +187,13 @@ impl Nand {
     pub fn changes_from(&self, base: &Nand) -> Vec<u8> {
         let mut out = Vec::new();
         for (n, (a, b)) in self.blocks.iter().zip(&base.blocks).enumerate() {
-            if a != b {
+            // Shared blocks are the same without comparing them.
+            let same = match (a, b) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
                 out.extend((n as u32).to_le_bytes());
                 match a {
                     Some(data) => {
@@ -218,7 +235,7 @@ impl Nand {
                     changes = &changes[5..];
                 }
                 Some(1) => {
-                    self.blocks[n] = Some(changes.get(5..5 + RAW).ok_or_else(bad)?.into());
+                    self.blocks[n] = Some(Arc::new(changes.get(5..5 + RAW).ok_or_else(bad)?.to_vec()));
                     changes = &changes[5 + RAW..];
                 }
                 _ => return Err(bad()),
@@ -277,7 +294,7 @@ impl Nand {
             n if n == raw => {
                 for (b, block) in data.chunks(BLOCK / PAGE * PAGE_RAW).enumerate() {
                     if block.iter().any(|&x| x != 0xFF) {
-                        nand.blocks[b] = Some(block.into());
+                        nand.blocks[b] = Some(Arc::new(block.to_vec()));
                     }
                 }
             }

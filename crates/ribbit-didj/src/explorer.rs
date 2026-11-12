@@ -56,7 +56,7 @@ const CBF_MAGIC: u32 = 0x9ABC_DEF0;
 const CBF_HEADER: usize = 24;
 
 /// Whether a package file belongs to the Leapster Explorer (its meta.inf).
-fn for_explorer(data: &[u8]) -> bool {
+pub(crate) fn for_explorer(data: &[u8]) -> bool {
     let Ok(entries) = ribbit_core::zip::entries(data) else { return false };
     entries.iter().filter(|e| e.name.to_ascii_lowercase().ends_with("meta.inf")).any(|e| {
         ribbit_core::zip::read_entry(data, e).is_ok_and(|m| crate::package::Meta::parse(&String::from_utf8_lossy(&m)).get("Device") == Some("LeapsterExplorer"))
@@ -180,6 +180,13 @@ pub fn nand_from_packages(dir: &std::path::Path) -> Result<Nand, String> {
 
 /// `nand_from_packages` on a NAND of `blocks` blocks.
 pub fn nand_from_packages_blocks(dir: &std::path::Path, blocks: usize) -> Result<Nand, String> {
+    nand_with_files(dir, blocks, &Tree::new())
+}
+
+/// `nand_from_packages_blocks` with `extra` added to Bulk after the
+/// packages: a player's files carried over from a save made on another
+/// image (`carry::explorer_user_files`).
+pub fn nand_with_files(dir: &std::path::Path, blocks: usize, extra: &Tree) -> Result<Nand, String> {
     let mut flash = Nand::with_blocks(blocks);
     let mut written = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().map(|e| e.path()).collect();
@@ -217,14 +224,20 @@ pub fn nand_from_packages_blocks(dir: &std::path::Path, blocks: usize) -> Result
         let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         install_lf2(&mut bulk, &data).map_err(|e| format!("{}: {e}", path.display()))?;
     }
+    bulk.extend(extra.iter().map(|(p, e)| (p.clone(), e.clone())));
     if !bulk.is_empty() {
-        let offset = PARTITIONS[4].1;
-        let part = nand::Partition { name: "Bulk", offset, size: flash.size() - offset };
-        let lebs = crate::ubi::available_blocks(part.size / nand::BLOCK);
-        let volume = crate::ubifs::build(&bulk, lebs).map_err(|e| format!("Bulk: {e}"))?;
-        crate::ubi::write_volume(&mut flash, part, "ubi_bulk", &volume)?;
+        write_bulk(&mut flash, &bulk)?;
     }
     Ok(flash)
+}
+
+/// Writes `bulk` as the Bulk partition's UBI volume (`ubi_bulk`, UBIFS).
+pub fn write_bulk(flash: &mut Nand, bulk: &Tree) -> Result<(), String> {
+    let offset = PARTITIONS[4].1;
+    let part = nand::Partition { name: "Bulk", offset, size: flash.size() - offset };
+    let lebs = crate::ubi::available_blocks(part.size / nand::BLOCK);
+    let volume = crate::ubifs::build(bulk, lebs).map_err(|e| format!("Bulk: {e}"))?;
+    crate::ubi::write_volume(flash, part, "ubi_bulk", &volume)
 }
 
 /// The kernel image (unpacked) from a CBF file's zImage.
@@ -277,18 +290,7 @@ const FRAMEBUFFER: u32 = 0x82E0_0000;
 /// AppManager set, not read from Emerald Boot.
 fn show_splash(bus: &mut crate::machine::Bus) {
     let part = PARTITIONS[1].1;
-    let rle = bus.nand.read(part, PARTITIONS[2].1 - part);
-    let mut pixels = Vec::with_capacity(320 * 240);
-    for w in rle.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)) {
-        let (n, c) = ((w >> 24) as usize, w & 0xFF_FFFF);
-        if n == 0 || pixels.len() + n > 320 * 240 {
-            break;
-        }
-        pixels.extend(std::iter::repeat_n(0xFF00_0000 | c, n));
-    }
-    if pixels.len() != 320 * 240 {
-        return;
-    }
+    let Some(pixels) = splash_pixels(&bus.nand.read(part, PARTITIONS[2].1 - part)) else { return };
     let at = (FRAMEBUFFER - RAM_BASE) as usize;
     for (i, p) in pixels.iter().enumerate() {
         bus.sdram[at + 4 * i..][..4].copy_from_slice(&p.to_le_bytes());
@@ -297,6 +299,20 @@ fn show_splash(bus: &mut crate::machine::Bus) {
     for (off, v) in [(0x00, 0x2), (0x04, 239 << 16 | 319), (0x0C, 319), (0x10, 239), (0x24, 0x0653_0020), (0x28, 4), (0x2C, 320 * 4), (0x38, FRAMEBUFFER)] {
         bus.preset(mlc + off, v);
     }
+}
+
+/// FIRST.32.rle (the boot splash, `show_splash`) as 320x240 ARGB pixels;
+/// None if it doesn't fill the screen.
+pub fn splash_pixels(rle: &[u8]) -> Option<Vec<u32>> {
+    let mut pixels = Vec::with_capacity(320 * 240);
+    for w in rle.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)) {
+        let (n, c) = ((w >> 24) as usize, w & 0xFF_FFFF);
+        if n == 0 || pixels.len() + n > 320 * 240 {
+            break;
+        }
+        pixels.extend(std::iter::repeat_n(0xFF00_0000 | c, n));
+    }
+    (pixels.len() == 320 * 240).then_some(pixels)
 }
 
 pub fn boot(flash: Nand, cmdline: &str) -> Result<Didj, String> {

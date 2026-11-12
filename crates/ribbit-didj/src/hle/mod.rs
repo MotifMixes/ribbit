@@ -11,11 +11,15 @@
 mod dev;
 mod mlc;
 pub mod elf;
+pub mod explorer;
 pub mod mem;
 mod state;
 mod signal;
 mod sysfs;
 mod task;
+mod xfb;
+mod xsnd;
+mod xsocket;
 
 pub use dev::{cart_files, key};
 pub mod vfs;
@@ -41,6 +45,10 @@ const KUSER_GET_TLS: u32 = 0xFFFF_0FE0;
 const KUSER_VERSION: u32 = 3;
 /// ARM926EJ-S: swp, half, thumb, fast_mult, edsp, java.
 const HWCAP: u32 = 0x197;
+/// The most the programs' clock jumps to catch up with the host (`pace`):
+/// less than a period of the sound buffers' fill (Brio's 128 ms buffer
+/// is kept at least 96 ms full).
+const MAX_JUMP: std::time::Duration = std::time::Duration::from_millis(50);
 
 const EBADF: i32 = 9;
 const EAGAIN: i32 = 11;
@@ -268,6 +276,10 @@ pub struct Process {
     /// current tables.
     tlb_for: u32,
     tlb_generation: u32,
+    /// The Leapster Explorer's devices, when this runs its programs
+    /// (explorer.rs).
+    #[serde(default)]
+    pub(super) x: explorer::Explorer,
 }
 
 /// The JIT stops where Ribbit answers instead of the kernel: system calls,
@@ -285,12 +297,21 @@ fn err(e: i32) -> u32 {
 
 impl Process {
     pub fn new(vfs: Vfs) -> Self {
+        Self::with_memory(vfs, mem::SDRAM, None)
+    }
+
+    /// A process on a machine with `sdram` bytes of SDRAM, user pages from
+    /// `pool` (else the Didj's).
+    pub(super) fn with_memory(vfs: Vfs, sdram: usize, pool: Option<[(u32, u32); 2]>) -> Self {
         let mut cpu = Arm::new();
         // MMU on, high vectors (at 0xFFFF0000); domain 0 manager.
         cpu.cp15.control |= 1 | 1 << 13;
         cpu.cp15.dacr = 3;
-        let mut m = crate::machine::Didj::with_sdram(crate::nand::Nand::erased(), mem::SDRAM);
-        let frames = Frames::new(&mut m.bus, KUSER_VERSION);
+        let mut m = crate::machine::Didj::with_sdram(crate::nand::Nand::erased(), sdram);
+        let frames = match pool {
+            Some(pool) => Frames::with_pool(&mut m.bus, KUSER_VERSION, pool),
+            None => Frames::new(&mut m.bus, KUSER_VERSION),
+        };
         set_up_jit(&mut m);
         // The 3D chip at the real one's speed (DIDJ_HLE_GA3D=<n>: n times as fast). 4 gave
         // JetPack Heroes 60 fps for 25-33, but NeoPets' title fades (a step when 40 ms have
@@ -354,6 +375,7 @@ impl Process {
             frames,
             tlb_for: 0,
             tlb_generation: 0,
+            x: Default::default(),
         };
         p.mlc_init();
         p.hz = p.m.hle_cpu_hz();
@@ -416,7 +438,14 @@ impl Process {
             *a = signal::Action::default();
         }
 
-        self.mem().map(STACK_TOP - STACK_SIZE, STACK_SIZE);
+        if self.x.on {
+            // Given memory as it is touched (the Explorer runs many
+            // processes; the kernel pages stacks in on demand too).
+            self.mem().reserve(STACK_TOP - STACK_SIZE, STACK_SIZE);
+            self.mem().map(STACK_TOP - (128 << 10), 128 << 10);
+        } else {
+            self.mem().map(STACK_TOP - STACK_SIZE, STACK_SIZE);
+        }
         let mut top = STACK_TOP;
         let mut push_str = |mem: &mut Space, s: &str| {
             top -= s.len() as u32 + 1;
@@ -509,13 +538,21 @@ impl Process {
     /// Keeps the programs' clock with the host's while they run: waits when
     /// it is ahead (a host faster than a Didj), jumps when it is more than
     /// 20 ms behind (a slower one; programs spinning on gettimeofday then
-    /// still keep time).
+    /// still keep time). A jump is at most `MAX_JUMP`: the rest of a hitch
+    /// of the host's (a frame saved to disk, a save state, a busy PC) is
+    /// time lost, as a pause is. Jumping it all ran the programs' sound
+    /// dry: Brio's 128 ms ALSA buffer underran, its recovery filled the
+    /// buffer without starting it, the writer blocked until the video
+    /// stopped, and that error path left AppManager freeing a bad pointer
+    /// (pid 123 crashed in free() at boot, or munmap got garbage).
     fn pace(&mut self) {
         let (clock, host) = (self.clock(), self.host());
         if clock > host + std::time::Duration::from_millis(1) {
             std::thread::sleep(clock - host);
         } else if host > clock + std::time::Duration::from_millis(20) {
-            self.set_clock(host);
+            let lost = (host - clock).saturating_sub(MAX_JUMP);
+            self.paused += lost;
+            self.set_clock(host - lost);
         }
     }
 
@@ -552,6 +589,9 @@ impl Process {
     /// The sound written to /dev/dsp since the last call (16-bit samples,
     /// interleaved), with its rate and channel count.
     pub fn take_sound(&mut self) -> (Vec<i16>, u32, u32) {
+        if self.x.on {
+            return self.x_take_sound();
+        }
         let d = &mut self.dev.dsp;
         (d.out.drain(..).collect(), d.rate, d.channels)
     }
@@ -642,12 +682,32 @@ impl Process {
                         // (+ 8 for a data abort).
                         let lr = self.cpu.r[14];
                         let thumb = self.cpu.spsr() & psr::T != 0;
+                        // A page reserved for demand paging (`Space::reserve`):
+                        // it gets its memory and the instruction runs again.
+                        let touched = match pc - VECTORS {
+                            0xC => Some((lr.wrapping_sub(4), lr.wrapping_sub(4))),
+                            0x10 => Some((self.cpu.cp15.far, lr.wrapping_sub(8))),
+                            _ => None,
+                        };
+                        if let Some((addr, again)) = touched
+                            && self.mem().populate(addr)
+                        {
+                            let user = self.cpu.spsr();
+                            self.cpu.set_cpsr(user);
+                            self.cpu.r[15] = again;
+                            continue;
+                        }
                         let (what, at) = match pc - VECTORS {
                             4 => ("undefined instruction".to_string(), lr.wrapping_sub(if thumb { 2 } else { 4 })),
                             0xC => ("prefetch abort".to_string(), lr.wrapping_sub(4)),
                             0x10 => (format!("bad address {:08X}", self.cpu.cp15.far), lr.wrapping_sub(8)),
                             _ => ("jump into the vector page".to_string(), self.cpu.current),
                         };
+                        if self.x.on {
+                            let mut c = self.cpu.clone();
+                            c.set_mode(mode::USR);
+                            eprintln!("[hle] tid {} crashed, user registers {:08X?}", self.tid, c.r);
+                        }
                         return Stop::Crashed(format!("pid {}: {what} at {at:08X}", self.g.tgid));
                     }
                 }
@@ -755,6 +815,11 @@ impl Process {
     }
 
     fn dispatch(&mut self, n: u32, a: [u32; 6]) -> u32 {
+        if self.x.on
+            && let Some(r) = self.x_syscall(n, a)
+        {
+            return r.unwrap_or_else(err);
+        }
         let r = match n {
             1 => {
                 self.exit_thread(a[0]);
@@ -907,7 +972,10 @@ impl Process {
         if to >= self.g.brk_start && to < MMAP_BASE {
             let brk = self.g.brk;
             // Out of memory: the break stays (brk returns the old one).
-            if to > brk && !self.mem().map(page_up(brk), page_up(to) - page_up(brk)) {
+            if to > brk && self.x.on {
+                // The Explorer's heaps get pages as they are touched.
+                self.mem().reserve(page_up(brk), page_up(to) - page_up(brk));
+            } else if to > brk && !self.mem().map(page_up(brk), page_up(to) - page_up(brk)) {
                 return brk;
             }
             self.g.brk = to;
@@ -941,6 +1009,13 @@ impl Process {
             && flags & MAP_ANONYMOUS == 0
         {
             return if self.mem().map_phys(at, len, pgoff << 12) { Ok(at) } else { Err(ENOMEM) };
+        }
+        if self.x.on
+            && flags & MAP_ANONYMOUS == 0
+            && let Some(Fd::Dev { dev: dev::Device::Other(rdev), .. }) = self.g.fds.get(fd as usize).and_then(|f| f.as_ref())
+        {
+            let rdev = *rdev;
+            return self.x_mmap(rdev, at, len, pgoff);
         }
         let contents = if flags & MAP_ANONYMOUS == 0 {
             let Some(Fd::File { path, .. }) = self.g.fds.get(fd as usize).and_then(|f| f.as_ref()) else { return Err(EBADF) };
@@ -1031,7 +1106,7 @@ impl Process {
         if let Data::Dev(rdev) = node.data
             && node.mode & S_IFMT == S_IFCHR
         {
-            let dev = dev::Device::open(rdev)?;
+            let dev = if self.x.on { self.x_open(rdev)? } else { dev::Device::open(rdev)? };
             return Ok(self.new_fd(Fd::Dev { dev, path, nonblock: flags & O_NONBLOCK != 0 }, 0));
         }
         if flags & O_TRUNC != 0
@@ -1044,6 +1119,12 @@ impl Process {
     }
 
     fn close(&mut self, fd: u32) -> Result<u32, i32> {
+        if self.x.on
+            && let Fd::Dev { dev: dev::Device::Other(rdev), .. } = self.fd(fd)?
+        {
+            let rdev = *rdev;
+            self.x_close(rdev);
+        }
         self.fd(fd)?;
         self.g.fds[fd as usize] = None;
         Ok(0)
@@ -1264,7 +1345,11 @@ impl Process {
         put(48 - o, &size.to_le_bytes());
         put(56 - o, &4096u32.to_le_bytes());
         put(64 - o, &(size.div_ceil(512) as u32).to_le_bytes());
-        for at in [68, 76, 84] {
+        // The Explorer's uClibc 0.9.32 has the 2.6.31 kernel's layout: a
+        // 64-bit st_blocks at 64, the times from 72 (busybox ls -l shows
+        // the files' dates so).
+        let times = if self.x.on { [72, 80, 88] } else { [68, 76, 84] };
+        for at in times {
             put(at - o, &mtime.to_le_bytes());
         }
         put(96 - 2 * o, &(ino as u64).to_le_bytes());
@@ -1784,5 +1869,33 @@ fn name(n: u32) -> &'static str {
         0xF_0002 => "cacheflush",
         0xF_0005 => "set_tls",
         _ => "?",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A hitch of the host's (a frame written to disk, a save state) moves
+    /// the programs' clock on by `MAX_JUMP` at most; the rest is time lost,
+    /// as a pause is. Jumping it whole ran Brio's sound buffer dry and its
+    /// recovery path ended with AppManager crashing in free() at boot.
+    #[test]
+    fn a_host_hitch_moves_the_programs_clock_by_max_jump_at_most() {
+        let mut p = Process::new(Vfs::new());
+        let start = p.host();
+        p.set_clock(start);
+        std::thread::sleep(Duration::from_millis(300));
+        p.pace();
+        assert_eq!(p.clock() - start, MAX_JUMP);
+        // The host's clock less the time lost is with the programs' again.
+        assert!(p.host().saturating_duration_since(p.clock()) < Duration::from_millis(20));
+        // A short lag (a host a little slower than the console) is still
+        // caught up whole.
+        let before = p.clock();
+        std::thread::sleep(Duration::from_millis(25));
+        p.pace();
+        assert!(p.clock() - before >= Duration::from_millis(25));
     }
 }

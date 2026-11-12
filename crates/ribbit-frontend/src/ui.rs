@@ -19,6 +19,11 @@ pub enum Action {
     OpenCartridge(PathBuf),
     /// A game chosen in the library (on the console chosen in its menu).
     PlayFromLibrary(PathBuf),
+    /// A Didj cartridge chosen on the Explorer's page: into the slot of the
+    /// Explorer running, or one turned on for it.
+    PlayOnExplorer(PathBuf),
+    /// Take the cartridge out of the Explorer's slot.
+    RemoveExplorerCart,
     /// The console the library plays Leapster games on.
     SetLibraryConsole(ribbit_memory::known::Hardware),
     /// Start a console's own system (its BIOS), no cartridge needed.
@@ -69,10 +74,17 @@ pub enum Action {
     SetLeapster2Usb(bool),
     /// Offer the Didj on the PC's USB, or stop.
     SetDidjUsb(bool),
+    /// Offers the Leapster Explorer on this PC's USB, or stops.
+    SetExplorerUsb(bool),
     /// Turn the Didj on: start its menu with no cartridge.
     TurnOnDidj,
     SetDidjSerialTcp(bool),
     ImportDidjSave(PathBuf),
+    /// Install, uninstall, export or import on the Didj (`didj_library`).
+    DidjJob(crate::didj_library::Job),
+    /// The same on the Leapster Explorer (`explorer_library`).
+    ExplorerJob(crate::didj_library::Job),
+    ImportDidjFolder(PathBuf),
     /// Unpack this zip of RockIt Twist packages and use it as the content.
     ImportTwistZip(PathBuf),
     /// Change the Leapster 2's SD card (Emulation › Leapster 2 SD card).
@@ -151,6 +163,8 @@ pub const STATE_SLOTS: u8 = 5;
 /// What the UI shows (read-only snapshot).
 pub struct Info {
     pub running: bool,
+    /// The Leapster Explorer is running: whether a cartridge is in its slot.
+    pub explorer_cart: Option<bool>,
     /// A cartridge game is running, and whether its own settings are on.
     pub game_settings: Option<bool>,
     /// The original LeapPad is running.
@@ -411,6 +425,14 @@ pub fn draw(
             Pick::SdImage => Action::SdCard(crate::sdcard::Job::LoadImage(path)),
             Pick::SdExport => Action::SdCard(crate::sdcard::Job::Export(path)),
             Pick::DidjSave => Action::ImportDidjSave(path),
+            Pick::DidjInstall => Action::DidjJob(crate::didj_library::Job::Install { path, play: false }),
+            Pick::DidjExport => Action::DidjJob(crate::didj_library::Job::Export(path)),
+            Pick::DidjExportNand => Action::DidjJob(crate::didj_library::Job::ExportNand(path)),
+            Pick::DidjImport => Action::DidjJob(crate::didj_library::Job::Import(path)),
+            Pick::ExplorerInstall => Action::ExplorerJob(crate::didj_library::Job::Install { path, play: false }),
+            Pick::ExplorerExport => Action::ExplorerJob(crate::didj_library::Job::Export(path)),
+            Pick::ExplorerImport => Action::ExplorerJob(crate::didj_library::Job::Import(path)),
+            Pick::DidjFolder => Action::ImportDidjFolder(path),
         });
     }
     if phone {
@@ -756,7 +778,7 @@ fn console_tabs(
     actions: &mut Vec<Action>,
 ) {
     let side = |g: &crate::library::Game| g.family.is_book() == books;
-    let count = |f: Option<Family>| library.games.iter().filter(|g| side(g) && f.is_none_or(|f| f.lists(g.family))).count();
+    let count = |f: Option<Family>| library.games.iter().filter(|g| side(g) && f.map_or(!g.is_explorer_cart(), |f| f.lists(g.family))).count();
     // A page for each console that is here and has games.
     let families: Vec<Family> = Family::ALL
         .into_iter()
@@ -803,12 +825,19 @@ fn console_tabs(
             let name_g = ui.painter().layout_no_wrap(name.to_string(), font.clone(), egui::Color32::WHITE);
             let count_g =
                 ui.painter().layout_no_wrap(count(choice).to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
-            let size = egui::vec2(name_g.size().x + 6.0 + count_g.size().x, 34.0);
+            // A console's tab has its icon before the name.
+            let icon = if choice.is_some() { 26.0 } else { 0.0 };
+            let size = egui::vec2(icon + name_g.size().x + 6.0 + count_g.size().x, 34.0);
             let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             let fg = if selected { ACCENT } else if resp.hovered() { egui::Color32::from_gray(240) } else { egui::Color32::from_gray(165) };
             let p = ui.painter();
             let y = rect.top() + 4.0;
+            if let Some(f) = choice {
+                let r = egui::Rect::from_center_size(egui::pos2(rect.left() + 11.0, y + name_g.size().y / 2.0), egui::vec2(22.0, 22.0));
+                crate::console_icons::paint_device(p, r, f.console());
+            }
+            let rect = egui::Rect::from_min_max(rect.min + egui::vec2(icon, 0.0), rect.max);
             p.galley(egui::pos2(rect.left(), y), name_g.clone(), fg);
             let count_pos = egui::pos2(rect.left() + name_g.size().x + 6.0, y + name_g.size().y - count_g.size().y - 1.0);
             p.galley(count_pos, count_g, fg.gamma_multiply(0.7));
@@ -904,6 +933,10 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         }
         if ui.add_enabled(info.running, egui::Button::new("Reset").shortcut_text("Ctrl+R")).clicked() {
             actions.push(Action::Reset);
+            ui.close();
+        }
+        if info.explorer_cart == Some(true) && ui.button("Take the Cartridge Out").clicked() {
+            actions.push(Action::RemoveExplorerCart);
             ui.close();
         }
         if let Some(mut own) = info.game_settings
@@ -1190,6 +1223,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                     );
                 }
             }
+            didj_library_menu(ui, info.didj_folder.is_some(), actions);
             let usb = settings.didj_usb;
             if ui
                 .button(if usb {
@@ -1199,7 +1233,10 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                     egui::RichText::new("🔌  Plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
                 })
                 .on_hover_text(format!(
-                    "Experimental. Offers the emulated Didj as a USB device to this PC through USB/IP (port 3240),                      so LeapFrog Connect can talk to it. {USBIP_NEEDS} Then run: {USBIP_ATTACH}. The cable is in                      while that is attached; detaching pulls it out, and the Didj then turns off and on, as a real                      one does."
+                    "Experimental. Offers the emulated Didj as a USB device to this PC through USB/IP (port 3240), \
+                     so LeapFrog Connect can talk to it. {USBIP_NEEDS} Then run: {USBIP_ATTACH}. The cable is in \
+                     while that is attached; detaching pulls it out, and the Didj then turns off and on, as a real \
+                     one does."
                 ))
                 .clicked()
             {
@@ -1209,7 +1246,8 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             if ui
                 .button("Serial console…")
                 .on_hover_text(
-                    "The Didj's serial port (UART0): Linux's start-up log and a root shell (#) to type commands                      into, as on a real Didj's test pads. Can also be offered to telnet or PuTTY on this PC.",
+                    "The Didj's serial port (UART0): Linux's start-up log and a root shell (#) to type commands \
+                     into, as on a real Didj's test pads. Can also be offered to telnet or PuTTY on this PC.",
                 )
                 .clicked()
             {
@@ -1229,9 +1267,23 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 ui.close();
             }
             if ui
+                .button("Import a Didj save folder…")
+                .on_hover_text(
+                    "A copy of a Didj's data folder (its /Didj, with Data/0-2/profile.dsc, Data/Avatars and game \
+                     saves), from a backup or another emulator: choose that folder. Its profiles, Didjis, themes, game \
+                     progress and installed games are added to this Didj; a profile it has replaces this Didj's in the \
+                     same place. The save it had is kept as a .before-folder-import file. Restarts a running Didj.",
+                )
+                .clicked()
+            {
+                actions.push(Action::Pick(Pick::DidjFolder));
+                ui.close();
+            }
+            if ui
                 .checkbox(&mut settings.didj_extras_notice, "Say which optional packages are missing")
                 .on_hover_text(
-                    "When the Didj starts without JetPack Heroes (DIDJ-0x000F0001) or the AstroGuyHelmet avatar                      (DIDJ-0x000E0010), a message names them. The Didj works without them.",
+                    "When the Didj starts without JetPack Heroes (DIDJ-0x000F0001) or the AstroGuyHelmet avatar \
+                     (DIDJ-0x000E0010), a message names them. The Didj works without them.",
                 )
                 .changed()
             {
@@ -1284,7 +1336,9 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             changed |= ui
                 .checkbox(&mut settings.didj_frame_skip, "Skip frames when the PC is too slow")
                 .on_hover_text(
-                    "When your PC can't keep up, up to 2 of every 3 frames aren't drawn: the game runs at its                      real speed (sound, timing and play are the same) and the picture moves less smoothly.                      Off: every frame is drawn, and the game slows down instead. At once.",
+                    "When your PC can't keep up, up to 2 of every 3 frames aren't drawn: the game runs at its \
+                     real speed (sound, timing and play are the same) and the picture moves less smoothly. \
+                     Off: every frame is drawn, and the game slows down instead. At once.",
                 )
                 .changed();
             ui.separator();
@@ -1302,7 +1356,9 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             changed |= ui
                 .checkbox(&mut settings.didj_dither, "3D dithering (original)")
                 .on_hover_text(
-                    "The dot pattern a real Didj's 3D engine puts in the colours of games that ask for it (Sonic,                      Foster's Home, Clone Wars; not Fists of Foam). The exact pattern is a guess. Off: colours                      rounded, smoother. At once.",
+                    "The dot pattern a real Didj's 3D engine puts in the colours of games that ask for it (Sonic, \
+                     Foster's Home, Clone Wars; not Fists of Foam). The exact pattern is a guess. Off: colours \
+                     rounded, smoother. At once.",
                 )
                 .changed();
             changed |= ui
@@ -1317,6 +1373,45 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 settings.didj_enhanced = mode != 2;
                 settings.didj_hle = mode == 1;
                 actions.push(Action::SettingsChanged);
+            }
+        });
+        sub_menu(ui, "Leapster Explorer", |ui| {
+            // 0 Enhanced (new), 1 Original.
+            let mut mode = if settings.explorer_hle { 0 } else { 1 };
+            let mut changed = ui
+                .radio_value(&mut mode, 0, "Enhanced (new, experimental)")
+                .on_hover_text(
+                    "Runs the Explorer's menu and games without its Linux system: Ribbit answers what they ask of \
+                     it. Starts sooner. Saves are shared with Original. No USB or LeapFrog Connect here: use \
+                     Original for those. From the next power-on.",
+                )
+                .changed();
+            changed |= ui
+                .radio_value(&mut mode, 1, "Original")
+                .on_hover_text("The Explorer's own Linux system, as LeapFrog shipped it. From the next power-on.")
+                .changed();
+            if changed {
+                settings.explorer_hle = mode == 0;
+                actions.push(Action::SettingsChanged);
+            }
+            ui.separator();
+            explorer_library_menu(ui, actions);
+            let usb = settings.explorer_usb;
+            if ui
+                .button(if usb {
+                    egui::RichText::new("🔌  Unplug from this PC (USB)").color(egui::Color32::from_rgb(80, 200, 110))
+                } else {
+                    egui::RichText::new("🔌  Plug into this PC (USB)").color(egui::Color32::from_rgb(235, 90, 90))
+                })
+                .on_hover_text(format!(
+                    "Experimental. Offers the emulated Leapster Explorer as a USB device to this PC through USB/IP \
+                     (port 3240), so LeapFrog Connect can talk to it. {USBIP_NEEDS} Then run: {USBIP_ATTACH}. The \
+                     cable is in while that is attached; detaching pulls it out."
+                ))
+                .clicked()
+            {
+                actions.push(Action::SetExplorerUsb(!usb));
+                ui.close();
             }
         });
         // The RockIt Twist's own items, in a menu of their own.
@@ -2169,9 +2264,22 @@ fn library_screen(
                 query.is_empty() || g.title.to_lowercase().contains(&query) || g.subtitle.to_lowercase().contains(&query)
             };
             let tab_name = tab.map_or("all", |f| f.name());
+            // A console chip clicked on the All tab shows that console's
+            // games only (Esc, the chip again or another tab clears it).
+            let filter_id = crate::console_icons::filter_id();
+            let mut filter: Option<ribbit_memory::known::Hardware> = ui.ctx().data(|d| d.get_temp(filter_id)).flatten();
+            if tab.is_some() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                filter = None;
+                ui.ctx().data_mut(|d| d.insert_temp::<Option<ribbit_memory::known::Hardware>>(filter_id, None));
+            }
+            let plays_on = |g: &crate::library::Game, hw: ribbit_memory::known::Hardware| {
+                g.family.console() == hw || (hw == ribbit_memory::known::Hardware::Explorer && g.family == Family::Didj && g.has_tag("Cartridge"))
+            };
             let shown_games: Vec<&crate::library::Game> = library.games.iter().filter(|g| {
+                if let Some(hw) = filter && !plays_on(g, hw) { return false; }
                 if g.family.is_book() != *books { return false; }
                 if !tab.is_none_or(|f| f.lists(g.family)) { return false; }
+                if tab.is_none() && g.is_explorer_cart() { return false; }
                 if !matches(g) { return false; }
                 if *favorites_only && !settings.favorites.contains(&g.path) { return false; }
                 if g.has_tag("Internal") && settings.hide_builtin_tabs.contains(tab_name) { return false; }
@@ -2179,6 +2287,10 @@ fn library_screen(
                 if open_folder.is_none() && !*favorites_only && settings.folders.iter().any(|f| f.games.contains(&g.path)) { return false; }
                 true
             }).collect();
+            // The console itself (a Didj's or Explorer's firmware: "System")
+            // first, then the games in title order.
+            let mut shown_games = shown_games;
+            shown_games.sort_by_key(|g| !g.has_tag("System"));
             let heading = if *favorites_only {
                 "FAVORITES".to_string()
             } else {
@@ -2187,6 +2299,10 @@ fn library_screen(
                     None => "ALL GAMES".to_string(),
                     Some(f) => f.name().to_uppercase(),
                 }
+            };
+            let heading = match filter {
+                Some(hw) => format!("{heading}  ·  {} (Esc shows all)", crate::console_icons::name(hw).to_uppercase()),
+                None => heading,
             };
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("{heading}  ·  {}", shown_games.len())).size(13.0).strong().color(ACCENT));
@@ -2306,7 +2422,7 @@ fn library_screen(
                                             let t = ((shown - CARD_STAGGER * n as f32) / CARD_GROW).clamp(0.0, 1.0);
                                             if t < 1.0 { ui.ctx().request_repaint(); }
                                             let is_fav = settings.favorites.contains(&game.path);
-                                            game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, true, &settings.folders, actions);
+                                            game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, true, tab.is_none(), &settings.folders, actions);
                                         }
                                     });
                                     ui.add_space(card_gap);
@@ -2326,7 +2442,7 @@ fn library_screen(
                             let t = ((shown - CARD_STAGGER * n as f32) / CARD_GROW).clamp(0.0, 1.0);
                             if t < 1.0 { ui.ctx().request_repaint(); }
                             let is_fav = settings.favorites.contains(&game.path);
-                            game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, false, &settings.folders, actions);
+                            game_card(ui, game, card_w, 1.0 - (1.0 - t).powi(3), is_fav, false, tab.is_none(), &settings.folders, actions);
                         }
                     });
                     ui.add_space(card_gap);
@@ -2717,6 +2833,14 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         if have && power_button(ui, "Turn on the Didj (its menu)") {
             actions.push(Action::TurnOnDidj);
         }
+        if have
+            && ui
+                .add(egui::Button::new("Install game…").corner_radius(8).min_size(egui::vec2(0.0, 32.0)))
+                .on_hover_text("Installs a Didj game (.lfp, or a cartridge dump) on the Didj, as LeapFrog Connect does. You can also drop an .lfp onto this window.")
+                .clicked()
+        {
+            actions.push(Action::Pick(Pick::DidjInstall));
+        }
         return;
     }
     // The Explorer's page: its firmware package in the library is the console.
@@ -2726,6 +2850,14 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
             && power_button(ui, "Turn on the Leapster Explorer (its setup and menu)")
         {
             actions.push(Action::PlayFromLibrary(g.path.clone()));
+        }
+        if firmware.is_some()
+            && ui
+                .add(egui::Button::new("Install game…").corner_radius(8).min_size(egui::vec2(0.0, 32.0)))
+                .on_hover_text("Installs a Leapster Explorer game (.lf2 or .lfp) on the Explorer, as LeapFrog Connect does. You can also drop one onto this window.")
+                .clicked()
+        {
+            actions.push(Action::Pick(Pick::ExplorerInstall));
         }
         return;
     }
@@ -2747,6 +2879,12 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
 }
 
 /// A power button, the size of the rescan button; whether it was clicked.
+/// Playing a library entry: a Didj cartridge's Explorer entry goes into the
+/// Explorer's slot.
+fn play_action(game: &crate::library::Game) -> Action {
+    if game.is_explorer_cart() { Action::PlayOnExplorer(game.path.clone()) } else { Action::PlayFromLibrary(game.path.clone()) }
+}
+
 fn power_button(ui: &mut egui::Ui, hover: &str) -> bool {
     // The symbol is drawn: the fonts may not have it.
     let r = ui.add(egui::Button::new("").corner_radius(8).min_size(egui::vec2(36.0, 32.0))).on_hover_text(hover);
@@ -2938,6 +3076,10 @@ fn paint_art(ui: &egui::Ui, game: &crate::library::Game, rect: egui::Rect, radiu
     let p = ui.painter();
     let shadow = egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(120) };
     p.add(shadow.as_shape(rect, radius));
+    // A console's card (its firmware: "System") shows the console's icon.
+    if game.has_tag("System") {
+        return crate::console_icons::paint(p, rect, radius as f32, game.family.console());
+    }
     match &game.art {
         Art::Texture(t) => {
             egui::Image::new((t.id(), rect.size())).corner_radius(radius).paint_at(ui, rect);
@@ -2951,6 +3093,22 @@ fn paint_art(ui: &egui::Ui, game: &crate::library::Game, rect: egui::Rect, radiu
             p.text(rect.center(), egui::Align2::CENTER_CENTER, note, font, egui::Color32::from_gray(120));
         }
     }
+}
+
+/// The power symbol on a console's card (where a game's has the play
+/// triangle): a ring open at the top and the bar through it.
+fn paint_power(p: &egui::Painter, c: egui::Pos2, r: f32, alpha: f32) {
+    p.circle_filled(c, r, ACCENT.gamma_multiply(alpha));
+    let stroke = egui::Stroke::new(r * 0.12, egui::Color32::WHITE.gamma_multiply(alpha));
+    let ring = r * 0.45;
+    let pts: Vec<egui::Pos2> = (0..=32)
+        .map(|i| {
+            let a = (40.0f32 + 280.0 * i as f32 / 32.0).to_radians();
+            c + egui::vec2(a.sin(), -a.cos()) * ring
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, stroke));
+    p.line_segment([c + egui::vec2(0.0, -ring - r * 0.12), c + egui::vec2(0.0, -r * 0.08)], stroke);
 }
 
 /// A LeapPad book's card (the cartridge has no picture of its own): a
@@ -3072,7 +3230,7 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
                 paint_play(ui.painter(), rect.center(), 40.0, 1.0);
             }
             if art.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                actions.push(Action::PlayFromLibrary(game.path.clone()));
+                actions.push(play_action(game));
             }
             ui.add_space(24.0);
             ui.vertical(|ui| {
@@ -3112,7 +3270,7 @@ fn hero(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action
                 play.append("▶", 0.0, format(style.size * 1.7));
                 play.append("  Play", 0.0, egui::TextFormat { font_id: egui::FontId::new(style.size, style.family.clone()), ..format(0.0) });
                 if primary_button_text(ui, play.into(), egui::vec2(180.0, 46.0)).clicked() {
-                    actions.push(Action::PlayFromLibrary(game.path.clone()));
+                    actions.push(play_action(game));
                 }
             });
         });
@@ -3211,7 +3369,7 @@ fn folder_card(ui: &mut egui::Ui, idx: usize, name: &str, game_count: usize, art
 }
 
 /// `appear`: 0 to 1 as the card grows in (smaller and transparent at 0).
-fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, is_fav: bool, in_folder: bool, folders: &[crate::settings::LibraryFolder], actions: &mut Vec<Action>) {
+fn game_card(ui: &mut egui::Ui, game: &crate::library::Game, w: f32, appear: f32, is_fav: bool, in_folder: bool, chips: bool, folders: &[crate::settings::LibraryFolder], actions: &mut Vec<Action>) {
     let pad = 10.0;
     let inner_w = w - 2.0 * pad;
     let (name, region) = split_region(&game.title);
@@ -3251,9 +3409,36 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
     p.rect_stroke(card, 14, egui::Stroke::new(1.0 + lift, border), egui::StrokeKind::Inside);
     let art = egui::Rect::from_min_size(card.min + egui::vec2(pad, pad), egui::vec2(inner_w, inner_w));
     paint_art(ui, game, art, 10);
+    let mut chip_rects: Vec<(egui::Rect, ribbit_memory::known::Hardware)> = Vec::new();
+    // On the All tab, which consoles the game is for: a chip each, along
+    // the art's foot (a Didj cartridge plays on the Explorer too).
+    if chips && !game.has_tag("System") {
+        let mut consoles = vec![game.family.console()];
+        if game.family == crate::library::Family::Didj && game.has_tag("Cartridge") {
+            consoles.push(ribbit_memory::known::Hardware::Explorer);
+        }
+        let mut x = art.min.x + 6.0;
+        for hw in consoles {
+            let r = crate::console_icons::chip(ui.painter(), egui::pos2(x, art.max.y - 30.0), hw);
+            x = r.max.x + 4.0;
+            chip_rects.push((r, hw));
+        }
+    }
+    let on_chip = response.interact_pointer_pos().and_then(|pos| chip_rects.iter().find(|(r, _)| r.contains(pos)).map(|&(_, hw)| hw));
+    if response.clicked()
+        && let Some(hw) = on_chip
+    {
+        let id = crate::console_icons::filter_id();
+        let now: Option<ribbit_memory::known::Hardware> = ui.ctx().data(|d| d.get_temp(id)).flatten();
+        ui.ctx().data_mut(|d| d.insert_temp(id, if now == Some(hw) { None } else { Some(hw) }));
+    }
     if lift > 0.0 {
         ui.painter().rect_filled(art, 10, egui::Color32::from_black_alpha((70.0 * lift) as u8));
-        paint_play(ui.painter(), art.center(), 30.0, lift);
+        if game.has_tag("System") {
+            paint_power(ui.painter(), art.center(), 30.0, lift);
+        } else {
+            paint_play(ui.painter(), art.center(), 30.0, lift);
+        }
     }
     // Star button — top-right corner of the art area. Always shown as ☆
     // (dim) or ★ (accent); check the cursor/click position against the star
@@ -3308,10 +3493,16 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
     let mut x = at.x;
     let y = at.y + two_lines + 6.0;
     for r in region.into_iter().chain(game.tags.iter().map(|t| t.as_ref())) {
-        let g = p.layout_no_wrap(r.to_string(), egui::FontId::proportional(11.0), egui::Color32::from_gray(200));
+        // A console's card: its button, "Turn on", where a game has tags.
+        let (text, fill, fg) = if r == "System" {
+            ("Turn on", ACCENT, egui::Color32::WHITE)
+        } else {
+            (r, egui::Color32::from_white_alpha(14), egui::Color32::from_gray(200))
+        };
+        let g = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(if r == "System" { 12.5 } else { 11.0 }), fg);
         let b = egui::Rect::from_min_size(egui::pos2(x, y), g.size() + egui::vec2(12.0, 4.0));
-        p.rect_filled(b, 5, egui::Color32::from_white_alpha(14));
-        p.galley(b.min + egui::vec2(6.0, 2.0), g, egui::Color32::from_gray(200));
+        p.rect_filled(b, 5, fill);
+        p.galley(b.min + egui::vec2(6.0, 2.0), g, fg);
         x = b.max.x + 8.0;
     }
     // The rest of the line, cut short with … where it would run past the
@@ -3336,16 +3527,17 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
                 ui.end_row();
             }
         });
-        ui.label(egui::RichText::new("Click to play · right-click for more").weak());
+        ui.label(egui::RichText::new(if game.has_tag("System") { "Click to turn on · right-click for more" } else { "Click to play · right-click for more" }).weak());
     });
-    let game_clicked = response.clicked() && !response.interact_pointer_pos().map_or(false, |p| star_rect.contains(p));
+    let game_clicked = response.clicked() && on_chip.is_none() && !response.interact_pointer_pos().map_or(false, |p| star_rect.contains(p));
     if game_clicked {
-        actions.push(Action::PlayFromLibrary(game.path.clone()));
+        actions.push(play_action(game));
     }
     let game_path = game.path.clone();
+    let play_game = play_action(game);
     response.context_menu(|ui| {
-        if ui.button("Play").clicked() {
-            actions.push(Action::PlayFromLibrary(game_path.clone()));
+        if ui.button(if game.has_tag("System") { "Turn on" } else { "Play" }).clicked() {
+            actions.push(play_game.clone());
             ui.close();
         }
         if ui.button("Get title screen again").clicked() {
@@ -3381,6 +3573,9 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
                 }
             });
         }
+        if matches!(game.family, Family::Didj | Family::Explorer) && !game.is_explorer_cart() {
+            didj_card_menu(ui, game, actions);
+        }
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a
         // Zippity's or RockIt Twist's belongs to the whole console.
@@ -3397,6 +3592,98 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
             ui.close();
         }
     });
+}
+
+/// The Didj menu's library items: installing games, and a real Didj's
+/// files in and out (`didj_library`).
+fn didj_library_menu(ui: &mut egui::Ui, have: bool, actions: &mut Vec<Action>) {
+    let none = "No Didj found: add the folder that holds its firmware packages (DIDJ-0x….lfp, or one bios.didj) with \"Add games folder\".";
+    ui.separator();
+    let items: [(&str, &str, Pick); 4] = [
+        (
+            "Install game (.lfp)…",
+            "Installs a Didj game on the Didj, as LeapFrog Connect does: its .lfp package, or a cartridge dump. It shows in the Didj's own menu and in the library, in every mode. Dropping an .lfp onto the window does the same. Turns a running Didj off first.",
+            Pick::DidjInstall,
+        ),
+        (
+            "Import from a real Didj…",
+            "Choose the folder you copied a real Didj's drive into (Data, ProgramFiles), or one holding its NAND dump (didj.nand). Its profiles, Didjis, game saves and installed games are added to this Didj; files with the same name are replaced, the Didj's system files are left out. The save it had is kept as a .before-library file. Turns a running Didj off first.",
+            Pick::DidjImport,
+        ),
+        (
+            "Copy to a real Didj (export)…",
+            "Writes this Didj's profiles, Didjis, game saves and installed games into the folder you choose, as Didj/Data and Didj/ProgramFiles, laid out like a real Didj's drive, with a read-me on copying them over with LeapFrog Connect. UNTESTED ON A REAL DIDJ: back yours up first.",
+            Pick::DidjExport,
+        ),
+        (
+            "Export as a NAND image…",
+            "Writes the whole Didj (system and your files) as didj.nand (256 MB) into the folder you choose: a NAND dump in a real Didj's layout, which Ribbit can start from. Not for writing to a real Didj.",
+            Pick::DidjExportNand,
+        ),
+    ];
+    for (label, hover, pick) in items {
+        if ui.add_enabled(have, egui::Button::new(label)).on_hover_text(hover).on_disabled_hover_text(none).clicked() {
+            actions.push(Action::Pick(pick));
+            ui.close();
+        }
+    }
+    ui.separator();
+}
+
+/// The Explorer menu's library items (`explorer_library`).
+fn explorer_library_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    let items: [(&str, &str, Pick); 3] = [
+        ("Install game (.lf2 / .lfp)…", "Installs a Leapster Explorer game on the Explorer, as LeapFrog Connect does: files in /LF/Bulk/ProgramFiles, where its menu finds them. Dropping one onto the window does the same. Turns a running Explorer off first.", Pick::ExplorerInstall),
+        ("Import from a real Explorer…", "Choose the folder holding a copy of a real Explorer's /LF/Bulk (Data, ProgramFiles), or one holding its NAND dump as explorer.nand. Profiles, progress, games and downloads are added; the console's own files are left out. UNTESTED with a real Explorer's files.", Pick::ExplorerImport),
+        ("Export the Explorer's files…", "Writes the Explorer's profiles, progress, installed games and downloads into the folder you choose, as LF/Bulk in a real Explorer's layout. A backup: no safe way to copy them onto a real Explorer is known.", Pick::ExplorerExport),
+    ];
+    for (label, hover, pick) in items {
+        if ui.button(label).on_hover_text(hover).clicked() {
+            actions.push(Action::Pick(pick));
+            ui.close();
+        }
+    }
+    ui.separator();
+}
+
+/// A Didj game card's own items: install a package or cartridge on the
+/// console, uninstall an installed one.
+fn didj_card_menu(ui: &mut egui::Ui, game: &crate::library::Game, actions: &mut Vec<Action>) {
+    use crate::didj_library::Job;
+    let explorer = game.family == Family::Explorer;
+    let to = |job: Job| if explorer { Action::ExplorerJob(job) } else { Action::DidjJob(job) };
+    let console = if explorer { "the Explorer" } else { "the Didj" };
+    let installed = if explorer { crate::explorer_library::installed_folder(&game.path) } else { crate::didj_library::installed_folder(&game.path) };
+    if let Some(folder) = installed {
+        ui.separator();
+        let uninstall = format!("Uninstall from {console}");
+        for (label, delete_saves) in [(uninstall.as_str(), false), ("Uninstall and delete its saves", true)] {
+            let text = if delete_saves { egui::RichText::new(label).color(egui::Color32::from_rgb(235, 87, 80)) } else { egui::RichText::new(label) };
+            let hover = if delete_saves {
+                "Removes the game and its progress in every profile (Ribbit keeps the Didj's save as it was in a .before-library file)"
+            } else {
+                "Removes the game; its progress stays, for when it is installed again"
+            };
+            if ui.button(text).on_hover_text(hover).clicked() {
+                actions.push(to(Job::Uninstall { folder: folder.to_string(), title: game.title.clone(), delete_saves }));
+                ui.close();
+            }
+        }
+        // Its .lfp in the games folders (folded into this card).
+        if let Some((_, package)) = game.details.iter().find(|(l, _)| *l == "Package") {
+            let label = if game.has_tag("Update available") { "Update from its .lfp" } else { "Reinstall from its .lfp" };
+            if ui.button(label).on_hover_text(package.as_str()).clicked() {
+                actions.push(to(Job::Install { path: PathBuf::from(package), play: false }));
+                ui.close();
+            }
+        }
+    } else if game.has_tag("Not installed") || (!explorer && game.has_tag("Cartridge")) {
+        ui.separator();
+        if ui.button(format!("Install on {console}")).on_hover_text("Puts the game on the console, as LeapFrog Connect does: it shows in the console's menu").clicked() {
+            actions.push(to(Job::Install { path: game.path.clone(), play: false }));
+            ui.close();
+        }
+    }
 }
 
 /// "Delete save data for <title>?" Delete / Cancel.
@@ -4006,7 +4293,8 @@ fn serial_window(ctx: &egui::Context, st: &mut UiState, settings: &Settings, act
             if ui
                 .checkbox(&mut tcp, format!("Offer to terminals (telnet 127.0.0.1 {})", crate::serial::PORT))
                 .on_hover_text(
-                    "For PuTTY (connection type Telnet) or `telnet 127.0.0.1 2323`: a real terminal, with arrow keys                      and copy and paste. Only programs on this PC can connect.",
+                    "For PuTTY (connection type Telnet) or `telnet 127.0.0.1 2323`: a real terminal, with arrow keys \
+                     and copy and paste. Only programs on this PC can connect.",
                 )
                 .changed()
             {

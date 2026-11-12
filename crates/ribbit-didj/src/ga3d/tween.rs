@@ -194,20 +194,41 @@ fn follow_layers(a: &Frame, b: &Frame, pairs: &mut [Option<usize>]) {
             *votes.entry(eighths(m)).or_default() += 1;
         }
     }
+    // Each one's best move: most votes; a move only it has (3D, each
+    // triangle its own): the one in the list's order; then the shortest.
+    let best: Vec<Option<(usize, (f32, f32))>> = pairs
+        .iter()
+        .enumerate()
+        .map(|(j, pair)| {
+            let score = |&(i, m): &(usize, (f32, f32))| {
+                let count = votes[&eighths(m)];
+                (count, count == 1 && *pair == Some(i), -(m.0.abs() + m.1.abs()))
+            };
+            candidates(j).into_iter().max_by(|x, y| score(x).partial_cmp(&score(y)).unwrap())
+        })
+        .collect();
+    // How many take each move, and the move most take.
+    let mut taken: HashMap<(i32, i32), u32> = HashMap::new();
+    for &(_, m) in best.iter().flatten() {
+        *taken.entry(eighths(m)).or_default() += 1;
+    }
+    let most = taken.values().copied().max().unwrap_or(0);
     for (j, pair) in pairs.iter_mut().enumerate() {
-        // Most votes; a move only it has (3D, each triangle its own): the
-        // one in the list's order; then the shortest.
-        let score = |&(i, m): &(usize, (f32, f32))| {
-            let count = votes[&eighths(m)];
-            (count, count == 1 && *pair == Some(i), -(m.0.abs() + m.1.abs()))
-        };
+        let Some((i, m)) = best[j] else { continue };
         // A move only one picture could make is no layer's: one that changed
         // picture in its place keeps its pair, not one that looks like it now.
-        if let Some(&(i, m)) = candidates(j).iter().max_by(|x, y| score(x).partial_cmp(&score(y)).unwrap())
-            && (votes[&eighths(m)] > 1 || pair.is_none())
-        {
-            *pair = Some(i);
+        if votes[&eighths(m)] <= 1 && pair.is_some() {
+            continue;
         }
+        // Nor does one that changed picture in its place take a move most
+        // don't: in a still row of boxes the one losing its cursor (another
+        // picture before) took the next box's move, a box-width jump that
+        // tore it apart in the picture between (Didji Racing's Tune-Up).
+        let in_place = pair.and_then(|p| moved(&a.ops[p].kind, &b.ops[j].kind)).is_some_and(|d| d.0.abs() < SAME_PLACE && d.1.abs() < SAME_PLACE);
+        if in_place && taken[&eighths(m)] < most {
+            continue;
+        }
+        *pair = Some(i);
     }
 }
 
@@ -236,6 +257,12 @@ fn with_neighbours(a: &Frame, b: &Frame, pairs: &[Option<usize>]) -> Vec<Option<
         let neighbour = (start > 0 && beside(start - 1)).then(|| start - 1).or((j < b.ops.len() && beside(j)).then_some(j));
         let Some(n) = neighbour else { continue };
         let Some(m) = pairs[n].and_then(|i| moved(&a.ops[i].kind, &b.ops[n].kind)) else { continue };
+        // A neighbour that moved too far isn't blended (drawn where it
+        // ends), so neither is this: taken back by such a move, it showed
+        // up far from anything in the picture between.
+        if m.0.abs() > MAX_MOVE || m.1.abs() > MAX_MOVE {
+            continue;
+        }
         shifts[start..j].fill(Some(m));
     }
     shifts
@@ -371,44 +398,6 @@ impl Ga3d {
         let saved = Saved { mem: mem_saved, hd: if self.hd.on() { self.hd.save(tiles) } else { Vec::new() } };
         let pairs = line_up(a, b);
         let shifts = with_neighbours(a, b, &pairs);
-        // TEMPTW: TWEEN_DUMP=1 prints, per in-between picture, one line per
-        // drawn op (kind, where, how big, which op it paired with, its move
-        // and back-shift). The timer-end glitch is the last picture before
-        // the Tune-Up screen changes; grab the tail of stderr.
-        if std::env::var_os("TWEEN_DUMP").is_some() {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static PIC: AtomicU64 = AtomicU64::new(0);
-            let n = PIC.fetch_add(1, Ordering::Relaxed);
-            let span = |kind: &Kind| -> (f32, f32) {
-                match kind {
-                    Kind::Rectangle(p, q) => ((q[0] - p[0]).abs(), (q[1] - p[1]).abs()),
-                    Kind::Triangle(v, _) => {
-                        let ext = |c: usize| v.iter().map(|x| x[c]).fold(f32::MIN, f32::max) - v.iter().map(|x| x[c]).fold(f32::MAX, f32::min);
-                        (ext(0), ext(1))
-                    }
-                    _ => (f32::NAN, f32::NAN),
-                }
-            };
-            eprintln!("[pic {n}] t={t:.3} ops={}", b.ops.len());
-            for (k, op) in b.ops.iter().enumerate() {
-                let Some(at) = place(&op.kind) else { continue };
-                let tag = match op.kind {
-                    Kind::Clip(..) => "clip",
-                    Kind::Triangle(..) => "tri",
-                    Kind::Rectangle(..) => "rect",
-                    Kind::Fill => "fill",
-                    Kind::Lut => "lut",
-                };
-                let (w, h) = span(&op.kind);
-                let (pair, mv, look) =
-                    pairs[k].map_or((-1i64, (f32::NAN, f32::NAN), false), |i| (i as i64, moved(&a.ops[i].kind, &op.kind).unwrap_or((f32::NAN, f32::NAN)), a.uvs(i) == b.uvs(k)));
-                let sh = shifts[k].map_or(f32::NAN, |s| s.0);
-                eprintln!(
-                    "  [op {k}] {tag} at {:.1},{:.1} size {:.1}x{:.1} pair {pair} mv {:.2},{:.2} look {} shift {:.2} uv {:x}",
-                    at.0, at.1, w, h, mv.0, mv.1, look as u8, sh, b.uvs(k)
-                );
-            }
-        }
         // Everything the drawing touches that the game would see.
         let keep = (self.regs.clone(), self.lut, self.out, self.cost, self.pixels, self.triangles, self.trace.len(), self.skip);
         self.skip = false;
@@ -560,7 +549,7 @@ fn save(b: &Frame, mem: &Mem) -> (Vec<(usize, Vec<u8>)>, std::collections::BTree
             for x in x0..=x1 {
                 let a = addr(x, y);
                 tiles.extend(Hd::tile_of(a));
-                let o = Mem::offset(a, texture);
+                let o = mem.offset(a, texture);
                 match &mut run {
                     Some((start, end)) if *end == o => *end = o + 2,
                     _ => {
@@ -689,6 +678,16 @@ mod tests {
         let b = frame(&[sprite(-2.0, 0.0), sprite(8.0, 0.75), sprite(18.0, 0.5)]);
         let pairs = line_up(&a, &b);
         assert_eq!(with_neighbours(&a, &b, &pairs), vec![None, Some((-2.0, 0.0)), None]);
+    }
+
+    #[test]
+    fn a_box_losing_its_cursor_stays_in_a_still_row() {
+        // Five boxes; the first one shows the cursor (picture 2) in the older
+        // frame. Nothing moves, so the first box must not take the second's
+        // place (40 pixels along, the same picture now).
+        let row = |first: f32| -> Vec<Kind> { (0..5).map(|k| sprite(40.0 * k as f32, if k == 0 { first } else { 1.0 })).collect() };
+        let (a, b) = (frame(&row(2.0)), frame(&row(1.0)));
+        assert_eq!(line_up(&a, &b), vec![Some(0), Some(1), Some(2), Some(3), Some(4)]);
     }
 
     #[test]

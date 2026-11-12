@@ -14,6 +14,8 @@
 //! DIDJ_HLE_GA3D=<n> runs the 3D chip n times as fast; DIDJ_HLE_MLC_HZ=<n>
 //! gives the MLC n frames a second (60 is real); DIDJ_HLE_TICK_US=<n> makes
 //! the kernel tick n microseconds (10000 is real).
+//! DIDJ_HLE_MIPS=<n>: as on a host that runs only n million instructions a
+//! second (a busy PC).
 //! DIDJ_HLE_CART=<dump> puts a cartridge in the slot; DIDJ_HLE_CARRY=<save>
 //! puts the player's files from an Original save (.nandblocks) on /Didj.
 //! DIDJ_HLE_WAV, DIDJ_HLE_LOG, DIDJ_HLE_FRAMES and DIDJ_HLE_PCS: sound,
@@ -129,6 +131,7 @@ fn main() {
         (a.parse().unwrap(), b.parse().unwrap())
     });
     let mut left = millions * 1_000_000;
+    let slow: Option<f64> = std::env::var("DIDJ_HLE_MIPS").ok().and_then(|v| v.parse().ok()).filter(|&m: &f64| m > 0.0);
     let stop = loop {
         let now = if keys_ms { t.elapsed().as_millis() as u64 } else { p.executed };
         // DIDJ_HLE_TRACE_FROM=<ms or millions, as the keys>: the trace from then.
@@ -175,7 +178,14 @@ fn main() {
         let recording = frames_dir.is_some() && now >= frames_from * unit;
         let step = left.min(if sampling || tweening || recording || after.peek().is_some() { 1_000_000 } else { 10_000_000 });
         let before = p.executed;
+        // DIDJ_HLE_MIPS=<n>: a slower (or busy) host, running at most n
+        // million instructions a second: a pause after each step.
+        let (step_t, step_n) = (std::time::Instant::now(), p.executed);
         let stop = p.run(step);
+        if let Some(mips) = slow {
+            let least = std::time::Duration::from_secs_f64((p.executed - step_n) as f64 / (mips * 1e6));
+            std::thread::sleep(least.saturating_sub(step_t.elapsed()));
+        }
         if sampling {
             eprintln!("[pc] {} {:08X} {} ms", p.tid(), p.cpu.r[15], t.elapsed().as_millis());
         }
@@ -213,7 +223,7 @@ fn main() {
         let (s, r, c) = p.take_sound();
         if !s.is_empty() {
             if sound_log {
-                eprintln!("[didjhle] sound {} frames at {:.0} ms, {}M", s.len() / c as usize, t.elapsed().as_secs_f64() * 1000.0, p.executed / 1_000_000);
+                eprintln!("[didjhle] sound {} frames at {:.0} ms (programs {:.1}), {}M", s.len() / c as usize, t.elapsed().as_secs_f64() * 1000.0, p.program_time().as_secs_f64() * 1000.0, p.executed / 1_000_000);
             }
             (rate, channels) = (r, c);
             sound.extend(s);

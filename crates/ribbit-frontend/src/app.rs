@@ -121,6 +121,20 @@ pub struct App {
     /// A Leapster Explorer being built (its NAND from the packages takes
     /// seconds) and the folder of its packages, for the problem message.
     explorer_building: Option<(PathBuf, std::thread::JoinHandle<anyhow::Result<crate::didj::ExplorerBuilt>>)>,
+    /// Work on the Didj's save (`didj_library`: installing, listing...),
+    /// one job at a time.
+    didj_job: Option<std::thread::JoinHandle<crate::didj_library::Done>>,
+    /// The Didj folder whose installed games the library lists (None: list
+    /// them again), and each one's menu art by folder, for starting it.
+    didj_listed: Option<PathBuf>,
+    didj_menu_art: std::collections::HashMap<String, ribbit_didj::autostart::Art>,
+    /// A job asked for while another ran: started next (true: the
+    /// Explorer's).
+    didj_next: Option<(bool, crate::didj_library::Job)>,
+    /// As `didj_listed`, for the Leapster Explorer.
+    explorer_listed: Option<PathBuf>,
+    /// The cartridge (a raw dump) that goes into that Explorer's slot.
+    explorer_cart: Option<Vec<u8>>,
     /// The USB/IP server for the Leapster 2 and the Didj, once started (its
     /// port stays bound for the rest of the program; it offers whichever
     /// console runs).
@@ -308,6 +322,12 @@ impl App {
             zippity_cleaning: None,
             twist_import: None,
             explorer_building: None,
+            didj_job: None,
+            didj_listed: None,
+            didj_menu_art: Default::default(),
+            didj_next: None,
+            explorer_listed: None,
+            explorer_cart: None,
             usb_server: None,
             twist: None,
             leappad: None,
@@ -653,6 +673,8 @@ impl App {
         if let Some(d) = self.didj.take() {
             d.stop();
             self.fit_window = FIT_TRIES;
+            self.didj_listed = None;
+            self.explorer_listed = None;
         }
         // An Explorer still being built is dropped when it's done.
         self.explorer_building = None;
@@ -737,6 +759,10 @@ impl App {
         // listed wherever they are).
         let extra: Vec<PathBuf> = self.settings.recent_carts.iter().chain(&opened).cloned().collect();
         self.library.scan(&self.settings.rom_folders, &extra, self.settings.twist_content.clone(), art);
+        // The games installed on the Didj and Explorer are listed again
+        // after the scan.
+        self.didj_listed = None;
+        self.explorer_listed = None;
         // Outline fonts for HD device text, from the same folders.
         crate::device_fonts::load(self.settings.rom_folders.clone());
     }
@@ -750,6 +776,16 @@ impl App {
     }
 
     fn open_dropped(&mut self, path: PathBuf) {
+        // An Explorer game's package: installed on the Explorer.
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lf2") || e.eq_ignore_ascii_case("lfp"))
+            && crate::explorer_library::describe_package(&path).is_some_and(|g| g.has_tag("Not installed"))
+        {
+            return self.explorer_job_start(crate::didj_library::Job::Install { path, play: false });
+        }
+        // A Didj game's .lfp: installed on the Didj, as Connect would.
+        if crate::didj::is_package(&path) && self.didj_game_to_install(&path) {
+            return self.didj_job_start(crate::didj_library::Job::Install { path, play: false });
+        }
         // A BIOS is recognised by checksum; anything else is tried as a cartridge.
         let is_bios = ribbit_core::read_image(&path)
             .ok()
@@ -828,6 +864,27 @@ impl App {
         // packages beside it.
         if crate::didj::describe_explorer(&path).is_some() {
             return self.start_explorer(path);
+        }
+        // A game installed on the Explorer, or a game package for it: the
+        // Explorer (its menu has the game); one not installed is first.
+        if crate::explorer_library::installed_folder(&path).is_some() {
+            return self.start_explorer_menu();
+        }
+        if let Some(g) = self.library.games.iter().find(|g| g.path == path && g.family == crate::library::Family::Explorer && !g.has_tag("System") && !g.is_explorer_cart()) {
+            if g.has_tag("Not installed") {
+                return self.explorer_job_start(crate::didj_library::Job::Install { path, play: true });
+            }
+            return self.start_explorer_menu();
+        }
+        // A game installed on the Didj: started from its menu.
+        if let Some(folder) = crate::didj_library::installed_folder(&path) {
+            let folder = folder.to_string();
+            return self.start_installed_didj(&folder);
+        }
+        // A Didj game's package away from the Didj's own: installed on it
+        // first, as LeapFrog Connect would, then started.
+        if crate::didj::is_package(&path) && self.didj_game_to_install(&path) {
+            return self.didj_job_start(crate::didj_library::Job::Install { path, play: true });
         }
         // A Didj package: the Didj, built from the packages beside it.
         if crate::didj::is_package(&path) {
@@ -1096,17 +1153,56 @@ impl App {
         let save_dir = self.save_dir();
         let into = dir.clone();
         self.ui.toast("Starting the Leapster Explorer…");
+        self.explorer_cart = None;
         self.explorer_building = Some((dir, std::thread::spawn(move || crate::didj::DidjSession::build_explorer(&into, &save_dir))));
+    }
+
+    /// A Didj cartridge on the Explorer: into the slot of the Explorer that
+    /// is running (its menu then shows the game), or an Explorer turned on
+    /// with it in.
+    fn play_on_explorer(&mut self, path: &Path) {
+        let Some(cart) = crate::didj::read_cart(path) else {
+            return self.ui.problem("Not a cartridge", "This file isn't a Didj cartridge dump.", path.display().to_string());
+        };
+        if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
+            match d.set_cart(Some(cart)) {
+                Ok(()) => self.ui.toast("Cartridge in: pick it in the Explorer's menu"),
+                Err(e) => self.ui.problem("Couldn't put the cartridge in", "The dump may be damaged.", e),
+            }
+            return;
+        }
+        let Some(firmware) = self.library.games.iter().find(|g| g.family == crate::library::Family::Explorer && g.has_tag("System")).map(|g| g.path.clone()) else {
+            return self.ui.problem(
+                "No Leapster Explorer in the library",
+                "The Explorer is built from its firmware packages (Firmware Base.lfp and the others LeapFrog Connect downloads). Add the folder that holds them with \"Add games folder\".",
+                "",
+            );
+        };
+        self.start_explorer(firmware);
+        self.explorer_cart = Some(cart);
     }
 
     /// Powers on the Leapster Explorer `start_explorer` built.
     fn finish_explorer(&mut self, dir: &Path, built: anyhow::Result<crate::didj::ExplorerBuilt>) {
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match built.and_then(|b| crate::didj::DidjSession::start_explorer(b, sink, self.ui.serial.clone())) {
+        match built.and_then(|b| crate::didj::DidjSession::start_explorer(b, sink, self.ui.serial.clone(), self.settings.explorer_hle)) {
             Ok(d) => {
                 self.fit_window = FIT_TRIES;
+                if let Some(n) = d.carried.filter(|&n| n > 0) {
+                    self.ui.toast_for(
+                        format!("This Leapster Explorer's save was made on another memory image: {n} of your files (profiles, progress, settings) were carried over"),
+                        Duration::from_secs(8),
+                    );
+                }
                 d.set_dither(self.settings.didj_dither);
+                // In the slot from power on (the kernel checks it at start).
+                if let Some(cart) = self.explorer_cart.take()
+                    && let Err(e) = d.set_cart(Some(cart))
+                {
+                    tracing::warn!(target: "ribbit::didj", "Explorer cartridge: {e}");
+                }
                 self.didj = Some(d);
+                self.apply_didj_usb();
                 self.paused = false;
                 if let Some(a) = &mut self.audio {
                     a.clear();
@@ -1686,6 +1782,11 @@ impl App {
             Pick::SdFolder => self.settings.leapster2_sd_folder.clone(),
             Pick::SdImage | Pick::SdExport => None,
             Pick::DidjSave => Some(self.save_dir()),
+            Pick::DidjInstall | Pick::DidjImport => self.settings.rom_folders.last().cloned(),
+            Pick::DidjExport | Pick::DidjExportNand => None,
+            Pick::ExplorerInstall | Pick::ExplorerImport => self.settings.rom_folders.last().cloned(),
+            Pick::ExplorerExport => None,
+            Pick::DidjFolder => None,
         };
         #[cfg(target_os = "macos")]
         if self.sheet.is_none()
@@ -1737,6 +1838,14 @@ impl App {
             Pick::SdFolder => self.set_sd_folder(Some(path)),
             Pick::SdImage => self.sd_card(crate::sdcard::Job::LoadImage(path)),
             Pick::DidjSave => self.import_didj_save(path),
+            Pick::DidjInstall => self.didj_job_start(crate::didj_library::Job::Install { path, play: false }),
+            Pick::DidjExport => self.didj_job_start(crate::didj_library::Job::Export(path)),
+            Pick::DidjExportNand => self.didj_job_start(crate::didj_library::Job::ExportNand(path)),
+            Pick::DidjImport => self.didj_job_start(crate::didj_library::Job::Import(path)),
+            Pick::ExplorerInstall => self.explorer_job_start(crate::didj_library::Job::Install { path, play: false }),
+            Pick::ExplorerExport => self.explorer_job_start(crate::didj_library::Job::Export(path)),
+            Pick::ExplorerImport => self.explorer_job_start(crate::didj_library::Job::Import(path)),
+            Pick::DidjFolder => self.import_didj_folder(path),
             Pick::SdExport => self.sd_card(crate::sdcard::Job::Export(path)),
         }
     }
@@ -1880,6 +1989,13 @@ impl App {
             Action::Pick(w) => self.pick(w),
             Action::OpenCartridge(p) => self.open_cart(p),
             Action::PlayFromLibrary(p) => self.open_cart(p),
+            Action::PlayOnExplorer(p) => self.play_on_explorer(&p),
+            Action::RemoveExplorerCart => {
+                if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
+                    let _ = d.set_cart(None);
+                    self.ui.toast("Cartridge out");
+                }
+            }
             Action::SetLibraryConsole(hw) => {
                 self.settings.library_console = hw.name().to_string();
                 self.save_settings();
@@ -1960,6 +2076,7 @@ impl App {
                 }
             }
             Action::ImportDidjSave(path) => self.import_didj_save(path),
+            Action::ImportDidjFolder(path) => self.import_didj_folder(path),
             Action::SetDidjSerialTcp(on) => {
                 self.settings.didj_serial_tcp = on;
                 self.save_settings();
@@ -1967,6 +2084,16 @@ impl App {
                 if on && self.ui.serial.listening() {
                     self.ui.toast(format!("Didj serial console: telnet 127.0.0.1 {}", crate::serial::PORT));
                 }
+            }
+            Action::SetExplorerUsb(on) => {
+                self.settings.explorer_usb = on;
+                self.save_settings();
+                self.apply_didj_usb();
+                self.ui.toast(if on {
+                    format!("Leapster Explorer on USB: run  {}  to plug it in", crate::ui::USBIP_ATTACH)
+                } else {
+                    "Leapster Explorer unplugged from USB".to_string()
+                });
             }
             Action::SetDidjUsb(on) => {
                 self.settings.didj_usb = on;
@@ -1978,6 +2105,8 @@ impl App {
                     "Didj unplugged from USB".to_string()
                 });
             }
+            Action::DidjJob(job) => self.didj_job_start(job),
+            Action::ExplorerJob(job) => self.explorer_job_start(job),
             Action::TurnOnDidj => {
                 // The Didj's system package: in the library, last played, or in a games folder.
                 let package = self
@@ -2537,7 +2666,7 @@ impl App {
             },
             (None, None, None) => match self.didj.as_ref().map(|d| d.save_state()) {
                 Some(Some(b)) => b,
-                Some(None) => return self.ui.toast("Save states aren't made in Didj Enhanced (new) yet: switch to Original+ or Original (Emulation > Didj) for them"),
+                Some(None) => return self.ui.toast("Couldn't make a state in Enhanced (new) (see the log)"),
                 None => return,
             },
         };
@@ -2602,7 +2731,9 @@ impl App {
             self.ui.toast("Reset");
         }
         if let Some(d) = &self.didj {
-            d.reset(self.didj_mode());
+            // The Explorer has its own Enhanced (new) setting.
+            let mode = crate::didj::Mode { hle: if d.explorer { self.settings.explorer_hle } else { self.didj_mode().hle }, ..self.didj_mode() };
+            d.reset(mode);
             self.ui.toast("Reset");
         }
         if let Some(s) = &mut self.session {
@@ -2671,6 +2802,208 @@ impl App {
 
     /// Makes the Didj save at `from` this Didj's (`didj::import_save`) and
     /// powers the Didj on again so its files are carried over.
+    /// The Didj's system package (the console): in the library, last
+    /// played, or in a games folder.
+    fn didj_system_package(&self) -> Option<PathBuf> {
+        self.library
+            .games
+            .iter()
+            .find(|g| g.family == crate::library::Family::Didj && g.has_tag("System"))
+            .map(|g| g.path.clone())
+            .or_else(|| self.settings.didj_package.clone().filter(|p| p.is_file()))
+            .or_else(|| self.settings.rom_folders.iter().find_map(|f| crate::didj::find_package(f, 3)))
+    }
+
+    /// Whether the package at `path` is a Didj game that isn't built into
+    /// the Didj (not beside its own packages): played, it is installed.
+    fn didj_game_to_install(&self, path: &Path) -> bool {
+        if let Some(g) = self.library.games.iter().find(|g| g.path == path) {
+            return g.has_tag("Not installed");
+        }
+        let beside_system = path.parent().and_then(|d| crate::didj::find_package(d, 0)).is_some();
+        !beside_system && self.didj_system_package().is_some() && crate::didj::menu_art(path, None).is_some()
+    }
+
+    /// Starts `job` on the Didj's save in the background (`didj_library`).
+    /// One that changes the save turns a running Didj off first, as a real
+    /// one leaves its menu when plugged into LeapFrog Connect.
+    fn didj_job_start(&mut self, job: crate::didj_library::Job) {
+        let Some(package) = self.didj_system_package() else {
+            return self.ui.problem(
+                "No Didj found",
+                "Add the folder that holds the Didj's firmware packages (DIDJ-0x….lfp files, or one bios.didj holding them) with \"Add games folder\".",
+                "",
+            );
+        };
+        if self.didj_job.is_some() {
+            if job != crate::didj_library::Job::List {
+                self.didj_next = Some((false, job));
+            }
+            return;
+        }
+        let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let running = self.didj.as_ref().is_some_and(|d| !d.explorer);
+        if running && job.writes() {
+            self.end_session();
+            self.ui.toast("The Didj was turned off to change what is on it (its saves are kept)");
+        } else if running && let Some(d) = &self.didj
+            && let Err(e) = d.flush()
+        {
+            tracing::warn!(target: "ribbit::saves", "saving the Didj's NAND: {e:#}");
+        }
+        match &job {
+            crate::didj_library::Job::Install { .. } => self.ui.toast("Installing the game on the Didj…"),
+            crate::didj_library::Job::Import(_) => self.ui.toast("Bringing in the real Didj's files…"),
+            crate::didj_library::Job::Export(_) | crate::didj_library::Job::ExportNand(_) => self.ui.toast("Copying the Didj's files…"),
+            _ => {}
+        }
+        let save_dir = self.save_dir();
+        self.didj_job = std::thread::Builder::new().name("ribbit-didj-library".into()).spawn(move || crate::didj_library::run(job, &dir, &save_dir)).ok();
+    }
+
+    /// Acts on a finished Didj job, and lists the installed games again
+    /// when they may have changed.
+    fn poll_didj_job(&mut self) {
+        use crate::didj_library::{Done, Job};
+        if self.didj_job.as_ref().is_some_and(|h| h.is_finished()) {
+            let done = self.didj_job.take().unwrap().join().unwrap_or_else(|_| Done::Failed { title: "The Didj's library", explain: String::new(), error: "the thread crashed".into() });
+            match done {
+                Done::Listed { dir, explorer: true, games } => {
+                    self.library.set_installed(crate::library::Family::Explorer, games.into_iter().map(|l| l.game).collect());
+                    self.explorer_listed = Some(dir);
+                }
+                Done::Listed { dir, explorer: false, games: listed } => {
+                    self.didj_menu_art = listed.iter().filter_map(|l| Some((crate::didj_library::installed_folder(&l.game.path)?.to_string(), l.menu_art.clone()?))).collect();
+                    self.library.set_installed(crate::library::Family::Didj, listed.into_iter().map(|l| l.game).collect());
+                    self.didj_listed = Some(dir);
+                }
+                Done::Installed { name, play, explorer: true, .. } => {
+                    self.explorer_listed = None;
+                    if play {
+                        self.ui.toast(format!("{name} installed on the Leapster Explorer"));
+                        self.start_explorer_menu();
+                    } else {
+                        self.ui.toast_for(format!("{name} installed on the Leapster Explorer: it's in its menu and in the library"), Duration::from_secs(6));
+                    }
+                }
+                Done::Installed { name, folder, art, play, explorer: false } => {
+                    self.didj_listed = None;
+                    if let Some(a) = art {
+                        self.didj_menu_art.insert(folder.clone(), a);
+                    }
+                    if play {
+                        self.ui.toast(format!("{name} installed on the Didj"));
+                        self.start_installed_didj(&folder);
+                    } else {
+                        self.ui.toast_for(format!("{name} installed on the Didj: it's in the Didj's menu and in the library"), Duration::from_secs(6));
+                    }
+                }
+                Done::Uninstalled { title, delete_saves } => {
+                    // Its .lfp, folded into the card, shows again.
+                    self.rescan_library();
+                    self.ui.toast(if delete_saves { format!("{title} and its saves removed from the Didj") } else { format!("{title} removed from the Didj (its saves stay)") });
+                }
+                Done::Exported { files, to } => {
+                    self.ui.toast_for(format!("{files} files copied to {} (see the read-me beside it for a real Didj)", to.display()), Duration::from_secs(8));
+                    if let Some(parent) = to.parent() {
+                        open_folder(parent);
+                    }
+                }
+                Done::ExportedNand(to) => self.ui.toast_for(format!("The Didj written to {}", to.display()), Duration::from_secs(8)),
+                Done::Imported(n) => {
+                    self.didj_listed = None;
+                    self.explorer_listed = None;
+                    self.ui.toast_for(format!("{n} files brought in: start the console to see them"), Duration::from_secs(8));
+                }
+                Done::Failed { title, explain, error } => self.ui.problem(title, explain, error),
+            }
+            match self.didj_next.take() {
+                Some((true, job)) => return self.explorer_job_start(job),
+                Some((false, job)) => return self.didj_job_start(job),
+                None => {}
+            }
+        }
+        // The installed games, once the library has its Didj and nothing
+        // else runs on the save.
+        // (Asked for by `didj_listed` = None: at start, after a rescan, a
+        // change or a Didj session; not looked up every frame.)
+        if self.didj_listed.is_none() && self.didj_job.is_none() && !self.library.scanning && self.didj.is_none() {
+            match self.didj_system_package().and_then(|p| p.parent().map(Path::to_path_buf)) {
+                Some(dir) => {
+                    self.didj_listed = Some(dir);
+                    self.didj_job_start(Job::List);
+                }
+                None => self.didj_listed = Some(PathBuf::new()),
+            }
+        }
+        if self.explorer_listed.is_none() && self.didj_job.is_none() && !self.library.scanning && self.didj.is_none() {
+            match self.explorer_firmware().and_then(|p| p.parent().map(Path::to_path_buf)) {
+                Some(dir) => {
+                    self.explorer_listed = Some(dir);
+                    self.explorer_job_start(Job::List);
+                }
+                None => self.explorer_listed = Some(PathBuf::new()),
+            }
+        }
+    }
+
+    /// The Leapster Explorer's Firmware Base package (the console) in the
+    /// library.
+    fn explorer_firmware(&self) -> Option<PathBuf> {
+        self.library.games.iter().find(|g| g.family == crate::library::Family::Explorer && g.has_tag("System")).map(|g| g.path.clone())
+    }
+
+    /// Turns the Explorer on (its menu, where its games are).
+    fn start_explorer_menu(&mut self) {
+        match self.explorer_firmware() {
+            Some(f) => self.start_explorer(f),
+            None => self.ui.problem("No Leapster Explorer found", "Add the folder that holds the Explorer's packages (Firmware Base.lfp and the rest) with \"Add games folder\".", ""),
+        }
+    }
+
+    /// `didj_job_start` for the Leapster Explorer (`explorer_library`).
+    fn explorer_job_start(&mut self, job: crate::didj_library::Job) {
+        let Some(firmware) = self.explorer_firmware() else {
+            return self.ui.problem("No Leapster Explorer found", "Add the folder that holds the Explorer's packages (Firmware Base.lfp and the rest) with \"Add games folder\".", "");
+        };
+        if self.didj_job.is_some() {
+            if job != crate::didj_library::Job::List {
+                self.didj_next = Some((true, job));
+            }
+            return;
+        }
+        let dir = firmware.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let running = self.didj.as_ref().is_some_and(|d| d.explorer);
+        if running && job.writes() {
+            self.end_session();
+            self.ui.toast("The Explorer was turned off to change what is on it (its saves are kept)");
+        } else if running && let Some(d) = &self.didj
+            && let Err(e) = d.flush()
+        {
+            tracing::warn!(target: "ribbit::saves", "saving the Explorer's NAND: {e:#}");
+        }
+        if matches!(job, crate::didj_library::Job::Install { .. }) {
+            self.ui.toast("Installing the game on the Leapster Explorer…");
+        }
+        let save_dir = self.save_dir();
+        self.didj_job = std::thread::Builder::new().name("ribbit-explorer-library".into()).spawn(move || crate::explorer_library::run(job, &dir, &save_dir)).ok();
+    }
+
+    /// Starts the game installed in the Didj's ProgramFiles/`folder` from
+    /// its menu, in the mode chosen.
+    fn start_installed_didj(&mut self, folder: &str) {
+        let Some(package) = self.didj_system_package() else {
+            return self.didj_job_start(crate::didj_library::Job::List);
+        };
+        let art = self.didj_menu_art.get(folder).cloned();
+        let title = self.library.games.iter().find(|g| crate::didj_library::installed_folder(&g.path) == Some(folder)).map(|g| g.title.clone());
+        self.start_didj(package, None, art);
+        if let (Some(d), Some(t)) = (&mut self.didj, title) {
+            d.title = t;
+            self.update_title();
+        }
+    }
+
     fn import_didj_save(&mut self, from: PathBuf) {
         let package = self.settings.didj_package.clone().filter(|p| p.is_file());
         let Some(package) = package else {
@@ -2692,6 +3025,34 @@ impl App {
         }
     }
 
+    /// Brings a Didj save folder into this Didj (`didj::import_didj_folder`)
+    /// and powers the Didj on again.
+    fn import_didj_folder(&mut self, from: PathBuf) {
+        let package = self.settings.didj_package.clone().filter(|p| p.is_file());
+        let Some(package) = package else {
+            self.ui.toast("Start the Didj once first, so Ribbit knows which Didj to import the save into");
+            return;
+        };
+        let dir = package.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        if self.didj.is_some() {
+            // Its own save is written first.
+            self.end_session();
+        }
+        match crate::didj::import_didj_folder(&from, &dir, &self.save_dir()) {
+            Ok(r) => {
+                let games = if r.packages > 0 { format!(", {} games installed from their packages", r.packages) } else { String::new() };
+                let backup = r.backup.as_ref().map_or_else(String::new, |b| format!(". This Didj's save before is kept as {}", b.display()));
+                self.ui.toast(format!("Didj save folder imported: {} profiles, {} files{games}{backup}", r.profiles, r.files));
+                self.start_didj(package, None, None);
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't import the Didj save folder",
+                "Choose a copy of the Didj's /Didj folder (the one with Data and Base in it), or a folder that has it as didj or assets/didj.",
+                format!("{e:#}"),
+            ),
+        }
+    }
+
     /// Offers the Didj's serial console on TCP if so set, else stops.
     fn apply_serial_tcp(&mut self) {
         if !self.settings.didj_serial_tcp {
@@ -2702,19 +3063,20 @@ impl App {
         }
     }
 
-    /// Offers the running Didj on USB if so set, else unplugs it.
+    /// Offers the running Didj or Leapster Explorer on USB if so set
+    /// (`didj_usb`, `explorer_usb`), else unplugs it.
     fn apply_didj_usb(&mut self) {
-        // The Explorer's USB isn't modelled yet.
-        if self.didj.as_ref().is_none_or(|d| d.explorer) {
-            return;
-        }
-        if self.settings.didj_usb
-            && let Some(why) = self.didj.as_ref().and_then(|d| d.usb_unavailable())
-        {
+        let Some(explorer) = self.didj.as_ref().map(|d| d.explorer) else { return };
+        let on = if explorer { self.settings.explorer_usb } else { self.settings.didj_usb };
+        if on && let Some(why) = self.didj.as_ref().and_then(|d| d.usb_unavailable()) {
             self.ui.toast(why);
             return;
         }
-        let srv = if self.settings.didj_usb { self.usb_server(crate::didj::usb_device(), "Didj") } else { None };
+        let srv = match (on, explorer) {
+            (false, _) => None,
+            (true, false) => self.usb_server(crate::didj::usb_device(), "Didj"),
+            (true, true) => self.usb_server(crate::didj::explorer_usb_device(), "Leapster Explorer"),
+        };
         if let Some(d) = &self.didj {
             d.set_usb(srv);
         }
@@ -2724,7 +3086,7 @@ impl App {
         // A console plugged into the PC keeps running in the background.
         let on_usb = (self.twist.is_some() && self.settings.twist_usb)
             || (self.settings.leapster2_usb && self.session.as_ref().is_some_and(|s| s.hardware == Hardware::Leapster2))
-            || (self.didj.is_some() && self.settings.didj_usb);
+            || self.didj.as_ref().is_some_and(|d| if d.explorer { self.settings.explorer_usb } else { self.settings.didj_usb });
         self.paused || (self.background && self.settings.pause_in_background && !on_usb)
     }
 
@@ -2965,6 +3327,7 @@ impl App {
                 Err(_) => self.ui.problem("Couldn't import the RockIt Twist games", TWIST_IMPORT_FAILED, "The import thread crashed."),
             }
         }
+        self.poll_didj_job();
         if self.explorer_building.as_ref().is_some_and(|(_, h)| h.is_finished()) {
             let (dir, h) = self.explorer_building.take().unwrap();
             let built = h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the thread building it crashed")));
@@ -3015,10 +3378,11 @@ impl App {
             d.set_running(!halted);
             d.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
             self.speed_percent = d.speed_percent();
+            let name = if d.explorer { "Leapster Explorer" } else { "Didj" };
             match d.take_usb_news() {
-                Some(crate::twist::UsbNews::Attached) => self.ui.toast("Didj plugged into this PC"),
-                Some(crate::twist::UsbNews::Detached) => self.ui.toast("Didj unplugged from this PC"),
-                Some(crate::twist::UsbNews::Failed(e)) => self.ui.toast(format!("Didj USB: {e}")),
+                Some(crate::twist::UsbNews::Attached) => self.ui.toast(format!("{name} plugged into this PC")),
+                Some(crate::twist::UsbNews::Detached) => self.ui.toast(format!("{name} unplugged from this PC")),
+                Some(crate::twist::UsbNews::Failed(e)) => self.ui.toast(format!("{name} USB: {e}")),
                 None => {}
             }
             if d.take_gave_up() {
@@ -3565,6 +3929,7 @@ impl App {
         let info =
             ui::Info {
                 running: self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
+                explorer_cart: self.didj.as_ref().filter(|d| d.explorer).map(|d| d.has_cart()),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 leappad: self.leappad.is_some(),
                 didj_folder: self
@@ -3866,6 +4231,8 @@ impl App {
         if let Some(h) = self.current_hardware() {
             let mode = match h {
                 Hardware::Didj if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
+                Hardware::Explorer if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
+                Hardware::Explorer => " (Original)",
                 Hardware::Didj if self.settings.didj_enhanced => " (Original+)",
                 Hardware::Didj => " (Original)",
                 _ => "",

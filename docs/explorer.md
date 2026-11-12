@@ -3,9 +3,9 @@
 LeapFrog's Leapster Explorer (2010, codename "Emerald", product line LST3) runs on
 the same LF1000 (MagicEyes Pollux, ARM926EJ-S at 393 MHz) as the Didj, so Ribbit
 emulates it with the Didj's machine (`crates/ribbit-didj`, `src/explorer.rs`).
-Status: boots Linux and LeapFrog's AppManager; touch screen and buttons work in the
+Status: boots Linux and LeapFrog's AppManager; plays Didj cartridges from its menu (Sonic tested); touch screen and buttons work in the
 first-time setup (Language Selection, Set the Date); the NOR flash with factory data
-is there. In the app (early): the library lists Firmware Base.lfp as the console and starts it from the packages beside it (built on a worker thread, so the window doesn't freeze meanwhile); the mouse is the stylus; Page Up / Page Down are the volume buttons; saves in explorer-<folder>.nandblocks and .nor. Speed about 100% in the app (tested by the user).
+is there. In the app (early): the library lists Firmware Base.lfp as the console and starts it from the packages beside it (built on a worker thread, so the window doesn't freeze meanwhile); the mouse is the stylus; Page Up / Page Down are the volume buttons; saves in explorer-<folder>.nandblocks and .nor, carried over to another image (below); Emulation > Leapster Explorer > Plug into this PC (USB) offers it over USB/IP (below). Speed about 100% in the app (tested by the user).
 
 Run: `cargo run --release -p ribbit-didj --example explorerboot -- <folder> [million cycles]`
 with the folder holding the English firmware set (archive.org item
@@ -14,7 +14,10 @@ with the folder holding the English firmware set (archive.org item
 kernel log is in it), `EXPLORER_BULK=<file>` (the Bulk partition as a UBI image),
 `EXPLORER_TRACE=<n>` (interpret to the first exception and print the last n PCs),
 `EXPLORER_JIT=0`, `EXPLORER_WAV=<file>` (the sound), `EXPLORER_INPUT=<million>:<what>;...` (`x,y` touches there, `lift`,
-a button name, `none`), `EXPLORER_SHOTS=<million>,...` (screens along the way).
+a button name, `none`, `insert` / `remove` the cartridge), `EXPLORER_SHOTS=<million>,...` (screens along the way),
+`EXPLORER_CART=<file>` (a cartridge dump in the slot), `EXPLORER_STATE_OUT=<file>` /
+`EXPLORER_STATE=<file>` (save the machine at the end / start from it; with
+`EXPLORER_COLD=1`, power on afresh with that state's NAND).
 
 First-time setup by script (times in million cycles):
 `EXPLORER_INPUT="3050:100,93;3100:lift;3350:294,214;3400:lift"` picks English (US)
@@ -185,9 +188,115 @@ sample for sample.
   firmware 1.4.11.2128's rcS shows LEGAL.png instead and nothing shows
   HEALTH_AND_SAFETY.png, so its absence is right for this firmware.
 
+## Cartridges
+
+The slot is the Didj's (`src/cart.rs`): a small-page NAND (512-byte pages, 16 KiB
+blocks) on the NAND controller's second bank, detect on GPIO port A pin 18 (low
+with a cartridge in; gpio_map.h EMERALD_CARTRIDGE_DETECT, as the Didj's), the
+cartridge type on port B pins 2-5 (`/LF/Base/EmeraldMfgTest/SetupNANDCartridge.sh`
+reads them the same way). VERIFIED in Ribbit with Didj cartridge dumps:
+
+* The kernel's NAND driver logs "cartridge inserted", "type: OTP", "ECC mode: none",
+  finds the Toshiba 64 MiB part, makes the "Cartridge" MTD (64 MB, 16 KiB blocks, as a
+  real Explorer's /proc/mtd shows), sees its UBI layer and attaches it as ubi2.
+* `lfcart.ko` (detect pin interrupt) and CartManager mount `ubi_Cartridge` (FAT) at
+  /LF/Cart (`/etc/init.d/cartridge`), both with the cartridge in at power-on and put in
+  or taken out at the menu: the menu's first square shows the game's icon, and goes
+  back to the empty-slot picture when it is taken out.
+* The Explorer plays Didj cartridges: its firmware has DidjTitles.json (17 titles)
+  and DidjPatches (App.so replacements for Indiana Jones and Sonic). Sonic, picked in
+  the menu, loads /LF/Cart/snc/App.so, shows its title screen and plays Green Hill
+  Zone (its 3D engine pictures; the engine reads its command buffer at
+  0x8320_0000, so `ga3d::Mem` now takes the SDRAM base, and block addresses reach all
+  64 MB). Indiana Jones reaches its own menu the same way.
+
+Not known: the Explorer's own cartridges. The kernel tells an "Emerald Cart ID" from
+the Didj's and expects no UBI layer on one ("cart has UBI layer, but is using Emerald
+Cart ID"); `/etc/init.d/cartridge` then mounts the MTD itself as FAT, and
+SetupNANDCartridge.sh turns on the chip's internal ECC for cart IDs 6, 11 and 15.
+GUESS from those strings: an Explorer cartridge is FAT straight on the NAND (no UBI)
+with another ID; its NAND ID, page size and the ECC command are UNKNOWN. No dump of one
+has been found, so Ribbit plays Didj cartridges only.
+
+In the app: every Didj cartridge in the library is listed on the Explorer's page too
+(tag "Didj cartridge"). Picking one turns the Explorer on with it in the slot, or puts
+it in the Explorer that is running; Emulation > Take the Cartridge Out takes it out.
+
+## Saves and carrying them over
+
+The app keeps the NAND's changed erase blocks in `explorer-<folder>.nandblocks`, the
+image's fingerprint in `.nandimage` and the NOR flash whole in `.nor` (the NOR doesn't
+depend on the image and is always loaded). A save made on another image (other
+packages, Ribbit building Bulk differently, the 1 GB NAND Ribbit had before 2026-11-08)
+would mix two UBIFS layouts, so the player's files are carried over instead
+(`carry::explorer_user_files` / `explorer_files_beyond`) and the old save is kept
+beside it (`.nandblocks.other-image`, as on the Didj):
+
+* `ubifs_read.rs` reads UBIFS back as the kernel left it: the committed index from the
+  master node, then the journal (log reference nodes, buds) replayed in sequence order;
+  data LZO1X, deflate or plain. With only a save's blocks, index nodes and leaves in LEBs
+  the save doesn't hold are skipped and a file is taken only when its inode, its name up to
+  the root and all its data are known.
+* 1 GB save: that image is built again (`nand_from_packages_blocks(.., NAND_BLOCKS_1GB)`),
+  so every Bulk file that differs from it is carried (a changed file too) onto the 512 MB NAND.
+* Any other image: the Bulk files read whole from the save's blocks, less those at paths the
+  new image has (the packages' files stay as built), as the Didj does.
+* VERIFIED on a real 1 GB save from the app (first-time setup done): both ways find the same
+  files, `settings.cfg`, `Data/Uploads/0-2/profile.log`, `Data/Local/...` folders; test
+  `explorer_files_carried_over`, `ubifs_read` tests, ignored `explorer_real_save`
+  (`RIBBIT_EXPLORER_DIR`, `RIBBIT_EXPLORER_SAVE`).
+* VERIFIED in the app (2026-11-12): the 1 GB save moved to 512 MB (14 files carried, the
+  old one kept aside); that save had never finished the first-time setup (no profile), so
+  Language Selection came up again. Setup done (profile ANN, a pet), closed (powered off in
+  0.7 s), reopened: Sign In lists ANN. On that 512 MB save the blocks-only reading finds the
+  same 34 files as the whole one (`profile.dsc`, `Pets/*.emrs`, `sharedobjects`, ...).
+* Not carried: the root file system's changes (the RFS partition comes raw from
+  erootfs.ubi): `/flags/volume`, `/flags/lasttime`, `/flags/pointercal` (rebuilt from the
+  NOR), FR logs. So the volume level and clock go back to their defaults after a carry-over.
+
+## USB
+
+The Explorer's kernel loads the same lf1000_udc as the Didj, so Ribbit's UDC model serves
+it unchanged. Retail boot (`/etc/init.d/rcS`, `dftp2`): `fuse-flasher` mounts /LF/fuse
+and `g_file_storage file=/LF/fuse/dftp enabled=1` offers that file as a disk: LeapFrog
+Connect speaks DFTP through it. With `/flags/dftp1` or `/flags/developer` it loads
+`g_ether` (USB Ethernet, DFTP over TCP, telnet/ftp for developers) instead; Ribbit has
+neither flag.
+
+VERIFIED with `EXPLORER=1 didjusb <folder> 4500` (no real USB): device 0x0F63:0x0020,
+release 3.25, USB 2.0 high speed, one interface 8/6/0x50 (mass storage, SCSI,
+Bulk-Only) with bulk endpoints 0x81/0x02 of 512 bytes; INQUIRY "LeapFrog
+LeapsterExplorer 0325"; ready at once (no unlock, unlike the Didj); READ CAPACITY
+102400 blocks of 512 bytes (50 MB); block 0 reads as zeros. Also VERIFIED in the app
+(2026-11-12) with a small USB/IP client (import, descriptors, SET_CONFIGURATION, INQUIRY):
+the Explorer then shows its "connected to a computer" picture; closing the app while
+attached closes the client's connection.
+
+In the app: Emulation > Leapster Explorer > Plug into this PC (USB) (setting
+`explorer_usb`); `usbip attach -r 127.0.0.1 -b 1-1`. As on the Didj, an import waits
+until the driver is loaded (`Udc::ready`), and a restart or the console turning itself
+on again disconnects the client first. UNTESTED: LeapFrog Connect itself (the DFTP
+exchange) and Windows' view of the 50 MB disk (it has no file system: Windows may offer
+to format it, which must be declined).
+
+## Library, installing games, real Explorers (Ribbit, `connect::lx`, `explorer_library`, 2026-11-12)
+
+The Explorer tab lists the console, with a drawn icon, then its games:
+- **Built-in**: Application `.lf2` packages beside Firmware Base (Pet Pad, Movie Player, ...).
+- **Installed**: games read from the save's Bulk `ProgramFiles`.
+- **Didj cartridge**: Didj cartridges, which play in the Explorer's slot.
+- **Not installed**: Explorer `.lf2` / `.lfp` game packages elsewhere in the games folders.
+
+A click turns the Explorer on. Ribbit doesn't pick the game in the Explorer's menu yet. A package that isn't installed is installed first.
+
+- **Install** (VERIFIED from the console's own `/usr/bin/lfpkg`): an Application package's files go to `/LF/Bulk/ProgramFiles/<folder>`. lfpkg keeps no registry. It unpacks the package and runs a `postinstall` script if there is one. Ribbit doesn't run postinstall scripts (UNKNOWN what a game's would do). The menu reads the folders' meta.inf. "remove" is unsupported in lfpkg ("must be manually removed"), so Ribbit's uninstall deletes the folder. With "delete its saves" it also deletes the game's progress: the folders in its meta.inf `PersistentData`, else `Data/<0-2|GameWide>/<folder>` (GUESS).
+- **Model**: the player's files are the Bulk tree that differs from the image built from the packages (`carry::explorer_files_beyond`, or `explorer_user_files` for a save made on another image). Ribbit builds the image again with them (`explorer::nand_with_files`) and keeps the changed blocks as the save. That is the same path the carry-over uses, so it doesn't depend on the mode. An Enhanced (new) HLE that reads its /LF/Bulk from this tree, as the Didj's HLE does with `files_beyond`, sees the same games and saves. When the HLE writes a file, it should write back the same way (`nand_with_files`, as Didj `hle_to_nand` does).
+- **Tested**: no Explorer game package is on this PC. The ignored test `didj::library_tests::explorer_install_list_uninstall` makes a stand-in package at test time in the real layout (`RibbitTest/meta.inf`, icon, App.so; none is kept in the repo), or takes RIBBIT_EXPLORER_LF2. It installs, lists, is on the NAND `build_explorer` starts with, exports, comes back after the save is deleted and imported, and uninstalls. UNTESTED with a real game, and the game was not started (its App.so is a stub).
+- **Real Explorers**: over USB a real Explorer offers only a 50 MB file for LeapFrog Connect's DFTP protocol, not its file system (see USB). So no safe way is known to copy files onto one. "Export the Explorer's files" writes `LF/Bulk/{Data,ProgramFiles,Downloads}` as a backup in the real layout (UNTESTED ON HARDWARE). "Import from a real Explorer" takes a copy of `/LF/Bulk` (e.g. made over the developer image's telnet/ftp) or a folder holding a 512 MB NAND dump as `explorer.nand`. It adds Data, ProgramFiles and Downloads and leaves `settings.cfg` and the language packs out. UNTESTED ON HARDWARE.
+
 ## Not done yet
 
-* The LFP100 power chip, cartridges, USB, carrying saves over to another image. The app's start is untested by a player.
+* The LFP100 power chip, the Explorer's own cartridges (no dump), LeapFrog Connect over USB (untested), carrying the root file system's /flags over. The app's start is untested by a player.
   D-pad tested (moves the highlight); A/B and the rest not tried yet.
 
 Sources: LF1000 kernel 2.6.37 port (github.com/mac2612/lf1000_kernel; LeapFrog's

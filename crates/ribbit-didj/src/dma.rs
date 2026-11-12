@@ -168,13 +168,17 @@ impl Dma {
         }
     }
 
-    /// The running command is done: PCM sent out is kept, then the next
-    /// queued command starts.
-    fn finish(&mut self, c: usize, sdram: &[u8]) {
+    /// PCM out has played the running command's bytes up to `to`: they are
+    /// kept as they go out, whole samples (4 bytes) at a time, not when the
+    /// whole command is done (which put up to 32 ms more behind the
+    /// picture). Those before `left`'s point (rounded down to a sample)
+    /// were kept already.
+    fn sent(&mut self, c: usize, to: u64, sdram: &[u8]) {
         let cmd = self.ch[c].current;
         if Self::paced(&cmd) && cmd[3] & SRC_IO == 0 {
             let src = cmd[0].wrapping_sub(self.ram_base) as usize;
-            if let Some(bytes) = sdram.get(src..src + len(&cmd) as usize) {
+            let from = ((len(&cmd) - self.ch[c].left) & !3) as usize;
+            if let Some(bytes) = sdram.get(src + from..src + (to as usize).max(from)) {
                 self.pcm.extend(bytes);
                 let max = self.pcm_rate as usize * 4;
                 if self.pcm.len() > max {
@@ -182,6 +186,13 @@ impl Dma {
                 }
             }
         }
+    }
+
+    /// The running command is done: PCM sent out is kept, then the next
+    /// queued command starts.
+    fn finish(&mut self, c: usize, sdram: &[u8]) {
+        let cmd = self.ch[c].current;
+        self.sent(c, len(&cmd), sdram);
         let ch = &mut self.ch[c];
         ch.busy = false;
         ch.left = 0;
@@ -204,8 +215,10 @@ impl Dma {
             ch.acc %= cpu_hz;
             if done >= ch.left {
                 self.finish(c, sdram);
-            } else {
-                ch.left -= done;
+            } else if done > 0 {
+                let to = (len(&ch.current) - ch.left + done) & !3;
+                self.sent(c, to, sdram);
+                self.ch[c].left -= done;
             }
         }
     }
@@ -219,6 +232,17 @@ impl Dma {
         }
         // `tick` adds cycles * rate to acc and counts acc / cpu_hz.
         self.ch.iter().filter(|c| c.busy).map(|c| (c.left * cpu_hz).saturating_sub(c.acc).div_ceil(rate)).min().unwrap_or(u64::MAX)
+    }
+
+    /// Bytes of sound handed to PCM out and not yet played: the running
+    /// transfer's rest and the commands queued behind it (the Didj's own
+    /// buffering, before Ribbit's).
+    pub fn pcm_queued(&self) -> u64 {
+        self.ch
+            .iter()
+            .filter(|c| c.busy && reqid(&c.current) == PCMOUT)
+            .map(|c| c.left + c.queue.iter().map(len).sum::<u64>())
+            .sum()
     }
 
     pub fn irq(&self) -> bool {
@@ -268,11 +292,14 @@ mod tests {
         // 4096 bytes at 32000 Hz * 4: 32 ms; at 100 MHz, 3.2M cycles.
         d.tick(3_000_000, 100_000_000, &ram);
         assert!(!d.irq());
+        // What has gone out so far is kept already: 3.0M cycles, 3840 bytes.
+        assert_eq!(d.pcm.len(), 3840);
         d.tick(300_000, 100_000_000, &ram);
         assert!(d.irq(), "first done");
         assert!(d.read(CH + MODE) & BUSY != 0, "the queued one runs");
         assert_eq!(d.read(CH), 0x2000);
         assert_eq!(d.pcm.iter().take(4).copied().collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert_eq!(d.pcm.len(), 4096);
         // Clearing INTPEND as lf1000_dma_int_clr does (read, set bit 17, write).
         let m = d.read(CH + MODE);
         d.write(CH + MODE, m | INTPEND, &ram);

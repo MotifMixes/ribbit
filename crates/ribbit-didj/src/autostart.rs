@@ -73,11 +73,15 @@ pub struct AutoStart {
     hold: u32,
     pressed: u32,
     games_tried: u32,
+    /// The way down the list of games (DOWN, then UP once the list's end
+    /// is met: the panel didn't change), and the screen at the last press.
+    games_dir: u32,
+    games_at: u64,
 }
 
 impl AutoStart {
     pub fn new(art: Art) -> Self {
-        Self { art, step: Step::Profile, frames: 0, still: 0, last: 0, hold: 0, pressed: 0, games_tried: 0 }
+        Self { art, step: Step::Profile, frames: 0, still: 0, last: 0, hold: 0, pressed: 0, games_tried: 0, games_dir: button::DOWN, games_at: 0 }
     }
 
     pub fn done(&self) -> bool {
@@ -122,13 +126,23 @@ impl AutoStart {
                 self.step = Step::Games;
                 button::A
             }
+            // The game list answers a press about 15 frames late (VERIFIED,
+            // Ribbit 2026-11-12): it waits longer before judging the panel.
+            Step::Games if self.still < 4 * STILL => 0,
             Step::Games if matches(px, HEADER, 1) => {
                 if self.art_shown(px) {
                     self.step = Step::Done;
                     button::A
-                } else if self.games_tried < MAX_GAMES {
+                } else if self.games_tried < 2 * MAX_GAMES {
+                    // An installed game may sit above the one the list
+                    // starts at (VERIFIED: Foster's installed above JetPack
+                    // Heroes); DOWN there changes nothing.
+                    if self.games_tried > 0 && hash == self.games_at && self.games_dir == button::DOWN {
+                        self.games_dir = button::UP;
+                    }
                     self.games_tried += 1;
-                    button::DOWN
+                    self.games_at = hash;
+                    self.games_dir
                 } else {
                     self.step = Step::Done;
                     0

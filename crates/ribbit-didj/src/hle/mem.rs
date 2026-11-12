@@ -41,28 +41,61 @@ pub struct Frames {
     l1_free: Vec<u32>,
     /// 1 KiB level-2 table slots (four to a frame).
     l2_free: Vec<u32>,
+    /// Where user pages come from (`POOL` on the Didj).
+    pool: [(u32, u32); 2],
+    /// Pages shared by content (read-only file mappings, `map_shared`):
+    /// how many maps hold each, and the frames by their contents' CRC.
+    #[serde(default)]
+    shared: HashMap<u32, u32>,
+    #[serde(default)]
+    by_crc: HashMap<u32, Vec<u32>>,
 }
 
 impl Frames {
     /// Lays out SDRAM: the vector page with the user helpers' version word
     /// at 0xFFFF0FFC, mapped by the shared top-megabyte table.
     pub fn new(bus: &mut Bus, kuser_version: u32) -> Self {
+        Self::with_pool(bus, kuser_version, POOL)
+    }
+
+    /// `new` with user pages from `pool` (two ranges; the Explorer's frame
+    /// buffers are bigger and its SDRAM larger).
+    pub fn with_pool(bus: &mut Bus, kuser_version: u32, pool: [(u32, u32); 2]) -> Self {
         let ram = &mut bus.sdram;
         ram[..POOL[0].0 as usize].fill(0);
         put(ram, VECTOR_L2 + (0xF0 << 2), VECTOR_FRAME | L2_SMALL);
         put(ram, VECTOR_FRAME + 0xFFC, kuser_version);
-        let free = POOL.iter().flat_map(|&(from, to)| (from..to).step_by(PAGE as usize)).rev().collect();
-        Self { free, l1_free: (0..L1_TABLES).rev().map(|i| i * 0x4000).collect(), l2_free: Vec::new() }
+        let free = pool.iter().flat_map(|&(from, to)| (from..to).step_by(PAGE as usize)).rev().collect();
+        Self { free, l1_free: (0..L1_TABLES).rev().map(|i| i * 0x4000).collect(), l2_free: Vec::new(), pool, shared: HashMap::new(), by_crc: HashMap::new() }
     }
 
     pub fn free_pages(&self) -> usize {
         self.free.len()
     }
+
+    /// A map lets go of frame `f`: back to the pool unless it is device
+    /// memory or still shared.
+    fn put_back(&mut self, f: u32, sdram: &[u8]) {
+        if let Some(n) = self.shared.get_mut(&f) {
+            *n -= 1;
+            if *n > 0 {
+                return;
+            }
+            self.shared.remove(&f);
+            let crc = crc32fast::hash(&sdram[f as usize..(f + PAGE) as usize]);
+            if let Some(v) = self.by_crc.get_mut(&crc) {
+                v.retain(|&x| x != f);
+            }
+        }
+        if pooled(&self.pool, f) {
+            self.free.push(f);
+        }
+    }
 }
 
 /// A frame from the pool (not device memory mapped in).
-fn pooled(f: u32) -> bool {
-    POOL.iter().any(|&(from, to)| (from..to).contains(&f))
+fn pooled(pool: &[(u32, u32); 2], f: u32) -> bool {
+    pool.iter().any(|&(from, to)| (from..to).contains(&f))
 }
 
 fn put(ram: &mut [u8], pa: u32, v: u32) {
@@ -80,6 +113,10 @@ pub struct Mem {
     l2: HashMap<u32, u32>,
     /// The tables changed since the processor's TLB was last flushed.
     pub dirty: bool,
+    /// Pages reserved but not yet given memory (`reserve`): zero pages
+    /// made on first touch, as the kernel's demand paging.
+    #[serde(default)]
+    lazy: std::collections::HashSet<u32>,
     /// It has its tables (not released).
     live: bool,
 }
@@ -102,7 +139,92 @@ impl Space<'_> {
     }
 
     pub fn mapped(&self, addr: u32) -> bool {
-        self.mem.pages.contains_key(&(addr / PAGE))
+        self.mem.pages.contains_key(&(addr / PAGE)) || self.mem.lazy.contains(&(addr / PAGE))
+    }
+
+    /// Reserves `addr..addr + len` as zero pages given memory on first
+    /// touch (`populate`); pages already there stay.
+    pub fn reserve(&mut self, addr: u32, len: u32) {
+        let (first, last) = (addr / PAGE, (addr as u64 + len as u64).div_ceil(PAGE as u64).min(0xFFF00) as u32);
+        for vpn in first..last {
+            if !self.mem.pages.contains_key(&vpn) {
+                self.mem.lazy.insert(vpn);
+            }
+        }
+    }
+
+    /// Gives a reserved page at `addr` its memory; false if it isn't
+    /// reserved (a real fault) or memory ran out.
+    pub fn populate(&mut self, addr: u32) -> bool {
+        let vpn = addr / PAGE;
+        if !self.mem.lazy.remove(&vpn) {
+            return false;
+        }
+        self.map(vpn * PAGE, PAGE)
+    }
+
+    /// Maps the page at `addr` read-only in spirit with `contents`, sharing
+    /// a frame with every other map of the same contents (libraries' code
+    /// and read-only data, mapped by every process). The program must not
+    /// write it: `privatize` first (mprotect adding PROT_WRITE).
+    pub fn map_shared(&mut self, addr: u32, contents: &[u8]) -> bool {
+        let vpn = addr / PAGE;
+        let mut page = [0u8; PAGE as usize];
+        page[..contents.len().min(PAGE as usize)].copy_from_slice(&contents[..contents.len().min(PAGE as usize)]);
+        if let Some(f) = self.mem.pages.remove(&vpn) {
+            self.set_entry(vpn, 0);
+            self.frames.put_back(f, &self.bus.sdram);
+        }
+        self.mem.lazy.remove(&vpn);
+        let crc = crc32fast::hash(&page);
+        let found = self.frames.by_crc.get(&crc).and_then(|v| v.iter().copied().find(|&f| self.bus.sdram[f as usize..(f + PAGE) as usize] == page));
+        let f = match found {
+            Some(f) => {
+                *self.frames.shared.get_mut(&f).unwrap() += 1;
+                f
+            }
+            None => {
+                let Some(f) = self.frames.free.pop() else { return false };
+                self.bus.sdram[f as usize..(f + PAGE) as usize].copy_from_slice(&page);
+                self.wrote(f, PAGE);
+                self.frames.shared.insert(f, 1);
+                self.frames.by_crc.entry(crc).or_default().push(f);
+                f
+            }
+        };
+        if !self.set_entry(vpn, f | L2_SMALL) {
+            self.frames.put_back(f, &self.bus.sdram);
+            return false;
+        }
+        self.mem.pages.insert(vpn, f);
+        true
+    }
+
+    /// Gives the shared pages in `addr..addr + len` copies of their own
+    /// (they are about to be written).
+    pub fn privatize(&mut self, addr: u32, len: u32) -> bool {
+        let (first, last) = (addr / PAGE, (addr as u64 + len as u64).div_ceil(PAGE as u64).min(0xFFF00) as u32);
+        for vpn in first..last {
+            let Some(&f) = self.mem.pages.get(&vpn) else { continue };
+            if !self.frames.shared.contains_key(&f) {
+                continue;
+            }
+            let Some(to) = self.frames.free.pop() else { return false };
+            self.bus.sdram.copy_within(f as usize..(f + PAGE) as usize, to as usize);
+            self.wrote(to, PAGE);
+            self.set_entry(vpn, to | L2_SMALL);
+            self.mem.pages.insert(vpn, to);
+            self.frames.put_back(f, &self.bus.sdram);
+        }
+        true
+    }
+
+    /// The physical address of `addr`, giving a reserved page its memory.
+    fn phys_mut(&mut self, addr: u32) -> Option<u32> {
+        if self.mem.lazy.contains(&(addr / PAGE)) {
+            self.populate(addr);
+        }
+        self.phys(addr)
     }
 
     fn set_entry(&mut self, vpn: u32, entry: u32) -> bool {
@@ -167,11 +289,10 @@ impl Space<'_> {
     pub fn unmap(&mut self, addr: u32, len: u32) {
         let (first, last) = (addr / PAGE, (addr as u64 + len as u64).div_ceil(PAGE as u64).min(0xFFF00) as u32);
         for vpn in first..last {
+            self.mem.lazy.remove(&vpn);
             if let Some(f) = self.mem.pages.remove(&vpn) {
                 self.set_entry(vpn, 0);
-                if pooled(f) {
-                    self.frames.free.push(f);
-                }
+                self.frames.put_back(f, &self.bus.sdram);
             }
         }
     }
@@ -179,7 +300,9 @@ impl Space<'_> {
     /// Gives back every page and table (the process ended or ran a new
     /// program).
     pub fn release(&mut self) {
-        self.frames.free.extend(self.mem.pages.drain().map(|(_, f)| f).filter(|&f| pooled(f)));
+        for (_, f) in std::mem::take(&mut self.mem.pages) {
+            self.frames.put_back(f, &self.bus.sdram);
+        }
         // Level-2 slots go back as slots (their frames stay split).
         self.frames.l2_free.extend(self.mem.l2.drain().map(|(_, t)| t));
         if self.mem.live {
@@ -193,10 +316,21 @@ impl Space<'_> {
         let mut child = Space::fresh(self.bus, self.frames)?;
         let mut pages: Vec<(u32, u32)> = self.mem.pages.iter().map(|(&v, &f)| (v, f)).collect();
         pages.sort_unstable();
+        child.lazy = self.mem.lazy.clone();
         let mut s = Space { mem: &mut child, bus: self.bus, frames: self.frames };
         for (vpn, from) in pages {
+            // Shared pages stay shared.
+            if let Some(n) = s.frames.shared.get_mut(&from) {
+                *n += 1;
+                if !s.set_entry(vpn, from | L2_SMALL) {
+                    s.release();
+                    return None;
+                }
+                s.mem.pages.insert(vpn, from);
+                continue;
+            }
             // Device memory is shared, not copied.
-            if !pooled(from) {
+            if !pooled(&s.frames.pool, from) {
                 if !s.map_phys(vpn * PAGE, PAGE, from) {
                     s.release();
                     return None;
@@ -219,7 +353,7 @@ impl Space<'_> {
         let need = page_up(len) / PAGE;
         let (mut start, mut run) = (from / PAGE, 0);
         for p in from / PAGE..limit / PAGE {
-            if self.mem.pages.contains_key(&p) {
+            if self.mem.pages.contains_key(&p) || self.mem.lazy.contains(&p) {
                 (start, run) = (p + 1, 0);
             } else {
                 run += 1;
@@ -252,7 +386,7 @@ impl Space<'_> {
         let mut a = addr;
         while out.len() < len {
             let n = (PAGE - a % PAGE).min((len - out.len()) as u32);
-            let pa = self.phys(a)? as usize;
+            let pa = self.phys_mut(a)? as usize;
             out.extend_from_slice(&self.bus.sdram[pa..pa + n as usize]);
             a = a.wrapping_add(n);
         }
@@ -266,7 +400,7 @@ impl Space<'_> {
         let mut rest = data;
         while !rest.is_empty() {
             let n = (PAGE - a % PAGE).min(rest.len() as u32);
-            let Some(pa) = self.phys(a) else { return false };
+            let Some(pa) = self.phys_mut(a) else { return false };
             self.bus.sdram[pa as usize..(pa + n) as usize].copy_from_slice(&rest[..n as usize]);
             self.wrote(pa, n);
             rest = &rest[n as usize..];
@@ -279,7 +413,8 @@ impl Space<'_> {
     pub fn cstr(&mut self, addr: u32) -> Option<String> {
         let mut out = Vec::new();
         for i in 0..4096u32 {
-            let b = self.bus.sdram[self.phys(addr.wrapping_add(i))? as usize];
+            let pa = self.phys_mut(addr.wrapping_add(i))? as usize;
+            let b = self.bus.sdram[pa];
             if b == 0 {
                 return Some(String::from_utf8_lossy(&out).into_owned());
             }

@@ -10,12 +10,6 @@ use std::ffi::c_void;
 /// This build can compile (x86-64 and AArch64).
 pub const SUPPORTED: bool = cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
 
-/// The calling convention for JIT helpers.
-#[cfg(target_arch = "x86_64")]
-macro_rules! jit_abi { () => { "sysv64" } }
-#[cfg(not(target_arch = "x86_64"))]
-macro_rules! jit_abi { () => { "C" } }
-
 /// A memory read helper: (bus, address) -> value (zero-extended).
 #[cfg(target_arch = "x86_64")]
 pub type ReadFn = extern "sysv64" fn(*mut c_void, u32) -> u32;

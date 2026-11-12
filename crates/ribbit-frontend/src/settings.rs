@@ -155,6 +155,8 @@ pub struct Settings {
     pub leapster2_usb: bool,
     /// Offer the Didj on the PC's USB (USB/IP, as `twist_usb`).
     pub didj_usb: bool,
+    /// The Leapster Explorer offered on this PC's USB (USB/IP), as `didj_usb`.
+    pub explorer_usb: bool,
     /// Offer the Didj's serial console to terminals on this PC (TCP port
     /// `serial::PORT`, 127.0.0.1 only).
     pub didj_serial_tcp: bool,
@@ -230,6 +232,10 @@ pub struct Settings {
     /// power-on.
     #[serde(default)]
     pub didj_hle: bool,
+    /// Leapster Explorer: Enhanced (new), its programs without its kernel
+    /// (`ribbit_didj::hle::explorer`; experimental). From the next power-on.
+    #[serde(default)]
+    pub explorer_hle: bool,
     /// Didj, Enhanced (new): in-between frames, smooth motion whatever the
     /// game's frame rate. At once.
     #[serde(default = "default_true")]
@@ -306,6 +312,7 @@ impl Default for Settings {
             twist_usb: false,
             leapster2_usb: false,
             didj_usb: false,
+            explorer_usb: false,
             didj_serial_tcp: false,
             didj_extras_notice: true,
             twist_keys: BTreeMap::new(),
@@ -330,6 +337,7 @@ impl Default for Settings {
             close_with_shutdown: false,
             didj_enhanced: true,
             didj_hle: false,
+            explorer_hle: false,
             didj_smooth: true,
             didj_dither: false,
             didj_cpu_scale: default_didj_cpu_scale(),

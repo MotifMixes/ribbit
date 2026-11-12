@@ -349,6 +349,45 @@ in-between option (phase 7).
   missed it), moving 3D games. Left: when Tune-Up's timer ends, one in-between picture shows two white
   bars by the emptied avatar panel (not in either frame). The player's white square on that panel (report
   of 2026-10-31) is not this: it came on 1.7.0, before in-between frames; still not reproduced.
+- Release checks (2026-11-12; didjhle and didjboot, the MOTIF save, the same keys from a trigger screen):
+  - /dev/dsp now answers as the LF1000 driver (i2s/main.c): SPEED 32000 whatever is asked (it took any
+    rate before), CHANNELS 2, SETFMT S16_LE, SETFRAGMENT 8 fragments; the buffer is 8 x 4096 bytes (was a
+    GUESS of 4) and a blocking write takes one fragment. Every cart asked 32000 anyway (logged once, "dsp:
+    N Hz asked"), so Sonic's sound was not at a wrong rate; the 32000 -> 16000 lead is Brio's own mixing,
+    the same in Original. With 8 fragments the HLE's sound lines up with Original: a Nicktoons menu move's
+    sound starts 265-270 ms after the picture (Original 235-260; with 4 fragments it was ~128 ms sooner).
+    The app plays the HLE's sound as it is written, so there it comes about 1/4 s sooner than in Original.
+  - Nicktoons input: the menu answers Down 2 frames later (80 ms at its 25 fps) in both, the picture 2.47 s
+    after the trigger in the HLE, 2.49 s in Original. Gameplay not reached by these keys. GUESS: the
+    "1/4 s lag" is the driver's 256 ms sound buffer, which the real Didj has too (docs/didj.md).
+  - WayForward games (SpongeBob, Nicktoons): their story scenes run 20-31 fps, logos up to 47, the Didj menu
+    50, in the HLE as in Original; JetPack's play 25-33 (checked before, Original the same) and clock-timed.
+    Nothing here runs a WayForward game above about 33 fps, so the "60, should be 30" lead (an LF3000
+    compatibility setting) is not this emulator's; whether a real Didj shows 30 or 33 in JetPack's levels
+    needs the user's Didj.
+  - Indiana Jones: New Game, Medium, then no keys: the first story panel ("In Nazca, Peru...") stays for
+    good, flipping at 50 fps, in the HLE (118 s) and in Original (the rest of a 350 s run) alike; A moves
+    on (A every 2.5 s reaches the first level, ~35 fps). So no HLE fault; GUESS: the panels wait for a
+    button. Whether a real Didj moves on alone needs the user's Didj.
+  - In-betweens (tween.rs): the box row under Tune-Up's letters tore apart in the picture after the cursor
+    blinked off (102 of 1148 pictures over 2 by twm.py; the old box, another picture with the cursor, took
+    the next box's place, a box-width move that many boxes could make): `follow_layers` now leaves a pair
+    that is in place unless most pictures take the new move (test
+    `a_box_losing_its_cursor_stays_in_a_still_row`). And an operation taken back with its neighbour no
+    longer is when that neighbour moved beyond MAX_MOVE (it isn't blended either). After: 0 of 305
+    pictures over 2; the timer-end picture (00:00, avatar gone) has no white bars. TWEEN_DUMP removed.
+    Left: one picture of the leaf wipe into "LET'S RACE" shows leaf and box shards (pieces moving over 48 px
+    a frame pair with look-alikes). The race itself never flips the MLC layer address (it draws into the
+    shown buffer, GUESS from the unchanged MLC registers), so it gets no in-between pictures, only
+    its own frames; it looks right. After the fix, 0 of 431 pictures over 2 in a run from Tune-Up into the race.
+  - Boot-logo "squeal" (player report, Enhanced (new) in the app at ~80% speed): the logo's sound,
+    captured to WAV, is the same in Original, Original+ and Enhanced (new), on f4c9111 and with the
+    /dev/dsp change, also with didjhle DIDJ_HLE_MIPS=250/150 (a slow host): no tone, click or rate error
+    from Ribbit. The one narrow high tone is in all of them: 14336 and 14430 Hz, about 49 dB under the
+    jingle's 1664 and 1570 Hz notes, their mirror around 16 kHz (high band vs mirrored low band
+    correlation 0.76): Brio's mixer makes it raising 16 kHz content to 32 kHz, so a real Didj puts it out
+    too (GUESS: its speaker hides it). The app's chain (32 kHz queue, linear to the device rate, the
+    CrispStereo exciter the player has on) adds no tone in a simulation (+3 dB above 4 kHz).
 
 ## Known risks
 

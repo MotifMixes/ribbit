@@ -77,6 +77,8 @@ fn main() {
     // Enhanced mode's fixes (ribbit_didj::enhanced); DIDJ_ORIGINAL=1 runs
     // the firmware as shipped.
     let original = ribbit_didj::nand_from_packages(dir.as_ref(), std::env::var_os("DIDJ_NO_BRIO").is_none()).unwrap_or_else(|e| panic!("{e}"));
+    // The image's fingerprint, as the app keeps it beside a save (.nandimage).
+    eprintln!("image {:08x}", original.fingerprint());
     let enhanced = std::env::var_os("DIDJ_ORIGINAL").is_none();
     let fixed = ribbit_didj::enhanced::apply(&mut flash, &original, enhanced);
     eprintln!("enhanced: {fixed} fixes; factory data added: {}", flash.add_factory_data());
@@ -213,6 +215,8 @@ fn main() {
     let mut auto = art.clone().map(ribbit_didj::autostart::AutoStart::new);
     let per_frame = (didj.cpu_hz() / 60 / 1_000_000).max(1);
     let mut auto_buttons = 0;
+    let mut last_buttons = 0;
+    let mut pcm_queue = (0u64, 0u64, 0u64, u64::MAX);
     for m in 0..millions {
         if let Some(&(i, art)) = after.peek()
             && m % per_frame == 0
@@ -246,6 +250,17 @@ fn main() {
             }
         }
         didj.bus.buttons |= auto_buttons;
+        // A press, with how much sound has gone out by then (stereo frames
+        // in DIDJ_WAV): the sound's lag is measured from there.
+        if didj.bus.buttons & !last_buttons != 0 {
+            println!("press {:#x} at {m} million cycles, wav frame {}", didj.bus.buttons & !last_buttons, wav.len() / 4);
+        }
+        last_buttons = didj.bus.buttons;
+        // How far ahead the Didj's sound is queued (ms), from its start.
+        if !wav.is_empty() {
+            let q = didj.bus.dma.pcm_queued() * 1000 / (didj.bus.dma.pcm_rate * 4).max(1);
+            pcm_queue = (pcm_queue.0 + q, pcm_queue.1 + 1, pcm_queue.2.max(q), pcm_queue.3.min(q));
+        }
         // DIDJ_SKIP=<millions>: frame skipping on from then (2 of every 3
         // frames).
         didj.bus.skip_frames = skip_from.is_some_and(|f| m >= f);
@@ -355,6 +370,9 @@ fn main() {
         println!("interpreted by kind: {}", ribbit_armjit::CLASSES.iter().zip(c).map(|(n, v)| format!("{n} {v}")).collect::<Vec<_>>().join(", "));
     }
     println!("PCM out: {} bytes, {} not zero", wav.len(), wav.iter().filter(|&&b| b != 0).count());
+    if pcm_queue.1 > 0 {
+        println!("sound queued at PCM out: {} ms on average, {}..{} ms", pcm_queue.0 / pcm_queue.1, pcm_queue.3, pcm_queue.2);
+    }
     if let Ok(path) = std::env::var("DIDJ_WAV") {
         let rate = didj.bus.dma.pcm_rate as u32;
         let mut f = b"RIFF".to_vec();

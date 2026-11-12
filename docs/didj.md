@@ -132,6 +132,13 @@ What it took to get past the kernel (each a hardware behaviour Linux relies on):
   = free slots; size GUESS 7); IRQ 3. Audio goes out in 4 KiB fragments to PCM out (request 24), so
   Ribbit paces those at 4 bytes per sample at 32000 Hz. Before this AppManager stopped at "HW is not
   busy, but fifo is not empty".
+- /dev/dsp (VERIFIED in the kernel source, i2s/main.c): 32000 Hz stereo S16_LE only; SPEED, CHANNELS and
+  SETFMT answer 32000, 2 and S16_LE whatever is asked. 8 fragments of 4096 bytes (256 ms); a blocking
+  write takes at most one fragment. Every cart that was run asks 32000 (Brio's mixer resamples its own
+  content, so e.g. Sonic's 32000 Hz clips play through it). Brio fills all 8 fragments, so a sound
+  reaches the speaker about 1/4 s after the program makes it: in Ribbit's Original, a Nicktoons menu
+  move shows 2 frames (80 ms) after the button, its sound 235-260 ms after the picture (2026-11-12).
+  GUESS: that is the "1/4 s input lag" players report on Nicktoons.
 - GA3D, the 3D engine (0xC001A000, mapped to user space by /dev/ga3d, driven by the closed
   libopengles_lite.so): see "3D engine" below.
 
@@ -388,6 +395,17 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
   launch_main then finds no main app and shows DOWNLOAD_FAILED.png ("Download Failed / Please Try
   Again"), waiting for USB (LeapFrog Connect runs `usbctl -a fsck`). Ribbit used to stop the machine
   like pulling the batteries, which made this happen; it now presses power and waits for the cut.
+- Closing (`Didj::shut_down`, frontend `power_off`): the USB cable pulled first if it is in, then the power
+  button; 3D drawing skipped meanwhile; up to 40 s of the PC's time (was 15 s). Measured 2026-11-12 in
+  didjboot: power pressed in Clone Wars gameplay to the cut is ~3.9 G cycles = 10 s of the console's time,
+  in Original and Enhanced alike (at the menu ~3 s). On a PC running the Didj below ~67% of real time the old
+  15 s ran out, and the NAND was saved mid-shutdown: an unclean start and, in Original mode, the tune-up
+  screen at the next start. GUESS that this is the player's "tune-up screen after closing with [x]"
+  (2026-11-01); the app log says "the Didj did not power off in N s" when it happens.
+- Whenever the Didj turns itself off cleanly (a cartridge's update, the USB cable pulled after a LeapFrog
+  Connect sync, a crash in Original mode), the app writes the save at once, before turning it on again, so
+  what it holds survives even a forced end of Ribbit later. A forced end (Task Manager) otherwise loses the
+  whole session since the last save: Ribbit saves the Didj only when the game closes.
 - The app turns a Didj that turned itself off on again (a cartridge's update powers off once: VERIFIED
   2026-10-31 for Tinker Bell, Clone Wars, HSM and Wolverine, fresh console, both modes), but not after a
   third power-off in a row within a minute of starting: it leaves it off and says so. A player saw a loop
@@ -397,6 +415,17 @@ in `crates/ribbit-didj/src/ga3d.rs`. What the menu (1.35.2.4222) uses is VERIFIE
   A broken save is repaired by DIDJ_TYPE=$'fsck.vfat -a /dev/mtdblock9
 rm -f /flags/needs_repair
 poweroff'.
+
+## Audio lag (measured 2026-11-12)
+
+Two buffers sit between a game and the PC's speakers. The Didj's own: its kernel's audio driver
+(drivers/lf1000/i2s/main.c) keeps 8 fragments of 4 KiB = 256 ms of sound, and Brio keeps them filled.
+Measured in Clone Wars gameplay (didjboot, `Dma::pcm_queued` every million cycles): Original mode 216 ms on
+average (0-256), Enhanced 117 ms. That is the firmware's behaviour, as on a real Didj (players report audio
+lag on real ones too). Ribbit's: the audio output's jitter buffer, held at 100 ms (`audio_out` TARGET, every
+console), and until 2026-11-12 PCM out kept a 4 KiB fragment only once all of it had played (up to 32 ms
+more); now it keeps the samples as they go out (`Dma::sent`). Original mode's extra lag is the Didj's own;
+GUESS: Original's slower processor (1x) keeps Brio's mixer further ahead of a game that is busy.
 
 ## Enhanced and Original modes (Ribbit; `ribbit_didj::enhanced`, Didj menu)
 
@@ -531,6 +560,16 @@ is commented out ("skipping fsck delete option on errors"); the repair came from
   under Data/Avatars, from packages or carried over (`package::fix_avatar_meta`). `ProfileAccess="0"` (quoted)
   is taken as it is; changing it alone did nothing. VERIFIED (didjboot DIDJ_CARRY with Ribbit's own save,
   profile MOTIF in /Didj/Data/0): My Didjis > Select a Didji shows AstroGuy and both of the player's Didjis.
+- Didjis Connect sends over USB (written by the PC onto the volume) are fixed at the next power-on
+  (`carry::avatars_to_fix`). Since 2026-11-12 in place: `carry::fix_avatars_in_place` rewrites each such
+  meta.inf on the volume and writes the changed LEBs anew as UBI does (`ubi::write_leb`: a free block, a
+  higher sequence number, the old block erased); nothing else on the console changes. Before, the image was
+  built again from the packages plus `carry::user_files`, which keeps only files at paths the packages don't
+  have, so anything Connect changed at a package path was lost: GUESS that this is the player's "profile
+  didn't persist after a sync" (2026-11-01); not reproduced with a real Connect.
+  VERIFIED (didjusb `RIBBIT_USB_SYNC=power|unplug|app`: a meta.inf without `Device` and a profile file
+  written by WRITE(10) as a PC does, then closed three ways): both files are in the save every way, the fix
+  in place keeps the profile, and the next Original-mode start is clean (no file check) to the menu.
 - LeapFrog Connect stops with an error unless the Didj's /Didj/Base holds `bootstrap-LF_LF1000` and
   `firmware-LF_LF1000` (a player: extracted into Connect's Mnt\<UnitID> \Base, it carries on). The
   Bootstrap and Device Firmware packages are now installed there too, beside being written raw; the Didj
@@ -551,6 +590,57 @@ profile.log, <game>/..., Backup/), /Data/GameIcons/, /Base/settings.cfg, /brd.re
 save without its .nandimage, in the app: 14 files carried over, the Didj starts at "Select a name" with its
 profile; a save set aside in 1.8.0 gives back its profiles. Emulation > Didj > Import a Didj save... makes
 any save the Didj's (`didj::import_save`) and starts it. `examples/didjsave.rs` lists what a save holds.
+
+## Library, installing games, real Didjs (Ribbit, `connect`, `didj_library`, 2026-11-12)
+
+The Didj tab lists every game the console has. Built-in means an application `.lfp` in the firmware folder. Installed means read from the save's /Didj/ProgramFiles. Cartridge means a dump in the games folders. Not installed means an application `.lfp` anywhere else. A click starts the game from the menu in the chosen mode (`AutoStart` with the panel art read from the installed files).
+
+- **Model.** The player's files are the files on the Brio volume that the image built from the packages doesn't have (`carry::files_beyond`; `carry::user_files` for a save made on another image). An installed game is just more of them, in `ProgramFiles/<folder>`. An install or uninstall builds the image again with the new list (`nand_with_files`) and writes the changed blocks as the save, the same path carry and Enhanced (new)'s `hle_to_nand` use. So installed games and saves are one save, `didj-<folder>.nandblocks`, read the same way by Original, Original+ (the NAND, with Enhanced's fixes outside Brio written again at each start) and Enhanced (new) (`files_beyond` into the HLE's file tree). VERIFIED by the ignored tests `didj::library_tests` (RIBBIT_DIDJ_DIR=didj): a profile and a game save written as Original, kept by Original+, changed in Enhanced (new), exported to a folder, the save deleted, imported, started in Original. Also: Foster's `.lfp` installed, listed with its art, present after a start in each mode (in Enhanced (new) in the file tree), uninstalled with its saves.
+- **What Connect writes for a game** (VERIFIED as far as the menu goes: it lists ProgramFiles, `brio::install_folder`). The package's top folder goes to `ProgramFiles/`, every file as zipped. No registry was found: the menu reads each folder's meta.inf. The console makes `Data/GameIcons/<folder>.png` itself. A cartridge's volume holds the same package (`cart::files`). Whether Connect writes more (an install log, .md5 checks) is UNKNOWN.
+- **A game's saves.** These are the folders its meta.inf `PersistentData` names (Foster's: `"/Data/0/MAC","/Data/1/MAC","/Data/2/MAC","/Data/GameWide/MAC"`). Without that key Ribbit uses `Data/<0-2>/<folder>` and `Data/GameWide/<folder>` (GUESS from JetPack Heroes' `Data/0/POW`). Uninstall keeps them unless asked. "Delete its saves" also removes the game icon.
+- **Safety.** The save before each change is kept as `.nandblocks.before-library`. A Didj that boots from a real NAND dump isn't changed (nand_with_files ignores extra files there). A running Didj is turned off first, like a real one leaving its menu for Connect.
+- **USB on a real Didj** (from the system's own scripts, VERIFIED in Ribbit's USB model above). With the cable in, `usbctl` offers the /Didj FAT volume as mass storage LUN 0. It stays "medium not present" until the PC sends LeapFrog's UNLOCK command (SCSI 0xC2), and LeapFrog Connect sends it. The device side could also be unlocked by a flags file (`/flags/usb_mass_storage` with UNLOCKED), but that means writing to the console's flags partition, so Ribbit doesn't suggest it. The safe, supported path is therefore Connect: it unlocks the drive, and the user copies files with Windows. Ribbit never talks to a real Didj.
+- **Import from a real Didj:** a folder copied off its drive (Data/, ProgramFiles/, or a Didj/ folder holding them), or a folder holding its `didj.nand` (its Brio volume read with `ubi::read_volume`: GUESS that a real console's UBI reads the same; booting a real dump works, VERIFIED bd07abd). Only `Data/` and `ProgramFiles/` come in (`connect::transferable`), never `Base/` or `brd.rev`. Files the image has stay as built. Same paths are replaced. Didjis get `Device="Didj"` as at every build.
+- **Export for a real Didj:** `<folder>/Didj/Data`, `<folder>/Didj/ProgramFiles` and a read-me with Connect copy steps. UNTESTED ON HARDWARE. Profile n replaces the real console's profile n. Export as a NAND image writes `didj.nand`: the 256 MB data area, mtd0..mtd7 end to end, with factory data. That is the format Ribbit boots and `Nand::from_dump` reads. It is for backups and other emulators, not for flashing (no safe way; UNTESTED ON HARDWARE).
+**The player's files beside the save (`.files`, 2026-11-12).** `user_files` only gets back a file whose
+folders' records lie in the save's blocks too. The kernel rewrites them as it writes (it updates the
+folders' times), but a save Enhanced (new) wrote (the volume built afresh, the folders above a file as they
+were) or one the PC wrote over USB (Windows leaves folder times alone) may hold none: VERIFIED 2026-11-12,
+`user_files` gave nothing at all for a set-up console's Enhanced (new) save, so adding micromods (a new
+image) would have started that Didj fresh. Every save now also writes `didj-<folder>.files`
+(`carry::pack`: the player's files, `files_beyond`, with a CRC-32 of the save they go with); a save on
+another image is carried from it when the CRC matches (`carry::unpack`), else from its blocks as before.
+Micromods: adding their .lfp files to the firmware folder builds a new image at the next start, and the
+player's files come over from `.files`.
+
+## Didj save folders (Ribbit, `ribbit_didj::didj_import`, 2026-11-12)
+
+A Didj save folder is a copy of the Didj's /Didj tree kept on a PC (from a backup or another emulator): the
+folder itself, or a folder with it as `didj` or `assets/didj`; a pristine copy of Data may be beside it as
+`assets/factory/Data`, installed games' packages in `assets/lfp`. Save states kept beside it can't be read.
+The player's files there: `Data/<0|1|2>/profile.dsc` (key=value: Name, Grade, Points,
+NumLoginsSinceLastConnect, AvatarPath=/Didj/Data/Avatars/<folder>/, ColorArt, LastSBShown), profile.log,
+game progress under `Data/<n>/`, Didjis in `Data/Avatars/<folder>/`, `Base/settings.cfg`
+(CurrProfile=0x<n>, Locale=en-us), themes in `Base/BLT/ColorArt/<theme>`, games in `ProgramFiles/<folder>`.
+
+Emulation > Didj > Import a Didj save folder... (`didj::import_didj_folder`) takes that folder.
+`didj_import::read` keeps the files under Data/, Base/settings.cfg, Base/BLT/ColorArt/ and ProgramFiles/
+that the image built from Ribbit's packages doesn't have as they are and the factory copy doesn't have
+either (a stock file of another firmware stays out); a game this Didj lacks is installed from its .lfp when
+the folder has it (copied into an "Imported" folder beside the packages), else copied as files.
+`didj_import::merge` puts them over the player's files the save had: a profile slot the import has replaces
+Ribbit's whole slot. Without a settings.cfg on either side (a save of Data/ alone, on a Didj never set up) it
+writes "CurrProfile=0x<n>
+Locale=en-us
+" (29 bytes, as in Ribbit's own saves), so the Didj starts at Sign
+In. The image is then built with them (`nand_with_files`, which fixes Didjis' meta.inf), and the save
+written with its `.files`; the save before is kept as `.nandblocks.before-folder-import` (with its
+.nandimage). Enhanced (new) reads the same save (`files_beyond`).
+VERIFIED 2026-11-12: unit test `didj_import::tests::reads_the_players_files` (a synthetic folder); ignored
+tests `didj::tests::didj_folder_import` (Ribbit's /Didj written out as a save folder, a set-up console's
+profile renamed IMPORTED, a Didji without Device: profile, Didji and game progress on the console in all
+three modes) and `didj::tests::didj_folder_real_save` (RIBBIT_DIDJ_IMPORT_SAVE: a real save folder, Data/
+only, profile 0 with a Didji: on the console in all three modes, and still there after closing).
 
 ## Serial console (Ribbit, VERIFIED 2026-10-31)
 
@@ -581,6 +671,10 @@ TCP terminal types `uname -r` and gets `2.6.20.1-leapfrog`, about 4 s after powe
   READ CAPACITY 0x6C08F + 1 blocks of 512 (221 MB); block 0 is a FAT boot sector ("mkdosfs").
   Other vendor commands (file_storage.c do_vendor_command) read the battery, the clock, needs_repair.
 - Pulling the cable: monitord sees "vbus is low", the system shuts down and powers off (the app turns it on).
+  VERIFIED 2026-11-12 (didjusb): 10.5 s of the console's time from the pull to the power cut. Pressing power
+  with the cable in also shuts down (8.2 s; /Didj is the PC's then, `umount: cannot umount /Didj`), and what
+  the PC wrote was kept both ways.
+- Closing the app with the cable in pulls it first (`Didj::shut_down`), and the PC's client is disconnected.
 - On the bus only while its USB driver is loaded (`Udc::ready`: g_file_storage enabled the VBUS interrupt).
   A `usbip attach` while the Didj is starting waits for it (up to 30 s, `Server::set_ready`): Windows
   enumerates at once, and before, the descriptor requests went unanswered ("USB device not recognized",
@@ -612,3 +706,7 @@ values) and the internal NAND's blocks that differ from the image built from the
 out. The JIT starts empty after a load. `didjboot` with DIDJ_STATE_CHECK=<millions> saves there, runs 200
 million instructions, loads and runs them again: CPU and SDRAM come out identical, with the JIT and in exact mode
 (VERIFIED 2026-10-29 at the menu: 10 MB state, about 0.1 s to save and 0.2 s to load).
+VERIFIED 2026-11-12 in the app's own path (STATE_VERSION 2; ignored test `didj::tests::didj_states_and_close`,
+a set-up console at its menu): Original (8.9 MB), Enhanced (9.6 MB) and Enhanced (new) (4.0 MB) states load
+and run on (167 flips in 5 s, picture shown), twice over; the close then takes 1.4-1.6 s and the next
+Original-mode start finds no file check to do. Not yet tried in a game (RIBBIT_DIDJ_CART does that).

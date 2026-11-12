@@ -395,9 +395,9 @@ impl Bus {
     /// The picture `t` of the way from the last frame but one to the last
     /// (in-between frames, `Ga3d::set_tween`); None with nothing to blend.
     pub fn frame_between(&mut self, t: f32) -> Option<(usize, usize, Vec<u32>)> {
-        let saved = self.ga3d.tween_draw(t, &mut crate::ga3d::Mem { sdram: &mut self.sdram })?;
+        let saved = self.ga3d.tween_draw(t, &mut crate::ga3d::Mem { sdram: &mut self.sdram, base: self.ram_base })?;
         let picture = self.frame_hd();
-        self.ga3d.untween(saved, &mut crate::ga3d::Mem { sdram: &mut self.sdram });
+        self.ga3d.untween(saved, &mut crate::ga3d::Mem { sdram: &mut self.sdram, base: self.ram_base });
         Some(picture)
     }
 
@@ -442,6 +442,9 @@ impl Bus {
                 let levels = crate::touch::levels(self.reg(base), self.reg(base + GPIOOUTENB), self.reg(base + GPIOPUENB), self.touch);
                 crate::touch::pad(levels) | if self.cart.is_some() { 0 } else { CART_DETECT }
             }
+            // The cartridge type, as on the Didj (the firmware's cartridge
+            // set-up script reads the same pins).
+            1 if self.cart.is_some() => crate::cart::PRODUCTION << CART_CFG_SHIFT,
             2 => {
                 let pressed = button::EXPLORER.iter().filter(|&&(b, _)| self.buttons & b != 0).fold(0, |p, &(_, pin)| p | 1 << pin);
                 (button::EXPLORER_ALL | 1 << 14) & !pressed | button::POWER & self.buttons
@@ -807,7 +810,7 @@ impl Bus {
             let shift = 8 * (addr & 3);
             let mask = if size == 4 { u32::MAX } else { ((1 << (8 * size)) - 1) << shift };
             let v = (self.ga3d.read(base) & !mask) | ((v << shift) & mask);
-            let mut mem = crate::ga3d::Mem { sdram: &mut self.sdram };
+            let mut mem = crate::ga3d::Mem { sdram: &mut self.sdram, base: self.ram_base };
             return self.ga3d.write(base, v, &mut mem);
         }
         if (crate::dma::BASE..crate::dma::END).contains(&addr) {
@@ -1194,6 +1197,34 @@ impl Didj {
                 }
             }
         }
+    }
+
+    /// Turns the console off as its owner would, its files kept whole.
+    /// With the USB cable in, the cable is pulled first: the Didj leaves
+    /// USB mode, takes /Didj back and shuts down by itself (monitord: "vbus
+    /// is low"). Pressing power with the cable in instead left what the
+    /// PC had written unsaved and the volume needing a repair (the tune-up
+    /// screen at the next start; see docs/didj.md "Power off"). Then, or
+    /// without a cable, the power button. `step(didj, cycles)` runs it a
+    /// little (false: stop waiting). Returns whether it powered off.
+    pub fn shut_down(&mut self, step: &mut dyn FnMut(&mut Didj, u64) -> bool) -> bool {
+        let hz = self.cpu_hz();
+        if self.bus.udc.attached {
+            self.bus.udc.attach(false);
+            let t = self.cpu.cycles;
+            while !self.bus.powered_off && self.cpu.cycles - t < 20 * hz {
+                if !step(self, hz / 50) {
+                    return false;
+                }
+            }
+        }
+        if !self.bus.powered_off {
+            self.bus.buttons = button::POWER;
+            let pressed = step(self, hz / 10);
+            self.bus.buttons = 0;
+            while pressed && !self.bus.powered_off && step(self, hz / 50) {}
+        }
+        self.bus.powered_off
     }
 
     /// Runs `n` processor cycles (one per instruction for now), the timers

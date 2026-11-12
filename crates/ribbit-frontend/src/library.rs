@@ -17,7 +17,7 @@ use ribbit_memory::known::Hardware;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-const EXTENSIONS: [&str; 10] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf3", "img", "didj", "lbk"];
+const EXTENSIONS: [&str; 11] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf2", "lf3", "img", "didj", "lbk"];
 /// Folder depth scanned below each ROM folder.
 const MAX_DEPTH: usize = 3;
 /// Art: emulated time searched for the title card, and how often to look.
@@ -243,6 +243,69 @@ impl Game {
     pub fn has_tag(&self, tag: &str) -> bool {
         self.tags.iter().any(|t| t == tag)
     }
+
+    /// A Didj cartridge's second entry, on the Explorer's page alone
+    /// (`didj::on_explorer`).
+    pub fn is_explorer_cart(&self) -> bool {
+        self.family == Family::Explorer && self.has_tag(crate::didj::EXPLORER_CART_TAG)
+    }
+}
+
+/// The keys of the games installed on a console (`didj_library`): one card
+/// per game, the package file it may also have in the games folders folded
+/// into it.
+pub const INSTALLED_KEY: &str = "didj-installed-";
+
+/// A detail's value (`Game::details`).
+fn detail<'a>(g: &'a Game, label: &str) -> Option<&'a str> {
+    g.details.iter().find(|(l, _)| *l == label).map(|(_, v)| v.as_str())
+}
+
+/// Whether version `a` is newer than `b` ("27" > "26", "1.3.10" > "1.3.9";
+/// numbers compared part by part).
+pub fn version_newer(a: &str, b: &str) -> bool {
+    let parts = |v: &str| v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    parts(a) > parts(b)
+}
+
+/// `list` with the installed games (`installed`) in it, in title order, in
+/// place of those it had. A game's package file ("Not installed": an .lfp in
+/// the games folders) of the same product and folder is folded into its
+/// installed card: one game, one card. The card remembers the file
+/// ("Package", for reinstalling) and says "Update available" when the file
+/// is a newer version. Cartridges stay cards of their own.
+fn merge_installed(list: &mut Vec<Game>, installed: &[Game]) {
+    list.retain(|g| !g.key.starts_with(INSTALLED_KEY));
+    for g in installed {
+        let art = match &g.art {
+            Art::Image(i) => Art::Image(i.clone()),
+            Art::Texture(t) => Art::Texture(t.clone()),
+            Art::Pending | Art::Missing => Art::Missing,
+        };
+        let mut copy = Game { path: g.path.clone(), family: g.family, title: g.title.clone(), subtitle: g.subtitle.clone(), details: g.details.clone(), tags: g.tags.clone(), key: g.key.clone(), art };
+        let same = |o: &Game| {
+            let eq = |label: &str| match (detail(o, label), detail(&copy, label)) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            };
+            o.family == copy.family && o.has_tag("Not installed") && eq("Folder") && (eq("Product") || detail(o, "Product").is_none() || detail(&copy, "Product").is_none())
+        };
+        if let Some(i) = list.iter().position(same) {
+            let file = list.remove(i);
+            if let (Some(newer), Some(have)) = (detail(&file, "Version"), detail(&copy, "Version"))
+                && version_newer(newer, have)
+            {
+                copy.tags.push("Update available".into());
+                copy.details.push(("Update", format!("{} has version {newer}", file.path.display())));
+            }
+            copy.details.push(("Package", file.path.display().to_string()));
+            if matches!(copy.art, Art::Missing) {
+                copy.art = file.art;
+            }
+        }
+        let at = list.partition_point(|o| o.title.to_lowercase() <= copy.title.to_lowercase());
+        list.insert(at, copy);
+    }
 }
 
 /// A prototype or pre-release build, going by its name: these dumps are not
@@ -446,6 +509,9 @@ pub struct Library {
     /// The RockIt Twist's system packages are there (in the games folders
     /// or Ribbit's own folder): the console can start.
     pub twist_ready: bool,
+    /// The games installed on the Didj (`didj_library`): kept in `games`
+    /// across rescans, as they have no file in the games folders.
+    didj_installed: Vec<Game>,
 }
 
 impl Library {
@@ -462,6 +528,7 @@ impl Library {
             incoming: None,
             twist_system_dir: crate::twist::system_dir(data_dir),
             twist_ready: false,
+            didj_installed: Vec::new(),
         }
     }
 
@@ -515,6 +582,7 @@ impl Library {
                     self.twist_ready = crate::twist::SystemPackages::find(None, &known).is_some();
                     if let Some(list) = self.incoming.take() {
                         self.games = list;
+                        merge_installed(&mut self.games, &self.didj_installed);
                     }
                     self.scanning = false;
                     self.making_art = self.games.iter().any(|g| matches!(g.art, Art::Pending));
@@ -522,6 +590,7 @@ impl Library {
                 Msg::Done => {
                     if let Some(list) = self.incoming.take() {
                         self.games = list;
+                        merge_installed(&mut self.games, &self.didj_installed);
                     }
                     self.scanning = false;
                     self.making_art = false;
@@ -535,6 +604,14 @@ impl Library {
                 }
             }
         }
+    }
+
+    /// The games installed on a console (`family`: the Didj or the
+    /// Explorer) now (`didj_library::list`, `explorer_library::list`).
+    pub fn set_installed(&mut self, family: Family, games: Vec<Game>) {
+        self.didj_installed.retain(|g| g.family != family);
+        self.didj_installed.extend(games);
+        merge_installed(&mut self.games, &self.didj_installed);
     }
 
     /// Notes every BIOS opened with File > Open BIOS (the one in use first),
@@ -591,7 +668,9 @@ impl Library {
     /// in the games folders, the RockIt Twist's system): the library shows
     /// then even without a Leapster BIOS.
     pub fn has_system_files(&self) -> bool {
-        self.twist_ready || CONSOLES.into_iter().any(|hw| self.bios_for(hw).is_some())
+        // A Didj's firmware packages are its system files too: a player with
+        // only a Didj gets the library, not the Leapster's BIOS page.
+        self.twist_ready || CONSOLES.into_iter().any(|hw| self.bios_for(hw).is_some()) || self.games.iter().any(|g| g.family == Family::Didj && g.has_tag("System"))
     }
 
     /// Whether this console can start: its BIOS (or the RockIt Twist's
@@ -752,8 +831,12 @@ fn worker(
                 continue;
             }
             Some(Found::Twist(game) | Found::LeapPad(game) | Found::Didj(game)) => {
-                if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
-                    return;
+                // A Didj cartridge is on the Explorer's page too.
+                let explorer = (game.family == Family::Didj && game.has_tag("Cartridge")).then(|| crate::didj::on_explorer(&game));
+                for game in std::iter::once(game).chain(explorer) {
+                    if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
+                        return;
+                    }
                 }
                 continue;
             }
@@ -916,6 +999,15 @@ fn classify(path: &Path) -> Option<Found> {
     }
     if let Some(game) = crate::didj::describe_explorer(path) {
         return Some(Found::Didj(game));
+    }
+    // A Leapster Explorer game's package (.lf2, or an .lfp for it).
+    if let Some(game) = crate::explorer_library::describe_package(path) {
+        return Some(Found::Didj(game));
+    }
+    // The Explorer's other packages (system, trailers, patches) are no
+    // games, and not the RockIt Twist's either.
+    if crate::explorer_library::is_explorer_package(path) {
+        return None;
     }
     // RockIt Twist packages go by name and first bytes (they are big, and
     // a .lfp is a zip that must not be unpacked as a ROM).
@@ -1467,6 +1559,42 @@ fn load_png(path: &Path) -> Option<egui::ColorImage> {
 
 #[cfg(test)]
 mod tests {
+    /// A game installed on the console and its .lfp in a games folder are
+    /// one card; a newer .lfp says "Update available"; a cartridge of it
+    /// stays its own card; another game's .lfp stays.
+    #[test]
+    fn an_installed_game_and_its_package_are_one_card() {
+        use super::*;
+        let game = |key: &str, tag: &'static str, folder: &str, version: &str, path: &str| Game {
+            path: PathBuf::from(path),
+            family: Family::Didj,
+            title: "Foster's".into(),
+            subtitle: String::new(),
+            details: vec![("Product", "0x000F0009".to_string()), ("Folder", folder.to_string()), ("Version", version.to_string())],
+            tags: vec![tag.into()],
+            key: key.into(),
+            art: Art::Missing,
+        };
+        let installed = [game("didj-installed-mac", "Installed", "MAC", "27", "didj-installed:MAC")];
+        let mut list = vec![game("didj-x", "Not installed", "mac", "27", "a.lfp"), game("didj-cart", "Cartridge", "MAC", "27", "cart"), game("didj-y", "Not installed", "POW", "1", "b.lfp")];
+        merge_installed(&mut list, &installed);
+        let keys: Vec<&str> = list.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(keys.iter().filter(|k| **k == "didj-x").count(), 0, "the .lfp folded in");
+        assert!(keys.contains(&"didj-cart") && keys.contains(&"didj-y") && keys.contains(&"didj-installed-mac"));
+        let card = list.iter().find(|g| g.key == "didj-installed-mac").unwrap();
+        assert_eq!(detail(card, "Package"), Some("a.lfp"));
+        assert!(!card.has_tag("Update available"));
+        // A newer .lfp: still one card, marked.
+        let mut list = vec![game("didj-x", "Not installed", "MAC", "28", "new.lfp")];
+        merge_installed(&mut list, &installed);
+        assert_eq!(list.len(), 1);
+        assert!(list[0].has_tag("Installed") && list[0].has_tag("Update available"));
+        // Listed again (a rescan): no second copy.
+        merge_installed(&mut list, &installed);
+        assert_eq!(list.len(), 1);
+        assert!(version_newer("1.3.10", "1.3.9") && !version_newer("27", "27"));
+    }
+
     use super::*;
 
     #[test]

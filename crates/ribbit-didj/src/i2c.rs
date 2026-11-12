@@ -117,6 +117,14 @@ impl I2c {
         &self.codec
     }
 
+    /// Sets a codec register (the HLE, which answers the codec's driver
+    /// itself).
+    pub fn set_codec(&mut self, reg: usize, v: u8) {
+        if let Some(r) = self.codec.get_mut(reg) {
+            *r = v;
+        }
+    }
+
     /// The codec's gain on each channel (left, right; 1.0 = as sent) through
     /// the speaker, from its registers (CS43L22 datasheet): PCMx volume 0x1A/0x1B
     /// (7-bit, 0.5 dB steps, +12 to -51.5 dB, bit 7 mute), master 0x20/0x21

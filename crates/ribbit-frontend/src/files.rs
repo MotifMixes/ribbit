@@ -27,6 +27,22 @@ pub enum Pick {
     SdExport,
     /// A Didj save (.nandblocks) to import.
     DidjSave,
+    /// A Didj game (.lfp, or a cartridge dump) to install on the Didj.
+    DidjInstall,
+    /// A folder to copy the Didj's files into, in a real Didj's layout.
+    DidjExport,
+    /// A folder to write the Didj's NAND image into.
+    DidjExportNand,
+    /// A copy of a real Didj's drive (or a folder with its didj.nand).
+    DidjImport,
+    /// A Leapster Explorer game package (.lf2, .lfp) to install.
+    ExplorerInstall,
+    /// A folder for the Explorer's files, in a real Explorer's layout.
+    ExplorerExport,
+    /// A copy of a real Explorer's /LF/Bulk (or a folder with explorer.nand).
+    ExplorerImport,
+    /// A Didj save folder (a copied /Didj tree) to import.
+    DidjFolder,
 }
 
 impl Pick {
@@ -43,12 +59,20 @@ impl Pick {
             Pick::SdImage => "Load an SD card image into the Leapster 2",
             Pick::SdExport => "Choose a folder for the SD card's files",
             Pick::DidjSave => "Import a Didj save (.nandblocks)",
+            Pick::DidjInstall => "Install a Didj game (.lfp or cartridge dump)",
+            Pick::DidjExport => "Choose a folder for the Didj's files (for a real Didj)",
+            Pick::DidjExportNand => "Choose a folder for the Didj's NAND image (didj.nand)",
+            Pick::DidjImport => "Choose the copy of a real Didj's drive (or a folder with its didj.nand)",
+            Pick::ExplorerInstall => "Install a Leapster Explorer game (.lf2 or .lfp)",
+            Pick::ExplorerExport => "Choose a folder for the Leapster Explorer's files",
+            Pick::ExplorerImport => "Choose the copy of a real Explorer's /LF/Bulk (or a folder with its explorer.nand)",
+            Pick::DidjFolder => "Choose a Didj save folder (a copy of the Didj's /Didj, with Data in it)",
         }
     }
 
     /// Whether a folder is chosen (not a file).
     pub fn is_folder(self) -> bool {
-        matches!(self, Pick::RomFolder | Pick::TwistContent | Pick::RecordFolder | Pick::SdFolder | Pick::SdExport)
+        matches!(self, Pick::RomFolder | Pick::TwistContent | Pick::RecordFolder | Pick::SdFolder | Pick::SdExport | Pick::DidjExport | Pick::DidjExportNand | Pick::DidjImport | Pick::ExplorerExport | Pick::ExplorerImport | Pick::DidjFolder)
     }
 }
 
@@ -94,6 +118,12 @@ pub fn native_pick(what: Pick, start: Option<&Path>) -> Option<PathBuf> {
     if what == Pick::DidjSave {
         return d.add_filter("Didj saves", &DIDJ_SAVES).add_filter("All files", &["*"]).pick_file();
     }
+    if what == Pick::DidjInstall {
+        return d.add_filter("Didj games", &["lfp", "zip"]).add_filter("All files (cartridge dumps)", &["*"]).pick_file();
+    }
+    if what == Pick::ExplorerInstall {
+        return d.add_filter("Leapster Explorer games", &["lf2", "lfp"]).add_filter("All files", &["*"]).pick_file();
+    }
     d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"]).add_filter("All files", &["*"]).pick_file()
 }
 
@@ -125,6 +155,10 @@ impl SheetPick {
             Box::pin(d.add_filter("SD card images", &SD_IMAGES).add_filter("All files", &["*"]).pick_file())
         } else if what == Pick::DidjSave {
             Box::pin(d.add_filter("Didj saves", &DIDJ_SAVES).add_filter("All files", &["*"]).pick_file())
+        } else if what == Pick::DidjInstall {
+            Box::pin(d.add_filter("Didj games", &["lfp", "zip"]).add_filter("All files (cartridge dumps)", &["*"]).pick_file())
+        } else if what == Pick::ExplorerInstall {
+            Box::pin(d.add_filter("Leapster Explorer games", &["lf2", "lfp"]).add_filter("All files", &["*"]).pick_file())
         } else {
             Box::pin(
                 d.add_filter("Leapster images", &["bin", "rom", "u3", "lst", "zip"])

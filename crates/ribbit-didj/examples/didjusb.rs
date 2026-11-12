@@ -9,6 +9,8 @@
 //! With RIBBIT_USBIP=<seconds> it instead serves the console over USB/IP
 //! (port 3240) for that long, so the PC's own USB stack can attach it
 //! (`usbip attach -r 127.0.0.1 -b 1-1`), printing each transfer.
+//!
+//! EXPLORER=1: the folder holds a Leapster Explorer's packages instead.
 
 use ribbit_didj::machine::Didj;
 use ribbit_didj::udc::Transfer;
@@ -48,6 +50,26 @@ impl Host {
         self.seq
     }
 
+    /// A Bulk-Only command with `data` going to the console: CBW, data
+    /// out, CSW. Returns the CSW status.
+    fn scsi_out(&mut self, out: u8, inp: u8, cdb: &[u8], data: Vec<u8>) -> Option<u8> {
+        self.tag += 1;
+        let mut cbw = b"USBC".to_vec();
+        cbw.extend(self.tag.to_le_bytes());
+        cbw.extend((data.len() as u32).to_le_bytes());
+        cbw.extend([0, 0, cdb.len() as u8]);
+        cbw.extend(cdb);
+        cbw.resize(31, 0);
+        let s = self.submit(out, false, [0; 8], cbw, 31);
+        self.wait(s, 5.0)?;
+        let n = data.len() as u32;
+        let s = self.submit(out, false, [0; 8], data, n);
+        self.wait(s, 5.0)?;
+        let s = self.submit(inp, true, [0; 8], Vec::new(), 13);
+        let csw = self.wait(s, 5.0)?.1;
+        (csw.len() == 13 && &csw[..4] == b"USBS").then(|| csw[12])
+    }
+
     fn control(&mut self, setup: [u8; 8]) -> Option<(i32, Vec<u8>)> {
         let length = u16::from_le_bytes([setup[6], setup[7]]) as u32;
         let seq = self.submit(0, setup[0] & 0x80 != 0, setup, Vec::new(), length);
@@ -80,11 +102,19 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = args.first().expect("usage: didjusb <folder of .lfp files> [million cycles before the cable]");
     let before: u64 = args.get(1).map_or(4000, |s| s.parse().expect("not a number"));
-    let mut flash = ribbit_didj::nand_from_packages(dir.as_ref(), true).unwrap_or_else(|e| panic!("{e}"));
-    let original = flash.clone();
-    ribbit_didj::enhanced::apply(&mut flash, &original, true);
-    flash.add_factory_data();
-    let didj = Box::new(Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(true)));
+    // EXPLORER=1: a Leapster Explorer from its packages (Firmware Base.lfp
+    // and the .lf2 files) instead of a Didj.
+    let (didj, original) = if std::env::var("EXPLORER").as_deref() == Ok("1") {
+        let flash = ribbit_didj::explorer::nand_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+        let original = flash.clone();
+        (Box::new(ribbit_didj::explorer::boot(flash, ribbit_didj::explorer::CMDLINE).unwrap_or_else(|e| panic!("{e}"))), original)
+    } else {
+        let mut flash = ribbit_didj::nand_from_packages(dir.as_ref(), true).unwrap_or_else(|e| panic!("{e}"));
+        let original = flash.clone();
+        ribbit_didj::enhanced::apply(&mut flash, &original, true);
+        flash.add_factory_data();
+        (Box::new(Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(true))), original)
+    };
     let mut h = Host { didj, seq: 0, tag: 0, uart_seen: 0 };
     for _ in 0..before {
         h.run(1_000_000);
@@ -144,9 +174,108 @@ fn main() {
     if let Some((block0, status)) = h.scsi(out, inp, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0], 512) {
         println!("=== READ(10) block 0: status {status}, {} bytes, OEM {:?}, ends {:02X?}", block0.len(), String::from_utf8_lossy(&block0[3..11.min(block0.len())]), &block0[510.min(block0.len())..]);
     }
+    if let Ok(close) = std::env::var("RIBBIT_USB_SYNC") {
+        return sync(&mut h, out, inp, &original, dir.as_ref(), &close);
+    }
     println!("\n=== cable out");
     h.didj.bus.udc.attach(false);
     for _ in 0..2000 {
+        h.run(1_000_000);
+    }
+}
+
+/// The files a LeapFrog Connect sync leaves (GUESS at the names: a Didji
+/// with no Device line, and a profile file).
+const SYNCED: [(&str, &[u8]); 2] = [
+    ("Data/Avatars/Synced/meta.inf", b"Name=\"Synced\"\r\nDeviceTypes=\"DIDJ\"\r\n"),
+    ("Data/0/synced_profile.txt", b"a profile LeapFrog Connect wrote"),
+];
+
+/// RIBBIT_USB_SYNC=<power|unplug|app>: writes files onto /Didj as a PC
+/// does (WRITE(10) of the sectors they change), then closes as Ribbit
+/// would: `power` presses the power button with the cable still in (the
+/// app before 2026-11-12), `unplug` pulls the cable first, `app` runs the
+/// app's own close (`Didj::shut_down`). Then starts again
+/// from the changed blocks, as the app does, and says whether the files
+/// came through and whether the next start's file check was clean.
+fn sync(h: &mut Host, out: u8, inp: u8, original: &ribbit_didj::nand::Nand, dir: &std::path::Path, close: &str) {
+    use ribbit_didj::{brio, carry, nand, ubi};
+    use ribbit_core::fatfs;
+    let brio = nand::partition("Brio").unwrap();
+    let len = brio::volume_sectors(brio.size / nand::BLOCK) * 512;
+    let before = ubi::read_volume(&h.didj.bus.nand, brio, len);
+    let mut after = before.clone();
+    {
+        let mut w = fatfs::Writer::new(&mut after).unwrap();
+        for (p, d) in SYNCED {
+            w.file(p, d).unwrap();
+        }
+        w.finish();
+    }
+    let changed: Vec<usize> = (0..len / 512).filter(|s| before[s * 512..][..512] != after[s * 512..][..512]).collect();
+    println!("=== writing {} sectors", changed.len());
+    for s in &changed {
+        let lba = (*s as u32).to_be_bytes();
+        let cdb = [0x2A, 0, lba[0], lba[1], lba[2], lba[3], 0, 0, 1, 0];
+        let r = h.scsi_out(out, inp, &cdb, after[s * 512..][..512].to_vec());
+        if r != Some(0) {
+            println!("=== WRITE(10) {s}: {r:?}");
+        }
+    }
+    let hz = h.didj.cpu_hz();
+    let t = h.didj.cpu.cycles;
+    match close {
+        "power" => {
+            h.didj.bus.buttons = ribbit_didj::machine::button::POWER;
+            h.run(hz / 10);
+            h.didj.bus.buttons = 0;
+            while !h.didj.bus.powered_off && h.didj.cpu.cycles - t < 30 * hz {
+                h.run(hz / 100);
+            }
+        }
+        "unplug" => {
+            h.didj.bus.udc.attach(false);
+            while !h.didj.bus.powered_off && h.didj.cpu.cycles - t < 30 * hz {
+                h.run(hz / 100);
+            }
+        }
+        _ => {
+            let t0 = h.didj.cpu.cycles;
+            let off = h.didj.shut_down(&mut |d, c| {
+                d.run(c);
+                d.cpu.cycles - t0 < 60 * hz
+            });
+            println!("=== shut_down: {off}");
+        }
+    }
+    println!("\n=== powered off: {} after {:.1} s", h.didj.bus.powered_off, (h.didj.cpu.cycles - t) as f64 / hz as f64);
+    // The next start, as the app's: the changed blocks over the image.
+    let changes = h.didj.bus.nand.changes_from(original);
+    let mut flash = original.clone();
+    flash.apply_changes(&changes).unwrap();
+    let volume = ubi::read_volume(&flash, brio, len);
+    for (p, d) in SYNCED {
+        println!("=== saved {p}: {}", fatfs::read_file(&volume, p).as_deref() == Some(d));
+    }
+    if carry::avatars_to_fix(&flash) {
+        let fixed = carry::fix_avatars_in_place(&mut flash);
+        println!("=== avatars fixed in place: {fixed:?}");
+        let volume = ubi::read_volume(&flash, brio, len);
+        for (p, d) in SYNCED {
+            let got = fatfs::read_file(&volume, p);
+            println!("=== after the fix {p}: {}", if p.ends_with("meta.inf") { got.is_some_and(|g| g.starts_with(d)) } else { got.as_deref() == Some(d) });
+        }
+    }
+    let _ = dir;
+    // Boot it and show the file check's findings.
+    let mut again = original.clone();
+    again.apply_changes(&flash.changes_from(original)).unwrap();
+    ribbit_didj::enhanced::apply(&mut again, original, false);
+    again.add_factory_data();
+    h.didj = Box::new(ribbit_didj::machine::Didj::with_sdram(again, ribbit_didj::enhanced::sdram_size(false)));
+    h.uart_seen = 0;
+    println!("\n=== start again (Original mode)");
+    for _ in 0..4000 {
         h.run(1_000_000);
     }
 }
