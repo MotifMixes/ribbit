@@ -303,6 +303,7 @@ impl App {
         // What an in-app update moved aside.
         crate::install::remove_leftovers();
         crate::twist::set_bindings(&settings.twist_keys);
+        crate::zippity::set_bindings(&settings.zippity_keys);
         if let Some(f) = &opts.firmware {
             // A LeapPad base ROM is the LeapPad's; the Leapster's BIOS stays.
             if std::fs::read(f).is_ok_and(|d| ribbit_leappad::identify(&d) == Some(ribbit_leappad::Image::BaseRom)) {
@@ -870,7 +871,7 @@ impl App {
         if crate::explorer_library::installed_folder(&path).is_some() {
             return self.start_explorer_menu();
         }
-        if let Some(g) = self.library.games.iter().find(|g| g.path == path && g.family == crate::library::Family::Explorer && !g.has_tag("System") && !g.is_explorer_cart()) {
+        if let Some(g) = self.library.games.iter().find(|g| g.path == path && g.family == crate::library::Family::Explorer && !g.has_tag("System") && !g.plays_in_explorer_slot()) {
             if g.has_tag("Not installed") {
                 return self.explorer_job_start(crate::didj_library::Job::Install { path, play: true });
             }
@@ -1162,7 +1163,7 @@ impl App {
     /// with it in.
     fn play_on_explorer(&mut self, path: &Path) {
         let Some(cart) = crate::didj::read_cart(path) else {
-            return self.ui.problem("Not a cartridge", "This file isn't a Didj cartridge dump.", path.display().to_string());
+            return self.ui.problem("Not a cartridge", "This file isn't a Didj or Leapster Explorer cartridge dump.", path.display().to_string());
         };
         if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
             match d.set_cart(Some(cart)) {
@@ -1724,6 +1725,33 @@ impl App {
                         t.controls.swipe(up);
                     }
                 }
+            }
+        }
+    }
+
+    /// Lets go of everything held on the keyboard (the window lost the
+    /// focus: its key releases go elsewhere).
+    fn release_keys(&mut self) {
+        for b in self.held.release(Source::Keyboard) {
+            if let Some(s) = &self.session {
+                s.emu.lock().buttons.set(b, false);
+            }
+            if let Some(z) = &self.zippity {
+                z.set_button(b, false);
+            }
+            if let Some(d) = &self.didj {
+                d.set_button(b, false);
+            }
+        }
+        if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
+            d.set_explorer_volume(true, false);
+            d.set_explorer_volume(false, false);
+        }
+        self.rewinding = false;
+        if self.fast_forward {
+            self.fast_forward = false;
+            if let Some(s) = &self.session {
+                s.emu.resync();
             }
         }
     }
@@ -3098,6 +3126,7 @@ impl App {
             // Releases may never arrive while another window has the mouse
             // or the keys: nothing on the console view stays held.
             self.release_view();
+            self.release_keys();
             if let Some(t) = &mut self.twist {
                 t.release_keys();
             }
@@ -3576,6 +3605,20 @@ impl App {
             }
             return;
         }
+        if let Some(t) = self.ui.capturing_zippity {
+            if pressed {
+                if code != KeyCode::Escape {
+                    let name = crate::settings::key_name(code);
+                    // A key does one thing: taken from any other input.
+                    self.settings.zippity_keys.retain(|_, k| *k != name);
+                    self.settings.zippity_keys.insert(crate::zippity::action_name(t), name);
+                    crate::zippity::set_bindings(&self.settings.zippity_keys);
+                    self.save_settings();
+                }
+                self.ui.capturing_zippity = None;
+            }
+            return;
+        }
         let ctrl = self.modifiers.control_key();
         if pressed {
             match code {
@@ -3614,13 +3657,17 @@ impl App {
             }
             return;
         }
-        // Shift: stand on (or step off) the Zippity mat's home spot, unless
-        // Shift is bound to a button.
-        if matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
-            && self.settings.button_for(code).is_none()
-            && let Some(z) = &self.zippity
-        {
-            if pressed {
+        // The Zippity has its own keys (zippity::KEYS), in place of the
+        // Leapster's; they reach it as the Leapster buttons a game controller
+        // uses. Shift, unless given to an input, stands on (or steps off) the
+        // mat's home spot.
+        if self.zippity.is_some() {
+            if let Some(t) = crate::zippity::key(code) {
+                self.press(Source::Keyboard, t.button(), pressed);
+            } else if matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
+                && pressed
+                && let Some(z) = &self.zippity
+            {
                 self.settings.zippity_on_home = !self.settings.zippity_on_home;
                 z.set_on_home(self.settings.zippity_on_home);
                 self.save_settings();
@@ -4492,9 +4539,21 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             // Settled in `about_to_wait`: focus moving to the debugger's
-            // window is not going to the background.
-            WindowEvent::Focused(f) => self.main_focused = f,
+            // window is not going to the background. The keys are let go of
+            // at once either way: their releases now go to the other window.
+            WindowEvent::Focused(f) => {
+                self.main_focused = f;
+                if !f {
+                    self.release_keys();
+                }
+            }
             WindowEvent::DroppedFile(path) => self.open_dropped(path),
+            // Synthetic events are winit's stand-ins for keys held while the
+            // focus moved: presses for the keys down as the window gains it
+            // (Shift then toggled the Zippity's home spot behind the
+            // player's back), releases as it loses it. Both are left out:
+            // losing the focus lets go of every key itself (`focus_changed`).
+            WindowEvent::KeyboardInput { is_synthetic: true, .. } => {}
             WindowEvent::KeyboardInput { event: KeyEvent { physical_key, state, repeat: false, .. }, .. } => {
                 if consumed && self.egui_ctx.egui_wants_keyboard_input() {
                     return;

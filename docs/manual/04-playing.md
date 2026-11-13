@@ -26,7 +26,7 @@
 | Screenshot | `F12` |
 | Start / stop recording a video | `F8` |
 
-**Input › Key bindings…** changes the keys; **Help › Controls** (`F1`) lists them, with the Zippity's and the RockIt Twist's.
+**Input › Key bindings…** changes the keys (its console list switches between the Leapster's, the Zippity's and the RockIt Twist's); **Help › Controls** (`F1`) lists them, with the Zippity's and the RockIt Twist's.
 
 ![Input › Key bindings](images/key-bindings.png)
 

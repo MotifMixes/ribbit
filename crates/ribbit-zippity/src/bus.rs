@@ -19,22 +19,24 @@ pub const SRAM_SIZE: usize = 0x20_0000;
 pub const IRAM_BASE: u32 = 0xF800_0000;
 pub const IRAM_SIZE: usize = 0x1_0000;
 
-/// Instructions per video field (60 a second): 18 million instructions a
-/// second. The CPU clock and its memory wait states are UNKNOWN; this is
-/// fitted to a recording of a real unit starting up, whose screens wait on
-/// the CPU while it loads and decodes the next one: the LeapFrog logo 2.94 s
-/// here against 3.07 s, the credits 3.77 s against 4.00 s, the warning to
-/// the Sign In menu 25.2 s against 26.4 s. At 60 million (one per field
-/// before) these took 2.70 s, 2.70 s and 21.9 s, and at 15 million 3.30 s,
-/// 4.30 s and 27.2 s. Frame-timed animations are unaffected (the kernel is
-/// mostly idle, waiting for the next frame).
-pub const FRAME: u64 = 300_000;
+/// Instructions per video field (60 a second): 27 million instructions a
+/// second (the clock and memory wait states themselves are UNKNOWN). Fitted
+/// to a recording of a real unit starting up: the warning screen stays up
+/// while the kernel decodes the LeapFrog logo's pictures, pure CPU work
+/// (its length does not change with the NAND's speed), 3.30 s from its
+/// fade-in to the next screen on the recording and here (18 million gave
+/// 4.20 s, 24 million 3.60 s, 36 million 2.97 s). Frame-timed screens are
+/// unaffected (the kernel is mostly idle, waiting for the next frame).
+/// docs/zippity.md, "Speed".
+pub const FRAME: u64 = 450_000;
 /// Instructions per second (FRAME a 60th of a second; a stand-in).
 pub const CLOCK: u64 = FRAME * 60;
 /// Instructions the power button stays held from power-on (the bootloader
 /// powers off unless it is held; the kernel enters a test mode if it still is).
 const POWER_HOLD: u64 = 20 * FRAME;
 const IRQ_VIDEO: u32 = 27;
+/// The frame commit's busy flag (0xD05001F0 bit 14; see `Bus::frame`).
+const COMMIT_BUSY: u32 = 0x4000;
 const IRQ_DMA: u32 = 24;
 /// The timers' interrupt lines (timer 0 to 3).
 const IRQ_TIMER: [u32; 4] = [25, 17, 10, 9];
@@ -46,8 +48,12 @@ const IRQ_GFX: u32 = 12;
 /// controller timeout. UNVERIFIED.
 const TIMER_HZ: u64 = 32_768;
 /// How often the radio receiver sends the controllers' state: UNKNOWN; once
-/// a frame here.
-const RADIO_PERIOD: u64 = FRAME;
+/// a millisecond here (as often as the kernel's decoder runs). Once a frame
+/// was too slow: while any input is held, the menus take a snapshot of the
+/// packet count every other frame (0xCC18) and the controller check (0x19FDC)
+/// may look a sixth of a frame later; with no packet in between it took the
+/// controllers for switched off and showed the "switch them on" panel.
+const RADIO_PERIOD: u64 = CLOCK / 1000;
 /// The controllers' state with nothing pressed: the buttons are active-low
 /// (the kernel turns 1-to-0 changes into presses; 0x3FF is all released).
 pub const PAD_IDLE: u16 = 0x3FF;
@@ -57,11 +63,12 @@ const RX_FIFO: usize = 16;
 /// warns at 0x5BCB or less and gives up at 0x5928 or less). Full batteries'
 /// reading is UNKNOWN; this is comfortably above both.
 const ADC_BATTERY: u32 = 0x7000;
-/// How fast a NAND DMA transfer goes (bytes a second). Fitted to recordings
-/// of real units: Mickey Mouse Clubhouse's loading screen lasts 8.8 s (14.2
-/// MB read, and the CPU's work on it); here 9.1 s, of which the CPU's
-/// share is about 3.3 s (estimated from runs at two CPU speeds).
-const NAND_DMA_RATE: u64 = 7_200_000;
+/// How fast a NAND DMA transfer goes (bytes a second). Fitted with the CPU
+/// speed to a recording of a real unit: Mickey Says' "LOADING" screen (about
+/// 40 MB read, by fits at several speeds, and the CPU's work on them) lasts
+/// 6.6 s there and here; at 7.2 MB/s and 18 million instructions a second
+/// it was 11.5 s.
+const NAND_DMA_RATE: u64 = 15_000_000;
 
 const SPU_WORDS: usize = 0x2000 / 4;
 const PPU_WORDS: usize = 0x8000 / 4;
@@ -230,6 +237,12 @@ pub struct Bus {
     /// it falls behind).
     #[serde(skip)]
     pub(crate) want_picture: bool,
+    /// When the fade (0xD05000C0) last stepped towards the picture (see
+    /// `Bus::fade`; not in states).
+    #[serde(skip, default = "pending_after_load")]
+    pub(crate) frame_pending: bool,
+    #[serde(skip)]
+    pub(crate) shown_fade: u32,
     /// CPU writes and I/O accesses so far: a loop that makes none changes
     /// nothing (see `Zippity::run`'s idle loops).
     #[serde(skip)]
@@ -239,6 +252,12 @@ pub struct Bus {
     pub(crate) skipped: u64,
     #[serde(skip)]
     pub probe: Probe,
+}
+
+/// A state loaded mid-frame: let the next field finish a frame (states do
+/// not record whether one was in flight).
+fn pending_after_load() -> bool {
+    true
 }
 
 impl Bus {
@@ -275,6 +294,8 @@ impl Bus {
             picture: Vec::new(),
             picture_at: None,
             want_picture: true,
+            frame_pending: false,
+            shown_fade: 0,
             activity: 0,
             skipped: 0,
             probe: Probe::default(),
@@ -347,18 +368,54 @@ impl Bus {
         (enabled && self.pending_irq() != 0, enabled && self.pending_fiq() != 0)
     }
 
-    /// A video field: the frame interrupt's bit 0, and bit 11 every second
-    /// field (see below).
+    /// A video field: the frame interrupt's bits 0 and 11, and the frame
+    /// commit's busy flag (0xD05001F0 bit 14) running out.
     pub(crate) fn frame(&mut self) {
-        // Bit 0 comes every field (60 a second) and bit 11, which counts
-        // frames shown and paces the kernel's main loop, every second one:
-        // the TV picture is interlaced, 30 whole frames a second. With bit
-        // 11 every field the start-up screens ran twice as fast as a
-        // recording of a real unit (warning 2 s against 4, the LeapFrog logo
-        // 1 s against 3, the mat 6 s against 11); with it every second field
-        // they match within a second. Which field is first is UNKNOWN.
-        let field = self.now / FRAME;
-        self.video_status |= if field % 2 == 1 { 0x801 } else { 0x001 };
+        // Bit 0 (vertical blank) and bit 11 (frame shown) come every field,
+        // 60 a second. The kernel counts bit 11 as the time: its timers add
+        // up the fields counted and divide by 60 (50 on a PAL unit, the
+        // strap at 0xC0000000 bit 6; code at 0x20A70), so the count must
+        // run at the field rate. Its main loop (0x2CFF0) waits for the bit 0
+        // handler's flag, sends the frame and commits it (writes 1 to
+        // 0xD05001F0), then waits for the next bit 11. The bit 0 handler
+        // (0x35EA8) skips the flag while the commit is busy (bit 14), so a
+        // commit in one field holds the loop until the field after next: 30
+        // loops a second, each seeing two fields counted. Without the busy
+        // flag the loop ran 60 a second and everything went twice as fast;
+        // with bit 11 every second field instead (as before) the count ran
+        // at half the time, and the start-up's LeapFrog logo stepped every
+        // 10 fields and stood still 0.6 s, against about 6 and 1.1 s on a
+        // recording of a real unit (now 4-6 and 1.0 s). How long the busy
+        // flag really lasts is UNKNOWN.
+        //
+        // Bit 0 comes only while a committed frame is on its way: at each
+        // field from the commit to the field where it comes up (the busy
+        // flag clear), and then the fade (0xD05000C0) that comes up with it
+        // is taken. Not at all while the kernel sends no frames (loading).
+        // The bit 0 handler (0x35EA8) rotates the three frame buffers each
+        // time it finds the commit done, which only makes sense once per
+        // frame; and it steps the fade (0x2E410), so fades wait for frames:
+        // the start-up warning's fade-in, started 17 fields before its first
+        // frame, then runs over the warning as on a recording of a real unit
+        // (before, it ran over black and the warning popped up), a mat
+        // picture's fade-in no longer shows the screen before it, and
+        // LOADING, shown just before a program is read and then left without
+        // frames while the fade is set to black, stays up as on the
+        // recording (before, a 16-field timeout was needed).
+        self.video_status |= 0x800;
+        let commit = self.latch(0xD050_01F0);
+        if commit & COMMIT_BUSY != 0 {
+            // Bit 31 (not readable) marks the first field seen.
+            let next = if commit & 0x8000_0000 != 0 { commit & !(0x8000_0000 | COMMIT_BUSY) } else { commit | 0x8000_0000 };
+            self.set_latch(0xD050_01F0, next);
+        }
+        if self.frame_pending {
+            self.video_status |= 1;
+            if self.latch(0xD050_01F0) & COMMIT_BUSY == 0 {
+                self.frame_pending = false;
+                self.shown_fade = self.latch(0xD050_00C0) & 0xFF;
+            }
+        }
         self.lines_dirty = true;
     }
 
@@ -402,14 +459,14 @@ impl Bus {
         // bits 9-5 are A's bits 15-11 and bits 4-0 A's bits 7-3 (from the
         // kernel's decoder at 0x2B154).
         if self.now >= self.radio_due {
-            self.radio_due = self.now + RADIO_PERIOD;
+            self.radio_due = self.now + self.probe.radio_period.unwrap_or(RADIO_PERIOD);
             let now = self.now;
             let state = self.probe.pad_script.iter().find(|p| (p.1..p.2).contains(&now)).map_or(self.pad, |p| p.0);
             let a = ((state >> 5) & 31) << 11 | (state & 31) << 3;
-            for b in [a as u8, (a >> 8) as u8, (a ^ 1) as u8, ((a ^ 1) >> 8) as u8] {
-                if self.rx.len() < RX_FIFO {
-                    self.rx.push_back(b);
-                }
+            // A whole packet or none: a part would leave the decoder out of
+            // step until it finds the packet boundary again.
+            if self.rx.len() + 4 <= RX_FIFO {
+                self.rx.extend([a as u8, (a >> 8) as u8, (a ^ 1) as u8, ((a ^ 1) >> 8) as u8]);
             }
         }
     }
@@ -504,15 +561,41 @@ impl Bus {
         }
     }
 
+    /// The maths unit's arithmetic (0xF60040A0; from the cartridge games'
+    /// drivers, UNVERIFIED on hardware): +0xA8 the operation, +0xA0 and
+    /// +0xA4 the operands, +0xAC and +0xB0 the results. Operation 1 is a
+    /// 16.16 fixed-point product (a game replaced its software routine for
+    /// (a * b) >> 16 with it; +0xB0 the bits above), 3 a signed division
+    /// (+0xAC the quotient, +0xB0 the remainder: the games use them for
+    /// sprite scaling steps and wrapping). Others are UNKNOWN (read 0).
+    fn arith(&self, second: bool) -> u32 {
+        let (a, b) = (self.latch(0xF600_40A0) as i32, self.latch(0xF600_40A4) as i32);
+        match self.latch(0xF600_40A8) {
+            1 => {
+                let p = (a as i64 * b as i64) >> 16;
+                if second { (p >> 32) as u32 } else { p as u32 }
+            }
+            3 if second => a.checked_rem(b).unwrap_or(a) as u32,
+            3 => a.checked_div(b).unwrap_or(0) as u32,
+            _ => 0,
+        }
+    }
+
     pub(crate) fn io(&mut self, a: u32, write: Option<u32>, size: u32) -> u32 {
         self.lines_dirty = true;
         // Polling the NAND controller's status changes nothing: a loop that
-        // only waits on it is idle (Zippity::run skips it, a device tick at
-        // a time, so the transfer's end is seen within 256 instructions).
+        // only waits on it is idle (Zippity::run skips it up to the
+        // transfer's end, which it then sees at the same instruction as
+        // without skipping).
         if write.is_some() || !matches!(a, 0xD090_0000 | 0xD090_0140) {
             self.activity += 1;
         }
-        self.probe.io(self.now, self.pc, a, write, size);
+        let v = self.io_access(a, write);
+        self.probe.io(self.now, self.pc, a, write, size, v);
+        v
+    }
+
+    fn io_access(&mut self, a: u32, write: Option<u32>) -> u32 {
         if let Some(v) = self.nand_io(a, write) {
             return v;
         }
@@ -605,11 +688,7 @@ impl Bus {
                 // next screen's pictures into the sprite cache (which showed
                 // as scrambled and half-drawn sprites between screens).
                 if dst == 0xD050_2000 && self.want_picture {
-                    let mut img = std::mem::take(&mut self.picture);
-                    img.resize(crate::SCREEN_W * crate::SCREEN_H, 0);
-                    self.render(&mut img);
-                    self.picture = img;
-                    self.picture_at = Some(self.now);
+                    self.redraw();
                 }
                 0
             }
@@ -697,6 +776,28 @@ impl Bus {
             (0xD050_0328, None) => self.latch(0xD050_0310) & 0xFFFF,
             (0xD050_032C, None) => self.latch(0xD050_0314) & 0xFFFF,
             (0xD050_0330, None) => 0x8000,
+            // The fixed-point maths unit (0xF6004000): its matrix product
+            // (`geometry`, video.rs) and arithmetic (`arith`). Results are
+            // ready at once: the kernels read them straight after starting.
+            (0xF680_0000 | 0xF680_0004, Some(_)) => {
+                self.geometry(a);
+                0
+            }
+            (0xF600_40AC | 0xF600_40B0, None) => self.arith(a == 0xF600_40B0),
+            // Frame commit (see `frame`): writing bit 0 sends the frame
+            // and sets the busy flag (bit 14) until the field after next;
+            // a commit while busy (the bit 0 handler repeats it) changes
+            // nothing.
+            (0xD050_01F0, Some(v)) => {
+                if latched & COMMIT_BUSY != 0 {
+                    self.set_latch(a, latched);
+                } else if v & 1 != 0 {
+                    self.set_latch(a, v | COMMIT_BUSY);
+                    self.frame_pending = true;
+                }
+                0
+            }
+            (0xD050_01F0, None) => latched & !0x8000_0000,
             (0xD050_018C, None) => self.video_status,
             (0xD050_018C, Some(v)) => {
                 self.video_status &= !v;
@@ -756,5 +857,58 @@ impl ArmBus for Bus {
                 self.io(a, Some(v), 32);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ONE: u32 = 0x1_0000;
+
+    fn fixed(x: f64) -> u32 {
+        (x * 65536.0) as i32 as u32
+    }
+
+    /// A 3 x 3 transform as Disney Princess's Dress Dash loads it (rows four
+    /// words apart, translation in the last row) moves a point.
+    #[test]
+    fn maths_unit_matrix() {
+        let mut b = Bus::new(Vec::new());
+        let m = [fixed(0.6), 0, 0, 0, 0, fixed(0.6), 0, 0, 120 << 16, 60 << 16, ONE, 0];
+        for (i, &v) in m.iter().enumerate() {
+            b.write32(0xF600_4000 + 4 * i as u32, v);
+        }
+        for (i, v) in [10 << 16, 48 << 16, ONE].into_iter().enumerate() {
+            b.write32(0xF600_4040 + 4 * i as u32, v);
+        }
+        b.write32(0xF680_0004, 1);
+        let r: Vec<i32> = (0..3).map(|i| b.read32(0xF600_4060 + 4 * i) as i32).collect();
+        // x' = 0.6 x + 120, y' = 0.6 y + 60 (0x9999 is just under 0.6).
+        assert_eq!(r[0], 10 * 0x9999 + (120 << 16));
+        assert_eq!(r[1], 48 * 0x9999 + (60 << 16));
+        assert_eq!(r[2], ONE as i32);
+        // 4 x 4: the identity leaves a vector as it is.
+        for i in 0..16 {
+            b.write32(0xF600_4000 + 4 * i, if i % 5 == 0 { ONE } else { 0 });
+        }
+        b.write32(0xF600_404C, fixed(-2.5));
+        b.write32(0xF680_0000, 1);
+        assert_eq!(b.read32(0xF600_406C), fixed(-2.5));
+        assert_eq!(b.read32(0xF600_4060), 10 << 16);
+    }
+
+    #[test]
+    fn maths_unit_arithmetic() {
+        let mut b = Bus::new(Vec::new());
+        let mut op = |mode: u32, a: i32, x: i32| {
+            b.write32(0xF600_40A8, mode);
+            b.write32(0xF600_40A0, a as u32);
+            b.write32(0xF600_40A4, x as u32);
+            (b.read32(0xF600_40AC) as i32, b.read32(0xF600_40B0) as i32)
+        };
+        assert_eq!(op(1, fixed(1.5) as i32, fixed(-2.0) as i32).0, fixed(-3.0) as i32);
+        assert_eq!(op(3, -17, 5), (-3, -2), "C's signed division");
+        assert_eq!(op(3, 7, 0).0, 0, "no answer for a division by zero (UNKNOWN on hardware)");
     }
 }

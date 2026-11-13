@@ -6,18 +6,23 @@
 //! found saved players in it (a previous owner's); the app then offers to
 //! remove them from the dump file itself (`clean_dump`).
 //!
-//! Controls (the Leapster's bindings): the D-pad is the joystick, A chooses,
-//! Hint stands on the mat (both foot pads), and B, Home and Pause are the
-//! controller bits 4, 5 and 6, whose buttons are not identified yet
-//! (docs/zippity.md).
+//! Controls: the keyboard has the Zippity's own keys (`KEYS`, which the
+//! player can change: `Settings::zippity_keys`); a game controller and the
+//! touch controls go through the Leapster's buttons (`CONTROLS`): the D-pad
+//! is the bopper, A, B and Hint the green, red and blue spots, Home the
+//! Pause/Home button, Pause standing on the home spot (or, while the setting
+//! keeps the player standing there, a jump off it), and the volume buttons
+//! the feet (docs/zippity.md).
 
 use crate::audio_out::AudioSink;
 use ribbit_input::Button;
 use ribbit_zippity::{PAGE, Pad, SCREEN_H, SCREEN_W, Zippity};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use winit::keyboard::KeyCode;
 
 /// The Zippity's inputs (its manual, the Parent Guide 605-11430-A, and the
 /// factory test menu, which names bits 4-7) on Ribbit's buttons: the
@@ -28,7 +33,8 @@ use std::time::{Duration, Instant};
 /// The feet keys (the Leapster's volume buttons, which the Zippity has no
 /// use for: LB and RB on a gamepad) move one foot: lifted while standing on
 /// the home spot, put down while not. Mickey Says starts with "march in
-/// place", left and right in turn.
+/// place", left and right in turn. Pause stands on the home spot; while the
+/// player stands there anyway it lifts both feet instead (a jump).
 pub const CONTROLS: [(Button, u16, &str); 11] = [
     (Button::Up, Pad::UP, "Bopper up (away from you)"),
     (Button::Down, Pad::DOWN, "Bopper down (towards you)"),
@@ -38,12 +44,150 @@ pub const CONTROLS: [(Button, u16, &str); 11] = [
     (Button::B, Pad::RED, "Red spot"),
     (Button::Hint, Pad::BLUE, "Blue spot"),
     (Button::Home, Pad::HOME, "Pause/Home button"),
-    (Button::Pause, Pad::LEFT_FOOT | Pad::RIGHT_FOOT, "Stand on the home spot"),
+    (Button::Pause, Pad::LEFT_FOOT | Pad::RIGHT_FOOT, "Stand on the home spot (jump while standing)"),
     (Button::VolumeDown, Pad::LEFT_FOOT, "Left foot (lift / step)"),
     (Button::VolumeUp, Pad::RIGHT_FOOT, "Right foot (lift / step)"),
 ];
 
 const FEET: u16 = Pad::LEFT_FOOT | Pad::RIGHT_FOOT;
+
+/// A Zippity input a key can be given (the keyboard's own bindings; a game
+/// controller keeps the Leapster buttons of `CONTROLS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZipKey {
+    BopperUp,
+    BopperDown,
+    BopperLeft,
+    BopperRight,
+    Red,
+    Blue,
+    Green,
+    Home,
+    Stand,
+    LeftFoot,
+    RightFoot,
+}
+
+impl ZipKey {
+    pub const ALL: [ZipKey; 11] = [
+        ZipKey::BopperUp,
+        ZipKey::BopperDown,
+        ZipKey::BopperLeft,
+        ZipKey::BopperRight,
+        ZipKey::Red,
+        ZipKey::Blue,
+        ZipKey::Green,
+        ZipKey::Home,
+        ZipKey::Stand,
+        ZipKey::LeftFoot,
+        ZipKey::RightFoot,
+    ];
+
+    /// The Leapster button that stands for it (`CONTROLS`).
+    pub fn button(self) -> Button {
+        match self {
+            ZipKey::BopperUp => Button::Up,
+            ZipKey::BopperDown => Button::Down,
+            ZipKey::BopperLeft => Button::Left,
+            ZipKey::BopperRight => Button::Right,
+            ZipKey::Red => Button::B,
+            ZipKey::Blue => Button::Hint,
+            ZipKey::Green => Button::A,
+            ZipKey::Home => Button::Home,
+            ZipKey::Stand => Button::Pause,
+            ZipKey::LeftFoot => Button::VolumeDown,
+            ZipKey::RightFoot => Button::VolumeUp,
+        }
+    }
+
+    /// What it is called in the bindings dialog and Help > Controls.
+    pub fn label(self) -> &'static str {
+        let b = self.button();
+        CONTROLS.iter().find(|c| c.0 == b).map_or("", |c| c.2)
+    }
+
+    /// The game controller button for it.
+    pub fn pad_label(self) -> &'static str {
+        match self {
+            ZipKey::BopperUp | ZipKey::BopperDown | ZipKey::BopperLeft | ZipKey::BopperRight => "D-pad / left stick",
+            ZipKey::Red => "B",
+            ZipKey::Blue => "X or Y",
+            ZipKey::Green => "A",
+            ZipKey::Home => "Back / Select",
+            ZipKey::Stand => "Start",
+            ZipKey::LeftFoot => "LB",
+            ZipKey::RightFoot => "RB",
+        }
+    }
+}
+
+/// The keyboard's default keys, laid out as the mat: red, blue and green
+/// left to right on Z X C, the feet above them on A and S, standing on the
+/// home spot on D, the bopper on the arrows and its Pause/Home button on
+/// Space. They replace the Leapster's keys while a Zippity runs. Shift
+/// (while no input has it) still toggles standing on the home spot.
+pub const KEYS: &[(KeyCode, ZipKey)] = &[
+    (KeyCode::ArrowUp, ZipKey::BopperUp),
+    (KeyCode::ArrowDown, ZipKey::BopperDown),
+    (KeyCode::ArrowLeft, ZipKey::BopperLeft),
+    (KeyCode::ArrowRight, ZipKey::BopperRight),
+    (KeyCode::KeyZ, ZipKey::Red),
+    (KeyCode::KeyX, ZipKey::Blue),
+    (KeyCode::KeyC, ZipKey::Green),
+    (KeyCode::Space, ZipKey::Home),
+    (KeyCode::KeyD, ZipKey::Stand),
+    (KeyCode::KeyA, ZipKey::LeftFoot),
+    (KeyCode::KeyS, ZipKey::RightFoot),
+];
+
+/// The player's own keys (`Settings::zippity_keys`): action name
+/// (`action_name`) to key name. An action given a key here uses only that
+/// key; the key no longer does what it did by default.
+static BINDINGS: std::sync::RwLock<BTreeMap<String, String>> = std::sync::RwLock::new(BTreeMap::new());
+
+/// Sets the player's keys (from the settings).
+pub fn set_bindings(b: &BTreeMap<String, String>) {
+    *BINDINGS.write().unwrap() = b.clone();
+}
+
+/// An action's name in the settings file ("Red", "BopperUp").
+pub fn action_name(t: ZipKey) -> String {
+    format!("{t:?}")
+}
+
+/// Every (key name, action) with these player's keys, theirs first.
+fn keymap_with(b: &BTreeMap<String, String>) -> Vec<(String, ZipKey)> {
+    let mut out: Vec<(String, ZipKey)> = Vec::new();
+    for t in ZipKey::ALL {
+        if let Some(k) = b.get(&action_name(t)) {
+            out.push((k.clone(), t));
+        }
+    }
+    for &(k, t) in KEYS {
+        let name = crate::settings::key_name(k);
+        if !b.contains_key(&action_name(t)) && !out.iter().any(|(c, _)| *c == name) {
+            out.push((name, t));
+        }
+    }
+    out
+}
+
+fn keymap() -> Vec<(String, ZipKey)> {
+    keymap_with(&BINDINGS.read().unwrap())
+}
+
+/// The Zippity input a key gives.
+pub fn key(code: KeyCode) -> Option<ZipKey> {
+    let name = crate::settings::key_name(code);
+    keymap().into_iter().find(|(k, _)| *k == name).map(|(_, t)| t)
+}
+
+/// The keys for an input, for the dialog and Help ("Z", "Up"; "—": none).
+pub fn keys_for(what: ZipKey) -> String {
+    let names: Vec<String> =
+        keymap().into_iter().filter(|(_, t)| *t == what).map(|(k, _)| crate::settings::key_label(&k)).collect();
+    if names.is_empty() { "—".into() } else { names.join(" / ") }
+}
 
 /// Frames a second (the model's stand-in timing: FRAME instructions each).
 const FPS: f64 = 60.0;
@@ -297,9 +441,12 @@ fn run(s: &Shared) {
         let audio = {
             let mut z = s.z.lock().unwrap();
             // Standing on the home spot (the setting, or Pause held) puts
-            // both feet down; a foot key moves its foot from there.
+            // both feet down; a foot key moves its foot from there. Pause
+            // while standing there lifts both (a jump: games such as Disney
+            // Princess's Dress Dash take the landing, both footprints
+            // pressed at once, as an action, which standing never gives).
             let held = s.held.load(Ordering::Relaxed);
-            let standing = if s.on_home.load(Ordering::Relaxed) { FEET } else { held & FEET };
+            let standing = if s.on_home.load(Ordering::Relaxed) { FEET ^ (held & FEET) } else { held & FEET };
             let feet = standing ^ s.moved.load(Ordering::Relaxed);
             z.set_pad(Pad::held(held & !FEET | feet));
             z.set_want_picture(draw);
@@ -429,6 +576,39 @@ fn apply_pages(flash: &mut [u8], pages: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_input_has_a_key_and_no_key_does_two_things() {
+        for (i, (k, _)) in KEYS.iter().enumerate() {
+            assert!(KEYS[i + 1..].iter().all(|(o, _)| o != k), "{k:?} is bound twice");
+        }
+        for t in ZipKey::ALL {
+            assert!(KEYS.iter().any(|(_, k)| *k == t), "{t:?} has no key");
+            assert!(CONTROLS.iter().any(|c| c.0 == t.button()), "{t:?} has no Leapster button");
+            assert!(!t.label().is_empty());
+        }
+        // Shift and the app's own keys stay free.
+        for k in [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::Tab, KeyCode::Escape, KeyCode::Backquote] {
+            assert!(KEYS.iter().all(|(o, _)| *o != k), "{k:?} is the app's");
+        }
+        let defaults = keymap_with(&BTreeMap::new());
+        assert!(defaults.contains(&("KeyZ".into(), ZipKey::Red)));
+        assert!(defaults.contains(&("Space".into(), ZipKey::Home)));
+    }
+
+    #[test]
+    fn a_remapped_key_replaces_the_default() {
+        // Red moved to Q: Z does nothing, Q is red; Green given Z: Z is green.
+        let mut b = BTreeMap::new();
+        b.insert(action_name(ZipKey::Red), "KeyQ".to_string());
+        let m = keymap_with(&b);
+        assert!(m.contains(&("KeyQ".into(), ZipKey::Red)));
+        assert!(!m.iter().any(|(k, _)| k == "KeyZ"));
+        b.insert(action_name(ZipKey::Green), "KeyZ".to_string());
+        let m = keymap_with(&b);
+        assert_eq!(m.iter().filter(|(k, _)| k == "KeyZ").map(|(_, t)| *t).collect::<Vec<_>>(), [ZipKey::Green]);
+        assert!(!m.iter().any(|(k, _)| k == "KeyC"), "C was green's default");
+    }
 
     #[test]
     fn changed_pages_round_trip() {

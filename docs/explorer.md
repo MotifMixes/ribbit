@@ -210,17 +210,32 @@ reads them the same way). VERIFIED in Ribbit with Didj cartridge dumps:
   0x8320_0000, so `ga3d::Mem` now takes the SDRAM base, and block addresses reach all
   64 MB). Indiana Jones reaches its own menu the same way.
 
-Not known: the Explorer's own cartridges. The kernel tells an "Emerald Cart ID" from
-the Didj's and expects no UBI layer on one ("cart has UBI layer, but is using Emerald
-Cart ID"); `/etc/init.d/cartridge` then mounts the MTD itself as FAT, and
-SetupNANDCartridge.sh turns on the chip's internal ECC for cart IDs 6, 11 and 15.
-GUESS from those strings: an Explorer cartridge is FAT straight on the NAND (no UBI)
-with another ID; its NAND ID, page size and the ECC command are UNKNOWN. No dump of one
-has been found, so Ribbit plays Didj cartridges only.
+The Explorer's own cartridges (2026-11-13, from 86 dumps: 64 MiB, or 128 MiB for 19 of
+them): the dump is a FAT32 volume labelled "Cartridge" from byte 0, no UBI and no spare
+area. Its meta.inf (one folder, as a Didj game's) says Device="LeapsterExplorer" (70) or
+"LeapPadExplorer" (16, LeapPad games), PackageID LST3-.... The kernel tells an "Emerald
+Cart ID" (port B pin 4 low) from the Didj's and expects no UBI layer on one ("cart has UBI
+layer, but is using Emerald Cart ID"); `/etc/init.d/cartridge` then mounts the MTD
+itself as FAT. Ribbit (`cart::is_explorer_image`, `from_explorer_image`) puts the pages
+in as they are with erased spare areas, gives the chip the ID of its size (0x98 0x76 or
+0x79) and the type 3 (`cart::EMERALD`: the Didj's 7 with the Emerald pin low): the
+kernel logs "cartridge has no UBI" and "cart driver ready" with no error. GUESS: the
+real type bits (only pin 4 is known; SetupNANDCartridge.sh turns on internal ECC for
+6, 11 and 15), the real chips' IDs and page size.
+
+VERIFIED in Ribbit, all 86 (a set-up Explorer powered on with the cartridge in, signed
+in, the cartridge's square tapped, the screen 11 s later): 61 reach their title,
+menu or game; 15 LeapPad games show their "Please play this cartridge on a LeapPad"
+screen (Mini Game Greatest Hits, also a LeapPad game, plays); 8 later ones (Finding Dory,
+Frozen x2, PJ Masks, Paw Patrol, Trolls, The Little Mermaid, Rusty Rivets) show "This
+cartridge is not supported on this platform"; the 2 French ones ask for their language
+pack (only the English set was there). Those screens are the games' own. Test:
+`explorer_cartridges_are_explorer_games` (RIBBIT_EXPLORER_CARTS=<folder>).
 
 In the app: every Didj cartridge in the library is listed on the Explorer's page too
-(tag "Didj cartridge"). Picking one turns the Explorer on with it in the slot, or puts
-it in the Explorer that is running; Emulation > Take the Cartridge Out takes it out.
+(tag "Didj cartridge"), and every Explorer cartridge on that page alone (tag
+"Cartridge"). Picking one turns the Explorer on with it in the slot, or puts it in the
+Explorer that is running; Emulation > Take the Cartridge Out takes it out.
 
 ## Saves and carrying them over
 
@@ -285,6 +300,7 @@ The Explorer tab lists the console, with a drawn icon, then its games:
 - **Built-in**: Application `.lf2` packages beside Firmware Base (Pet Pad, Movie Player, ...).
 - **Installed**: games read from the save's Bulk `ProgramFiles`.
 - **Didj cartridge**: Didj cartridges, which play in the Explorer's slot.
+- **Cartridge**: the Explorer's own cartridges (and LeapPad ones), which play in its slot.
 - **Not installed**: Explorer `.lf2` / `.lfp` game packages elsewhere in the games folders.
 
 A click turns the Explorer on. Ribbit doesn't pick the game in the Explorer's menu yet. A package that isn't installed is installed first.
@@ -296,7 +312,7 @@ A click turns the Explorer on. Ribbit doesn't pick the game in the Explorer's me
 
 ## Not done yet
 
-* The LFP100 power chip, the Explorer's own cartridges (no dump), LeapFrog Connect over USB (untested), carrying the root file system's /flags over. The app's start is untested by a player.
+* The LFP100 power chip, the Explorer's real cartridge type bits and chip IDs (guessed), LeapFrog Connect over USB (untested), carrying the root file system's /flags over. The app's start is untested by a player.
   D-pad tested (moves the highlight); A/B and the rest not tried yet.
 
 Sources: LF1000 kernel 2.6.37 port (github.com/mac2612/lf1000_kernel; LeapFrog's

@@ -424,7 +424,7 @@ impl Bus {
         match port {
             0 if self.cart.is_some() => 0,
             0 => CART_DETECT,
-            1 if self.cart.is_some() => BOARD_ID << BOARD_ID_SHIFT | crate::cart::PRODUCTION << CART_CFG_SHIFT,
+            1 if let Some(c) = &self.cart => BOARD_ID << BOARD_ID_SHIFT | c.cart_type() << CART_CFG_SHIFT,
             1 => BOARD_ID << BOARD_ID_SHIFT,
             2 => button::ALL & !self.buttons | button::POWER & self.buttons,
             _ => 0,
@@ -443,8 +443,9 @@ impl Bus {
                 crate::touch::pad(levels) | if self.cart.is_some() { 0 } else { CART_DETECT }
             }
             // The cartridge type, as on the Didj (the firmware's cartridge
-            // set-up script reads the same pins).
-            1 if self.cart.is_some() => crate::cart::PRODUCTION << CART_CFG_SHIFT,
+            // set-up script reads the same pins); an Explorer cartridge's
+            // has the Emerald pin low.
+            1 if let Some(c) = &self.cart => c.cart_type() << CART_CFG_SHIFT,
             2 => {
                 let pressed = button::EXPLORER.iter().filter(|&&(b, _)| self.buttons & b != 0).fold(0, |p, &(_, pin)| p | 1 << pin);
                 (button::EXPLORER_ALL | 1 << 14) & !pressed | button::POWER & self.buttons

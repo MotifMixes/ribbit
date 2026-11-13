@@ -13,6 +13,11 @@
 //! nand_base.c `nand_command`). The ID is Toshiba's 512 Mbit OTP part (nand
 //! lf1000.c OTP_DEVID_512MBIT, 0x98 0x76); what other cartridges answer is
 //! UNKNOWN, so smaller or larger dumps get the ID of their size.
+//!
+//! A Leapster Explorer cartridge has no UBI: its FAT volume starts at page 0
+//! (64 or 128 MiB dumps of the data alone, no spare area) and the type pins
+//! say so (`EMERALD`); the kernel then mounts the "Cartridge" MTD itself
+//! (lf1000.c "cartridge has no UBI", /etc/init.d/cartridge).
 
 pub const PAGE: usize = 512;
 pub const OOB: usize = 16;
@@ -24,6 +29,13 @@ pub const PAGES_PER_BLOCK: usize = 32;
 /// VERIFIED: a real Didj with a cartridge logs "cart type read=7, used=7",
 /// "cartridge ECC mode: none" and the ID 0x98 0x76 (Toshiba NAND 64MiB).
 pub const PRODUCTION: u32 = 0x7;
+
+/// An Explorer cartridge's type: the Emerald pin (port B pin 4, nand.h
+/// NAND_CART_TYPE_EMERALD) low, which the kernel expects with no UBI layer
+/// ("cart has UBI layer, but is using Emerald Cart ID"); the others as
+/// `PRODUCTION` (OTP, ECC off). GUESS: no real Explorer's reading is known;
+/// SetupNANDCartridge.sh turns on internal ECC for 6, 11 and 15, not 3.
+pub const EMERALD: u32 = 0x3;
 
 pub struct Cart {
     /// The raw flash, PAGE_RAW bytes per page.
@@ -41,6 +53,8 @@ pub struct Cart {
     id_pos: usize,
     /// Pages written or blocks erased since the dump was loaded.
     pub changed: bool,
+    /// An Explorer cartridge (FAT at page 0, no UBI).
+    emerald: bool,
 }
 
 impl Cart {
@@ -50,7 +64,14 @@ impl Cart {
         if flash.is_empty() || flash.len() % block != 0 {
             return Err(format!("{} bytes is not a Didj cartridge dump (blocks of {block} bytes)", flash.len()));
         }
-        Ok(Self { flash, cmd: 0, area: 0, addr: Vec::new(), page: 0, pos: 0, program: Vec::new(), id_pos: 0, changed: false })
+        let emerald = !flash.starts_with(b"UBI#") && flash.get(510..512) == Some(&[0x55, 0xAA][..]);
+        Ok(Self { flash, cmd: 0, area: 0, addr: Vec::new(), page: 0, pos: 0, program: Vec::new(), id_pos: 0, changed: false, emerald })
+    }
+
+    /// The type on GPIO port B pins 2-5: `EMERALD` for an Explorer
+    /// cartridge, else `PRODUCTION`.
+    pub fn cart_type(&self) -> u32 {
+        if self.emerald { EMERALD } else { PRODUCTION }
     }
 
     /// True for a file of a cartridge dump's size with UBI at its start.
@@ -176,7 +197,7 @@ const BLOCKS: usize = 4096;
 /// (`JDI/meta.inf`, Type="Application"), ready for /Didj/ProgramFiles.
 pub fn files(raw: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
     // A NAND dump, or the volume alone (as the app keeps some).
-    let fat = if is_volume(raw) { raw.to_vec() } else { volume(raw)? };
+    let fat = if is_volume(raw) || is_explorer_image(raw) { raw.to_vec() } else { volume(raw)? };
     let mut out = Vec::new();
     let mut folders = vec![String::new()];
     while let Some(dir) = folders.pop() {
@@ -201,6 +222,28 @@ pub fn is_volume(data: &[u8]) -> bool {
         && data.len() <= crate::ubi::available_blocks(BLOCKS) * (PAGE * PAGES_PER_BLOCK - 1024)
 }
 
+/// True for an Explorer cartridge dump: a FAT volume from byte 0 that
+/// fills whole erase blocks of the chip (no spare area, no UBI).
+pub fn is_explorer_image(data: &[u8]) -> bool {
+    data.len() >= 512
+        && data.len() % (PAGE * PAGES_PER_BLOCK) == 0
+        && data.len() <= 128 << 20
+        && data[510..512] == [0x55, 0xAA]
+        && (&data[82..87] == b"FAT32" || &data[54..59] == b"FAT16" || &data[54..59] == b"FAT12")
+        && !is_volume(data)
+}
+
+/// The raw flash of an Explorer cartridge dump (`is_explorer_image`): its
+/// pages as they are, spare areas erased (ECC off).
+pub fn from_explorer_image(fat: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::with_capacity(fat.len() / PAGE * PAGE_RAW);
+    for page in fat.chunks(PAGE) {
+        raw.extend_from_slice(page);
+        raw.extend_from_slice(&[0xFF; OOB]);
+    }
+    raw
+}
+
 /// A raw dump made from an image of the FAT volume (`is_volume`): UBI as
 /// on a retail cartridge, spare areas erased (production cartridges run
 /// with ECC off).
@@ -216,9 +259,13 @@ pub fn from_volume(fat: &[u8]) -> Result<Vec<u8>, String> {
 
 /// The cartridge's UBI volume 0 ("ubi_Cartridge", a FAT32 volume): each
 /// erase block's VID header names the logical block it holds; where two
-/// hold the same one, the higher sequence number wins (ubi-media.h).
+/// hold the same one, the higher sequence number wins (ubi-media.h). An
+/// Explorer cartridge's volume is its data area as it is.
 pub fn volume(raw: &[u8]) -> Option<Vec<u8>> {
     let flash = data(raw);
+    if !raw.starts_with(b"UBI#") && flash.get(510..512) == Some(&[0x55, 0xAA][..]) {
+        return Some(flash);
+    }
     let peb = PAGE * PAGES_PER_BLOCK;
     let be32 = |b: &[u8], o: usize| u32::from_be_bytes(b[o..o + 4].try_into().unwrap()) as usize;
     let mut lebs: std::collections::BTreeMap<usize, (u64, usize)> = Default::default();
@@ -279,6 +326,28 @@ mod tests {
         assert_eq!(raw.len(), 69206016);
         let v = volume(&raw).unwrap();
         assert_eq!(v[..fat.len()], fat[..]);
+    }
+
+    #[test]
+    fn an_explorer_image_is_fat_from_page_0_with_the_emerald_type() {
+        let mut fat = vec![0u8; 64 << 20];
+        fat[71..82].copy_from_slice(b"Cartridge  ");
+        fat[82..87].copy_from_slice(b"FAT32");
+        fat[510..512].copy_from_slice(&[0x55, 0xAA]);
+        fat[PAGE * 3 + 7] = 9;
+        assert!(is_explorer_image(&fat) && !is_volume(&fat));
+        let raw = from_explorer_image(&fat);
+        assert_eq!(raw.len(), (64 << 20) / PAGE * PAGE_RAW);
+        assert!(!Cart::looks_like(&raw));
+        assert_eq!(volume(&raw).unwrap(), fat);
+        let mut c = Cart::new(raw).unwrap();
+        assert_eq!(c.cart_type(), EMERALD);
+        assert_eq!(read(&mut c, 0x00, 7, 3, 1), [9]);
+        // A Didj cartridge (UBI) keeps the production type.
+        let mut small = vec![0u8; 15360 * 2];
+        small[71..82].copy_from_slice(b"Cartridge  ");
+        small[510..512].copy_from_slice(&[0x55, 0xAA]);
+        assert_eq!(Cart::new(from_volume(&small).unwrap()).unwrap().cart_type(), PRODUCTION);
     }
 
     #[test]

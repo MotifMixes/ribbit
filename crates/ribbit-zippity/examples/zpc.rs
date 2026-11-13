@@ -20,10 +20,12 @@ fn main() {
     }
     let mut hist: HashMap<u32, u64> = HashMap::new();
     let mut n = 0u64;
+    // ZPC_FROM=n: count from frame n only.
+    let from: u64 = std::env::var("ZPC_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     while z.instructions() < frames * FRAME {
         z.step();
         n += 1;
-        if n.is_multiple_of(97) {
+        if n.is_multiple_of(97) && z.instructions() >= from * FRAME {
             *hist.entry(z.cpu().current).or_default() += 1;
         }
     }

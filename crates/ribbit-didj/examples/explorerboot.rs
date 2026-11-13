@@ -49,6 +49,8 @@ fn main() {
         let mut data = std::fs::read(&path).expect("can't read the cartridge");
         if ribbit_didj::cart::is_volume(&data) {
             data = ribbit_didj::cart::from_volume(&data).unwrap_or_else(|e| panic!("{e}"));
+        } else if ribbit_didj::cart::is_explorer_image(&data) {
+            data = ribbit_didj::cart::from_explorer_image(&data);
         }
         cart = Some(ribbit_didj::cart::Cart::new(data).unwrap_or_else(|e| panic!("{e}")));
     }

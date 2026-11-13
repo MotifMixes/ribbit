@@ -425,8 +425,16 @@ impl ApplicationHandler for App {
                     gpu.resize(size);
                 }
             }
+            // winit's synthetic key events stand in for keys held while the
+            // focus moved; losing the focus lets go of every button instead.
+            WindowEvent::Focused(false) => {
+                for b in ribbit_input::Button::ALL {
+                    self.machine.buttons.set(b, false);
+                }
+            }
             WindowEvent::KeyboardInput {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state, repeat: false, .. },
+                is_synthetic: false,
                 ..
             } => {
                 if code == KeyCode::KeyF && state == ElementState::Pressed {

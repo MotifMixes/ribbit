@@ -207,6 +207,28 @@ pub struct Info {
     pub cheat_freezes: Vec<(u32, u32, String)>,
 }
 
+/// The consoles with their own keys, in the bindings window's drop-down.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum BindingsConsole {
+    /// The Leapster's keys (also the L-MAX, Leapster 2, Explorer and Didj).
+    #[default]
+    Leapster,
+    Zippity,
+    RockItTwist,
+}
+
+impl BindingsConsole {
+    const ALL: [BindingsConsole; 3] = [BindingsConsole::Leapster, BindingsConsole::Zippity, BindingsConsole::RockItTwist];
+
+    fn label(self) -> &'static str {
+        match self {
+            BindingsConsole::Leapster => "Leapster",
+            BindingsConsole::Zippity => "Zippity",
+            BindingsConsole::RockItTwist => "RockIt Twist",
+        }
+    }
+}
+
 /// Something that went wrong, as the error card shows it.
 #[derive(Clone)]
 pub struct Problem {
@@ -231,6 +253,10 @@ pub struct UiState {
     pub capturing: Option<Button>,
     /// A RockIt Twist action waiting for its new key.
     pub capturing_twist: Option<crate::twist::TwistKey>,
+    /// A Zippity input waiting for its new key.
+    pub capturing_zippity: Option<crate::zippity::ZipKey>,
+    /// The console whose keys the bindings window shows.
+    pub bindings_console: BindingsConsole,
     pub browser: Browser,
     /// Messages and when each stops showing.
     toasts: Vec<(String, Instant)>,
@@ -1506,6 +1532,10 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         game_only_note(ui, info);
         if item(ui, "Key bindings…", "") {
             st.show_bindings = true;
+            // The running Zippity's keys, or the Zippity page's.
+            if info.zippity || (!info.running && settings.library_tab == "Zippity") {
+                st.bindings_console = BindingsConsole::Zippity;
+            }
         }
         if ui
             .checkbox(&mut settings.touch_controls, "Touch controls")
@@ -2879,10 +2909,10 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
 }
 
 /// A power button, the size of the rescan button; whether it was clicked.
-/// Playing a library entry: a Didj cartridge's Explorer entry goes into the
-/// Explorer's slot.
+/// Playing a library entry: an Explorer cartridge or a Didj cartridge's
+/// Explorer entry goes into the Explorer's slot.
 fn play_action(game: &crate::library::Game) -> Action {
-    if game.is_explorer_cart() { Action::PlayOnExplorer(game.path.clone()) } else { Action::PlayFromLibrary(game.path.clone()) }
+    if game.plays_in_explorer_slot() { Action::PlayOnExplorer(game.path.clone()) } else { Action::PlayFromLibrary(game.path.clone()) }
 }
 
 fn power_button(ui: &mut egui::Ui, hover: &str) -> bool {
@@ -3573,7 +3603,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
                 }
             });
         }
-        if matches!(game.family, Family::Didj | Family::Explorer) && !game.is_explorer_cart() {
+        if matches!(game.family, Family::Didj | Family::Explorer) && !game.plays_in_explorer_slot() {
             didj_card_menu(ui, game, actions);
         }
         ui.separator();
@@ -3793,57 +3823,105 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
     serial_window(ctx, st, settings, actions);
     let mut open = st.show_bindings;
     egui::Window::new("Key bindings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-        ui.label("Click a key, then press the new key on your keyboard.");
-        egui::Grid::new("bindings").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
-            for b in BINDABLE {
-                ui.label(format!("{b:?}"));
-                let label = if st.capturing == Some(b) {
-                    "press a key…".to_string()
-                } else {
-                    settings.key_for(b).map_or("—".to_string(), settings::key_label)
-                };
-                if ui.add(egui::Button::new(label).min_size([110.0, 0.0].into())).clicked() {
-                    st.capturing = Some(b);
+        ui.horizontal(|ui| {
+            ui.label("Console:");
+            let before = st.bindings_console;
+            egui::ComboBox::from_id_salt("bindings console").selected_text(st.bindings_console.label()).show_ui(ui, |ui| {
+                for c in BindingsConsole::ALL {
+                    ui.selectable_value(&mut st.bindings_console, c, c.label());
                 }
-                ui.end_row();
+            });
+            if st.bindings_console != before {
+                st.capturing = None;
+                st.capturing_twist = None;
+                st.capturing_zippity = None;
             }
         });
+        ui.label("Click a key, then press the new key on your keyboard.");
         ui.separator();
-        if ui.button("Restore defaults").clicked() {
-            settings.keys = settings::default_keys();
-            st.capturing = None;
-            actions.push(Action::SettingsChanged);
-        }
-        ui.separator();
-        egui::CollapsingHeader::new("RockIt Twist keys").show(ui, |ui| {
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                egui::Grid::new("twist-bindings").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
-                    for t in crate::twist::actions() {
-                        ui.label(crate::twist::action_label(t));
-                        let label = if st.capturing_twist == Some(t) {
+        match st.bindings_console {
+            BindingsConsole::Leapster => {
+                egui::Grid::new("bindings").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
+                    for b in BINDABLE {
+                        ui.label(format!("{b:?}"));
+                        let label = if st.capturing == Some(b) {
                             "press a key…".to_string()
                         } else {
-                            crate::twist::keys_for(t)
+                            settings.key_for(b).map_or("—".to_string(), settings::key_label)
                         };
                         if ui.add(egui::Button::new(label).min_size([110.0, 0.0].into())).clicked() {
-                            st.capturing_twist = Some(t);
+                            st.capturing = Some(b);
                         }
                         ui.end_row();
                     }
                 });
-            });
-            if ui.button("Restore RockIt Twist defaults").clicked() {
-                settings.twist_keys.clear();
-                crate::twist::set_bindings(&settings.twist_keys);
-                st.capturing_twist = None;
-                actions.push(Action::SettingsChanged);
+                ui.separator();
+                if ui.button("Restore defaults").clicked() {
+                    settings.keys = settings::default_keys();
+                    st.capturing = None;
+                    actions.push(Action::SettingsChanged);
+                }
             }
-        });
+            BindingsConsole::Zippity => {
+                egui::Grid::new("zippity-bindings").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
+                    for t in crate::zippity::ZipKey::ALL {
+                        ui.label(t.label());
+                        let label = if st.capturing_zippity == Some(t) {
+                            "press a key…".to_string()
+                        } else {
+                            crate::zippity::keys_for(t)
+                        };
+                        if ui.add(egui::Button::new(label).min_size([110.0, 0.0].into())).clicked() {
+                            st.capturing_zippity = Some(t);
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.label(
+                    egui::RichText::new("Shift (unless given to an input) toggles standing on the home spot.")
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(170)),
+                );
+                ui.separator();
+                if ui.button("Restore Zippity defaults").clicked() {
+                    settings.zippity_keys.clear();
+                    crate::zippity::set_bindings(&settings.zippity_keys);
+                    st.capturing_zippity = None;
+                    actions.push(Action::SettingsChanged);
+                }
+            }
+            BindingsConsole::RockItTwist => {
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    egui::Grid::new("twist-bindings").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                        for t in crate::twist::actions() {
+                            ui.label(crate::twist::action_label(t));
+                            let label = if st.capturing_twist == Some(t) {
+                                "press a key…".to_string()
+                            } else {
+                                crate::twist::keys_for(t)
+                            };
+                            if ui.add(egui::Button::new(label).min_size([110.0, 0.0].into())).clicked() {
+                                st.capturing_twist = Some(t);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                });
+                ui.separator();
+                if ui.button("Restore RockIt Twist defaults").clicked() {
+                    settings.twist_keys.clear();
+                    crate::twist::set_bindings(&settings.twist_keys);
+                    st.capturing_twist = None;
+                    actions.push(Action::SettingsChanged);
+                }
+            }
+        }
     });
     st.show_bindings = open;
     if !open {
         st.capturing = None;
         st.capturing_twist = None;
+        st.capturing_zippity = None;
     }
 
     egui::Window::new("Controls").open(&mut st.show_controls).collapsible(false).resizable(false).show(ctx, |ui| {
@@ -3877,10 +3955,17 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
         });
         ui.separator();
         ui.label(egui::RichText::new("On the Zippity").strong());
-        egui::Grid::new("zippity").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
-            for (b, _, what) in crate::zippity::CONTROLS {
-                ui.label(what);
-                ui.label(settings.key_for(b).map_or_else(|| format!("{b:?}"), |k| format!("{} ({b:?})", settings::key_label(k))));
+        egui::Grid::new("zippity").num_columns(3).spacing([24.0, 4.0]).show(ui, |ui| {
+            for t in crate::zippity::ZipKey::ALL {
+                ui.label(t.label());
+                ui.label(crate::zippity::keys_for(t));
+                ui.label(egui::RichText::new(format!("Controller: {}", t.pad_label())).color(egui::Color32::from_gray(150)));
+                ui.end_row();
+            }
+            // Shift toggles it unless the player gave Shift to an input.
+            if crate::zippity::key(winit::keyboard::KeyCode::ShiftLeft).is_none() {
+                ui.label("Stand on / step off the home spot (stays)");
+                ui.label("Shift");
                 ui.end_row();
             }
         });

@@ -249,6 +249,12 @@ impl Game {
     pub fn is_explorer_cart(&self) -> bool {
         self.family == Family::Explorer && self.has_tag(crate::didj::EXPLORER_CART_TAG)
     }
+
+    /// A cartridge that plays in the Explorer's slot: a Didj cartridge's
+    /// Explorer entry or an Explorer cartridge.
+    pub fn plays_in_explorer_slot(&self) -> bool {
+        self.is_explorer_cart() || (self.family == Family::Explorer && self.has_tag(crate::didj::EXPLORER_OWN_CART_TAG))
+    }
 }
 
 /// The keys of the games installed on a console (`didj_library`): one card
@@ -1023,7 +1029,7 @@ fn classify(path: &Path) -> Option<Found> {
     if data.len() < 0x1_0000 {
         return None;
     }
-    if ribbit_didj::cart::Cart::looks_like(&data) || ribbit_didj::cart::is_volume(&data) {
+    if ribbit_didj::cart::Cart::looks_like(&data) || ribbit_didj::cart::is_volume(&data) || ribbit_didj::cart::is_explorer_image(&data) {
         return crate::didj::describe_cart(path, &data).map(Found::Didj);
     }
     use ribbit_memory::known;

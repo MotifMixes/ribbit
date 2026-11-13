@@ -1754,8 +1754,9 @@ fn card_picture(art: &egui::ColorImage) -> egui::ColorImage {
 pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
     use crate::library::{Family, Game};
     use ribbit_core::fatfs;
-    // A raw dump, or an image of its FAT volume alone.
-    let volume = if ribbit_didj::cart::is_volume(data) { std::borrow::Cow::Borrowed(data) } else { std::borrow::Cow::Owned(ribbit_didj::cart::volume(data)?) };
+    // A raw dump, or an image of its FAT volume alone (an Explorer
+    // cartridge's dump is one).
+    let volume = if ribbit_didj::cart::is_volume(data) || ribbit_didj::cart::is_explorer_image(data) { std::borrow::Cow::Borrowed(data) } else { std::borrow::Cow::Owned(ribbit_didj::cart::volume(data)?) };
     let (folder, meta) = fatfs::list(&volume, "")?.into_iter().filter(|e| e.is_dir).find_map(|e| {
         let m = fatfs::read_file(&volume, &format!("{}/meta.inf", e.name))?;
         Some((e.name, ribbit_didj::package::Meta::parse(&String::from_utf8_lossy(&m))))
@@ -1767,23 +1768,45 @@ pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
         name => name.map_or(stem, str::to_string),
     };
     let art = card_art(&meta, |f| fatfs::read_file(&volume, &format!("{folder}/{f}")));
-    let mut details = vec![("System", "Didj".to_string())];
+    // An Explorer cartridge (Device="LeapsterExplorer", PackageID LST3-...)
+    // is the same FAT volume; it plays in the Explorer's slot alone. A
+    // LeapPad's (Device="LeapPadExplorer") fits the slot too.
+    let leappad = meta.get("Device") == Some("LeapPadExplorer");
+    let explorer = leappad || meta.get("Device") == Some("LeapsterExplorer");
+    let system = if leappad {
+        "Leapster Explorer (a LeapPad cartridge)"
+    } else if explorer {
+        "Leapster Explorer"
+    } else {
+        "Didj"
+    };
+    let mut details = vec![("System", system.to_string())];
     for (label, key) in [("Name", "Name"), ("Version", "Version"), ("Product", "ProductID"), ("Publisher", "Publisher"), ("Developer", "Developer")] {
         if let Some(v) = meta.get(key) {
             details.push((label, v.to_string()));
         }
     }
-    details.push(("Status", "early emulation: Ribbit starts it from the Didj's menu (a console set up with a profile)".to_string()));
+    details.push((
+        "Status",
+        if leappad {
+            "early emulation: in the Explorer's slot, its menu shows the game; most LeapPad games then ask to be played on a LeapPad"
+        } else if explorer {
+            "early emulation: in the Explorer's slot, its menu shows the game; take it out from the Emulation menu"
+        } else {
+            "early emulation: Ribbit starts it from the Didj's menu (a console set up with a profile)"
+        }
+        .to_string(),
+    ));
     details.push(("File", path.display().to_string()));
     let id = meta.get("ProductID").unwrap_or("").to_string();
     Some(Game {
         path: path.to_path_buf(),
-        family: Family::Didj,
+        family: if explorer { Family::Explorer } else { Family::Didj },
         title,
         subtitle: meta.get("Version").map_or(String::new(), |v| format!("version {v}")),
         details,
-        tags: vec!["Cartridge".into()],
-        key: format!("didj-cart-{id}"),
+        tags: vec![if explorer { EXPLORER_OWN_CART_TAG } else { "Cartridge" }.into()],
+        key: format!("{}-cart-{id}", if explorer { "explorer" } else { "didj" }),
         art,
     })
 }
@@ -1818,18 +1841,25 @@ pub fn on_explorer(didj: &crate::library::Game) -> crate::library::Game {
 /// The tag of `on_explorer` entries.
 pub const EXPLORER_CART_TAG: &str = "Didj cartridge";
 
+/// The tag of an Explorer cartridge's own entry (`describe_cart`).
+pub const EXPLORER_OWN_CART_TAG: &str = "Cartridge";
+
 /// The dump at `path` if it is a Didj cartridge (zipped or not): the raw
 /// flash, or an image of its FAT volume alone, made into the raw flash.
 pub fn read_cart(path: &Path) -> Option<Vec<u8>> {
     use ribbit_didj::cart;
     let raw = path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("zip"));
     let len = std::fs::metadata(path).ok()?.len() as usize;
-    if raw && len % (cart::PAGE_RAW * cart::PAGES_PER_BLOCK) != 0 && len % 15360 != 0 {
+    if raw && len % (cart::PAGE_RAW * cart::PAGES_PER_BLOCK) != 0 && len % 15360 != 0 && len % (cart::PAGE * cart::PAGES_PER_BLOCK) != 0 {
         return None;
     }
     let data = ribbit_core::read_image(path).ok()?;
     if cart::Cart::looks_like(&data) {
         return Some(data);
+    }
+    // A Leapster Explorer cartridge: FAT from page 0, no UBI.
+    if cart::is_explorer_image(&data) {
+        return Some(cart::from_explorer_image(&data));
     }
     cart::is_volume(&data).then(|| cart::from_volume(&data).ok()).flatten()
 }
@@ -1916,6 +1946,28 @@ mod tests {
     /// programs write to /Didj reaches the save, where the other modes find
     /// it (carry::user_files). RIBBIT_DIDJ_DIR: a folder of Didj packages;
     /// RIBBIT_DIDJ_SHOT=<file.png> saves the picture.
+    /// Every Leapster Explorer cartridge dump (zipped or not) in
+    /// RIBBIT_EXPLORER_CARTS is an Explorer game that goes into its slot,
+    /// titled from its meta.inf, and reads as a cartridge with the Emerald type.
+    #[test]
+    #[ignore]
+    fn explorer_cartridges_are_explorer_games() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_EXPLORER_CARTS").expect("RIBBIT_EXPLORER_CARTS"));
+        let mut n = 0;
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let path = e.unwrap().path();
+            let raw = read_cart(&path).unwrap_or_else(|| panic!("{}: not read as a cartridge", path.display()));
+            let data = ribbit_core::read_image(&path).unwrap();
+            let g = describe_cart(&path, &data).unwrap_or_else(|| panic!("{}: no meta.inf", path.display()));
+            assert!(g.family == crate::library::Family::Explorer && g.plays_in_explorer_slot() && !g.is_explorer_cart(), "{}", path.display());
+            assert!(!g.title.is_empty());
+            assert_eq!(ribbit_didj::cart::Cart::new(raw).unwrap().cart_type(), ribbit_didj::cart::EMERALD);
+            n += 1;
+        }
+        assert!(n > 0);
+        println!("{n} Explorer cartridges");
+    }
+
     /// "Turn off when idle" on all three modes, in real time (9 minutes):
     /// off (the default), the Didj is still on past its 7 minutes; on, it
     /// shuts down, stays off and the app is told. RIBBIT_DIDJ_DIR as above.

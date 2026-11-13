@@ -76,18 +76,23 @@ struct IdleLoop {
     r: [u32; 16],
     cpsr: u32,
     activity: u64,
+    /// The instruction count then.
+    at: u64,
 }
 
 impl IdleLoop {
-    /// Whether the CPU is where it was at the last jump back, with the same
-    /// registers and no write or I/O access since (an idle loop); notes the
-    /// state for next time if not.
-    fn again(&mut self, cpu: &Arm, activity: u64) -> bool {
+    /// If the CPU is where it was at the last jump back, with the same
+    /// registers and no write or I/O access since (an idle loop), the
+    /// instructions one time round takes; otherwise notes the state for next
+    /// time.
+    fn again(&mut self, cpu: &Arm, activity: u64, now: u64) -> Option<u64> {
         if self.activity == activity && self.cpsr == cpu.cpsr && self.r == cpu.r {
-            return true;
+            let period = now - self.at;
+            self.at = now;
+            return Some(period);
         }
-        *self = IdleLoop { r: cpu.r, cpsr: cpu.cpsr, activity };
-        false
+        *self = IdleLoop { r: cpu.r, cpsr: cpu.cpsr, activity, at: now };
+        None
     }
 }
 
@@ -191,7 +196,11 @@ impl Zippity {
     /// to the next one at once. The system spends most of its time in such
     /// loops (waiting for the video interrupt's flag in RAM), and the result
     /// is the same as running them. Waiting for an interrupt (CP15) is
-    /// skipped the same way.
+    /// skipped the same way. Only whole times round are skipped, stopping
+    /// short of the next tick, frame or end of a NAND transfer (whose status
+    /// the loop may be polling), and the rest is run: the CPU is then where
+    /// it would have been, and everything comes out bit-identical to running
+    /// every instruction.
     pub fn run(&mut self, n: u64) {
         let end = self.bus.now + n;
         // The next frame interrupt (at instruction FRAME - 1 of each frame)
@@ -214,6 +223,7 @@ impl Zippity {
             }
             // Instructions up to the next event.
             let next = frame_at.min(tick_at).min(end);
+            let window = self.bus.now;
             while self.bus.now < next {
                 if self.bus.lines_dirty {
                     self.bus.lines_dirty = false;
@@ -223,11 +233,23 @@ impl Zippity {
                 self.cpu.step(&mut self.bus);
                 self.bus.now += 1;
                 let (pc, at) = (self.cpu.r[15], self.cpu.current);
-                if (self.cpu.waiting || pc <= at && at - pc < 64) && !self.bus.probe.no_idle_skip
-                    && idle.again(&self.cpu, self.bus.activity)
+                if (self.cpu.waiting || pc <= at && at - pc < 64)
+                    && !self.bus.probe.no_idle_skip
+                    && let Some(period) = idle.again(&self.cpu, self.bus.activity, self.bus.now)
                 {
-                    self.bus.skipped += next - self.bus.now;
-                    self.bus.now = next;
+                    // The last time round must have seen what the coming ones
+                    // will: no tick or frame since it began, and the NAND's
+                    // busy status (read without counting as activity) not
+                    // changed during it.
+                    let now = self.bus.now;
+                    let (last, nand) = (now - period, self.bus.nand_busy_until);
+                    if last >= window && !(last < nand && nand <= now) {
+                        let until = if nand > now { next.min(nand) } else { next };
+                        let skip = (until - now) / period * period;
+                        self.bus.skipped += skip;
+                        self.bus.now += skip;
+                        idle.at = self.bus.now;
+                    }
                 }
             }
         }
@@ -247,18 +269,19 @@ impl Zippity {
     /// The picture: SCREEN_W x SCREEN_H pixels, 0x00RRGGBB. It is the one
     /// drawn when the kernel last handed the chip a frame's sprite list, as
     /// the chip draws into a frame buffer the TV then shows. While the
-    /// kernel loads the next screen it keeps interrupts off for frames on
-    /// end, its frame handler does not run and the TV keeps showing the last
-    /// picture, though the sprite cache it came from is being overwritten
-    /// (drawing that memory instead showed garbage between the start-up
-    /// screens, which recordings do not). The same holds while a game's own
-    /// kernel is loaded (no frame handler at all for seconds: the TV keeps
-    /// the "LOADING" screen, where drawing memory gave black and garbage).
+    /// kernel loads the next screen it sends no frame for many fields and
+    /// the TV keeps showing the last picture, though the sprite cache it
+    /// came from is being overwritten (drawing that memory instead showed
+    /// garbage between the start-up screens, which recordings do not). The
+    /// same holds while a game's own kernel is loaded (no frame sent for
+    /// seconds: the TV keeps the "LOADING" screen, where drawing memory gave
+    /// black and garbage).
     /// Drawn now only before the first picture.
     pub fn render(&self, out: &mut [u32]) {
         match self.bus.picture_at {
             Some(_) if self.bus.picture.len() == out.len() => {
-                out.copy_from_slice(&self.bus.picture)
+                out.copy_from_slice(&self.bus.picture);
+                self.bus.apply_fade(out);
             }
             _ => self.bus.render(out),
         }
@@ -315,7 +338,18 @@ impl Zippity {
             return Err("this state is from another version of the Zippity model".into());
         }
         let mut z: Zippity = bincode::deserialize(&state[4..]).map_err(|e| e.to_string())?;
+        // The flashes are not in the state: keep the system NAND and the
+        // cartridge in the slot (without it a game loaded from a state
+        // found no cartridge to read).
         std::mem::swap(&mut z.bus.nand.flash, &mut self.bus.nand.flash);
+        // The cartridge stays in the slot (it is not in the state either).
+        std::mem::swap(&mut z.bus.nand.cart, &mut self.bus.nand.cart);
+        std::mem::swap(&mut z.bus.nand.touched, &mut self.bus.nand.touched);
+        // So does the choice to draw pictures (not in the state: it came
+        // back false, and no picture was drawn after loading until the app
+        // set it again; tools that never set it drew memory live, garbage
+        // while a game loads).
+        z.bus.want_picture = self.bus.want_picture;
         z.bus.nand.dirty = self.bus.nand.dirty;
         z.bus.lines_dirty = true;
         z.bus.probe = std::mem::take(&mut self.bus.probe);

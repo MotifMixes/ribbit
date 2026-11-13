@@ -348,3 +348,145 @@ impl Bus {
         (((l >> shift) * main) >> 7, ((r >> shift) * main) >> 7)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sound unit with RAM: the words at halfword address `at`.
+    fn bus_with(at: u32, words: &[u16]) -> Bus {
+        let mut bus = Bus::new(Vec::new());
+        for (i, w) in words.iter().enumerate() {
+            let a = (at as usize + i) * 2;
+            bus.ram[a..a + 2].copy_from_slice(&w.to_le_bytes());
+        }
+        // Full main volume, volume select 2 (as the kernel sets them).
+        bus.set_latch(0xD040_0E04, 0x7F);
+        bus.set_latch(0xD040_0E34, 0x08A8);
+        bus
+    }
+
+    /// Starts channel 0 at `addr` (halfwords) with `mode`, loop address,
+    /// full volume and envelope level (the envelope held: manual, +0xE54),
+    /// centred, and phase 0x20000 (one sample of the sound per output
+    /// sample), with interpolation off (+0xE34 bit 9).
+    fn start(bus: &mut Bus, addr: u32, mode: u32, loop_addr: u32) {
+        bus.spu_set(0, 0, addr);
+        bus.spu_set(0, 1, mode);
+        bus.spu_set(0, 2, loop_addr);
+        bus.spu_set(0, 3, 0x407F);
+        bus.spu_set(0, 4, 0x7F00);
+        bus.spu_set(0, 6, 0);
+        bus.set_latch(0xD040_1810, 0x2_0000);
+        bus.set_latch(0xD040_0E34, 0x08A8 | 0x200);
+        bus.set_latch(0xD040_0E54, 1);
+        bus.spu_enable(0, 1);
+        bus.spu_set(0, 5, 0x7F);
+    }
+
+    /// What a sample comes out as on the right: times the envelope level
+    /// (0x7F of 0x80), volume and pan (0x7F x 0x7F of 2^14), the volume
+    /// select's shift (2) and the main volume (0x7F of 0x80).
+    fn scale(s: i32) -> i32 {
+        (((((s * 0x7F) >> 7) * 0x7F * 0x7F) >> 14) >> 2) * 0x7F >> 7
+    }
+
+    /// The standard IMA ADPCM decoder, low nibble first.
+    fn ima(words: &[u16]) -> Vec<i32> {
+        let (mut v, mut idx, mut out) = (0i32, 0usize, Vec::new());
+        for w in words {
+            for k in 0..4 {
+                let n = (w >> (4 * k)) & 15;
+                let step = IMA_STEPS[idx];
+                let mut d = step >> 3;
+                if n & 4 != 0 {
+                    d += step;
+                }
+                if n & 2 != 0 {
+                    d += step >> 1;
+                }
+                if n & 1 != 0 {
+                    d += step >> 2;
+                }
+                v = (v + if n & 8 != 0 { -d } else { d }).clamp(-32768, 32767);
+                idx = (idx as i32 + IMA_INDEX[(n & 7) as usize]).clamp(0, 88) as usize;
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn output_rate_is_a_quarter_of_the_sound_clock() {
+        assert_eq!(OUTPUT_RATE, 70_312.5);
+    }
+
+    /// A one-shot ADPCM sound decodes as IMA ADPCM (low nibble first, the
+    /// step index clamped at 0 and 88, the level at 16 bits), ends at its
+    /// 0xFFFF word, and then the channel stops: enable bit clear, stop flag
+    /// set.
+    #[test]
+    fn adpcm_one_shot_decodes_and_stops() {
+        let sound = [0x7777, 0x7777, 0x0F0F, 0x9999, 0x1234, 0xFFFF];
+        let mut bus = bus_with(0x1000, &sound);
+        bus.set_latch(0xD040_0E00, 1);
+        start(&mut bus, 0x1000, 0x9000, 0);
+        let mut got = Vec::new();
+        for _ in 0..25 {
+            got.push(bus.spu_mix().1);
+        }
+        let want: Vec<i32> = ima(&sound[..5]).iter().map(|&s| scale(s)).collect();
+        assert_eq!(&got[..20], &want[..]);
+        assert!(!bus.voices[0].playing);
+        assert_eq!(bus.latch(0xD040_0E00) & 1, 0);
+        assert_eq!(bus.spu_stopped[0] & 1, 1);
+        assert_eq!(&got[20..], &[0; 5]);
+    }
+
+    /// A looping instrument: an ADPCM attack, then at its 0xFFFF the loop
+    /// address, played as plain unsigned 16-bit samples (the ADPCM bit
+    /// clears) over and over.
+    #[test]
+    fn adpcm_attack_then_pcm_loop() {
+        let attack = [0x1111, 0xFFFF];
+        let pcm = [0x9000, 0x7000, 0x8000, 0xFFFF];
+        let mut words = attack.to_vec();
+        words.extend_from_slice(&pcm);
+        let mut bus = bus_with(0x2000, &words);
+        start(&mut bus, 0x2000, 0xE000, 0x2002);
+        let mut got = Vec::new();
+        for _ in 0..16 {
+            got.push(bus.spu_mix().1);
+        }
+        let want_attack: Vec<i32> = ima(&attack[..1]).iter().map(|&s| scale(s)).collect();
+        assert_eq!(&got[..4], &want_attack[..]);
+        // At the end marker the last sample repeats once (MAME's model),
+        // then the loop: 0x1000, -0x1000, 0, again and again.
+        assert_eq!(got[4], want_attack[3]);
+        let lp = [scale(0x1000), scale(-0x1000), 0];
+        for (i, &v) in got[5..].iter().enumerate() {
+            let k = i % 4;
+            if k < 3 {
+                assert_eq!(v, lp[k], "loop sample {i}");
+            }
+        }
+        assert_eq!(bus.spu_reg(0, 1) & 0x8000, 0, "the ADPCM bit clears at the loop");
+        assert!(bus.voices[0].playing);
+    }
+
+    /// The beat counter: the base count runs down once a tick; each time it
+    /// reloads the beat count drops; at 0 (with bit 15) the flag rises.
+    #[test]
+    fn beat_counter_flags_after_base_times_beats_ticks() {
+        let mut bus = Bus::new(Vec::new());
+        bus.set_latch(0xD040_0E10, 4);
+        bus.set_latch(0xD040_0E14, 0x8000 | 3);
+        let mut ticks = 0;
+        while !bus.beat_flag {
+            bus.beat_tick();
+            ticks += 1;
+            assert!(ticks < 100);
+        }
+        assert_eq!(ticks, 1 + 4 * 2);
+    }
+}

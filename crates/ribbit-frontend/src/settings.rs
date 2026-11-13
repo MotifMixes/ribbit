@@ -166,6 +166,9 @@ pub struct Settings {
     /// The player's RockIt Twist keys: action (`twist::action_name`) to key
     /// name; actions not here keep their default keys.
     pub twist_keys: BTreeMap<String, String>,
+    /// The player's Zippity keys: action (`zippity::action_name`) to key
+    /// name; actions not here keep their default keys (`zippity::KEYS`).
+    pub zippity_keys: BTreeMap<String, String>,
     /// The original LeapPad's base ROM (kept apart from the Leapster's BIOS).
     pub leappad_bios: Option<PathBuf>,
     /// The virtual book opened last with each LeapPad cartridge (cartridge
@@ -316,6 +319,7 @@ impl Default for Settings {
             didj_serial_tcp: false,
             didj_extras_notice: true,
             twist_keys: BTreeMap::new(),
+            zippity_keys: BTreeMap::new(),
             leappad_bios: None,
             leappad_books: BTreeMap::new(),
             leappad_book_only: false,
@@ -592,6 +596,21 @@ mod tests {
             ("↑", "Z", "7")
         );
         assert_eq!(cap_text("PageDown"), "PgDn");
+    }
+
+    #[test]
+    fn zippity_keys_round_trip() {
+        let mut s = Settings::default();
+        assert!(s.zippity_keys.is_empty(), "the defaults are zippity::KEYS");
+        s.zippity_keys.insert("Red".into(), "KeyQ".into());
+        s.zippity_keys.insert("Home".into(), "Enter".into());
+        let text = toml::to_string_pretty(&s).unwrap();
+        let back = toml::from_str::<Settings>(&text).unwrap();
+        assert_eq!(back.zippity_keys, s.zippity_keys);
+        assert_eq!(back, s);
+        assert!(back.zippity_keys.values().all(|k| key_from_name(k).is_some()));
+        // A settings file from before has none.
+        assert!(toml::from_str::<Settings>("volume = 0.5").unwrap().zippity_keys.is_empty());
     }
 
     #[test]

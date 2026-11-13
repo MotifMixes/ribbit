@@ -25,15 +25,18 @@ These consoles are experimental: some games may not work yet. The [compatibility
 
 The Zippity is LeapFrog's TV console with a dance mat and a bopper. It needs a dump of its system memory (its NAND) in your games folder; its built-in games and its cartridges then play.
 
-| Zippity | Key |
-|---|---|
-| Bopper | Arrow keys |
-| Green spot (choose) | `Z` |
-| Red spot | `X` |
-| Blue spot | `H` |
-| Pause / Home | `Backspace` |
-| Stand on the home spot | `Enter` (or **Input › Zippity: stand on the home spot**, `Shift`) |
-| Left / right foot | `-` / `=` |
+| Zippity | Key | Controller |
+|---|---|---|
+| Bopper | Arrow keys | D-pad / left stick |
+| Red spot | `Z` | B |
+| Blue spot | `X` | X or Y |
+| Green spot (choose) | `C` | A |
+| Pause / Home (on the bopper) | `Space` | Back |
+| Left / right foot | `A` / `S` | LB / RB |
+| Stand on the home spot (jump while standing) | `D` | Start |
+| Keep standing on the home spot | `Shift` (or **Input › Zippity: stand on the home spot**) | |
+
+These keys replace the Leapster's while a Zippity runs. Change them in **Input › Key bindings…** with **Zippity** chosen in the console list.
 
 ## RockIt Twist (early emulation)
 
@@ -131,7 +134,7 @@ Nobody has tried this on a real Didj yet. If the Didj complains, put your backup
 
 ### Leapster Explorer: library, installing games
 
-The **Leapster Explorer** tab shows the console first. After it come its built-in apps, games installed on it (**Installed**), Didj cartridges (they play in its slot) and Explorer game packages (`.lf2`, `.lfp`) in your games folders (**Not installed**). Clicking a game turns the Explorer on. Pick the game in its menu. A game that isn't installed is installed first.
+The **Leapster Explorer** tab shows the console first. After it come its built-in apps, games installed on it (**Installed**), Didj cartridges and Explorer cartridges (both play in its slot; dumps as `.bin` or zipped), and Explorer game packages (`.lf2`, `.lfp`) in your games folders (**Not installed**). Clicking a game turns the Explorer on. Pick the game in its menu (a cartridge is the first square). LeapPad cartridges fit the slot too, but most of them only show a screen asking to be played on a LeapPad, and some later cartridges (Frozen, PJ Masks, Paw Patrol, Trolls…) say they are not supported on this console. A game that isn't installed is installed first.
 
 - **Install game…** on the tab, **Emulation › Leapster Explorer › Install game (.lf2 / .lfp)…**, or dropping a package onto the window installs it the way LeapFrog Connect does. It stays when Ribbit closes. Right-click an installed game to uninstall it, with or without its saves.
 - **Export the Explorer's files…** writes your profiles, progress and installed games as `LF/Bulk` in a real Explorer's layout. A real Explorer offers no drive to copy them back to, so keep the export as a backup.

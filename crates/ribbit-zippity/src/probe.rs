@@ -33,6 +33,10 @@ pub struct Probe {
     /// The controllers' state over time: (state, from, to); outside these
     /// windows the state set with `Zippity::set_pad` is used.
     pub pad_script: Vec<(u16, u64, u64)>,
+    /// Research: send the controllers' packets every this many instructions
+    /// instead of once a millisecond (`FRAME` shows the old once-a-frame
+    /// rate's "switch on your controllers" panel).
+    pub radio_period: Option<u64>,
     /// Print each sound channel start.
     pub spu_log: bool,
     /// Operations started on the 0xD0800000 engine.
@@ -49,7 +53,7 @@ pub struct Probe {
 }
 
 impl Probe {
-    pub(crate) fn io(&mut self, now: u64, pc: u32, a: u32, write: Option<u32>, size: u32) {
+    pub(crate) fn io(&mut self, now: u64, pc: u32, a: u32, write: Option<u32>, size: u32, value: u32) {
         if self.enabled {
             let e = self.stats.entry(a).or_insert_with(|| Access { first_pc: pc, ..Default::default() });
             match write {
@@ -60,7 +64,7 @@ impl Probe {
                 None => e.reads += 1,
             }
             if e.reads + e.writes <= 6 && self.first.len() < 2000 {
-                self.first.push(line(pc, a, write, size));
+                self.first.push(line(pc, a, write, size, value));
             }
         }
         if let Some((lo, hi)) = self.watch
@@ -68,7 +72,7 @@ impl Probe {
             && (lo..=hi).contains(&a)
             && self.watched.len() < 400_000
         {
-            self.watched.push(format!("{now:>10} {}", line(pc, a, write, size)));
+            self.watched.push(format!("{now:>10} {}", line(pc, a, write, size, value)));
         }
     }
 
@@ -82,9 +86,10 @@ impl Probe {
     }
 }
 
-fn line(pc: u32, a: u32, write: Option<u32>, size: u32) -> String {
+/// An access, with the value written or read.
+fn line(pc: u32, a: u32, write: Option<u32>, size: u32, value: u32) -> String {
     match write {
         Some(v) => format!("{pc:08x}  W{size} {a:08x} = {v:08x}"),
-        None => format!("{pc:08x}  R{size} {a:08x}"),
+        None => format!("{pc:08x}  R{size} {a:08x} -> {value:08x}"),
     }
 }
