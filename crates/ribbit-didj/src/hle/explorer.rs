@@ -435,6 +435,9 @@ pub(crate) struct Explorer {
     pub tilt: [i32; 4],
     #[serde(default)]
     pub tilt_tick: i32,
+    /// SysV semaphore sets by id: (key, values).
+    #[serde(default)]
+    pub sems: std::collections::BTreeMap<u32, (u32, Vec<i32>)>,
     /// A LeapPad Explorer (`leappad.rs`): board ID 0x0B, its screen.
     #[serde(default)]
     pub leappad: bool,
@@ -842,6 +845,8 @@ impl Process {
         Some(match n {
             14 => self.x_mknod(a[0], a[1], a[2]),
             281..=297 | 366 => self.x_socket_call(n, a),
+            // SysV semaphores (semop, semget, semctl, semtimedop): libvr5 and dmix use them.
+            298..=300 | 312 => self.sysv_sem(n, a),
             5 | 322 => {
                 // /proc/uptime is made when read.
                 let at = if n == 5 { a[0] } else { a[1] };

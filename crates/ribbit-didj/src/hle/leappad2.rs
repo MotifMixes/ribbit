@@ -189,6 +189,8 @@ pub fn system_from_packages(dir: &std::path::Path) -> Result<(Vfs, Vec<String>),
     }
     super::explorer::add_tree(&mut vfs, "/LF/Bulk", &bulk);
     finish(&mut vfs);
+    // OpenGL ES and EGL answered by Ribbit (gles.rs): the VR5 GPU isn't modelled.
+    super::gles::patch_libraries(&mut vfs);
     Ok((vfs, skipped))
 }
 
@@ -290,3 +292,102 @@ impl Process {
 /// The cartridge's MTD as the LeapPad 2's cartridge.sh names it
 /// (/dev/mtdblock7). GUESS: its size line, as the Explorer's 64 MB part.
 const CART_MTD: &str = "mtd7: 04000000 00004000 \"Cartridge\"\n";
+
+impl Process {
+    /// SysV semaphores (ipc/sem.c semantics, one machine): semget (299),
+    /// semctl (300), semop (298) and semtimedop (312, its timeout ignored).
+    /// A semop that can't go on waits and tries again, as a sleeping task.
+    pub(super) fn sysv_sem(&mut self, n: u32, a: [u32; 6]) -> Result<u32, i32> {
+        const ENOENT: i32 = 2;
+        const EEXIST: i32 = 17;
+        const EINVAL: i32 = 22;
+        const EAGAIN: i32 = 11;
+        const ERANGE: i32 = 34;
+        const IPC_CREAT: u32 = 0o1000;
+        const IPC_EXCL: u32 = 0o2000;
+        const IPC_NOWAIT: u16 = 0o4000;
+        let sems = &mut self.x.sems;
+        match n {
+            299 => {
+                let (key, nsems, flags) = (a[0], a[1] as usize, a[2]);
+                if key != 0
+                    && let Some((&id, (_, v))) = sems.iter().find(|(_, (k, _))| *k == key)
+                {
+                    if flags & IPC_CREAT != 0 && flags & IPC_EXCL != 0 {
+                        return Err(EEXIST);
+                    }
+                    if nsems > v.len() {
+                        return Err(EINVAL);
+                    }
+                    return Ok(id);
+                }
+                if key != 0 && flags & IPC_CREAT == 0 {
+                    return Err(ENOENT);
+                }
+                if nsems == 0 || nsems > 250 {
+                    return Err(EINVAL);
+                }
+                let id = sems.keys().next_back().map_or(0x8000, |k| k + 1);
+                sems.insert(id, (key, vec![0; nsems]));
+                Ok(id)
+            }
+            300 => {
+                let (id, num, cmd, arg) = (a[0], a[1] as usize, a[2] & 0xFF, a[3]);
+                let Some((_, v)) = sems.get_mut(&id) else { return Err(EINVAL) };
+                match cmd {
+                    0 => {
+                        sems.remove(&id);
+                        Ok(0)
+                    }
+                    1 | 2 | 19 | 20 => Ok(0), // IPC_SET, IPC_STAT, SEM_STAT, SEM_INFO: nothing kept
+                    11 | 14 | 15 => Ok(0),    // GETPID, GETNCNT, GETZCNT
+                    12 => v.get(num).map(|&x| x as u32).ok_or(EINVAL),
+                    16 => {
+                        if arg as i32 > 32767 || (arg as i32) < 0 {
+                            return Err(ERANGE);
+                        }
+                        *v.get_mut(num).ok_or(EINVAL)? = arg as i32;
+                        Ok(0)
+                    }
+                    13 | 17 => {
+                        let len = v.len();
+                        if cmd == 13 {
+                            let vals: Vec<u8> = v.iter().flat_map(|&x| (x as u16).to_le_bytes()).collect();
+                            if !self.mem().write_bytes(arg, &vals) {
+                                return Err(super::EFAULT);
+                            }
+                        } else {
+                            let bytes = self.mem().read_bytes(arg, len * 2).ok_or(super::EFAULT)?;
+                            let vals: Vec<i32> = bytes.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]]) as i32).collect();
+                            self.x.sems.get_mut(&id).unwrap().1 = vals;
+                        }
+                        Ok(0)
+                    }
+                    _ => Err(EINVAL),
+                }
+            }
+            _ => {
+                let (id, sops, nsops) = (a[0], a[1], a[2] as usize);
+                let bytes = self.mem().read_bytes(sops, nsops * 6).ok_or(super::EFAULT)?;
+                let ops: Vec<(usize, i32, u16)> =
+                    bytes.chunks(6).map(|c| (u16::from_le_bytes([c[0], c[1]]) as usize, i16::from_le_bytes([c[2], c[3]]) as i32, u16::from_le_bytes([c[4], c[5]]))).collect();
+                let Some((_, v)) = self.x.sems.get_mut(&id) else { return Err(EINVAL) };
+                let mut new = v.clone();
+                for &(num, op, flg) in &ops {
+                    let Some(val) = new.get_mut(num) else { return Err(EINVAL) };
+                    let blocked = (op < 0 && *val + op < 0) || (op == 0 && *val != 0);
+                    if blocked {
+                        if flg & IPC_NOWAIT != 0 {
+                            return Err(EAGAIN);
+                        }
+                        self.block = Some(super::task::Wait::Retry(self.clock() + std::time::Duration::from_millis(1)));
+                        return Ok(0);
+                    }
+                    *val += op;
+                }
+                *v = new;
+                Ok(0)
+            }
+        }
+    }
+}

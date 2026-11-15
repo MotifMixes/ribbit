@@ -189,6 +189,11 @@ impl Process {
         BASE + l as u32 * RGBREGLEN + r + 0xC
     }
 
+    /// RGB layer `l`'s picture as the MLC shows it: (address, bytes a line).
+    pub(super) fn fb_layer_memory(&mut self, l: usize) -> (u32, u32) {
+        (self.fb_read(l, RGBADDRESS), self.fb_read(l, RGBVSTRIDE))
+    }
+
     fn fb_read(&mut self, l: usize, r: u32) -> u32 {
         let a = self.fb_reg(l, r);
         self.m.bus.read32(a)

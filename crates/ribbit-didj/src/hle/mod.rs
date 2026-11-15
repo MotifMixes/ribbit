@@ -13,6 +13,7 @@ mod mlc;
 pub mod elf;
 pub mod explorer;
 pub mod leappad2;
+pub mod gles;
 pub mod leappad;
 pub mod mem;
 mod state;
@@ -282,6 +283,9 @@ pub struct Process {
     /// (explorer.rs).
     #[serde(default)]
     pub(super) x: explorer::Explorer,
+    /// OpenGL ES and EGL for the programs (gles.rs), made at the first call.
+    #[serde(skip)]
+    pub(super) gles: Option<Box<gles::Host>>,
 }
 
 /// The JIT stops where Ribbit answers instead of the kernel: system calls,
@@ -378,6 +382,7 @@ impl Process {
             tlb_for: 0,
             tlb_generation: 0,
             x: Default::default(),
+            gles: None,
         };
         p.mlc_init();
         p.hz = p.m.hle_cpu_hz();
@@ -785,6 +790,11 @@ impl Process {
             self.cpu.r[7]
         } else {
             let swi = self.mem().get32(ret.wrapping_sub(4)).unwrap_or(0) & 0xFF_FFFF;
+            // A GL/EGL function replaced by a hook (gles.rs).
+            if swi & 0xFF_0000 == gles::SWI_BASE {
+                self.gles_call(swi & 0xFFFF);
+                return;
+            }
             if swi == 0 { self.cpu.r[7] } else { swi.wrapping_sub(0x90_0000) }
         };
         self.call_eabi = user & psr::T != 0 || self.mem().get32(ret.wrapping_sub(4)).unwrap_or(0) & 0xFF_FFFF == 0;

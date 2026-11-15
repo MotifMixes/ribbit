@@ -1,0 +1,9 @@
+[package]
+name = "ribbit-gles"
+description = "OpenGL ES 1.1 (fixed function) and EGL in software, for programs Ribbit runs that draw with them (LeapPad 2/3, LeapPad Academy)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
