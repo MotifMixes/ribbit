@@ -7,8 +7,10 @@ docs/explorer-enhanced-hle.md): the firmware's own ARM programs on Ribbit's ARM 
 their Linux system calls instead of a kernel. There is no Original (real kernel) mode for these: the SoCs
 (Nexell NXP3200 / NXP4330) aren't emulated.
 
-Status (2026-11-15): research done; the ARM core runs ARMv7 programs (`Arm::v7`); the HLE has a LeapPad 2
-mode (`hle::leappad2`, `Process::new_leappad2`). See "What works" below. Not in the app yet.
+Status (2026-11-15): the ARM core runs ARMv7 programs (`Arm::v7`); the HLE has a LeapPad 2 mode
+(`hle::leappad2`, `Process::new_leappad2`) that boots the real firmware through the first-time setup to the
+home menu, and a LeapPad cartridge passes its "play this on a LeapPad" check there. Games don't draw yet: the
+LeapPad 2's Lightning draws with OpenGL ES on the LF2000's Nexell VR5 GPU, not emulated. Not in the app.
 
 ## Hardware
 
@@ -94,3 +96,83 @@ AppBundle), Mr. Pencil - The Lost Colors of Doodleberg, Pet Pals - Dog Show Dete
 SpongeBob - Best Day Ever, Thomas & Friends - The Great Penguin Rescue. Four carry a Base_lib with
 Device "LeapPad2Explorer" (Cooking! Recipes on the Road, Hello Kitty and Friends, The Magic School Bus -
 Dinosaurs, Monsters University) but are Explorer games otherwise. None says LeapPad 3.
+
+## What works (Enhanced (new), headless, 2026-11-15)
+
+Run: `EXPLORER_HLE_LEAPPAD2=1 cargo run --release -p ribbit-didj --example explorerhle -- D:/ribbit-roms/LeapPad2/EnglishLeapPad2`
+(Git Bash: MSYS_NO_PATHCONV=1) with the explorerhle options (docs/explorer-enhanced-hle.md), plus
+EXPLORER_HLE_TILT=x,y,z,orientation (the accelerometer), EXPLORER_HLE_STATE_OUT / EXPLORER_HLE_STATE (save the
+run's end, start from it). The file systems take 7-20 s to build (the language packs' bzip2).
+
+* /sbin/init runs rcS: lfd, the volume, VideoDaemon with the startup video and chime (the sound comes out),
+  setcal (with /flags/pointercal the setup has no Screen Calibration), mounts, networking (fails: no sockets
+  but AF_UNIX), dftp2, then /usr/bin/app starts AppManager, which starts the Flash UI (LPAD/main.swf).
+* The first-time setup by touch, as a player does it: Select Language (US), Date and Time, Create Profile
+  (name typed on the on-screen keyboard), grade, then the LeapFrog Connect tutorial videos and the home menu
+  (profile, Cartridge, My Profile, Check Here). Frames: D:/ribbit-scratch/leappad2/evidence/.
+  The setup screens and the startup video are drawn turned 90 degrees: that is their own art
+  (LanguageSelection.swf has a 272x480 stage; the logo in StartupVideo.ogg, a 480x272 video, is upright for a
+  LeapPad held on its side), not a fault (CHECK on a real LeapPad 2).
+* Cartridges: the Explorer dumps of LeapPad games go in the slot (`Process::explorer_cart` ->
+  `leappad2_cart`: what /etc/mdev/cartridge.sh does: cart_hotswap, /LF/Cart mounted, cnotify 1 and 3 to
+  /tmp/cart_events_socket). The home menu's Cartridge square shows the game's icon (Thomas & Friends).
+  Tapped, the cartridge's launcher (App.so, UEBLApp) logs "screen stats (480 x 272)", "Firmware and Device
+  OK...", "Microphone widget OK..." and AppManager loads the game, BookApp.so (here LeapFrog's LexPatches.json
+  replaces Thomas's with the "LBA7 Patch" BookApp). The game then sets up OpenGL ES (eglInitialize,
+  eglCreateWindowSurface, eglCreateContext) and crashes: libvr5 wants SysV semaphores (semget/semctl,
+  system calls 299/300, not in the HLE) and the GPU (/dev/ogl_vr5, /dev/vmem).
+* Speed: 40-100 million instructions a second while busy (video, Flash) on the i9; the real CPU is about
+  530 MHz, so screens change slowly (a setup step takes 5-20 s). The JIT interprets every ARMv7 and VFP
+  instruction inside its blocks (only MOVW is compiled).
+
+Fixed on the way (shared with the Explorer's HLE): a socket name whose node was unlinked can be bound again
+(VideoDaemon and AppManager both bind /tmp/cart_events_socket after unlinking it); save states keep the VFP
+registers (appended after the state, older states still load); the JIT keeps its ARMv7 mode after a load.
+
+## What's missing
+
+* **The GPU.** LeapPad 2 Lightning (libLightning2D: textures, eglSwapBuffers) and so every Lightning game
+  draws with OpenGL ES 1.1 through Nexell's libvr5.so: /dev/ogl_vr5 (ioctls), /dev/vmem (video memory),
+  /dev/mem, SysV semaphores. The VR5 is undocumented; the kernel's side is in the GPL source
+  (arch/arm/mach-nxp3200/vr5). Two ways: emulate the VR5 at its registers/command buffers (reverse
+  engineering libvr5's command stream), or HLE the GL API (answer libGLESv1_CM/libEGL's exported functions
+  in Rust, as Ribbit answers system calls, with a software or host-GPU renderer). The second looks smaller:
+  GLES 1.1 is documented and Lightning uses a small part of it (textured quads).
+* SysV IPC (semget/semop/semctl, shm*): needed by libvr5 and by ALSA's dmix (the Explorer's HLE lives
+  without dmix already).
+* Instructions: everything the scans found is implemented. Not implemented: Thumb-2 (only 63 libgcc_s
+  functions are Thumb; none were called), NEON (tagged in the LeapPad 3's uClibc, not found in use).
+  The JIT runs MOVT, the extends, the exclusives, the media and VFP instructions through the interpreter one
+  at a time; compiling the common ones (MOVT, UXTH/UXTB/SXTH, VFP loads, stores and arithmetic) is the
+  speed work. Unaligned LDR/STR are done in the interpreter only (the JIT rotates, as ARMv5).
+* The camera (/dev/video*, VIP), microphone, USB, Wi-Fi: absent (the programs carry on).
+* GUESSES to check on a real LeapPad 2: the input devices' order, the NAND/MTD table, MfgData's place
+  (the Explorer's NOR layout is used; "NOR checksum error" is printed and the defaults taken), RAM size.
+
+## LeapPad 3
+
+Not started in the HLE. Its firmware (6.2.0.654) is the same family on Linux 3.4.24 (SMP), uClibc
+0.9.33.1, with Qt and Wi-Fi; its root file system is ext4 on eMMC (Ribbit has no ext4 reader yet; 7-Zip
+reads it), its kernel a uImage in a FAT partition. Its uClibc, Lightning and AppManager use the same ARMv7
+instructions as the LeapPad 2's (no NEON found in them). Its platform is CABO, 480x272. The same work
+applies (an ext4 reader, the LF3000's /sys and devices, and the GPU, likely a different one).
+
+## Plan for the app
+
+1. The GPU (HLE of GLES 1.1 as above), then a LeapPad cartridge to its title and play, checked frame by frame.
+2. Library: a LeapPad 2 family (Device "LeapPad2Explorer" packages: Firmware-Base `PAD2-0x0022...`), its
+   cartridges the Explorer dumps whose meta.inf says LeapPadExplorer (and the Explorer games, which it also
+   runs), started in Enhanced (new) only (no Original mode: no LF2000 machine).
+3. A session as `Hle::new_explorer` with `Process::new_leappad2`: the stylus, the d-pad and buttons (gpio-keys),
+   volume, the accelerometer from the keyboard or a gamepad's tilt, saves of Bulk and /flags (the NAND layout
+   of a LeapPad 2 is a GUESS: keep its files as a folder or a UBI image of our own), save states.
+4. Settings: "Turn off when idle" must hold (off: never idles off; the LeapPad 2's AppManager has the
+   Explorer's shutdown timer, "Shutdown Timer set for 12000 [ms]", so the Explorer's idle handling applies).
+5. Speed: compile the common ARMv7/VFP instructions in the JIT.
+
+## Open questions
+
+* Is the sideways setup really how a LeapPad 2 shows it? (A real unit or a video.)
+* The retail board ID (0x206/0x207/0x208) and what changes with it (front camera).
+* Where MfgData lives on the LF2000 (NAND partition or NOR); the real /proc/mtd.
+* The VR5's interface (ioctls of /dev/ogl_vr5, the command format) if the GPU is emulated instead of HLE'd.

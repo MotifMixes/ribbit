@@ -1336,7 +1336,7 @@ const CART_MTD: &str = "mtd10: 04000000 00004000 \"Cartridge\"\nmtd11: 03b5ec00 
 const CART_MOUNT: &str = "/dev/mtdblock11 /LF/Cart vfat ro,relatime,fmask=0022,dmask=0022,codepage=cp437,iocharset=iso8859-1,errors=remount-ro 0 0\n";
 
 impl Process {
-    fn proc_file(&self, path: &str) -> String {
+    pub(super) fn proc_file(&self, path: &str) -> String {
         match self.vfs.get(path).map(|n| &n.data) {
             Some(Data::File(d)) => String::from_utf8_lossy(d).into_owned(),
             _ => String::new(),
@@ -1351,6 +1351,9 @@ impl Process {
     /// /LF/Cart through the HLE (`mount`). At power-on CartManager finds it
     /// by itself.
     pub fn explorer_cart(&mut self, raw: Option<&[u8]>) -> Result<(), String> {
+        if self.x.leappad2 {
+            return self.leappad2_cart(raw);
+        }
         let files = match raw {
             Some(r) => Some(crate::cart::files(r).ok_or("no cartridge volume in the dump")?),
             None => None,

@@ -61,7 +61,15 @@ fn main() {
         ribbit_didj::hle::explorer::system_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"))
     };
     eprintln!("[explorerhle] file systems read in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+    // EXPLORER_HLE_STATE=<file>: start from a save state (made by
+    // EXPLORER_HLE_STATE_OUT=<file> at the end of a run of the same folder).
+    let base = vfs.clone();
     let mut p = if leappad2 { Process::new_leappad2(vfs) } else { Process::new_explorer(vfs) };
+    let from_state = std::env::var("EXPLORER_HLE_STATE").ok();
+    if let Some(path) = &from_state {
+        p.load_state(&std::fs::read(path).expect("the state"), &base).unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("[explorerhle] started from {path}");
+    }
     p.trace = std::env::var_os("EXPLORER_HLE_TRACE").is_some();
     if let Some(rle) = ribbit_didj::hle::explorer::splash_from_packages(dir.as_ref()).filter(|_| !leappad2) {
         p.explorer_splash(&rle);
@@ -80,7 +88,9 @@ fn main() {
     }
     let argv: Vec<&str> = if args.len() > 1 { args[1..].iter().map(String::as_str).collect() } else { vec!["/sbin/init"] };
     let envp = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/", "TERM=vt100"];
-    p.exec(argv[0], &argv, &envp).unwrap_or_else(|e| panic!("{e}"));
+    if from_state.is_none() {
+        p.exec(argv[0], &argv, &envp).unwrap_or_else(|e| panic!("{e}"));
+    }
     let until_ms: u128 = std::env::var("EXPLORER_HLE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(20000);
     let shot_path = std::env::var("EXPLORER_HLE_SHOT").unwrap_or_else(|_| "shot.png".into());
     let mut shots: Vec<u128> = std::env::var("EXPLORER_HLE_SHOTS").unwrap_or_default().split(',').filter_map(|v| v.parse().ok()).collect();
@@ -196,6 +206,10 @@ fn main() {
         f.extend((data.len() as u32).to_le_bytes());
         f.extend(&data);
         std::fs::write(&path, f).expect("can't write the WAV");
+    }
+    if let Ok(path) = std::env::var("EXPLORER_HLE_STATE_OUT") {
+        std::fs::write(&path, p.save_state(&base)).expect("write the state");
+        eprintln!("[explorerhle] state saved to {path}");
     }
     // EXPLORER_HLE_CAT=<path>,...: files' contents at the end (folders
     // listed).

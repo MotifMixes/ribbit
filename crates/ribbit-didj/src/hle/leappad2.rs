@@ -242,4 +242,51 @@ impl Process {
         p.m.jit.v7 = true;
         p
     }
+
+    /// A cartridge put in (`raw`: its dump) or taken out, on the LeapPad 2.
+    /// There the kernel's lfcart makes mdev run /etc/mdev/cartridge.sh,
+    /// which sets lf2000-nand/cart_hotswap, mounts /dev/mtdblock7 at
+    /// /LF/Cart and runs cnotify: 1 (CARTRIDGE_INSERTED) and, mounted, 3
+    /// (READY); on removal 4 (REMOVED), the unmount, 6 (CLEAN). Ribbit does
+    /// what the script does: cnotify connects to /tmp/cart_events_socket
+    /// and sends {1, state} (8 bytes), and writes /tmp/cart_brio_state
+    /// ("state, name"), from its disassembly.
+    pub(super) fn leappad2_cart(&mut self, raw: Option<&[u8]>) -> Result<(), String> {
+        let files = match raw {
+            Some(r) => Some(crate::cart::files(r).ok_or("no cartridge volume in the dump")?),
+            None => None,
+        };
+        let inserted = files.is_some();
+        let notify = |p: &mut Self, state: u32, name: &str| {
+            p.vfs.add_file("/tmp/cart_brio_state", format!("{state}, {name}").into_bytes());
+            let msg: Vec<u8> = [1u32, state].iter().flat_map(|w| w.to_le_bytes()).collect();
+            p.sock_notify("/tmp/cart_events_socket", msg);
+        };
+        const HOTSWAP: &str = "/sys/devices/platform/lf2000-nand/cart_hotswap";
+        let mtd = self.proc_file("/proc/mtd").replace(CART_MTD, "");
+        if inserted {
+            self.x.cart = files;
+            self.vfs.add_file(HOTSWAP, b"1\n".to_vec());
+            self.vfs.add_file("/proc/mtd", format!("{mtd}{CART_MTD}").into_bytes());
+            self.vfs.add_file("/sys/class/mtd/mtd7/name", b"Cartridge\n".to_vec());
+            notify(self, 1, "CARTRIDGE_STATE_INSERTED");
+            self.cart_mount();
+            self.vfs.add_file("/cart_mounted", b"1\n".to_vec());
+            notify(self, 3, "CARTRIDGE_STATE_READY");
+        } else {
+            notify(self, 4, "CARTRIDGE_STATE_REMOVED");
+            self.cart_unmount();
+            self.x.cart = None;
+            self.vfs.remove("/cart_mounted");
+            self.vfs.add_file(HOTSWAP, b"0\n".to_vec());
+            self.vfs.add_file("/proc/mtd", mtd.into_bytes());
+            self.vfs.remove("/sys/class/mtd/mtd7/name");
+            notify(self, 6, "CARTRIDGE_STATE_CLEAN");
+        }
+        Ok(())
+    }
 }
+
+/// The cartridge's MTD as the LeapPad 2's cartridge.sh names it
+/// (/dev/mtdblock7). GUESS: its size line, as the Explorer's 64 MB part.
+const CART_MTD: &str = "mtd7: 04000000 00004000 \"Cartridge\"\n";
