@@ -12,6 +12,7 @@ members = [
     "crates/ribbit-twist",
     "crates/ribbit-didj",
     "crates/ribbit-leappad",
+    "crates/ribbit-iquest",
     "crates/ribbit-speech",
     "crates/ribbit-memory",
     "crates/ribbit-video",
@@ -34,6 +35,7 @@ default-members = [
     "crates/ribbit-twist",
     "crates/ribbit-didj",
     "crates/ribbit-leappad",
+    "crates/ribbit-iquest",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
@@ -64,6 +66,7 @@ ribbit-clickstart = { path = "crates/ribbit-clickstart" }
 ribbit-twist = { path = "crates/ribbit-twist" }
 ribbit-didj = { path = "crates/ribbit-didj" }
 ribbit-leappad = { path = "crates/ribbit-leappad" }
+ribbit-iquest = { path = "crates/ribbit-iquest" }
 ribbit-speech = { path = "crates/ribbit-speech" }
 ribbit-memory = { path = "crates/ribbit-memory" }
 ribbit-video = { path = "crates/ribbit-video" }
@@ -104,4 +107,8 @@ opt-level = 2
 opt-level = 3
 
 [profile.dev.package.ribbit-twist]
+opt-level = 3
+
+# The iQuest's 8051 runs its debug-log printf a lot; research runs need speed.
+[profile.dev.package.ribbit-iquest]
 opt-level = 3

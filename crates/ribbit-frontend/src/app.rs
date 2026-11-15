@@ -112,6 +112,8 @@ pub struct App {
     zippity: Option<crate::zippity::ZipSession>,
     /// A ClickStart being played.
     clickstart: Option<crate::clickstart::CsSession>,
+    /// An iQuest or Turbo Twist Extreme being played.
+    iquest: Option<crate::iquest::IqSession>,
     /// A Didj being played.
     didj: Option<crate::didj::DidjSession>,
     /// Its latest picture.
@@ -326,6 +328,7 @@ impl App {
             session: None,
             zippity: None,
             clickstart: None,
+            iquest: None,
             didj: None,
             tv_frame: Vec::new(),
             zippity_cleaning: None,
@@ -686,6 +689,10 @@ impl App {
             c.stop();
             self.fit_window = FIT_TRIES;
         }
+        if let Some(q) = self.iquest.take() {
+            q.stop();
+            self.fit_window = FIT_TRIES;
+        }
         if let Some(d) = self.didj.take() {
             d.stop();
             self.fit_window = FIT_TRIES;
@@ -839,6 +846,9 @@ impl App {
         if hw == Hardware::ClickStart {
             return self.start_clickstart(bios, None);
         }
+        if matches!(hw, Hardware::IQuest | Hardware::TurboTwist) {
+            return self.start_iquest(bios, None);
+        }
         self.next_bios = Some(bios);
         if let Err(e) = self.boot(None) {
             let (title, explain) = explain_load_error(&e);
@@ -929,6 +939,28 @@ impl App {
                 self.ui.problem(title, explain, format!("{e:#}"));
             }
             return;
+        }
+        // The iQuest and the Turbo Twist Extreme: the base ROM alone, or a
+        // cartridge on its model's base ROM from the library.
+        if let Some(family @ (crate::library::Family::IQuest | crate::library::Family::TurboTwist)) =
+            internal.map(|g| g.family).or_else(|| crate::library::family_of(&path))
+        {
+            if internal.is_some() || crate::library::is_internal(&path) {
+                return self.start_iquest(path, None);
+            }
+            let hw = family.console();
+            return match self.library.bios_for(hw).map(Path::to_path_buf) {
+                Some(bios) => self.start_iquest(bios, Some(path)),
+                None => self.ui.problem(
+                    "No base ROM found",
+                    format!(
+                        "{} cartridges need the handheld's base ROM (a 4 MB dump) in one of your games folders. \
+                         Add the folder that holds it with \"Add games folder\".",
+                        hw.name()
+                    ),
+                    "",
+                ),
+            };
         }
         // The ClickStart: its system ROM's activities, or a cartridge on the
         // system ROM from the library.
@@ -1111,6 +1143,42 @@ impl App {
                     ),
                     None => format!("Ribbit couldn't load the Zippity's memory dump \"{}\". It may be damaged or not a full dump.", file_name(&nand)),
                 },
+                format!("{e:#}"),
+            ),
+        }
+    }
+
+    /// Plays an iQuest or Turbo Twist Extreme: its base ROM `bios`, with
+    /// `cart` in the slot (none: the base alone).
+    fn start_iquest(&mut self, bios: PathBuf, cart: Option<PathBuf>) {
+        self.end_session();
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::iquest::IqSession::start(&bios, cart.as_deref(), &self.save_dir(), sink, !self.settings.turn_off_when_idle) {
+            Ok(mut q) => {
+                self.fit_window = FIT_TRIES;
+                if let Some(p) = &cart {
+                    q.title = self.library.games.iter().find(|g| &g.path == p).map_or_else(
+                        || p.file_stem().map_or_else(|| q.title.clone(), |s| s.to_string_lossy().into_owned()),
+                        |g| g.title.clone(),
+                    );
+                }
+                self.iquest = Some(q);
+                self.paused = false;
+                if let Some(a) = &mut self.audio {
+                    a.clear();
+                }
+                self.update_title();
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't start the handheld",
+                format!(
+                    "Ribbit couldn't load the base ROM \"{}\"{}. It may be damaged or not a full dump.",
+                    file_name(&bios),
+                    match &cart {
+                        Some(c) => format!(" with the cartridge \"{}\"", file_name(c)),
+                        None => String::new(),
+                    }
+                ),
                 format!("{e:#}"),
             ),
         }
@@ -1678,6 +1746,7 @@ impl App {
         let busy = self.session.is_some()
             || self.zippity.is_some()
             || self.clickstart.is_some()
+            || self.iquest.is_some()
             || self.didj.is_some()
             || self.twist.is_some()
             || self.leappad.is_some()
@@ -1703,7 +1772,7 @@ impl App {
         if span < STATUS_EVERY {
             return;
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
         tracing::info!(target: "ribbit::perf",
             fps = (self.status.1 as f64 / span.as_secs_f64()).round(),
             running,
@@ -1723,6 +1792,11 @@ impl App {
             Some(Hardware::Zippity)
         } else if self.clickstart.is_some() {
             Some(Hardware::ClickStart)
+        } else if let Some(q) = &self.iquest {
+            Some(match q.model {
+                ribbit_iquest::Model::IQuest => Hardware::IQuest,
+                ribbit_iquest::Model::TurboTwistExtreme => Hardware::TurboTwist,
+            })
         } else if let Some(d) = &self.didj {
             Some(if d.leappad2 {
                 Hardware::LeapPad2
@@ -2068,6 +2142,8 @@ impl App {
                 "Zippity"
             } else if self.clickstart.is_some() {
                 "ClickStart"
+            } else if let Some(q) = &self.iquest {
+                q.model.name()
             } else if let Some(d) = &self.didj {
                 if d.explorer { "Leapster Explorer" } else { "Didj" }
             } else if self.twist.is_some() { "RockIt Twist" } else { "no game" };
@@ -2152,6 +2228,7 @@ impl App {
                 .map(|s| &s.title)
                 .or(self.zippity.as_ref().map(|z| &z.title))
                 .or(self.clickstart.as_ref().map(|c| &c.title))
+                .or(self.iquest.as_ref().map(|q| &q.title))
                 .or(self.didj.as_ref().map(|d| &d.title))
                 .or(self.leappad.as_ref().map(|l| &l.title))
                 .or(self.twist.as_ref().map(|t| &t.title));
@@ -2929,6 +3006,10 @@ impl App {
             c.reset();
             self.ui.toast("Reset");
         }
+        if let Some(q) = &self.iquest {
+            q.reset();
+            self.ui.toast("Reset");
+        }
         if let Some(d) = &self.didj {
             // The Explorer has its own Enhanced (new) setting.
             let mode = crate::didj::Mode { hle: if d.explorer { self.settings.explorer_hle } else { self.didj_mode().hle }, ..self.didj_mode() };
@@ -2947,7 +3028,7 @@ impl App {
     }
 
     fn toggle_pause(&mut self) {
-        if self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() {
+        if self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() {
             self.paused = !self.paused;
             if let Some(a) = &mut self.audio {
                 a.clear();
@@ -3445,6 +3526,8 @@ impl App {
                 (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H)
             } else if self.clickstart.is_some() {
                 (ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H)
+            } else if let Some(q) = &self.iquest {
+                q.size()
             } else {
                 if self.leappad.is_some() {
                     self.ui.toast("The LeapPad has no screen to record");
@@ -3571,8 +3654,16 @@ impl App {
             return;
         }
         // It turned itself off: closed, as a Leapster that did.
-        if self.clickstart.as_ref().is_some_and(|c| c.powered_off()) {
+        if self.clickstart.as_ref().is_some_and(|c| c.powered_off()) || self.iquest.as_ref().is_some_and(|q| q.powered_off()) {
             self.end_session();
+            return;
+        }
+        if let Some(q) = &self.iquest {
+            q.set_running(!halted);
+            q.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+            q.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+            self.speed_percent = q.speed_percent();
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
         if let Some(c) = &self.clickstart {
@@ -3857,6 +3948,13 @@ impl App {
         {
             return;
         }
+        // The iQuest's keyboard and the Turbo Twist Extreme's buttons
+        // (iquest::key_name).
+        if let Some(q) = &self.iquest
+            && q.key(code, pressed)
+        {
+            return;
+        }
         // The RockIt Twist has its own keys (twist::KEYS), Tab and Shift
         // included, while its session is open.
         if let Some(t) = &mut self.twist {
@@ -3914,7 +4012,7 @@ impl App {
         let open = self.ui.side_menu_open();
         let (was_open, paused_by_menu) = self.side_menu;
         if open && !was_open {
-            let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some();
+            let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
             let pause = running && !self.paused;
             if pause {
                 self.toggle_pause();
@@ -3935,7 +4033,7 @@ impl App {
         let Some(set) = self.opts.keep_screen_on else {
             return;
         };
-        let playing = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
+        let playing = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
         if playing != self.screen_on {
             set(playing);
             self.screen_on = playing;
@@ -4049,7 +4147,7 @@ impl App {
                 PadEvent::Button(b, pressed) => self.press(Source::Gamepad, b, pressed),
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
-                    if (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
+                    if (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
                         self.toggle_pause();
                     }
                 }
@@ -4151,6 +4249,9 @@ impl App {
         if let Some(c) = &self.clickstart {
             c.frame(&mut self.tv_frame);
         }
+        if let Some(q) = &self.iquest {
+            q.frame(&mut self.tv_frame);
+        }
         let didj_size = self.didj.as_ref().map(|d| d.frame(&mut self.tv_frame));
         if let Some(t) = &self.twist {
             t.frame(&mut self.tv_frame);
@@ -4171,6 +4272,8 @@ impl App {
             Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
         } else if self.clickstart.is_some() {
             Some((ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H))
+        } else if let Some(q) = &self.iquest {
+            Some(q.size())
         } else if let Some(size) = didj_size {
             Some(size)
         } else if lmax_dual {
@@ -4206,7 +4309,7 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
+                running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 explorer_cart: self.didj.as_ref().filter(|d| d.explorer).map(|d| d.has_cart()),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 leappad: self.leappad.is_some(),
@@ -4229,6 +4332,7 @@ impl App {
                     .map(|s| s.title.clone())
                     .or(self.zippity.as_ref().map(|z| z.title.clone()))
                     .or(self.clickstart.as_ref().map(|c| c.title.clone()))
+                    .or(self.iquest.as_ref().map(|q| q.title.clone()))
                     .or(self.didj.as_ref().map(|d| d.title.clone()))
                     .or(self.twist.as_ref().map(|t| t.title.clone()))
                     .or(self.leappad.as_ref().map(|l| l.title.clone()))
@@ -4301,6 +4405,10 @@ impl App {
                 (None, _, _) if self.clickstart.is_some() => {
                     let c = self.clickstart.as_ref().unwrap();
                     crate::discord::Presence::playing(&c.title, "ClickStart", c.started)
+                }
+                (None, _, _) if self.iquest.is_some() => {
+                    let q = self.iquest.as_ref().unwrap();
+                    crate::discord::Presence::playing(&q.title, q.model.name(), q.started)
                 }
                 (None, Some(t), _) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
                 (None, None, Some(l)) => crate::discord::Presence::playing(&l.title, "LeapPad", l.started).with_series(l.series.as_deref()),
@@ -4396,7 +4504,7 @@ impl App {
             None => Gpu::lcd_rect(px_area, display),
         };
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some())
+        let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some())
             .then_some((self.lcd_px, display, self.settings.ai));
         // The handheld LCD inset in the bottom-right corner of the TV picture.
         let inset = lmax_dual.then(|| {
@@ -4499,7 +4607,7 @@ impl App {
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
         self.frame_diag.frame(frame_start, took, running && !self.halted());
         match picture {
             Some(hash) => self.details.frame(frame_start, hash, took),

@@ -3551,6 +3551,7 @@ dependencies = [
  "ribbit-debug",
  "ribbit-didj",
  "ribbit-input",
+ "ribbit-iquest",
  "ribbit-leappad",
  "ribbit-memory",
  "ribbit-speech",
@@ -3576,6 +3577,16 @@ version = "1.9.3"
 name = "ribbit-input"
 version = "1.9.3"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ribbit-iquest"
+version = "1.9.3"
+dependencies = [
+ "ribbit-core",
+ "ribbit-leappad",
+ "ribbit-memory",
  "serde",
 ]
 

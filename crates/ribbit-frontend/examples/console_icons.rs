@@ -11,7 +11,7 @@ mod console_icons;
 use ribbit_memory::known::Hardware;
 use std::collections::HashMap;
 
-const ALL: [Hardware; 12] = [
+const ALL: [Hardware; 14] = [
     Hardware::Leapster,
     Hardware::LeapsterLmax,
     Hardware::Leapster2,
@@ -24,6 +24,8 @@ const ALL: [Hardware; 12] = [
     Hardware::LeapPadExplorer,
     Hardware::LeapPad2,
     Hardware::ClickStart,
+    Hardware::IQuest,
+    Hardware::TurboTwist,
 ];
 
 struct Canvas {

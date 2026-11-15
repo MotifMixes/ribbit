@@ -155,6 +155,10 @@ pub enum Family {
     LeapPad2,
     /// A ClickStart cartridge, or its system ROM's built-in activities.
     ClickStart,
+    /// An iQuest cartridge, or its base ROM alone.
+    IQuest,
+    /// The Turbo Twist Extreme's base ROM (no cartridge dump known).
+    TurboTwist,
 }
 
 /// Cartridges made for the Leapster 2 alone, by CRC32: the "Leapster 2
@@ -165,15 +169,17 @@ const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 impl Family {
     /// The library tabs: the game consoles in alphabetical order, then the
     /// LeapPad (a book reader; Ribbit is a game emulator first).
-    pub const ALL: [Family; 10] = [
+    pub const ALL: [Family; 12] = [
         Family::ClickStart,
         Family::Didj,
+        Family::IQuest,
         Family::Leapster,
         Family::Leapster2,
         Family::Explorer,
         Family::LeapPadExplorer,
         Family::LeapPad2,
         Family::RockItTwist,
+        Family::TurboTwist,
         Family::Zippity,
         Family::LeapPad,
     ];
@@ -195,6 +201,8 @@ impl Family {
             Family::LeapPadExplorer => "LeapPad Explorer",
             Family::LeapPad2 => "LeapPad 2",
             Family::ClickStart => "ClickStart",
+            Family::IQuest => "iQuest",
+            Family::TurboTwist => "Turbo Twist Extreme",
         }
     }
 
@@ -203,7 +211,7 @@ impl Family {
         match self {
             Family::Leapster => !matches!(
                 hw,
-                Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart
+                Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart | Hardware::IQuest | Hardware::TurboTwist
             ),
             Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
@@ -214,6 +222,8 @@ impl Family {
             Family::LeapPadExplorer => hw == Hardware::LeapPadExplorer,
             Family::LeapPad2 => hw == Hardware::LeapPad2,
             Family::ClickStart => hw == Hardware::ClickStart,
+            Family::IQuest => hw == Hardware::IQuest,
+            Family::TurboTwist => hw == Hardware::TurboTwist,
         }
     }
 
@@ -230,6 +240,8 @@ impl Family {
             Family::LeapPadExplorer => Hardware::LeapPadExplorer,
             Family::LeapPad2 => Hardware::LeapPad2,
             Family::ClickStart => Hardware::ClickStart,
+            Family::IQuest => Hardware::IQuest,
+            Family::TurboTwist => Hardware::TurboTwist,
         }
     }
 
@@ -245,7 +257,7 @@ impl Family {
 }
 
 /// The consoles, in the order the library lists them.
-pub const CONSOLES: [Hardware; 7] = [
+pub const CONSOLES: [Hardware; 9] = [
     Hardware::Leapster,
     Hardware::LeapsterTv,
     Hardware::LeapsterLmax,
@@ -253,6 +265,8 @@ pub const CONSOLES: [Hardware; 7] = [
     Hardware::Zippity,
     Hardware::RockItTwist,
     Hardware::ClickStart,
+    Hardware::IQuest,
+    Hardware::TurboTwist,
 ];
 
 pub struct Game {
@@ -663,6 +677,10 @@ impl Library {
             if let Some(Found::ClickStartBios(_)) = classify(p) {
                 return BiosFile { hardware: Hardware::ClickStart, path: p.to_path_buf(), name: "ClickStart system ROM".into() };
             }
+            if let Some(Found::IQuestBios(g)) = classify(p) {
+                let hardware = g.family.console();
+                return BiosFile { hardware, path: p.to_path_buf(), name: format!("{} base ROM", hardware.name()) };
+            }
             let known = ribbit_core::load_firmware(p).ok().and_then(|f| f.known().copied());
             let hardware = known.map_or(Hardware::Leapster, |k| k.hardware);
             let name = known.map_or_else(
@@ -739,7 +757,7 @@ impl Library {
             .filter(|&hw| {
                 !matches!(
                     hw,
-                    Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart
+                    Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart | Hardware::IQuest | Hardware::TurboTwist
                 )
             })
             .filter(|&hw| self.bios_for(hw).is_some())
@@ -766,6 +784,8 @@ impl Library {
             Hardware::LeapPadExplorer => Family::LeapPadExplorer,
             Hardware::LeapPad2 => Family::LeapPad2,
             Hardware::ClickStart => Family::ClickStart,
+            Hardware::IQuest => Family::IQuest,
+            Hardware::TurboTwist => Family::TurboTwist,
             _ => Family::Leapster,
         }
     }
@@ -899,6 +919,23 @@ fn worker(
                     }
                 }
                 if tx.send(Msg::Game(game)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Some(Found::IQuestBios(game)) => {
+                let hardware = game.family.console();
+                let bios = BiosFile { hardware, path: path.clone(), name: format!("{} base ROM", hardware.name()) };
+                if tx.send(Msg::Bios(bios)).is_err() {
+                    return;
+                }
+                if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Some(Found::IQuest(game)) => {
+                if seen_games.insert(game.key.clone()) && tx.send(Msg::Game(game)).is_err() {
                     return;
                 }
                 continue;
@@ -1093,6 +1130,11 @@ enum Found {
     ClickStart(Game),
     /// The ClickStart's system ROM: the console, and its built-in activities.
     ClickStartBios(Game),
+    /// An iQuest cartridge.
+    IQuest(Game),
+    /// An iQuest or Turbo Twist Extreme base ROM: the handheld, playable
+    /// alone.
+    IQuestBios(Game),
 }
 
 /// Zippity images: the system NAND (with spare area) and cartridges.
@@ -1176,6 +1218,15 @@ fn classify(path: &Path) -> Option<Found> {
             return Some(Found::ClickStart(describe_clickstart(path, k, &id)));
         }
     }
+    // The iQuest's and Turbo Twist Extreme's base ROMs share the LeapPad's
+    // boot stub (they are its chip), so they go first; iQuest cartridges
+    // hold only data.
+    if let Some(model) = ribbit_iquest::identify(&data) {
+        return Some(Found::IQuestBios(describe_iquest_bios(path, model, &data)));
+    }
+    if ribbit_iquest::looks_like_cartridge(&data) {
+        return Some(Found::IQuest(describe_iquest(path, &data)));
+    }
     // LeapPad images start with the same 8051 boot stub; a base ROM is not
     // a game (it is opened with File > Open BIOS).
     match ribbit_leappad::identify(&data) {
@@ -1206,6 +1257,8 @@ pub fn family_of(path: &Path) -> Option<Family> {
         Found::LeapPad(_) => Some(Family::LeapPad),
         Found::Didj(g) => Some(g.family),
         Found::ClickStart(_) | Found::ClickStartBios(_) => Some(Family::ClickStart),
+        Found::IQuest(_) => Some(Family::IQuest),
+        Found::IQuestBios(g) => Some(g.family),
         Found::Bios(..) => None,
     }
 }
@@ -1228,7 +1281,7 @@ pub fn find_zippity_nand(folders: &[PathBuf]) -> Option<PathBuf> {
 
 /// Whether a file is a console's built-in games (the Zippity's NAND).
 pub fn is_internal(path: &Path) -> bool {
-    matches!(classify(path), Some(Found::ZippityNand(_) | Found::ClickStartBios(_)))
+    matches!(classify(path), Some(Found::ZippityNand(_) | Found::ClickStartBios(_) | Found::IQuestBios(_)))
 }
 
 /// A Leapster cartridge image, or None for anything else.
@@ -1238,6 +1291,49 @@ fn read_cartridge(data: Vec<u8>) -> Option<Cartridge> {
     let plausible = data.len().is_power_of_two() && data.len() >= 0x10_0000;
     let cart = Cartridge::from_bytes(data).ok()?;
     (cart.known().is_some() || cart.header().is_ok() || plausible).then_some(cart)
+}
+
+/// An iQuest cartridge, named from its file ("iQuest 4.0 Science Grade 5
+/// (500-12328-A)": the title, and the part number as the subtitle).
+fn describe_iquest(path: &Path, data: &[u8]) -> Game {
+    let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let (title, part) = match stem.rfind(" (") {
+        Some(i) => (stem[..i].trim().to_string(), stem[i + 2..].trim_end_matches(|c| c != ')').trim_end_matches(')').to_string()),
+        None => (stem.clone(), String::new()),
+    };
+    let title = title.strip_prefix("iQuest ").map_or(title.clone(), str::to_string);
+    let mut details = vec![("System", "iQuest".to_string()), ("Size", format!("{} MB", data.len().div_ceil(1 << 20)))];
+    if !part.is_empty() {
+        details.push(("Part number", part.clone()));
+    }
+    let id = ribbit_memory::ImageId::of(data);
+    let key = format!("{:08x}", id.crc32);
+    Game { path: path.to_path_buf(), family: Family::IQuest, title, subtitle: part, details, tags: vec!["Cartridge".into()], key, art: Art::Missing }
+}
+
+/// An iQuest or Turbo Twist Extreme base ROM, listed as the handheld on
+/// its own (no cartridge).
+fn describe_iquest_bios(path: &Path, model: ribbit_iquest::Model, data: &[u8]) -> Game {
+    let (family, title) = match model {
+        ribbit_iquest::Model::IQuest => (Family::IQuest, "iQuest (no cartridge)"),
+        ribbit_iquest::Model::TurboTwistExtreme => (Family::TurboTwist, "Turbo Twist Extreme"),
+    };
+    let id = ribbit_memory::ImageId::of(data);
+    let details = vec![("System", model.name().to_string()), ("Base ROM", file_name_of(path))];
+    Game {
+        path: path.to_path_buf(),
+        family,
+        title: title.to_string(),
+        subtitle: "Base ROM".to_string(),
+        details,
+        tags: vec!["System".into()],
+        key: format!("{:08x}", id.crc32),
+        art: Art::Missing,
+    }
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned())
 }
 
 /// A LeapPad cartridge, named from its file: "(LeapPad, 500-11878-B) Level 4 -
