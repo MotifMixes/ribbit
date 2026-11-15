@@ -5,7 +5,7 @@
 An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leapster (the main target), the
 Leapster L-MAX, Leapster TV and Leapster 2, the Leapster Explorer, the Zippity, the RockIt Twist, the Didj, the
 original LeapPad and the ClickStart. Written in Rust, for **Windows, macOS,
-Linux and Android** (the Android app is new and has not been tested on real devices yet).
+Linux and Android**.
 
 ## Download and play
 
@@ -195,10 +195,9 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 
 **General**
 
-* Android: builds, but has never been run on a device; the Zippity is not wired up there. Controllers work
-  through their buttons and D-pad; analogue sticks are not read yet. No update check in the Android app.
-* Linux and macOS builds are new and less tested than Windows. Linux has been run under WSL only; macOS has not
-  been run yet.
+* Android: the Zippity is not wired up there. Controllers work through their buttons and D-pad; analogue sticks are
+  not read yet. No update check in the Android app.
+* Linux and macOS are less tested than Windows.
 
 ## Roadmap
 
@@ -215,8 +214,7 @@ Roughly in this order:
 6. **More LeapFrog systems** (in progress): the LeapPad 1, 2 and 3, the My First LeapPad, Little Touch LeapPad and
    LeapPad Plus Microphone, the iQuest and Turbo Twist, and the games of the LeapFrog Epic and LeapPad Academy.
 7. **Homebrew**: documentation and tools for writing your own Leapster and RockIt Twist programs.
-8. **More platforms**: Android on real devices (analogue sticks, update check), Linux and macOS tested on real
-   machines.
+8. **More platforms**: Android analogue sticks and update check; more testing on Linux and macOS.
 
 Later, maybe: a BIOS-free mode (a separate Flash player for Leapster cartridges, clearly labelled, never replacing
 the accurate path).
@@ -241,7 +239,7 @@ cargo build --release
   writes `target/dist/Ribbit-<version>-macos-universal.zip` (`Ribbit.app` for Apple silicon and Intel).
 * Add `--upload` to the Linux or macOS script to attach the file to the GitHub release `v<version>` (needs the `gh`
   CLI, logged in; make the release first, e.g. from the Windows build).
-* **Android release** (arm64, untested on a device): `python -I scripts/build-apk.py` builds
+* **Android release** (arm64): `python -I scripts/build-apk.py` builds
   `target/android/ribbit-debug.apk` and the release copy `target/dist/Ribbit-<version>-android-arm64.apk` (needs the
   Android SDK/NDK and `cargo-ndk`). Android 8 or later.
 
