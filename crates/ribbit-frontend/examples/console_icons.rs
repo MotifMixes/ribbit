@@ -86,7 +86,7 @@ impl Canvas {
 
 fn main() {
     let out = std::path::PathBuf::from(std::env::args().nth(1).expect("usage: console_icons <out.png>"));
-    let (row, w) = (140.0f32, 620.0f32);
+    let (row, w) = (140.0f32, 760.0f32);
     let h = row * ALL.len() as f32;
     let ctx = egui::Context::default();
     let mut textures: HashMap<egui::TextureId, egui::ColorImage> = HashMap::new();
@@ -108,6 +108,14 @@ fn main() {
                 console_icons::chip(&pb, egui::pos2(0.0, 0.0), hw);
                 ui.ctx().set_transform_layer(big, egui::emath::TSTransform::new(egui::vec2(270.0, y + 4.0), 2.0));
                 console_icons::paint_device(&p, egui::Rect::from_min_size(egui::pos2(270.0, y + 60.0), egui::vec2(72.0, 72.0)), hw);
+            }
+            // The LeapPad models, down the right-hand side: 128 and 40 points.
+            for (i, m) in ribbit_leappad::Model::ALL.into_iter().enumerate() {
+                let y = i as f32 * row + 6.0;
+                let r = egui::Rect::from_min_size(egui::pos2(624.0, y), egui::vec2(128.0, 128.0));
+                p.rect_filled(r, 16.0, egui::Color32::from_rgb(34, 44, 46));
+                console_icons::paint_leappad_model(&p, r, m);
+                console_icons::paint_leappad_model(&p, egui::Rect::from_min_size(egui::pos2(580.0, y), egui::vec2(40.0, 40.0)), m);
             }
         });
         for (id, deltas) in &full.textures_delta.set {

@@ -9,8 +9,8 @@
 //! the same output queue as the Leapster's.
 
 use crate::audio_out::AudioSink;
-use ribbit_leappad::book::{self, Book, PAGE_H, PAGE_W, Problem, Side, Spot, TouchReport};
-use ribbit_leappad::{MACHINE_HZ, Machine};
+use ribbit_leappad::book::{self, Book, Problem, Side, Spot, TouchReport};
+use ribbit_leappad::{MACHINE_HZ, Machine, Model};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -41,6 +41,9 @@ struct Shared {
     /// The breakpoint the machine stopped at (debugger), for the app.
     hit: Mutex<Option<u16>>,
     pen: Mutex<Option<Spot>>,
+    /// Little Touch LeapPad: the open spread's magnets (u32::MAX: leave
+    /// them as they are).
+    magnets: AtomicU32,
     power: AtomicBool,
     off: AtomicBool,
     /// The firmware's idle power-off ("Auto Power Down") turned it off, not
@@ -48,6 +51,9 @@ struct Shared {
     idle_off: AtomicBool,
     /// Keep it on however long it is left alone ("Turn off when idle" off).
     keep_awake: AtomicBool,
+    /// My First LeapPad: the ABC Phonics Bus template lies on the pad
+    /// (FC20 bit 3, `Bus::template_in`).
+    template: AtomicBool,
     log: Mutex<VecDeque<String>>,
     touches: Mutex<VecDeque<(Instant, TouchReport)>>,
     /// Percent of real time over the last second (f32 bits).
@@ -98,6 +104,9 @@ pub struct LeapPadSession {
     script: Option<(Instant, VecDeque<ScriptTouch>)>,
     /// The pen touches GO by itself (settings `leappad_auto_go`).
     pub auto_go: bool,
+    /// Which pad the base ROM is (LeapPad, My First LeapPad, Little Touch,
+    /// Plus Microphone).
+    pub model: Model,
 }
 
 /// One scripted touch: at `at` seconds, show spread `spread` and touch its
@@ -175,6 +184,7 @@ impl LeapPadSession {
             anyhow::bail!("{} is not a LeapPad base ROM", bios.display());
         }
         let mut m = Machine::new(rom.clone());
+        let model = m.model;
         m.bus.classic = classic;
         let mut cart_data = None;
         let mut repaired = false;
@@ -198,7 +208,10 @@ impl LeapPadSession {
             cart_data = Some(data.clone());
             m.insert_cartridge(data);
         }
-        let eeprom_path = save_dir.join("leappad.eeprom");
+        let eeprom_path = save_dir.join(match model {
+            Model::MyFirst => "myfirstleappad.eeprom",
+            _ => "leappad.eeprom",
+        });
         let eeprom = std::fs::read(&eeprom_path).ok();
         if let Some(e) = &eeprom {
             m.set_eeprom(e.clone());
@@ -209,10 +222,12 @@ impl LeapPadSession {
             paused: AtomicBool::new(false),
             hit: Mutex::new(None),
             pen: Mutex::new(None),
+            magnets: AtomicU32::new(u32::MAX),
             power: AtomicBool::new(false),
             off: AtomicBool::new(false),
             idle_off: AtomicBool::new(false),
             keep_awake: AtomicBool::new(true),
+            template: AtomicBool::new(false),
             log: Mutex::new(VecDeque::new()),
             touches: Mutex::new(VecDeque::new()),
             speed: AtomicU32::new(0),
@@ -228,8 +243,8 @@ impl LeapPadSession {
             run(&s)
         })?;
         let (series, title) = match cart {
-            Some(c) => c.file_stem().map_or_else(|| (None, "LeapPad".into()), |s| book_series(&book_title(&s.to_string_lossy()))),
-            None => (None, "LeapPad (no cartridge)".into()),
+            Some(c) => c.file_stem().map_or_else(|| (None, model.name().into()), |s| book_series(&book_title(&s.to_string_lossy()))),
+            None => (None, format!("{} (no cartridge)", model.name())),
         };
         Ok(LeapPadSession {
             shared,
@@ -255,6 +270,7 @@ impl LeapPadSession {
             pen: None,
             script: std::env::var_os("RIBBIT_LEAPPAD_SCRIPT").and_then(|p| read_script(Path::new(&p))).map(|s| (Instant::now(), s)),
             auto_go: true,
+            model,
         })
     }
 
@@ -290,7 +306,17 @@ impl LeapPadSession {
     /// outlines of everything touchable, and the GO spots). Returns whether
     /// the cartridge's layout could be read.
     pub fn open_cartridge_book(&mut self) -> bool {
-        let Some(cart) = self.cart.clone() else { return false };
+        // No cartridge: the book built into the base, if it has one (the
+        // Little Touch's base holds "One Bear in the Bedroom").
+        let Some(cart) = self.cart.clone() else {
+            if self.model == Model::LittleTouch
+                && let Ok(b) = Book::from_base(&self.words_input.0, &self.title)
+            {
+                self.open_book(Ok((b, Vec::new())));
+                return true;
+            }
+            return false;
+        };
         let built = std::fs::read(&cart)
             .map_err(|e| e.to_string())
             .and_then(|d| Book::from_cartridge(&d, &self.title, part_number(&cart).as_deref()));
@@ -533,6 +559,13 @@ impl LeapPadSession {
         self.shared.keep_awake.store(!on, Ordering::Relaxed);
     }
 
+    /// My First LeapPad: the ABC Phonics Bus template on the pad (it then
+    /// plays the base's own activity) or not. Other models have no such
+    /// switch.
+    pub fn set_template(&self, on: bool) {
+        self.shared.template.store(on, Ordering::Relaxed);
+    }
+
     /// The pad turned itself off for idling ("Auto Power Down").
     pub fn idle_powered_off(&self) -> bool {
         self.shared.off.load(Ordering::Relaxed) && self.shared.idle_off.load(Ordering::Relaxed)
@@ -638,11 +671,16 @@ fn run(s: &Shared) {
             }
             report.5 = pen.is_some();
             m.set_pen(pen);
+            let magnets = s.magnets.load(Ordering::Relaxed);
+            if magnets != u32::MAX {
+                m.set_magnets(magnets as u16);
+            }
             if s.power.swap(false, Ordering::Relaxed) {
                 s.idle_off.store(false, Ordering::Relaxed);
                 m.press_power();
             }
             m.keep_awake = s.keep_awake.load(Ordering::Relaxed);
+            m.bus.template_in = m.model == Model::MyFirst && s.template.load(Ordering::Relaxed);
             m.run_cycles(step);
             if let Some(h) = m.hit.take() {
                 *s.hit.lock().unwrap() = Some(h);
@@ -740,8 +778,18 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
     let words_h = if lp.words_status.is_empty() { 0.0 } else { 30.0 };
     let words_row = egui::Rect::from_min_max(egui::pos2(area.min.x, bar.min.y - words_h), egui::pos2(area.max.x, bar.min.y));
     let room = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, words_row.min.y)).shrink(10.0);
-    // The spread's size: two portrait pages side by side.
-    let spread_aspect = 2.0 * PAGE_W / PAGE_H;
+    // The spread's size: two portrait pages side by side (My First
+    // LeapPad: one landscape page; Little Touch: two squarish pages).
+    let model = lp.model;
+    let (page_w, page_h) = model.page_size();
+    let two = model.two_pages();
+    let spread_aspect = if two { 2.0 * page_w / page_h } else { page_w / page_h };
+    // Little Touch: the open spread's magnets tell the pad which it is (no
+    // book: none).
+    if model == Model::LittleTouch {
+        let magnets = lp.book.as_ref().and_then(|b| b.spreads.get(lp.spread)).and_then(|s| s.magnets).unwrap_or(0);
+        lp.shared.magnets.store(magnets as u32, Ordering::Relaxed);
+    }
     let spread = if *book_only {
         fit(room, spread_aspect)
     } else {
@@ -755,8 +803,9 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
     };
     let ctx = ui.ctx().clone();
     lp.poll_words(&ctx);
-    for side in [Side::Left, Side::Right] {
-        let page = page_rect(spread, side);
+    for side in if two { &[Side::Left, Side::Right][..] } else { &[Side::Left][..] } {
+        let side = *side;
+        let page = page_rect(spread, side, two);
         p.rect_filled(page.translate(egui::vec2(3.0, 3.0)), 3.0, egui::Color32::from_black_alpha(60));
         p.rect_filled(page, 3.0, PAPER);
         if let Some(tex) = lp.picture(&ctx, side) {
@@ -764,14 +813,14 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
         }
     }
     // The spiral binding.
-    let rings = 14;
+    let rings = if two { 14 } else { 0 };
     for i in 0..rings {
         let y = spread.min.y + spread.height() * (i as f32 + 0.5) / rings as f32;
         p.circle_stroke(egui::pos2(spread.center().x, y), spread.height() * 0.018, egui::Stroke::new(2.0, egui::Color32::from_gray(150)));
     }
     let to_screen = |s: Spot| {
-        let page = page_rect(spread, s.page);
-        egui::pos2(page.min.x + s.x / PAGE_W * page.width(), page.min.y + s.y / PAGE_H * page.height())
+        let page = page_rect(spread, s.page, two);
+        egui::pos2(page.min.x + s.x / page_w * page.width(), page.min.y + s.y / page_h * page.height())
     };
     let word_rect = |r: &book::Region| {
         let [x0, y0, x1, y1] = r.rect;
@@ -876,7 +925,7 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
             }
         }
         None => {
-            let page = page_rect(spread, Side::Left);
+            let page = page_rect(spread, Side::Left, two);
             let msg = if lp.cart.is_some() {
                 let why = lp.layout_note.as_ref().map_or(String::new(), |n| format!("\n\nRibbit could not draw this cartridge's book: {n}."));
                 format!(
@@ -894,7 +943,7 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
     // The pen: the mouse over the book; pressed, it is down on the page.
     let resp = ui.interact(spread, ui.id().with("leappad-book"), egui::Sense::click_and_drag());
     let hover = resp.hover_pos().or(resp.interact_pointer_pos());
-    let spot = hover.and_then(|h| book::spot_at((h.x - spread.min.x) / spread.width(), (h.y - spread.min.y) / spread.height()));
+    let spot = hover.and_then(|h| spot_at(model, (h.x - spread.min.x) / spread.width(), (h.y - spread.min.y) / spread.height()));
     let down = resp.is_pointer_button_down_on();
     match scripted_pen(lp) {
         // Paused, the pen is lifted (the pad stays drawn).
@@ -914,27 +963,32 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
         }
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
-    if !*book_only {
+    // The Little Touch has no pen: a hand presses the page.
+    if !*book_only && model.has_pen() {
         draw_pen(&p, area, spread, lp.pen.map(|(s, _)| to_screen(s)));
     }
     if lp.shared.off.load(Ordering::Relaxed) {
         p.rect_filled(spread, 3.0, egui::Color32::from_black_alpha(150));
-        p.text(spread.center(), egui::Align2::CENTER_CENTER, "The LeapPad is off.\nPress ON to turn it on.", egui::FontId::proportional(22.0), egui::Color32::WHITE);
+        p.text(spread.center(), egui::Align2::CENTER_CENTER, format!("The {} is off.\nPress ON to turn it on.", model.name()), egui::FontId::proportional(22.0), egui::Color32::WHITE);
     }
     // The bar.
     let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(egui::vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
     let n = lp.book.as_ref().map_or(0, |b| b.spreads.len());
-    if bar_ui.add_enabled(lp.spread > 0, egui::Button::new("◀")).on_hover_text("Previous page (the pen touches its GO)").clicked() {
+    // Little Touch books with magnets tell the pad their page by themselves;
+    // the others' page key is touched as a GO.
+    let by_magnets = lp.book.as_ref().is_some_and(|b| b.spreads.iter().any(|s| s.magnets.is_some()));
+    let turn_note = if by_magnets { "(its magnets tell the pad)" } else { "(the pen touches its GO)" };
+    if bar_ui.add_enabled(lp.spread > 0, egui::Button::new("◀")).on_hover_text(format!("Previous page {turn_note}")).clicked() {
         lp.spread -= 1;
-        if lp.auto_go {
+        if lp.auto_go && !by_magnets {
             touch_go(lp);
         }
     }
     let name = lp.book.as_ref().and_then(|b| b.spreads.get(lp.spread)).map_or("(no book)".to_string(), |s| s.name.clone());
     bar_ui.label(egui::RichText::new(format!("{name}  {}/{}", (lp.spread + 1).min(n), n)).color(egui::Color32::WHITE));
-    if bar_ui.add_enabled(lp.spread + 1 < n, egui::Button::new("▶")).on_hover_text("Next page (the pen touches its GO)").clicked() {
+    if bar_ui.add_enabled(lp.spread + 1 < n, egui::Button::new("▶")).on_hover_text(format!("Next page {turn_note}")).clicked() {
         lp.spread += 1;
-        if lp.auto_go {
+        if lp.auto_go && !by_magnets {
             touch_go(lp);
         }
     }
@@ -1169,7 +1223,24 @@ fn fit(room: egui::Rect, aspect: f32) -> egui::Rect {
     egui::Rect::from_center_size(room.center(), egui::vec2(w, h))
 }
 
-fn page_rect(spread: egui::Rect, side: Side) -> egui::Rect {
+/// Where a point of the shown spread falls (fractions of its width and
+/// height), in the model's page coordinates; My First LeapPad has one page.
+fn spot_at(model: Model, fx: f32, fy: f32) -> Option<Spot> {
+    if !(0.0..=1.0).contains(&fx) || !(0.0..=1.0).contains(&fy) {
+        return None;
+    }
+    let (w, h) = model.page_size();
+    if !model.two_pages() {
+        return Some(Spot { page: Side::Left, x: fx * w, y: fy * h });
+    }
+    let (page, px) = if fx < 0.5 { (Side::Left, fx * 2.0) } else { (Side::Right, fx * 2.0 - 1.0) };
+    Some(Spot { page, x: px * w, y: fy * h })
+}
+
+fn page_rect(spread: egui::Rect, side: Side, two: bool) -> egui::Rect {
+    if !two {
+        return spread;
+    }
     let half = spread.width() / 2.0;
     let x0 = spread.min.x + if side == Side::Left { 0.0 } else { half };
     egui::Rect::from_min_size(egui::pos2(x0, spread.min.y), egui::vec2(half, spread.height()))
@@ -1230,7 +1301,7 @@ fn debug_window(ctx: &egui::Context, lp: &LeapPadSession) {
         ui.label(format!("EEPROM calibration: {}  •  accesses not understood: {unknown}", if calibrated { "valid" } else { "missing" }));
         match lp.pen {
             Some((s, down)) => {
-                let (b, a) = book::pen_ratios(s);
+                let (b, a) = book::pen_ratios_for(lp.model, s);
                 ui.label(format!("Pen {} on the {:?} page at ({:.0}, {:.0})  •  sensor ratios B {:.3}, A {:.3}", if down { "down" } else { "over" }, s.page, s.x, s.y, b, a));
             }
             None => {

@@ -22,7 +22,7 @@ fn main() {
         m.hz = hz.parse().expect("HZ");
     }
     if std::env::var("FACTORY").is_ok() {
-        m.bus.eeprom = ribbit_leappad::eeprom::Eeprom::new(ribbit_leappad::calibration::factory_eeprom());
+        m.bus.eeprom = ribbit_leappad::eeprom::Eeprom::new(ribbit_leappad::Machine::factory_eeprom(m.model));
     }
     if let Ok(e) = std::env::var("EEPROM") {
         m.bus.eeprom = ribbit_leappad::eeprom::Eeprom::new(std::fs::read(e).expect("EEPROM file"));
@@ -63,7 +63,7 @@ fn main() {
         std::env::var("PAGEPEN").ok().map(|p| {
             let f: Vec<f64> = p.split(',').map(|x| x.parse().expect("PAGEPEN=page,x,y,start,length")).collect();
             let page = if f[0] == 0.0 { ribbit_leappad::book::Side::Left } else { ribbit_leappad::book::Side::Right };
-            let (u, v) = ribbit_leappad::book::pen_ratios(ribbit_leappad::book::Spot { page, x: f[1] as f32, y: f[2] as f32 });
+            let (u, v) = ribbit_leappad::book::pen_ratios_for(m.model, ribbit_leappad::book::Spot { page, x: f[1] as f32, y: f[2] as f32 });
             (u, v, (f[3] * 1e6) as u64, (f[4] * 1e6) as u64)
         })
     });
@@ -92,8 +92,53 @@ fn main() {
     let mut hits = vec![0u64; hit_at.len()];
     // WAV=file: the sound processor's 8 kHz mix.
     let wav = std::env::var("WAV").ok();
+    // Little Touch LeapPad: MAGNETS=hex@start;hex@start (the open page's
+    // magnet pattern from `start` million instructions) and
+    // KEY=row,col,start,length;... (a key of the switch matrix held).
+    let magnets: Vec<(u16, u64)> = std::env::var("MAGNETS").map(|v| v.split(';').map(|e| {
+        let (h, at) = e.split_once('@').unwrap_or((e, "0"));
+        (u16::from_str_radix(h, 16).expect("MAGNETS=hex@start"), at.parse::<u64>().expect("start") * 1_000_000)
+    }).collect()).unwrap_or_default();
+    let keys: Vec<[u64; 4]> = std::env::var("KEY").map(|v| v.split(';').map(|e| {
+        let f: Vec<u64> = e.split(',').map(|x| x.parse().expect("KEY=row,col,start,length")).collect();
+        [f[0], f[1], f[2] * 1_000_000, f[3] * 1_000_000]
+    }).collect()).unwrap_or_default();
+    // PWATCH=lo,hi,start: data reads of physical lo..=hi (hex) from `start`
+    // million instructions on, printed at the end (first 300).
+    let pwatch: Option<(u32, u32, u64)> = std::env::var("PWATCH").ok().map(|v| {
+        let f: Vec<&str> = v.split(',').collect();
+        (u32::from_str_radix(f[0], 16).unwrap(), u32::from_str_radix(f[1], 16).unwrap(), f[2].parse::<u64>().unwrap() * 1_000_000)
+    });
+    // TEMPLATE=1: My First LeapPad's template is on the pad.
+    m.bus.template_in = std::env::var("TEMPLATE").is_ok_and(|t| t == "1");
     let mut audio: Vec<i16> = Vec::new();
     for step in 0..steps {
+        if let Some((lo, hi, at)) = pwatch
+            && step == at
+        {
+            m.bus.pwatch = vec![(lo, hi)];
+        }
+        for &(pattern, at) in &magnets {
+            if step == at {
+                m.bus.magnets = pattern;
+                m.bus.uart.extend_from_slice(format!("
+<<magnets {pattern:03X}>>
+").as_bytes());
+            }
+        }
+        for &[r, c, at, len] in &keys {
+            if step == at {
+                m.bus.key = Some((r as u8, c as u8));
+                m.bus.uart.extend_from_slice(format!("
+<<key {r},{c} down>>
+").as_bytes());
+            } else if step == at + len {
+                m.bus.key = None;
+                m.bus.uart.extend_from_slice(b"
+<<key up>>
+");
+            }
+        }
         if wav.is_some() && step % 1000 == 0 {
             let mut buf = vec![0i16; m.bus.sound.output.len()];
             m.bus.sound.output.pop_into(&mut buf);
@@ -236,6 +281,12 @@ fn main() {
         println!("--- sound: {} samples ({:.1} s), {:.1} s not silent -> {path} ---", audio.len(), audio.len() as f64 / 8000.0, loud as f64 / 8000.0);
     }
     // XDUMP=addr,len (hex): on-chip XDATA at the end.
+    if pwatch.is_some() {
+        println!("--- watched reads ---");
+        for (pc, p, v) in m.bus.pwatch_log.iter().take(300) {
+            println!("  pc {pc:04X}: {p:07X}={v:02X}");
+        }
+    }
     if let Ok(x) = std::env::var("XDUMP") {
         for part in x.split(';') {
             let v: Vec<usize> = part.split(',').map(|n| usize::from_str_radix(n, 16).expect("hex")).collect();

@@ -64,7 +64,9 @@ pub enum Action {
     /// Open the RockIt Twist research preview (no package).
     OpenTwist,
     /// Turn on the original LeapPad with no cartridge.
-    StartLeapPad,
+    /// Turns on a LeapPad without a cartridge (None: the LeapPad, or the
+    /// first model whose base ROM is known).
+    StartLeapPad(Option<ribbit_leappad::Model>),
     /// Open this virtual book on the running LeapPad.
     OpenLeapPadBook(PathBuf),
     /// Use this folder as the RockIt Twist's storage content (None: none).
@@ -411,7 +413,7 @@ pub fn draw(
         }
         // The library once any console's system files are known (a player
         // with only a LeapPad, Zippity or RockIt Twist has no Leapster BIOS).
-        let have_system = info.bios_name.is_some() || settings.leappad_bios.is_some() || library.has_system_files();
+        let have_system = info.bios_name.is_some() || settings.leappad_bios.is_some() || !settings.leappad_bases.is_empty() || library.has_system_files();
         if !info.running && have_system {
             if was_running || st.library_since.is_none() {
                 st.library_since = Some(Instant::now());
@@ -1195,8 +1197,15 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 .on_hover_text("The pad with no cartridge. Needs its base ROM: open it with Open BIOS…")
                 .clicked()
             {
-                actions.push(Action::StartLeapPad);
+                actions.push(Action::StartLeapPad(None));
                 ui.close();
+            }
+            // The other models whose base ROMs are known.
+            for model in ribbit_leappad::Model::ALL.into_iter().filter(|&m| m != ribbit_leappad::Model::LeapPad) {
+                if settings.leappad_bases.contains_key(model.name()) && ui.button(format!("Turn on the {} (no cartridge)", model.name())).clicked() {
+                    actions.push(Action::StartLeapPad(Some(model)));
+                    ui.close();
+                }
             }
             if ui
                 .add_enabled(info.leappad, egui::Button::new("Open book…"))
@@ -1211,6 +1220,9 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             );
             ui.checkbox(&mut settings.leappad_auto_go, "Touch GO automatically").on_hover_text(
                 "On a real LeapPad the child touches the green GO circle after opening the book and after each page turn, so the pad knows the page. With this on, Ribbit's pen does it: on the first page once the pad has started, and whenever the page arrows turn the page.",
+            );
+            ui.checkbox(&mut settings.leappad_template, "My First LeapPad: ABC Phonics Bus template on the pad").on_hover_text(
+                "The My First LeapPad came with a printed template, the ABC Phonics Bus activity, that lies on the pad instead of a book; a switch under it tells the pad. On: the template is in and the pad plays its own ABC activity (\"Template In\"). Off: no template, the cartridge's book plays. Only the My First LeapPad has the switch.",
             );
             if ui
                 .checkbox(&mut settings.leappad_classic, "Play LeapPad Classic cartridges")
@@ -2874,8 +2886,8 @@ fn games_folder_button(ui: &mut egui::Ui, settings: &Settings, actions: &mut Vec
 fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
     // The LeapPad's page: the pad can be turned on without a cartridge.
     if tab == Some(Family::LeapPad) {
-        if settings.leappad_bios.is_some() && power_button(ui, "Turn on the LeapPad without a cartridge") {
-            actions.push(Action::StartLeapPad);
+        if (settings.leappad_bios.is_some() || !settings.leappad_bases.is_empty()) && power_button(ui, "Turn on the LeapPad without a cartridge") {
+            actions.push(Action::StartLeapPad(None));
         }
         return;
     }
@@ -3156,7 +3168,19 @@ fn paint_art(ui: &egui::Ui, game: &crate::library::Game, rect: egui::Rect, radiu
         Art::Texture(t) => {
             egui::Image::new((t.id(), rect.size())).corner_radius(radius).paint_at(ui, rect);
         }
-        _ if game.family == crate::library::Family::LeapPad => paint_book_cover(p, rect, radius, &game.title),
+        _ if game.family == crate::library::Family::LeapPad => {
+            paint_book_cover(p, rect, radius, &game.title);
+            // A My First LeapPad or Little Touch book: its pad in the corner.
+            let model = ribbit_leappad::Model::ALL
+                .into_iter()
+                .find(|m| *m != ribbit_leappad::Model::LeapPad && game.details.iter().any(|(k, v)| *k == "System" && v == m.name()));
+            if let Some(m) = model {
+                let s = rect.width().min(rect.height()) * 0.34;
+                let corner = egui::Rect::from_min_size(rect.max - egui::vec2(s + 6.0, s + 6.0), egui::vec2(s, s));
+                p.rect_filled(corner, s * 0.2, egui::Color32::from_black_alpha(110));
+                crate::console_icons::paint_leappad_model(p, corner.shrink(s * 0.06), m);
+            }
+        }
         _ if game.family == crate::library::Family::RockItTwist => paint_twist_card(p, rect, radius, &game.title),
         other => {
             p.rect_filled(rect, radius, egui::Color32::from_rgb(24, 30, 27));
