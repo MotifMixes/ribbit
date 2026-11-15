@@ -9,8 +9,8 @@ and the cartridge's own kernel and app work as described there. Only what differ
 
 | Model | Base ROMs | Input | Books found | In Ribbit |
 |---|---|---|---|---|
-| **My First LeapPad** (2002, 2004) | US 2004 152-10573 (4 MB), International V1.3 152-00932 (1 MB) | pen; one landscape page; GO spots; a template switch | 8 (archive.org) | boots, every spot of The Foot Book answers (501 of 501) |
-| **Little Touch LeapPad** (2005) | 152-11244 "Full Base ROM V1.1 - One Bear in the Bedroom" (4 MB), Germany 152-11010 (4 MB) | no pen: a 5 x 12 matrix of switches under two pages; 10 magnet switches read the open page | 6 (archive.org) | boots, every spot of Pooh Loves You! answers (211 of 211), pages opened by their magnets |
+| **My First LeapPad** (2002, 2004) | US 2004 152-10573 (4 MB), International V1.3 152-00932 (1 MB) | pen; one landscape page; GO spots; a template switch | 8 (archive.org) | all 8 boot and play; 3698 of 3698 spots answer in 7 of them (table below) |
+| **Little Touch LeapPad** (2005) | 152-11244 "Full Base ROM V1.1 - One Bear in the Bedroom" (4 MB), Germany 152-11010 (4 MB) | no pen: a 5 x 12 matrix of switches under two pages; 10 magnet switches read the open page | 6 (archive.org) | all 6 boot and play; 1113 of 1117 spots answer as predicted |
 | **LeapPad Plus Microphone** (2004) | 152-10793 "MIB - LeapPad Plus Microphone baseROM - US 2004" (8 MB) | the LeapPad's pen, plus a Sunplus PA7790 recorder | LeapPad books | boots, LeapPad books play; recording is **not** emulated |
 
 MAME (`src/mame/leapfrog/leappad.cpp`, BSD-3-Clause, David Haywood) has all of them as stubs: an I8032 at
@@ -88,7 +88,10 @@ own activity (the GO list at app header +0Bh instead of +5). Ribbit leaves the t
   left edges of the page.
 * Views, clickables and shapes are the LeapPad's. Two 2002 books (Leap's Big Day, El gran día de Croki) have
   cover views whose clickable pointer equals their +0Eh word and whose +10h is FFFF: they point to another
-  view's data, whose clickables they use (EVIDENCE).
+  view's data, whose clickables they use (EVIDENCE); another cover view ("BCTnT") leads elsewhere and is left
+  unread.
+* Vroom! Vroom! (2005) has views of kind 7 laid out as the LeapPad's State Table Model (Cars); Ribbit reads
+  their spots the same way (HYPOTHESIS, but every spot found answers).
 
 ### Books (A1, all from archive.org, each SHA1 matching MAME's list)
 
@@ -141,8 +144,15 @@ with no cartridge in (its app header is found as a cartridge's, `layout::read_ba
 * The header (version 1 or 2, "5A 0A 7F 5A 0A 73" at +9): views at +1Fh/+21h; at +23h an optional list of
   page-pointer keys in the GO format ("GlobalPP"); at +3Eh the **magnet list**: a pattern and a pointer to the
   view record (as in the GO list), up to 0FFFh, the default (traced with `lpboot PWATCH`).
-* View data: byte +1 is 1 for Touch and Tell (2 for activities); the clickables are at +12h. Clickables and
-  shapes are the LeapPad's.
+* View data: byte +1 is 1 for Touch and Tell (2 for activities); from +0Eh a run of rising pointers whose last
+  is the clickable list (+12h in most views; If I were...'s cover has one more). Clickables and shapes are the
+  LeapPad's.
+* **Not every book has magnets.** The 2003 apps (Baby's First Words) and the German books (Puuh mag dich!,
+  Tierbabys, Was wäre, wenn …?) have no magnet list: a key on each page picks it, either from the page-pointer
+  list at +23h ("GlobalPP") or, with none (Baby's First Words), from the PowerOn view's VSwitch clickables
+  ("VSwitch:32905 … NewV:20"). Ribbit gives those spreads a GO key, as the LeapPad's. Tierbabys' list records
+  are choices (`82 C3 02 pppp qqqq`) between two views on a setting at XDATA C302; Ribbit takes the second, the
+one the app opens (VERIFIED by touching, below).
 
 ### Books (A1, archive.org, SHA1 matching MAME's list)
 
@@ -190,6 +200,34 @@ The PA7790 is a separate Sunplus chip with its own, undumped program. What the b
 * So Ribbit's Plus Microphone has **no recorder**: ACK reads 1 (pulled up), "Internal Recorder Not Detected",
   and the books that do not need one play. Books that require it would play their "not present" views. No
   Plus Microphone book dump has been found to try.
+
+## Results (VERIFIED, 2026-11-15)
+
+`the_cartridge_answers_every_spot_its_layout_lists` (tests/books.rs) on every book, every spread: it opens each
+spread (GO, page key or magnets), touches a point inside every spot the layout reads, and compares the spot the
+app names with the one the layout puts where the app felt the touch.
+
+| Base | Book | Spots touched | Not as predicted |
+|---|---|---|---|
+| MFLP US | El gran día de Croki | 390 | 0 |
+| MFLP US | The Foot Book | 501 | 0 |
+| MFLP US | I Know My abc's | 484 | 0 |
+| MFLP US | Leap's Big Day | 348 | 0 |
+| MFLP US | Las Princesas Disney | 648 | 0 (its volume spots answer "LVol:") |
+| MFLP US | Mi Primer Día de Escuela | 373 | 0 |
+| MFLP US | Thomas and the School Trip | 554 | 0 (also 554 / 0 on the International base) |
+| MFLP US | Vroom! Vroom! | 386 | the first spread's 11 spots are silent in the test, as Cars' first spread is on the LeapPad (both State Table Model apps; the test does not wait for their state); the rest answer |
+| Little Touch US | Pooh Loves You! | 211 | 0 |
+| Little Touch US | If I were... | 177 | 0 |
+| Little Touch US | Baby's First Words | 203 | 4 (page keys on the last spread, which switch the view the next touches meet) |
+| Little Touch DE | Puuh mag dich! | 209 | 0 |
+| Little Touch DE | Was wäre, wenn ...? | 175 | 0 |
+| Little Touch DE | Tierbabys | 138 | 0 |
+| Plus Microphone | Tutter's Tiny Trip (LeapPad) | 216 | 0 |
+
+The first nine spreads of each book on both bases of its model (the US/International and US/German pairs)
+answered the same. Tierbabys' choice records take their **second** view (with the first, 125 spots answered
+for another view).
 
 ## The app (ribbit-frontend)
 

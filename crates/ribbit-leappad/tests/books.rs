@@ -286,6 +286,11 @@ fn the_cartridge_answers_every_spot_its_layout_lists() {
                     m.run_cycles(secs(0.5));
                     (m.take_log(), "MagnetSwitch: pData")
                 }
+                // The Little Touch's page keys answer as a VSwitch or a
+                // GlobalPP (a new view), not a page-pointer touch.
+                None if layout.family == ribbit_leappad::layout::Family::LittleTouch => {
+                    (touch(m, spread.go.as_ref().and_then(|g| g.inside_point()).unwrap()), "{DT}")
+                }
                 None => (touch(m, spread.go.as_ref().and_then(|g| g.inside_point()).unwrap()), "PPTouch"),
             };
             wait_for(m, &mut log, event, 1);
@@ -340,7 +345,9 @@ fn the_cartridge_answers_every_spot_its_layout_lists() {
                 None => continue,
             };
             mode = mode_of(&out).unwrap_or(mode);
-            if !out.contains(&want) {
+            // Volume spots (My First LeapPad's Las Princesas Disney) answer
+            // with the new volume ("LVol:", "Vol:119") instead of their name.
+            if !out.contains(&want) && !out.contains("LVol:") {
                 wrong.push(format!("spread {} {want} at ({:.0}, {:.0}) {:?}:\n{out}", n + 1, felt.x, felt.y, felt.page));
             }
             // A view switch ("NewV:" in the Classic app) leaves the spread's Touch-and-Tell view.

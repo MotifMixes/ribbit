@@ -939,10 +939,13 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
     // The bar.
     let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(egui::vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
     let n = lp.book.as_ref().map_or(0, |b| b.spreads.len());
-    let turn_note = if model == Model::LittleTouch { "(its magnets tell the pad)" } else { "(the pen touches its GO)" };
+    // Little Touch books with magnets tell the pad their page by themselves;
+    // the others' page key is touched as a GO.
+    let by_magnets = lp.book.as_ref().is_some_and(|b| b.spreads.iter().any(|s| s.magnets.is_some()));
+    let turn_note = if by_magnets { "(its magnets tell the pad)" } else { "(the pen touches its GO)" };
     if bar_ui.add_enabled(lp.spread > 0, egui::Button::new("◀")).on_hover_text(format!("Previous page {turn_note}")).clicked() {
         lp.spread -= 1;
-        if lp.auto_go && model != Model::LittleTouch {
+        if lp.auto_go && !by_magnets {
             touch_go(lp);
         }
     }
@@ -950,7 +953,7 @@ pub fn show(ui: &mut egui::Ui, area: egui::Rect, lp: &mut LeapPadSession, paused
     bar_ui.label(egui::RichText::new(format!("{name}  {}/{}", (lp.spread + 1).min(n), n)).color(egui::Color32::WHITE));
     if bar_ui.add_enabled(lp.spread + 1 < n, egui::Button::new("▶")).on_hover_text(format!("Next page {turn_note}")).clicked() {
         lp.spread += 1;
-        if lp.auto_go && model != Model::LittleTouch {
+        if lp.auto_go && !by_magnets {
             touch_go(lp);
         }
     }

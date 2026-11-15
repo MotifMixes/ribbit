@@ -286,6 +286,28 @@ fn shape(rom: &Rom, table: Option<usize>, scale: usize, id: u16) -> Result<Optio
     Ok(Some(Shape { page, points, rect }))
 }
 
+/// The Little Touch's view data: a run of pointers from +0Eh (leading FFFF
+/// skipped) whose last is the clickable list, e.g. 5AE0 5AE4 5AEA then the
+/// view's flags 9403 (Pooh Loves You!), or 0B40 0B40 0B4C 0B52 then FFFF
+/// (If I were..., whose cover view has one more). The pointers rise by
+/// little; the word after them does not. EVIDENCE (lists traced with lpboot
+/// PWATCH; checked by touching every spot).
+fn little_touch_clickables(rom: &Rom, data: usize) -> Result<u16, String> {
+    let mut o = data + 0x0E;
+    while rom.u16(o)? == 0xFFFF && o < data + 0x16 {
+        o += 2;
+    }
+    let mut last = rom.u16(o)?;
+    loop {
+        let next = rom.u16(o + 2)?;
+        if next == 0xFFFF || next < last || next - last > 0x400 {
+            return Ok(last);
+        }
+        last = next;
+        o += 2;
+    }
+}
+
 /// Which pad's app the header at `header` is (see `read`).
 fn family_at(cart: &[u8], header: usize) -> Family {
     let at = |sig: &[u8], o: usize| cart.get(header + o..header + o + sig.len()) == Some(sig);
@@ -369,12 +391,27 @@ fn read_from(cart: &[u8], origin: u32) -> Result<Layout, String> {
     // of 07/14/00 (500-11874) add the entry as bytes, while e.g. 500-11887's
     // shifts it left by 2 (kernel 0x26C1). Ribbit takes the scale under which
     // every GO spot is a shape.
+    // A GO record is `01 00 NN` (view NN); Tierbabys (Little Touch,
+    // Germany) has choices `82 C3 02 pppp qqqq` between two such records on
+    // a setting at XDATA C302: the second is the view the app opens (VERIFIED
+    // by touching every spot; with the first, 125 answered for another view).
+    let view_of = |r: usize| -> Result<usize, String> {
+        let mut r = r;
+        for _ in 0..4 {
+            match rom.u8(r)? {
+                0x01 => return Ok(rom.u16(r + 1)? as usize),
+                b if b & 0x80 != 0 => r = hbank + rom.u16(r + 5)? as usize,
+                _ => break,
+            }
+        }
+        Ok(rom.u16(r + 1)? as usize)
+    };
     let mut go_ids = Vec::new();
     let list = |start: usize, out: &mut Vec<(u16, usize)>, end: &dyn Fn(u16) -> bool| -> Result<(), String> {
         let mut o = start;
         loop {
             let id = rom.u16(o)?;
-            out.push((id, rom.u16(hbank + rom.u16(o + 2)? as usize + 1)? as usize));
+            out.push((id, view_of(hbank + rom.u16(o + 2)? as usize)?));
             if end(id) {
                 return Ok(());
             }
@@ -428,7 +465,7 @@ fn read_from(cart: &[u8], origin: u32) -> Result<Layout, String> {
         }
     }
     let mut spreads = Vec::new();
-    if family == Family::LittleTouch {
+    if family == Family::LittleTouch && !magnet_list.is_empty() {
         // A spread per magnet pattern, with the page-pointer key that opens
         // the same view if there is one.
         for &(magnets, opens) in &magnet_list {
@@ -445,11 +482,16 @@ fn read_from(cart: &[u8], origin: u32) -> Result<Layout, String> {
             }
         }
     }
+    let first_view = entries.first().and_then(|e| e.1);
     let mut views = Vec::new();
     let mut stm = Vec::new();
     for (index, (name, data, spread)) in entries.into_iter().enumerate() {
         let Some(data) = data else { continue };
         let kind = rom.u8(data + 1)?;
+        // My First LeapPad's 2005 "Vroom! Vroom!" and "Mi Primer Día de
+        // Escuela" have views of kind 7 laid out as the State Table Model's
+        // (32-bit pointers at +9, +0Dh, +11h). HYPOTHESIS, read as STM.
+        let kind = if family == Family::MyFirst && kind == 7 { STM } else { kind };
         if kind == STM {
             stm.push((views.len(), data));
         }
@@ -463,7 +505,8 @@ fn read_from(cart: &[u8], origin: u32) -> Result<Layout, String> {
         if clickables_at == 0x14 && rom.u16(data + 0x10)? == 0xFFFF && rom.u16(data + 0x14)? == rom.u16(data + 0x0E)? {
             list_of = (data & !0x7FFF) + rom.u16(data + 0x0E)? as usize;
         }
-        let mut o = (list_of & !0x7FFF) + rom.u16(list_of + clickables_at)? as usize;
+        let list_at = if family == Family::LittleTouch { little_touch_clickables(&rom, data)? } else { rom.u16(list_of + clickables_at)? };
+        let mut o = (list_of & !0x7FFF) + list_at as usize;
         // Only Touch-and-Tell views' clickables are read (data byte +1: 0;
         // the Little Touch's are 1, its activities 2).
         let tnt = if family == Family::LittleTouch { 1 } else { 0 };
@@ -479,6 +522,9 @@ fn read_from(cart: &[u8], origin: u32) -> Result<Layout, String> {
                 2..=6 | 9 | 11 => 10,
                 10 => 14,
                 12 => 9,
+                // Some My First LeapPad cover views (Leap's Big Day's
+                // "BCTnT") lead elsewhere: their list is left unread.
+                _ if family != Family::LeapPad => break,
                 _ => return Err(format!("view {name}: clickable of unknown type {ty}")),
             };
             if rom.u8(o + 3)? & 7 != 0
@@ -498,6 +544,35 @@ fn read_from(cart: &[u8], origin: u32) -> Result<Layout, String> {
     }
     if !stm.is_empty() {
         stm_touches(&rom, &mut views, &stm, &shape)?;
+    }
+    // Little Touch books without magnets (Baby's First Words, Tierbabys,
+    // 2003 apps): the PowerOn view's VSwitch clickables pick the spreads, a
+    // shape and a pointer to the view record as in the GO list ("VSwitch:32905
+    // ... NewV:20", Baby's First Words). Each page has such a key.
+    if family == Family::LittleTouch && spreads.is_empty()
+        && let Some(data) = first_view
+    {
+        let bank = data & !0x7FFF;
+        let mut o = bank + little_touch_clickables(&rom, data)? as usize;
+        for _ in 0..200 {
+            let (ty, id) = (rom.u8(o)?, rom.u16(o + 4)?);
+            if ty == 7
+                && let Some(go) = shape(id & 0xBFFF)?
+            {
+                let opens = rom.u16(bank + rom.u16(o + 6)? as usize + 1)? as usize;
+                spreads.push(Spread { go: Some(go), opens, magnets: None });
+            }
+            if id & 0x4000 != 0 {
+                break;
+            }
+            o += match ty {
+                0 | 7 => 8,
+                2..=6 | 9 | 11 => 10,
+                10 => 14,
+                12 => 9,
+                _ => break,
+            };
+        }
     }
     Ok(Layout { family, views, spreads })
 }
