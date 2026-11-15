@@ -139,8 +139,8 @@ fn bulk_folder(package_type: &str) -> Option<&'static str> {
 /// files) as the console's lfpkg does: its meta.inf's Type picks the
 /// folder; a package whose meta.inf sits in a folder of its own unpacks
 /// there as it is, one with meta.inf at the top into a folder named after
-/// its PackageID.
-pub fn install_lf2(tree: &mut Tree, lf2: &[u8]) -> Result<(), String> {
+/// its PackageID. Its meta.inf.
+pub fn install_lf2(tree: &mut Tree, lf2: &[u8]) -> Result<crate::package::Meta, String> {
     use std::io::Read;
     let mut tar = Vec::new();
     bzip2::read::BzDecoder::new(lf2).read_to_end(&mut tar).map_err(|e| format!("bzip2: {e}"))?;
@@ -165,8 +165,34 @@ pub fn install_lf2(tree: &mut Tree, lf2: &[u8]) -> Result<(), String> {
         let path = if base.is_empty() { name } else { format!("{base}/{name}") };
         tree.insert(path, entry);
     }
-    Ok(())
+    Ok(meta)
 }
+
+/// The language packs the firmware can't start without (PackageList
+/// "repair" packages): the shared one (fonts, LST3-0x00170030-000000) and
+/// one of a language (any other of Type "LanguagePack"; English:
+/// LST3-0x00170030-000001; other languages' IDs UNKNOWN). Without
+/// either AppManager shows only the "connect me to LeapFrog Connect"
+/// picture (ATTENTION_NEEDED.png); the trailers and Pet Pad packages,
+/// also "repair", aren't needed to reach the setup and menu (tested
+/// 2026-11-15). Of the `.lf2` packages' meta.inf, the missing ones, named
+/// as the English set names them.
+pub fn missing_packages(installed: &[crate::package::Meta]) -> Vec<&'static str> {
+    const SHARED: &str = "LST3-0x00170030-000000";
+    let shared = |m: &crate::package::Meta| m.get("PackageID").is_some_and(|id| id.eq_ignore_ascii_case(SHARED));
+    let mut missing = Vec::new();
+    if !installed.iter().any(shared) {
+        missing.push("Language Pack.lf2 (LST3-0x00170030-000000, the shared language pack)");
+    }
+    if !installed.iter().any(|m| m.get("Type").is_some_and(|t| t.trim() == "LanguagePack") && !shared(m)) {
+        missing.push("Language Pack EN.lf2 (LST3-0x00170030-000001, or another language's pack)");
+    }
+    missing
+}
+
+/// How `nand_with_files` starts its error when packages the firmware
+/// needs are missing (`missing_packages`); the list follows.
+pub const MISSING_PACKAGES: &str = "missing Leapster Explorer packages: ";
 
 /// The internal NAND as LeapFrog Connect leaves it with the packages in
 /// `dir`: each "DiskImage" file of the `.lfp` packages, named
@@ -220,9 +246,14 @@ pub fn nand_with_files(dir: &std::path::Path, blocks: usize, extra: &Tree) -> Re
         }
     }
     let mut bulk = Tree::new();
+    let mut installed = Vec::new();
     for path in entries.iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lf2"))) {
         let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        install_lf2(&mut bulk, &data).map_err(|e| format!("{}: {e}", path.display()))?;
+        installed.push(install_lf2(&mut bulk, &data).map_err(|e| format!("{}: {e}", path.display()))?);
+    }
+    let missing = missing_packages(&installed);
+    if !missing.is_empty() {
+        return Err(format!("{MISSING_PACKAGES}{}", missing.join(", ")));
     }
     bulk.extend(extra.iter().map(|(p, e)| (p.clone(), e.clone())));
     if !bulk.is_empty() {

@@ -223,14 +223,19 @@ pub fn is_volume(data: &[u8]) -> bool {
 }
 
 /// True for an Explorer cartridge dump: a FAT volume from byte 0 that
-/// fills whole erase blocks of the chip (no spare area, no UBI).
+/// fills whole erase blocks of the chip (no spare area, no UBI). Not the
+/// raw flash `from_explorer_image` makes of one, which starts the same
+/// but has an erased spare area after each page (64 MiB of FAT and its
+/// spare areas is whole erase blocks too): read as the volume, its files
+/// came out broken (the Explorer's Enhanced (new) showed an empty slot).
 pub fn is_explorer_image(data: &[u8]) -> bool {
-    data.len() >= 512
+    data.len() >= PAGE_RAW
         && data.len() % (PAGE * PAGES_PER_BLOCK) == 0
         && data.len() <= 128 << 20
         && data[510..512] == [0x55, 0xAA]
         && (&data[82..87] == b"FAT32" || &data[54..59] == b"FAT16" || &data[54..59] == b"FAT12")
         && !is_volume(data)
+        && !(data.len() % (PAGE_RAW * PAGES_PER_BLOCK) == 0 && data[PAGE..PAGE_RAW].iter().all(|&b| b == 0xFF))
 }
 
 /// The raw flash of an Explorer cartridge dump (`is_explorer_image`): its
@@ -339,6 +344,8 @@ mod tests {
         let raw = from_explorer_image(&fat);
         assert_eq!(raw.len(), (64 << 20) / PAGE * PAGE_RAW);
         assert!(!Cart::looks_like(&raw));
+        // The raw flash isn't taken for the volume (its spare areas).
+        assert!(!is_explorer_image(&raw));
         assert_eq!(volume(&raw).unwrap(), fat);
         let mut c = Cart::new(raw).unwrap();
         assert_eq!(c.cart_type(), EMERALD);

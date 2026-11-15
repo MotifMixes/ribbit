@@ -17,6 +17,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// The Leapster 2 family's build of the player (other signatures).
+#[path = "hd_l2.rs"]
+mod l2;
+
 /// First 44 bytes of the edge constructor (US v2.1 0x4004_E0D8; no absolute
 /// addresses inside, so the same compiled code matches in other builds).
 const EDGE_CTOR_SIG: [u8; 44] = [
@@ -78,10 +82,114 @@ pub struct GlyphRegs {
     pub string: u8,
     pub run: u8,
     pub baseline: u8,
+    /// The character's index in the string (`INDEX_PAST`: the string
+    /// register already points one past the character).
+    pub index: u8,
+    /// The colour (bytes R G B) and the pen x.
+    pub colour: u8,
+    pub pen_x: u8,
+    /// Where the run keeps its font resource.
+    pub font_at: u8,
 }
 
-const GLYPH_REGS_V21: GlyphRegs = GlyphRegs { string: 22, run: 17, baseline: 19 };
-const GLYPH_REGS_V15: GlyphRegs = GlyphRegs { string: 20, run: 16, baseline: 22 };
+/// `GlyphRegs::index` when the string register points past the character.
+pub const INDEX_PAST: u8 = 0xFF;
+
+const GLYPH_REGS_V21: GlyphRegs = GlyphRegs { string: 22, run: 17, baseline: 19, index: 14, colour: 23, pen_x: 13, font_at: 8 };
+const GLYPH_REGS_V15: GlyphRegs = GlyphRegs { string: 20, run: 16, baseline: 22, index: 14, colour: 23, pen_x: 13, font_at: 8 };
+/// The Leapster TV's text loop (VERIFIED-FW, TV v2.1.11 call at
+/// 0x4005_4352): it walks the string with `ldb.ab r1,[r18,1]` and counts
+/// down in r14, its run keeps the font at +0x0C, the colour is in r19 and
+/// the baseline in r20.
+const GLYPH_REGS_TV: GlyphRegs = GlyphRegs { string: 18, run: 17, baseline: 20, index: INDEX_PAST, colour: 19, pen_x: 13, font_at: 0x0C };
+
+/// Registers and sites that differ between builds of the Flash player (one
+/// mechanism for all: `BUILD_V21` for US v2.1 and its copies, `BUILD_TV`
+/// for the Leapster TV, hd_l2.rs's tables for the Leapster 2 family).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Build {
+    /// At the scanline hook: the renderer and the scanline counter (one
+    /// ahead of the row being drawn).
+    pub renderer: u8,
+    pub scan_y: u8,
+    /// At the shape reader's end site: the curve (start, control, end).
+    pub curve: u8,
+    /// The shape reader's three sites (see `Hooks::shape_sites`) when they
+    /// do not follow from `shape_curve` as in US v2.1.
+    pub sites: Option<(u32, u32, u32)>,
+}
+
+pub const BUILD_V21: Build = Build { renderer: 14, scan_y: 17, curve: 15, sites: None };
+
+/// The Leapster TV's Flash player (TV v2.1.11, 152-11594) is another
+/// compiler build of the same player: the same functions and structures,
+/// other registers and instruction order, so none of the US signatures
+/// match. These are its own (VERIFIED-FW, each function compared with its
+/// US v2.1 twin; addresses in the TV BIOS).
+///
+/// The edge constructor, 0x4006_B780 (r1 the edge record, as in US).
+const TV_EDGE_CTOR_SIG: [u8; 46] = [
+    0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xfc, 0x1c, 0x88, 0xb4, 0xfc, 0x1c, 0xc8,
+    0xb4, 0xfc, 0x1c, 0x08, 0xb5, 0xfc, 0x1c, 0x48, 0xb5, 0xa4, 0xc1, 0x0a, 0x25, 0xc0, 0x27, 0x28, 0x75, 0x3c, 0x89, 0x08, 0x76,
+    0x48, 0x77, 0x21, 0xe9,
+];
+/// The scanline function 0x4006_DF5C at 0x4006_DFDA (the twin of US
+/// 0x4005_0514): the renderer in r15, the counter in r13. The player
+/// structure's +0x7AC here (+0x7A8 in US).
+const TV_SCANLINE_SIG: [u8; 22] =
+    [0x5c, 0x87, 0x30, 0x22, 0x81, 0x0f, 0x00, 0x00, 0xac, 0x07, 0x84, 0xe1, 0xa8, 0xf4, 0xd4, 0x17, 0x06, 0x10, 0x11, 0x0e, 0x11, 0x00];
+const BUILD_TV: Build = Build { renderer: 15, scan_y: 13, curve: 14, sites: None };
+/// The solid painter, 0x4007_38E4.
+const TV_SOLID_PAINTER_SIG: [u8; 24] =
+    [0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xf1, 0xc0, 0x08, 0x77, 0x02, 0x22, 0x4d, 0x00, 0x8c, 0x25, 0x04, 0x90, 0x20, 0x00, 0x2c, 0x00, 0x68, 0x76];
+/// The bitmap painter, 0x4007_3108 (these 32 bytes start 0x32 in).
+const TV_BITMAP_PAINTER_SIG: [u8; 32] = [
+    0x7a, 0x71, 0x3a, 0x72, 0x10, 0xb9, 0x40, 0xc1, 0x40, 0x80, 0x9a, 0x70, 0x0a, 0x21, 0x00, 0x37, 0x5a, 0x73, 0x5f, 0x12, 0x01,
+    0x06, 0x55, 0x20, 0x40, 0x05, 0x10, 0xb9, 0x41, 0xc1, 0x2b, 0x71,
+];
+/// The gradient painter, 0x4007_3804 (linear 0x4007_35B8, radial 0x4007_36A0).
+const TV_GRADIENT_PAINTER_SIG: [u8; 26] =
+    [0xe1, 0xc5, 0x34, 0x10, 0x04, 0x00, 0xeb, 0x75, 0x09, 0x0c, 0x91, 0x04, 0xa4, 0xff, 0x03, 0xf0, 0x69, 0xff, 0xfb, 0x75, 0xe0, 0x7f, 0xc1, 0xc5, 0xe1, 0xc5];
+/// The blending gradient and bitmap painters, 0x4007_392C and 0x4007_39B0.
+const TV_GRADIENT_BLEND_SIG: [u8; 44] = [
+    0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xfc, 0x1c, 0x88, 0xb4, 0xf1, 0xc0, 0x99,
+    0x24, 0x04, 0x30, 0x3a, 0x70, 0x1a, 0x71, 0x48, 0x75, 0x02, 0x22, 0x4e, 0x00, 0x8c, 0x26, 0x04, 0x90, 0x20, 0x00, 0x2c, 0x00,
+    0x68, 0x77,
+];
+const TV_BITMAP_BLEND_SIG: [u8; 44] = [
+    0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xfc, 0x1c, 0x88, 0xb4, 0xf1, 0xc0, 0x99,
+    0x24, 0x04, 0x30, 0x5a, 0x70, 0x28, 0x75, 0x48, 0x76, 0x02, 0x22, 0x4f, 0x00, 0x8c, 0x27, 0x04, 0x90, 0x20, 0x00, 0x2c, 0x00,
+    0x3a, 0x73,
+];
+/// The point transform, 0x4006_736C (r0 matrix, r1 point, r2 result).
+const TV_TRANSFORM_SIG: [u8; 32] = [
+    0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xfc, 0x1c, 0x08, 0xb4, 0xfc, 0x1c, 0x48, 0xb4, 0xfc, 0x1c, 0x88, 0xb4, 0x0a, 0x22, 0xc0,
+    0x27, 0x1a, 0x70, 0x28, 0x77, 0x20, 0x80, 0x00, 0x87, 0x3a, 0x72,
+];
+/// The stroker's "add a piece", 0x4008_F0E8 (same registers as US).
+const TV_STROKE_SIG: [u8; 58] = [
+    0xe1, 0xc5, 0xe1, 0xc6, 0xe1, 0xc7, 0xf1, 0xc0, 0x08, 0x76, 0x00, 0x80, 0x28, 0x75, 0xe8, 0x10, 0x01, 0x00, 0xa7, 0xc1, 0x06,
+    0xe9, 0xc9, 0x70, 0x0e, 0x0f, 0x6f, 0xf4, 0xa9, 0x71, 0x7f, 0xf0, 0x44, 0x85, 0x20, 0x85, 0x19, 0x09, 0x81, 0x00, 0x65, 0x85,
+    0x41, 0x85, 0x11, 0x0a, 0xc1, 0x00, 0x02, 0x85, 0x0d, 0x09, 0x01, 0x00, 0x23, 0x85, 0xe3, 0x0a,
+];
+/// The shape reader's curve step, from 0x4007_E5A6 (the straight edge's
+/// end transform): its sites are +0x10 (straight edge done), +0x68
+/// (control point) and +0x98 (end; the curve in r14).
+const TV_SHAPE_CURVE_SIG: [u8; 64] = [
+    0x56, 0x27, 0x40, 0x12, 0x55, 0x25, 0x41, 0x1c, 0xc2, 0x0d, 0x6f, 0xf4, 0x40, 0x26, 0x02, 0x14, 0x64, 0x86, 0x40, 0x86, 0x7a,
+    0x62, 0x5c, 0x7a, 0x42, 0xa6, 0x61, 0x86, 0x05, 0x86, 0x1b, 0x63, 0x7c, 0x7b, 0x77, 0x00, 0x20, 0x00, 0x63, 0xa6, 0x66, 0x0f,
+    0x6f, 0xff, 0x56, 0x27, 0x50, 0x12, 0x40, 0x20, 0x94, 0x00, 0xe9, 0x70, 0xee, 0x0f, 0x6f, 0xff, 0x8a, 0x71, 0x14, 0x13, 0x01,
+    0x20,
+];
+/// The device-font text loop, from 0x4005_431A; its glyph blit call
+/// (`jl_s.d [r15]`, `mov r7, r19` in the delay slot) is 0x38 in.
+const TV_GLYPH_CALL_SIG: [u8; 74] = [
+    0x01, 0x12, 0x81, 0x24, 0x2a, 0x70, 0x23, 0x20, 0x40, 0x05, 0xca, 0x72, 0x0c, 0x11, 0x02, 0x20, 0x03, 0x14, 0xc5, 0x30, 0x0a,
+    0x70, 0x02, 0x14, 0xc1, 0x30, 0x43, 0x82, 0x00, 0x25, 0x45, 0x03, 0x01, 0x14, 0x84, 0x30, 0x20, 0xc3, 0x02, 0x24, 0x46, 0x20,
+    0x02, 0xc1, 0x27, 0xba, 0x2f, 0x26, 0x86, 0x01, 0x2f, 0x25, 0x46, 0x01, 0xc3, 0xba, 0x60, 0x7f, 0x0a, 0x27, 0xc0, 0x04, 0x21,
+    0xc0, 0x61, 0xbe, 0x1d, 0x65, 0xbf, 0x0e, 0x75, 0x90, 0xae, 0x7d,
+];
+const TV_GLYPH_CALL_AT: u32 = 0x38;
 
 /// The gradient span painter (US v2.1 0x4005_5394): fill +0x34 = 0x12 is
 /// radial, else linear (Flash's fill types).
@@ -134,6 +242,8 @@ pub struct Hooks {
     pub transform: Option<u32>,
     pub shape_curve: Option<u32>,
     pub stroke: Option<u32>,
+    /// This build's registers and sites (see `Build`).
+    pub build: Build,
 }
 
 impl Hooks {
@@ -162,7 +272,7 @@ impl Hooks {
     /// end, a curve's control point and a curve's end (the last is also
     /// where a finished edge is complete in r15).
     pub fn shape_sites(&self) -> Option<(u32, u32, u32)> {
-        self.shape_curve.map(|s| (s + 0x40 - 0x94, s + 0x10, s + 0x40))
+        self.build.sites.or_else(|| self.shape_curve.map(|s| (s + 0x40 - 0x94, s + 0x10, s + 0x40)))
     }
 }
 
@@ -175,9 +285,39 @@ struct Source {
 }
 
 impl Hooks {
-    /// Finds both hooks in a BIOS image mapped at `base`; None unless each
-    /// signature occurs (the first match is used).
+    /// Finds the hooks in a BIOS image mapped at `base`: US v2.1's player
+    /// build (also v1.5, UK, German, Spanish, L-MAX and cartridge copies),
+    /// the Leapster TV's, else the Leapster 2 family's (hd_l2.rs).
     pub fn find(bios: &[u8], base: u32) -> Option<Hooks> {
+        Self::find_v21(bios, base).or_else(|| Self::find_tv(bios, base)).or_else(|| l2::find(bios, base))
+    }
+
+    /// The Leapster TV's player build (see `TV_EDGE_CTOR_SIG`).
+    pub fn find_tv(bios: &[u8], base: u32) -> Option<Hooks> {
+        let find = |sig: &[u8]| {
+            bios.windows(sig.len()).enumerate().step_by(2).find(|(_, w)| *w == sig).map(|(i, _)| base + i as u32)
+        };
+        let curve = find(&TV_SHAPE_CURVE_SIG);
+        Some(Hooks {
+            edge_ctor: find(&TV_EDGE_CTOR_SIG)?,
+            scanline: find(&TV_SCANLINE_SIG)?,
+            solid_painter: find(&TV_SOLID_PAINTER_SIG)?,
+            bitmap_painter: find(&TV_BITMAP_PAINTER_SIG)? - BITMAP_PAINTER_SIG_AT,
+            glyph: find(&TV_GLYPH_CALL_SIG).map(|a| a + TV_GLYPH_CALL_AT),
+            glyph_regs: GLYPH_REGS_TV,
+            gradient: find(&TV_GRADIENT_PAINTER_SIG),
+            gradient_blend: find(&TV_GRADIENT_BLEND_SIG),
+            bitmap_blend: find(&TV_BITMAP_BLEND_SIG),
+            transform: find(&TV_TRANSFORM_SIG),
+            shape_curve: curve,
+            stroke: find(&TV_STROKE_SIG),
+            build: Build { sites: curve.map(|c| (c + 0x10, c + 0x68, c + 0x98)), ..BUILD_TV },
+        })
+    }
+
+    /// US v2.1's player build; None unless each required signature occurs
+    /// (the first match is used).
+    pub fn find_v21(bios: &[u8], base: u32) -> Option<Hooks> {
         let find = |sig: &[u8]| {
             bios.windows(sig.len()).enumerate().step_by(2).find(|(_, w)| *w == sig).map(|(i, _)| base + i as u32)
         };
@@ -189,11 +329,12 @@ impl Hooks {
             glyph: find(&GLYPH_CALL_SIG).or_else(|| find(&GLYPH_CALL_SIG_V15)).map(|a| a + GLYPH_CALL_SIG_AT),
             glyph_regs: if find(&GLYPH_CALL_SIG).is_none() && find(&GLYPH_CALL_SIG_V15).is_some() { GLYPH_REGS_V15 } else { GLYPH_REGS_V21 },
             gradient: find_masked(bios, base, &GRADIENT_PAINTER_SIG),
-            gradient_blend: find_masked(bios, base, &GRADIENT_BLEND_SIG),
-            bitmap_blend: find_masked(bios, base, &BITMAP_BLEND_SIG),
+            gradient_blend: find_masked(bios, base, &GRADIENT_BLEND_SIG).or_else(|| blend_calling(bios, base, find_masked(bios, base, &GRADIENT_PAINTER_SIG)?)),
+            bitmap_blend: find_masked(bios, base, &BITMAP_BLEND_SIG).or_else(|| blend_calling(bios, base, find(&BITMAP_PAINTER_SIG)? - BITMAP_PAINTER_SIG_AT)),
             transform: find(&TRANSFORM_SIG),
             shape_curve: find(&SHAPE_CURVE_SIG),
             stroke: find(&STROKE_SIG),
+            build: BUILD_V21,
         })
     }
 
@@ -215,6 +356,24 @@ impl Hooks {
             ("stroke", find(&STROKE_SIG)),
         ]
     }
+}
+
+/// A blending painter (see `GRADIENT_BLEND_SIG`) whose span painter is
+/// `painter`, for player builds where the calls' offsets differ (e.g. 2nd
+/// Grade's own player at 0x8001_C9F8, blending its bitmap painter 0x8001_C230).
+fn blend_calling(image: &[u8], base: u32, painter: u32) -> Option<u32> {
+    let mut sig = GRADIENT_BLEND_SIG;
+    // The two calls: the span painter (bl_s at +0x4A) and the blend.
+    for i in [74, 75, 80, 81] {
+        sig[i] = W;
+    }
+    image.windows(sig.len()).enumerate().step_by(2).filter(|(_, w)| w.iter().zip(&sig).all(|(&b, &s)| s == W || b as u16 == s)).find_map(|(i, w)| {
+        let half = u16::from_le_bytes([w[74], w[75]]) as i32;
+        let pc = base.wrapping_add(i as u32 + 74);
+        // bl_s: 11111 s11, target (pc & !3) + s11 * 4.
+        let target = (pc & !3).wrapping_add((((half & 0x7FF) << 21) >> 19) as u32);
+        (half >> 11 == 0x1F && target == painter).then_some(base.wrapping_add(i as u32))
+    })
 }
 
 /// The first even offset where `sig` matches (`W` matches any byte).
@@ -347,11 +506,22 @@ pub struct Pass {
     /// Units per LCD pixel (renderer +0x00): 4 at the BIOS's highest
     /// quality, 2 at medium (games choose, e.g. LF_SetMovieQuality).
     pub scale: i32,
+    /// Units per LCD pixel across, when it differs from `scale` (0: the
+    /// same). VERIFIED-FW (US v2.1): the renderer sits in a display object
+    /// whose stage rectangle in units (x0 x1 y0 y1, renderer -0x84) is
+    /// 0..320 x 0..160 at low quality in Learning with Leap's activities
+    /// but 0..160 x 0..160 in 1st Grade's, on the same 160 x 160 surface:
+    /// across, a movie may keep two units per LCD pixel at scale 1.
+    pub scale_x: i32,
     /// Scanlines this render swept, first and last + 1, in the pass's units
     /// (the BIOS may draw one rectangle in several sweeps).
     pub rows: Option<(i32, i32)>,
     /// The renderer object (r14): which surface the render draws into.
     pub renderer: u32,
+    /// The pixels the render draws into (renderer +0x20 is its surface,
+    /// whose +0x04 is the pixel data): the LCD's framebuffer, or another
+    /// bitmap.
+    pub target: u32,
     pub edges: Vec<Edge>,
     pub fills: HashMap<u32, Fill>,
     /// Device-font glyphs, drawn after this pass's shapes (a pass with no
@@ -505,7 +675,7 @@ impl HdCapture {
     /// The shape reader finished an edge (r15: start, control, end, i32).
     pub fn shape_edge(&mut self, regs: &[u32], peek: impl Fn(u32) -> u8) {
         let w = |a: u32| i32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
-        let c = regs[15];
+        let c = regs[self.players[self.active].build.curve as usize];
         let r = [(w(c), w(c + 4)), (w(c + 8), w(c + 12)), (w(c + 16), w(c + 20))];
         let f = |p: (i32, i32)| (p.0 as f32, p.1 as f32);
         let start = match self.last_end {
@@ -598,12 +768,16 @@ impl HdCapture {
             })
             .collect();
         let nib = |c: u32| ((c & 0xF0) | (c >> 4)) as u8;
-        let c = regs[23];
-        // The text loop's own registers (see `GlyphRegs`): the string, r14
-        // the index, the run (+0x08 the BIOS font resource), r13 the pen x,
-        // the baseline.
+        // The text loop's own registers (see `GlyphRegs`): the colour, the
+        // string, the index, the run (with the BIOS font resource), the pen
+        // x, the baseline.
         let gr = self.players[self.active].glyph_regs;
-        let res = w(regs[gr.run as usize] + 8);
+        let c = regs[gr.colour as usize];
+        let res = w(regs[gr.run as usize] + gr.font_at as u32);
+        let at = match gr.index {
+            INDEX_PAST => regs[gr.string as usize].wrapping_sub(1),
+            i => regs[gr.string as usize].wrapping_add(regs[i as usize]),
+        };
         let name_at = w(res + 4);
         let font: String = (0..32).map(|i| peek(name_at + i)).take_while(|&b| b != 0).map(|b| b as char).collect();
         let g = Glyph {
@@ -614,10 +788,10 @@ impl HdCapture {
             coverage,
             clip: [h(surface + 0x14), h(surface + 0x16), h(surface + 0x18), h(surface + 0x1A)],
             rgb: [nib(c & 0xFF), nib((c >> 8) & 0xFF), nib((c >> 16) & 0xFF)],
-            ch: peek(regs[gr.string as usize] + regs[14]) as u16,
+            ch: peek(at) as u16,
             font,
             em: peek(res + 0x10) as f32,
-            pen: (regs[13] as i16 as i32, regs[gr.baseline as usize] as i16 as i32),
+            pen: (regs[gr.pen_x as usize] as i16 as i32, regs[gr.baseline as usize] as i16 as i32),
         };
         // Text drawn after a render's scanlines goes over that render;
         // text drawn before the next render, under it (VERIFIED-FW:
@@ -716,11 +890,17 @@ impl HdCapture {
     pub fn scanline(&mut self, r: u32, y: i32, peek: impl Fn(u32) -> u8) {
         let w = |a: u32| i32::from_le_bytes([peek(a), peek(a + 1), peek(a + 2), peek(a + 3)]);
         let (rect, scale) = (Some([w(r + 0x28), w(r + 0x2C), w(r + 0x30), w(r + 0x34)]), w(r));
+        // The stage's width over its height, in units (see `Pass::scale_x`).
+        let (sw, sh) = (w(r - 0x80) - w(r - 0x84), w(r - 0x78) - w(r - 0x7C));
+        // Only the layouts seen (a full LCD's height, twice as wide or not):
+        // other player builds may keep something else there.
+        let scale_x = if sh == 160 * scale && sw == 2 * sh { 2 * scale } else { 0 };
         if self.current.rect.is_some() && ((self.current.rect, self.current.scale) != (rect, scale) || y < self.last_scan) {
             self.finish();
         }
         self.last_scan = y;
         self.current.renderer = r;
+        self.current.target = w(w(r + 0x20) as u32 + 4) as u32;
         // r17 runs one ahead of the scanline being drawn.
         self.current.rows = Some(match self.current.rows {
             Some((a, _)) => (a, y),
@@ -728,6 +908,7 @@ impl HdCapture {
         });
         self.current.rect = rect;
         self.current.scale = scale;
+        self.current.scale_x = scale_x;
         self.absorb_pending();
     }
 
@@ -773,9 +954,38 @@ impl HdCapture {
             self.frame.push(Pass { scale: 4, glyphs: std::mem::take(&mut self.glyphs), ..Default::default() });
         }
         self.restore_flat_edges();
-        // The thick lines whose outlines this pass draws.
-        let fills: std::collections::HashSet<u32> = self.current.edges.iter().filter(|e| e.rule == 2).map(|e| e.fills[0]).collect();
-        self.current.strokes = self.strokes.iter().filter(|s| fills.contains(&s.fill)).copied().collect();
+        // The thick lines whose outlines this pass draws: a piece counts
+        // where the pass has outline edges of its fill near it. (The fill
+        // alone is not enough: Star Wars Jedi Math's frame lines along the
+        // stage's edges share the text's fill, but the BIOS draws no outline
+        // for them, and HD drew a dark frame the LCD does not have.)
+        const CELL: i32 = 16;
+        let cell = |v: f32| (v.clamp(-1024.0, 2048.0) as i32).div_euclid(CELL);
+        let mut near: std::collections::HashSet<(u32, i32, i32)> = std::collections::HashSet::new();
+        for e in self.current.edges.iter().filter(|e| e.rule == 2) {
+            let xs = e.p.map(|p| p.0 as f32);
+            let ys = e.p.map(|p| p.1 as f32);
+            let (x0, x1) = (cell(xs.iter().copied().fold(f32::MAX, f32::min)), cell(xs.iter().copied().fold(f32::MIN, f32::max)));
+            let (y0, y1) = (cell(ys.iter().copied().fold(f32::MAX, f32::min)), cell(ys.iter().copied().fold(f32::MIN, f32::max)));
+            for cy in y0..=y1 {
+                for cx in x0..=x1 {
+                    near.insert((e.fills[0], cx, cy));
+                }
+            }
+        }
+        self.current.strokes = self
+            .strokes
+            .iter()
+            .filter(|s| {
+                let r = s.width / 2.0 + 4.0;
+                let xs = s.centre.map(|p| p.0);
+                let ys = s.centre.map(|p| p.1);
+                let (x0, x1) = (cell(xs.iter().copied().fold(f32::MAX, f32::min) - r), cell(xs.iter().copied().fold(f32::MIN, f32::max) + r));
+                let (y0, y1) = (cell(ys.iter().copied().fold(f32::MAX, f32::min) - r), cell(ys.iter().copied().fold(f32::MIN, f32::max) + r));
+                (y0..=y1).any(|cy| (x0..=x1).any(|cx| near.contains(&(s.fill, cx, cy))))
+            })
+            .copied()
+            .collect();
         self.frame.push(std::mem::take(&mut self.current));
     }
 
@@ -998,6 +1208,11 @@ pub struct HdCanvas {
     /// BIOS's pixel glyph by design, so the LCD comparison does not apply
     /// (until a render draws there again).
     from_outline: Vec<bool>,
+    /// LCD pixels a BIOS pixel glyph drew on since the last `update_mask`:
+    /// drawn as the BIOS draws it, so where the LCD disagrees something
+    /// else drew over it in the same frame (a game's own blit over its
+    /// device text, e.g. Number Raiders' title over the high score).
+    glyph_drawn: Vec<bool>,
     /// Outline fonts by name (from the player's cartridges, swf_font.rs):
     /// device text in these is drawn from its curves, else from the BIOS's
     /// pixel glyphs.
@@ -1064,6 +1279,7 @@ impl HdCanvas {
             covered: vec![false; 160 * 160],
             stale: vec![false; 160 * 160],
             from_outline: vec![false; 160 * 160],
+            glyph_drawn: vec![false; 160 * 160],
             fonts: None,
             why: [0; 4],
             shape_offset: SHAPE_OFFSET,
@@ -1122,12 +1338,28 @@ impl HdCanvas {
             1 | 2 | 4 => pass.scale,
             _ => 4,
         };
-        let k = self.scale as f32 / units as f32;
+        // Across, a low-quality (scale 1) movie may keep two units per LCD
+        // pixel (`Pass::scale_x`): its rectangles run to 320 for the LCD's
+        // 160 pixels, down to 160 (VERIFIED-FW, US v2.1 renderer: +0x00 =
+        // 1, a full redraw's unit rectangle +0x28 and its pixel rectangle
+        // +0x38 both 0..320 x 0..160, on the same 160 x 160 surface as at
+        // medium and high quality; Learning with Leap's activities, and
+        // the BIOS's Rabbit River, whose D-pad hint was drawn twice as wide).
+        // 1st Grade's low quality keeps one. The BIOS's own pixels there
+        // are then half an LCD pixel wide, bitmap and gradient matrices
+        // included.
+        let units_x = match pass.scale_x {
+            x @ 1..=8 => x,
+            _ => units,
+        };
+        let k = Scale { x: self.scale as f32 / units_x as f32, y: self.scale as f32 / units as f32 };
+        // BIOS pixels per LCD pixel across (2 at low quality, else 1).
+        let narrow = units_x as f32 / units as f32;
         let n = self.size as f32;
-        let r = pass.rect.map_or([0.0, n, 0.0, n], |r| r.map(|v| v as f32 * k));
+        let r = pass.rect.map_or([0.0, n, 0.0, n], |r| [r[0] as f32 * k.x, r[1] as f32 * k.x, r[2] as f32 * k.y, r[3] as f32 * k.y]);
         let (mut ry0, mut ry1) = (r[2], r[3]);
         if let Some((a, b)) = pass.rows {
-            (ry0, ry1) = (ry0.max(a as f32 * k), ry1.min(b as f32 * k));
+            (ry0, ry1) = (ry0.max(a as f32 * k.y), ry1.min(b as f32 * k.y));
         }
         let clamp = |v: f32| (v.round().max(0.0) as usize).min(self.size);
         let (x0, x1, y0, y1) = (clamp(r[0]), clamp(r[1]), clamp(ry0), clamp(ry1));
@@ -1155,15 +1387,19 @@ impl HdCanvas {
         let mut order: Vec<(&u32, &Fill)> = pass.fills.iter().collect();
         order.sort_by_key(|(a, f)| (f.order, **a));
         let index: HashMap<u32, i32> = order.iter().enumerate().map(|(i, (a, _))| (**a, i as i32)).collect();
-        let traced: Vec<Option<BitmapFill>> = order.iter().map(|(_, f)| f.bitmap.as_ref().filter(|_| self.trace_pixels).map(|b| self.traced_bitmap(b))).collect();
+        // Bitmap and gradient matrices take the BIOS's pixels: from LCD pixels.
+        let widen = |m: [f32; 6]| if narrow == 1.0 { m } else { [m[0] * narrow, m[1] * narrow, m[2], m[3], m[4], m[5]] };
+        let bitmaps: Vec<Option<BitmapFill>> = order.iter().map(|(_, f)| f.bitmap.as_ref().map(|b| BitmapFill { matrix: widen(b.matrix), ..b.clone() })).collect();
+        let traced: Vec<Option<BitmapFill>> = bitmaps.iter().map(|b| b.as_ref().filter(|_| self.trace_pixels).map(|b| self.traced_bitmap(b))).collect();
         let paints: Vec<Paint> = order
             .iter()
             .zip(traced)
-            .map(|((_, f), t)| match (&f.bitmap, &f.gradient, f.painter == self.solid_painter) {
+            .zip(bitmaps)
+            .map(|(((_, f), t), b)| match (b, &f.gradient, f.painter == self.solid_painter) {
                 _ if f.mask => Paint::Mask,
                 (Some(_), _, _) if t.is_some() => Paint::Bitmap(t.unwrap()),
-                (Some(b), _, _) => Paint::Bitmap(b.clone()),
-                (None, Some(g), _) => Paint::Gradient(g.clone()),
+                (Some(b), _, _) => Paint::Bitmap(b),
+                (None, Some(g), _) => Paint::Gradient(GradientFill { matrix: widen(g.matrix), ..g.clone() }),
                 (None, None, true) => Paint::Solid(f.rgba.map(|c| c as f32 / 255.0)),
                 (None, None, false) => Paint::Unknown,
             })
@@ -1218,6 +1454,7 @@ impl HdCanvas {
         let stroked: std::collections::HashSet<u32> = pass.strokes.iter().map(|s| s.fill).collect();
         for s in &pass.strokes {
             let Some(&f) = index.get(&s.fill) else { continue };
+            let s = &snap_thin(s, units_x as f32, units as f32);
             stroke_segs(s, k, o, f, &mut segs);
             stroke_segs(s, k, o, f, &mut segs_round);
         }
@@ -1278,10 +1515,17 @@ impl HdCanvas {
     }
 }
 
+/// Canvas pixels per pass unit, across and down.
+#[derive(Debug, Clone, Copy)]
+struct Scale {
+    x: f32,
+    y: f32,
+}
+
 /// An edge (start, control, end in pass units) as straight pieces in canvas
 /// units (scale `k`).
-fn flatten(e: &Edge, p: [(f32, f32); 3], k: f32, o: f32, fills: [i32; 2], segs: &mut Vec<Seg>) {
-    let p = p.map(|(x, y)| (x * k + o, y * k + o));
+fn flatten(e: &Edge, p: [(f32, f32); 3], k: Scale, o: f32, fills: [i32; 2], segs: &mut Vec<Seg>) {
+    let p = p.map(|(x, y)| (x * k.x + o, y * k.y + o));
     let n = if e.line {
         1
     } else {
@@ -1326,6 +1570,7 @@ impl HdCanvas {
                     continue;
                 }
                 self.covered[y as usize * 160 + x as usize] = true;
+                self.glyph_drawn[y as usize * 160 + x as usize] = true;
                 for py in y as usize * s..(y as usize + 1) * s {
                     for p in &mut self.pixels[py * self.size + x as usize * s..py * self.size + (x as usize + 1) * s] {
                         let ch = |k: u32, c: u8| ((c as u32 * a + ((*p >> k) & 0xFF) * (64 - a)) / 64) << k;
@@ -1427,26 +1672,20 @@ impl HdCanvas {
 
     /// Updates `mask` against the BIOS's frame `lcd` (160x160): a block is
     /// taken from the fallback where the canvas does not know it, where it
-    /// differs from its LCD pixel by more than `AGREE` beyond its
-    /// neighbourhood or by more than `FAR`, or where the LCD changed with no
-    /// render drawing there (until a render does). Returns the number of
+    /// differs from its LCD pixel by more than `FAR`, or where the LCD
+    /// changed with no render drawing there (until a render does). Returns the number of
     /// blocks taken from the fallback.
     pub fn update_mask(&mut self, lcd: &[u32]) -> usize {
         let (s, size) = (self.scale, self.size);
         // Up to 4x4 samples per block (enough to judge it, quick at any size).
         let step = (s / 4).max(1);
         let mut fallback = 0;
-        for by in 0..160 {
-            for bx in 0..160 {
-                let i = by * 160 + bx;
-                let l = lcd[i];
-                if self.covered[i] {
-                    self.stale[i] = false;
-                } else if self.prev_lcd.get(i).is_some_and(|&p| p != l) {
-                    self.stale[i] = true;
-                }
+        // Each block as shown (unknown parts from its LCD pixel), and
+        // whether the canvas knows less than half of it.
+        let blocks: Vec<([i32; 3], bool)> = (0..160 * 160)
+            .map(|i| {
+                let (bx, by, l) = (i % 160, i / 160, lcd[i]);
                 let lc = [(l >> 16) & 0xFF, (l >> 8) & 0xFF, l & 0xFF].map(|c| c as i32);
-                // The block as shown (unknown parts from the LCD pixel).
                 let (mut sum, mut n, mut known) = ([0i32; 3], 0i32, 0i32);
                 for y in (by * s..(by + 1) * s).step_by(step) {
                     for x in (bx * s..(bx + 1) * s).step_by(step) {
@@ -1460,28 +1699,61 @@ impl HdCanvas {
                         n += 1;
                     }
                 }
-                let avg = sum.map(|v| v / n);
+                (sum.map(|v| v / n), known < n * 128)
+            })
+            .collect();
+        for by in 0..160 {
+            for bx in 0..160 {
+                let i = by * 160 + bx;
+                let l = lcd[i];
+                if self.covered[i] {
+                    self.stale[i] = false;
+                } else if self.prev_lcd.get(i).is_some_and(|&p| p != l) {
+                    self.stale[i] = true;
+                }
+                let lc = [(l >> 16) & 0xFF, (l >> 8) & 0xFF, l & 0xFF].map(|c| c as i32);
+                let (avg, unknown) = blocks[i];
+                // The ranges of the LCD's and of HD's 3x3 neighbourhoods.
                 let (mut lo, mut hi) = ([255i32; 3], [0i32; 3]);
+                let (mut hlo, mut hhi) = ([255i32; 3], [0i32; 3]);
                 for ny in by.saturating_sub(1)..(by + 2).min(160) {
                     for nx in bx.saturating_sub(1)..(bx + 2).min(160) {
                         let q = lcd[ny * 160 + nx];
+                        let h = blocks[ny * 160 + nx].0;
                         for (k, c) in [(q >> 16) & 0xFF, (q >> 8) & 0xFF, q & 0xFF].into_iter().enumerate() {
                             lo[k] = lo[k].min(c as i32);
                             hi[k] = hi[k].max(c as i32);
+                            hlo[k] = hlo[k].min(h[k]);
+                            hhi[k] = hhi[k].max(h[k]);
                         }
                     }
                 }
                 let far = (0..3).any(|k| (avg[k] - lc[k]).abs() > FAR);
                 let off = (0..3).any(|k| avg[k] < lo[k] - AGREE || avg[k] > hi[k] + AGREE);
-                let unknown = known < n * 128;
+                // The LCD's pixel is nowhere near HD here: not a line or edge
+                // HD put a pixel over, but something HD does not have.
+                let missing = (0..3).any(|k| lc[k] < hlo[k] - AGREE || lc[k] > hhi[k] + AGREE);
                 // The LCD is shown only where HD does not know the picture: the
                 // LCD changed outside every render (drawn by other code), or
-                // the canvas has nothing there. Where HD drew, it is shown even
-                // if it differs from the LCD: what is left of those differences
-                // is the BIOS's own rounding (thin lines' jaggies, quarter-
-                // pixel edges), and the LCD's pixels in their place were specks.
+                // the canvas has nothing there, or HD is far from it (below).
+                // Where HD drew and differs less, it is shown: what is left of
+                // those differences is the BIOS's own rounding (thin lines'
+                // jaggies, quarter-pixel edges), and the LCD's pixels in their
+                // place were specks.
                 let disagree = !self.from_outline[i] && (far || off);
-                let use_fallback = self.stale[i] || unknown;
+                // A pixel glyph's block that disagrees was drawn over by
+                // something the capture missed: until a render draws
+                // there, it is stale.
+                if self.glyph_drawn[i] && disagree {
+                    self.stale[i] = true;
+                }
+                // Far from its LCD pixel, with no block of HD's around it near
+                // that pixel either, the block is not a matter of anti-aliasing
+                // or of a thin line a pixel over, but of something drawn that
+                // HD did not see (Star Wars Jedi Math's copyright lines, kept
+                // on the LCD through two full redraws whose edges leave them
+                // out): the LCD's pixel is shown.
+                let use_fallback = self.stale[i] || unknown || (disagree && far && missing);
                 let reason = if self.stale[i] {
                     Some(0)
                 } else if unknown {
@@ -1527,6 +1799,7 @@ impl HdCanvas {
         self.prev_lcd.clear();
         self.prev_lcd.extend_from_slice(&lcd[..160 * 160]);
         self.covered.fill(false);
+        self.glyph_drawn.fill(false);
         fallback
     }
 
@@ -1595,7 +1868,12 @@ fn weld(edges: &[Edge]) -> Vec<[(f32, f32); 2]> {
         let mut a = 0;
         while a < ends.len() {
             let mut b = a + 1;
-            while b < ends.len() && ends[b].0 - ends[b - 1].0 <= 1 && ends[b].0 - ends[a].0 <= 1 {
+            // In i32: the BIOS's far-off edges (x = -32000 and 32000, the
+            // frame around a mask's hole) differ by more than an i16 holds,
+            // and a wrapped difference joined them at x = 0 (Letter
+            // Factory's title: the iris wipe's black frame over everything).
+            let x = |k: usize| ends[k].0 as i32;
+            while b < ends.len() && x(b) - x(b - 1) <= 1 && x(b) - x(a) <= 1 {
                 b += 1;
             }
             let run = &ends[a..b];
@@ -1702,9 +1980,10 @@ fn smooth_joins(edges: &[Edge], ends: &mut [[(f32, f32); 2]]) {
 /// winding rule: a rectangle per flattened step and a disc at every point,
 /// all wound the same way, so they merge into a line with round caps and
 /// joins (Flash's lines).
-fn stroke_segs(s: &StrokePiece, k: f32, o: f32, fill: i32, segs: &mut Vec<Seg>) {
-    let c = s.centre.map(|(x, y)| (x * k + o, y * k + o));
-    let r = s.width * k / 2.0;
+fn stroke_segs(s: &StrokePiece, k: Scale, o: f32, fill: i32, segs: &mut Vec<Seg>) {
+    let c = s.centre.map(|(x, y)| (x * k.x + o, y * k.y + o));
+    // (Its width in units down: round caps stay round at low quality.)
+    let r = s.width * k.y / 2.0;
     if r <= 0.0 {
         return;
     }
@@ -1749,6 +2028,30 @@ fn stroke_segs(s: &StrokePiece, k: f32, o: f32, fill: i32, segs: &mut Vec<Seg>) 
         let (nx, ny) = (-dy / len * r, dx / len * r);
         poly(&[(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)]);
     }
+}
+
+/// A straight up-down or across line a pixel wide or less, moved onto the
+/// LCD pixel the BIOS's stroker puts it on: the one its centre is in once
+/// rounded to a unit (VERIFIED-FW from its outlines, 1-pixel lines at
+/// high quality, centre in units -> outline: 139.0 -> 136..140, 144.4 ->
+/// 144..148, 163.6 -> 164..168, 171.4 -> 168..172, 639.99 -> 640..644, 16.4
+/// -> 16..20). Drawn on its exact centre
+/// instead, Outwit's frame line along the stage's right edge (x = 639.99,
+/// off screen on the device) showed as a pixel of grey down the right
+/// side (Math Missions' as black, and along the bottom).
+/// `ux`, `uy`: units per LCD pixel across and down. Other lines stay on
+/// their exact path.
+fn snap_thin(s: &StrokePiece, ux: f32, uy: f32) -> StrokePiece {
+    let c = s.centre;
+    let same = |f: fn(&(f32, f32)) -> f32| (f(&c[0]) - f(&c[1])).abs() < 0.01 && (f(&c[0]) - f(&c[2])).abs() < 0.01;
+    let onto = |v: f32, u: f32| ((v.round() / u).floor() + 0.5) * u;
+    let mut out = *s;
+    if same(|p| p.0) && s.width <= ux {
+        out.centre = c.map(|(x, y)| (onto(x, ux), y));
+    } else if same(|p| p.1) && s.width <= uy {
+        out.centre = c.map(|(x, y)| (x, onto(y, uy)));
+    }
+    out
 }
 
 /// What one render's rows need.
@@ -2072,7 +2375,8 @@ mod tests {
                 bitmap_blend: None,
                 transform: None,
                 shape_curve: None,
-                stroke: None
+                stroke: None,
+                build: BUILD_V21,
             })
         );
         assert_eq!(Hooks::find(&bios[..0x200], 0x4000_0000), None);
@@ -2094,7 +2398,7 @@ mod tests {
             put(&mut mem, 0x128 + 4 * i, &v.to_le_bytes());
         }
         let peek = |a: u32| mem[a as usize];
-        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None, glyph_regs: GLYPH_REGS_V21, gradient: None, gradient_blend: None, bitmap_blend: None, transform: None, shape_curve: None, stroke: None });
+        let mut c = HdCapture::new(Hooks { edge_ctor: 0, scanline: 0, solid_painter: 0, bitmap_painter: 1, glyph: None, glyph_regs: GLYPH_REGS_V21, gradient: None, gradient_blend: None, bitmap_blend: None, transform: None, shape_curve: None, stroke: None, build: BUILD_V21 });
         c.edge(0, peek); // built before its render's first scanline event
         c.scanline(0x100, 1, peek);
         c.scanline(0x100, 2, peek); // later scanlines of the same render

@@ -940,7 +940,7 @@ impl Machine {
                     if from == h.edge_ctor {
                         hd.edge(self.cpu.regs[1], peek);
                     } else if from == h.scanline {
-                        hd.scanline(self.cpu.regs[14], self.cpu.regs[17] as i32, peek);
+                        hd.scanline(self.cpu.regs[h.build.renderer as usize], self.cpu.regs[h.build.scan_y as usize] as i32, peek);
                     } else if Some(from) == h.glyph {
                         hd.glyph(&self.cpu.regs, peek);
                     } else if Some(from) == h.transform {
@@ -1516,6 +1516,18 @@ impl Machine {
         let tv = self.io.lmax_tv.as_ref()?;
         tv.render_game(out);
         Some(FrameStatus::Decoded { format: io::lmax_tv::FORMAT })
+    }
+
+    /// EXPERIMENTAL HD: the picture HD capture is matched against and falls
+    /// back to (hd.rs): the BIOS's own 160x160 frame, whose colours the
+    /// captured fills have. On a Leapster TV that is the frame the BIOS
+    /// sends to its (absent) LCD before converting it into the TV chip's
+    /// YCbCr picture (VERIFIED-FW: the LCD transfers go on, format 4; the
+    /// TV copy is table[pixel] of it, loop at 0x4004_EA1E), so HD on the TV
+    /// shows the game's own colours, not the TV conversion's (T10).
+    /// Elsewhere the same as `render_frame`.
+    pub fn render_hd_frame(&self, out: &mut [u32; WIDTH * HEIGHT]) -> FrameStatus {
+        if self.is_leapster_tv() { self.render_lcd(out) } else { self.render_frame(out) }
     }
 
     /// Decodes the handheld LCD, also when a TV chip supplies the picture

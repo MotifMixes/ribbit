@@ -148,6 +148,8 @@ pub enum Family {
     Didj,
     /// The Leapster Explorer's firmware package (its menu).
     Explorer,
+    /// A ClickStart cartridge, or its system ROM's built-in activities.
+    ClickStart,
 }
 
 /// Cartridges made for the Leapster 2 alone, by CRC32: the "Leapster 2
@@ -158,7 +160,16 @@ const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 impl Family {
     /// The library tabs: the game consoles in alphabetical order, then the
     /// LeapPad (a book reader; Ribbit is a game emulator first).
-    pub const ALL: [Family; 7] = [Family::Didj, Family::Leapster, Family::Leapster2, Family::Explorer, Family::RockItTwist, Family::Zippity, Family::LeapPad];
+    pub const ALL: [Family; 8] = [
+        Family::ClickStart,
+        Family::Didj,
+        Family::Leapster,
+        Family::Leapster2,
+        Family::Explorer,
+        Family::RockItTwist,
+        Family::Zippity,
+        Family::LeapPad,
+    ];
 
     /// A book reader's (the library's Books side), not a game console's.
     pub fn is_book(self) -> bool {
@@ -174,19 +185,24 @@ impl Family {
             Family::LeapPad => "LeapPad",
             Family::Didj => "Didj",
             Family::Explorer => "Leapster Explorer",
+            Family::ClickStart => "ClickStart",
         }
     }
 
     /// Whether a console of this hardware runs the family's games.
     pub fn runs_on(self, hw: Hardware) -> bool {
         match self {
-            Family::Leapster => !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer),
+            Family::Leapster => !matches!(
+                hw,
+                Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::ClickStart
+            ),
             Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
             Family::RockItTwist => hw == Hardware::RockItTwist,
             Family::LeapPad => hw == Hardware::LeapPad,
             Family::Didj => hw == Hardware::Didj,
             Family::Explorer => hw == Hardware::Explorer,
+            Family::ClickStart => hw == Hardware::ClickStart,
         }
     }
 
@@ -200,6 +216,7 @@ impl Family {
             Family::LeapPad => Hardware::LeapPad,
             Family::Didj => Hardware::Didj,
             Family::Explorer => Hardware::Explorer,
+            Family::ClickStart => Hardware::ClickStart,
         }
     }
 
@@ -215,13 +232,14 @@ impl Family {
 }
 
 /// The consoles, in the order the library lists them.
-pub const CONSOLES: [Hardware; 6] = [
+pub const CONSOLES: [Hardware; 7] = [
     Hardware::Leapster,
     Hardware::LeapsterTv,
     Hardware::LeapsterLmax,
     Hardware::Leapster2,
     Hardware::Zippity,
     Hardware::RockItTwist,
+    Hardware::ClickStart,
 ];
 
 pub struct Game {
@@ -629,6 +647,9 @@ impl Library {
             if let Some(Found::ZippityNand(game)) = classify(p) {
                 return BiosFile { hardware: Hardware::Zippity, path: p.to_path_buf(), name: game.title };
             }
+            if let Some(Found::ClickStartBios(_)) = classify(p) {
+                return BiosFile { hardware: Hardware::ClickStart, path: p.to_path_buf(), name: "ClickStart system ROM".into() };
+            }
             let known = ribbit_core::load_firmware(p).ok().and_then(|f| f.known().copied());
             let hardware = known.map_or(Hardware::Leapster, |k| k.hardware);
             let name = known.map_or_else(
@@ -702,7 +723,12 @@ impl Library {
     pub fn consoles(&self) -> Vec<Hardware> {
         let have: Vec<Hardware> = CONSOLES
             .into_iter()
-            .filter(|&hw| !matches!(hw, Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer))
+            .filter(|&hw| {
+                !matches!(
+                    hw,
+                    Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::ClickStart
+                )
+            })
             .filter(|&hw| self.bios_for(hw).is_some())
             .collect();
         if have.is_empty() { vec![Hardware::Leapster] } else { have }
@@ -724,6 +750,7 @@ impl Library {
             Hardware::LeapPad => Family::LeapPad,
             Hardware::Didj => Family::Didj,
             Hardware::Explorer => Family::Explorer,
+            Hardware::ClickStart => Family::ClickStart,
             _ => Family::Leapster,
         }
     }
@@ -764,6 +791,10 @@ fn worker(
     // Zippity system NAND, which may be found later), and the NANDs found.
     let mut zippity_cart_todo: Vec<(String, PathBuf)> = Vec::new();
     let mut zippity_nands: Vec<PathBuf> = Vec::new();
+    // ClickStart pictures to make (key, system ROM, cartridge), and the
+    // system ROMs found (a cartridge's picture is made on one).
+    let mut clickstart_todo: Vec<(String, PathBuf, Option<PathBuf>)> = Vec::new();
+    let mut clickstart_bios: Vec<PathBuf> = Vec::new();
     // BIOSes whose built-in games need a picture (key, file).
     let mut builtin_todo: Vec<(String, PathBuf)> = Vec::new();
     // Original Leapster BIOSes found (art is made on one: see below).
@@ -836,6 +867,43 @@ fn worker(
                 }
                 continue;
             }
+            Some(Found::ClickStartBios(mut game)) => {
+                clickstart_bios.push(path.clone());
+                let bios = BiosFile { hardware: Hardware::ClickStart, path: path.clone(), name: "ClickStart system ROM".into() };
+                if tx.send(Msg::Bios(bios)).is_err() {
+                    return;
+                }
+                if !seen_games.insert(game.key.clone()) {
+                    continue;
+                }
+                match load_png(&art_file(art_dir, &game.key)) {
+                    Some(img) => game.art = Art::Image(img),
+                    None => {
+                        game.art = Art::Pending;
+                        clickstart_todo.push((game.key.clone(), path.clone(), None));
+                    }
+                }
+                if tx.send(Msg::Game(game)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Some(Found::ClickStart(mut game)) => {
+                if !seen_games.insert(game.key.clone()) {
+                    continue;
+                }
+                match load_png(&art_file(art_dir, &game.key)) {
+                    Some(img) => game.art = Art::Image(img),
+                    None => {
+                        game.art = Art::Pending;
+                        clickstart_todo.push((game.key.clone(), PathBuf::new(), Some(path.clone())));
+                    }
+                }
+                if tx.send(Msg::Game(game)).is_err() {
+                    return;
+                }
+                continue;
+            }
             Some(Found::Twist(game) | Found::LeapPad(game) | Found::Didj(game)) => {
                 // A Didj cartridge is on the Explorer's page too.
                 let explorer = (game.family == Family::Didj && game.has_tag("Cartridge")).then(|| crate::didj::on_explorer(&game));
@@ -880,6 +948,21 @@ fn worker(
     // folders (none: no art).
     for (key, path) in zippity_cart_todo {
         let image = zippity_nands.first().and_then(|nand| make_zippity_cart_art(nand, &path));
+        if let Some(img) = &image {
+            let _ = std::fs::create_dir_all(art_dir);
+            if let Err(e) = save_png(&art_file(art_dir, &key), img) {
+                tracing::warn!(target: "ribbit::library", "saving art: {e:#}");
+            }
+        }
+        if tx.send(Msg::Art(key, image.as_ref().map(to_image))).is_err() {
+            return;
+        }
+    }
+    // ClickStart: the screen some seconds after power-on, a cartridge's on a
+    // system ROM found in the folders (none: no art).
+    for (key, bios, cart) in clickstart_todo {
+        let bios = if cart.is_none() { Some(bios) } else { clickstart_bios.first().cloned() };
+        let image = bios.and_then(|b| make_clickstart_art(&b, cart.as_deref()));
         if let Some(img) = &image {
             let _ = std::fs::create_dir_all(art_dir);
             if let Err(e) = save_png(&art_file(art_dir, &key), img) {
@@ -991,6 +1074,10 @@ enum Found {
     LeapPad(Game),
     /// A Didj package: its firmware (the console) or a game.
     Didj(Game),
+    /// A ClickStart cartridge.
+    ClickStart(Game),
+    /// The ClickStart's system ROM: the console, and its built-in activities.
+    ClickStartBios(Game),
 }
 
 /// Zippity images: the system NAND (with spare area) and cartridges.
@@ -1041,6 +1128,23 @@ fn classify(path: &Path) -> Option<Found> {
         let id = ribbit_memory::ImageId::of(&data);
         return Some(Found::Zippity(describe_zippity(path, known::lookup(known::ZIPPITY_CARTRIDGES, &id), &id)));
     }
+    // ClickStart ROMs: by checksum, or by the header their build tools
+    // write ("chksum:... body:"SPG240"").
+    let clickstart_header = data.starts_with(b"chksum:") && data[..0x40].windows(9).any(|w| w == b"body:\"SPG");
+    if data.len() == ribbit_clickstart::BIOS_SIZE {
+        let id = ribbit_memory::ImageId::of(&data);
+        let k = known::lookup(known::CLICKSTART_SYSTEM, &id);
+        if k.is_some() || clickstart_header {
+            return Some(Found::ClickStartBios(describe_clickstart_bios(path, k, &id)));
+        }
+    }
+    if data.len() == ribbit_clickstart::CART_SIZE {
+        let id = ribbit_memory::ImageId::of(&data);
+        let k = known::lookup(known::CLICKSTART_CARTRIDGES, &id);
+        if k.is_some() || clickstart_header {
+            return Some(Found::ClickStart(describe_clickstart(path, k, &id)));
+        }
+    }
     // LeapPad images start with the same 8051 boot stub; a base ROM is not
     // a game (it is opened with File > Open BIOS).
     match ribbit_leappad::identify(&data) {
@@ -1070,6 +1174,7 @@ pub fn family_of(path: &Path) -> Option<Family> {
         Found::Twist(_) => Some(Family::RockItTwist),
         Found::LeapPad(_) => Some(Family::LeapPad),
         Found::Didj(g) => Some(g.family),
+        Found::ClickStart(_) | Found::ClickStartBios(_) => Some(Family::ClickStart),
         Found::Bios(..) => None,
     }
 }
@@ -1092,7 +1197,7 @@ pub fn find_zippity_nand(folders: &[PathBuf]) -> Option<PathBuf> {
 
 /// Whether a file is a console's built-in games (the Zippity's NAND).
 pub fn is_internal(path: &Path) -> bool {
-    matches!(classify(path), Some(Found::ZippityNand(_)))
+    matches!(classify(path), Some(Found::ZippityNand(_) | Found::ClickStartBios(_)))
 }
 
 /// A Leapster cartridge image, or None for anything else.
@@ -1149,6 +1254,50 @@ fn describe_zippity(path: &Path, known: Option<&ribbit_memory::known::KnownImage
     details.push(("CRC32", key.clone()));
     details.push(("File", path.display().to_string()));
     Game { path: path.to_path_buf(), family: Family::Zippity, title, subtitle, details, tags: Vec::new(), key, art: Art::Missing }
+}
+
+fn describe_clickstart(path: &Path, known: Option<&ribbit_memory::known::KnownImage>, id: &ribbit_memory::ImageId) -> Game {
+    let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    // "500-12727-a - finding nemo (uk)" -> "finding nemo (uk)".
+    let from_file = stem.split_once(" - ").filter(|(p, _)| p.starts_with("500-")).map_or(stem.as_str(), |(_, n)| n);
+    let title = known.map_or_else(|| from_file.to_string(), |k| crate::app::short_name(k.name));
+    let part = stem.split_once(" - ").map(|(p, _)| p.to_uppercase()).filter(|p| p.starts_with("500-"));
+    let size = format!("{} MB", id.size.div_ceil(1 << 20));
+    let subtitle = [part.clone(), Some(size.clone())].into_iter().flatten().collect::<Vec<_>>().join("  ·  ");
+    let key = format!("{:08x}", id.crc32);
+    let mut details = vec![("System", "ClickStart".to_string())];
+    if let Some(p) = part {
+        details.push(("Part number", p));
+    }
+    details.push(("Dump", if known.is_some() { "verified (known checksum)" } else { "not in Ribbit's list" }.into()));
+    details.push(("Size", size));
+    details.push(("CRC32", key.clone()));
+    details.push(("File", path.display().to_string()));
+    Game { path: path.to_path_buf(), family: Family::ClickStart, title, subtitle, details, tags: Vec::new(), key, art: Art::Missing }
+}
+
+/// The activities built into the ClickStart (its system ROM), as a library
+/// entry tagged "Internal".
+fn describe_clickstart_bios(path: &Path, known: Option<&ribbit_memory::known::KnownImage>, id: &ribbit_memory::ImageId) -> Game {
+    let key = format!("{:08x}", id.crc32);
+    let details = vec![
+        ("System", "ClickStart".to_string()),
+        ("Games", "built into the console (system ROM)".to_string()),
+        ("Dump", if known.is_some() { "verified (known checksum)" } else { "not in Ribbit's list" }.into()),
+        ("Size", format!("{} MB", id.size.div_ceil(1 << 20))),
+        ("CRC32", key.clone()),
+        ("File", path.display().to_string()),
+    ];
+    Game {
+        path: path.to_path_buf(),
+        family: Family::ClickStart,
+        title: "ClickStart Built-in Activities".into(),
+        subtitle: "The console's own menu and activities".into(),
+        details,
+        tags: vec!["Internal".into()],
+        key,
+        art: Art::Missing,
+    }
 }
 
 /// The games built into a Zippity (its system NAND), as a library entry
@@ -1348,7 +1497,12 @@ impl Capture {
 
     /// The LCD frame now, with the finished renders drawn into the HD picture.
     fn drain(&mut self) {
-        self.m.render_frame(&mut self.frame);
+        // The BIOS's own frame (on a Leapster TV, before its TV conversion).
+        if self.canvas.is_some() {
+            self.m.render_hd_frame(&mut self.frame);
+        } else {
+            self.m.render_frame(&mut self.frame);
+        }
         if let (Some(c), Some(hd)) = (self.canvas.as_mut(), self.m.hd.as_mut()) {
             for p in hd.take() {
                 c.apply(&p);
@@ -1514,6 +1668,44 @@ fn make_zippity_cart_art(nand: &Path, cart: &Path) -> Option<Shot> {
             continue;
         }
         z.render(&mut frame);
+        let colours = frame.iter().map(|p| p & 0x00FF_FFFF).collect::<HashSet<_>>().len();
+        if frame == last && colours >= 64 {
+            latest = Some(frame.clone());
+        }
+        if richest.as_ref().is_none_or(|b| colours > b.0) {
+            richest = Some((colours, frame.clone()));
+        }
+        last.copy_from_slice(&frame);
+    }
+    let best = latest.or(richest.filter(|b| b.0 >= 16).map(|b| b.1))?;
+    let x0 = (SCREEN_W - SCREEN_H) / 2;
+    let pixels = (0..SCREEN_H).flat_map(|y| best[y * SCREEN_W + x0..y * SCREEN_W + x0 + SCREEN_H].to_vec()).collect();
+    Some(Shot { size: SCREEN_H, pixels })
+}
+
+/// A ClickStart picture: the system ROM `bios` with cartridge `cart` (none:
+/// its built-in activities), the last still and colourful screen in its
+/// first 30 seconds (a title screen; logos come before), else the most
+/// colourful.
+fn make_clickstart_art(bios: &Path, cart: Option<&Path>) -> Option<Shot> {
+    use ribbit_clickstart::{SCREEN_H, SCREEN_W};
+    const FRAMES: usize = 1800;
+    const EVERY: usize = 60;
+    let mut cs = ribbit_clickstart::ClickStart::new(&ribbit_core::read_image(bios).ok()?);
+    if let Some(cart) = cart {
+        cs.insert_cartridge(&ribbit_core::read_image(cart).ok()?);
+        cs.reset();
+    }
+    let mut frame = vec![0u32; SCREEN_W * SCREEN_H];
+    let mut last = frame.clone();
+    let (mut latest, mut richest): (Option<Vec<u32>>, Option<(usize, Vec<u32>)>) = (None, None);
+    for i in 1..=FRAMES {
+        cs.run_frame();
+        cs.take_audio();
+        if i % EVERY != 0 {
+            continue;
+        }
+        cs.render(&mut frame);
         let colours = frame.iter().map(|p| p & 0x00FF_FFFF).collect::<HashSet<_>>().len();
         if frame == last && colours >= 64 {
             latest = Some(frame.clone());

@@ -132,6 +132,16 @@ fn main() {
         }
         lx.run(1_000_000);
         wav.extend(lx.bus.dma.pcm.drain(..));
+        // EXPLORER_PROGRESS=<million>: the wall time every so many million
+        // cycles, to measure the speed of one stretch (393 million = 1 s).
+        if let Some(n) = std::env::var("EXPLORER_PROGRESS").ok().and_then(|v| v.parse::<u64>().ok())
+            && (m + 1) % n == 0
+        {
+            // Linux: the resident memory too (MB).
+            let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+            let rss: String = status.lines().filter(|l| l.starts_with("Rss")).map(|l| format!(", {}", l.split_whitespace().take(2).collect::<Vec<_>>().join(" "))).collect();
+            eprintln!("[{}M at {:.2} s{rss}]", m + 1, started.elapsed().as_secs_f64());
+        }
         if shots_at.contains(&(m + 1)) {
             shot(&lx, &format!("{}-{}.png", shot_path.trim_end_matches(".png"), m + 1));
         }

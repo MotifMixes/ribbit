@@ -808,7 +808,7 @@ range. Transmission is instant (no baud timing).
 
 Owner's decision: HD comes from the real BIOS's own vector data (an "HD layer"), not from a separate Flash
 player. Evidence below is VERIFIED-FW on the US v2.1 BIOS (152-11265) by running it; other BIOSes have the
-same code at other addresses (not yet located).
+same code at other addresses (see "HD hooks in other BIOSes" below).
 
 * The rasterizer is a scanline active-edge renderer working at **4x the LCD in each axis**: edge records hold
   16-bit device coordinates in quarter pixels (a full-screen rectangle is 0..640), scanlines are quarter
@@ -827,7 +827,137 @@ same code at other addresses (not yet located).
 Proof of concept: `crates/ribbit-core/examples/hdframe.rs` captures one pass (1,435 edges, 36 fills in the
 SpongeBob intro), rasterizes it at 640x640 with even-odd toggling per fill and depth order, and matches the
 BIOS's frame in shape, layering and colour, at 4x the detail. Not decoded yet: gradient and bitmap fills,
-the rule byte, dirty-rectangle passes, clipping/masks, and the other BIOS revisions' addresses.
+the rule byte, dirty-rectangle passes, clipping/masks, and the other BIOS revisions' addresses. (Most of
+these were decoded since; the current state is in `crates/ribbit-core/src/hd.rs`.)
+
+### HD on the original Leapster and L-MAX: findings (2026-11-15)
+
+VERIFIED-FW on the US v2.1 BIOS unless noted; tools `examples/hdplay.rs` (a cart of `-` runs the BIOS alone,
+a state of `-` starts from power-on; `RIBBIT_HD_ROWCHECK`, `RIBBIT_HD_NOEXACT`, `RIBBIT_HD_DUMPMEM`).
+
+* **Units per pixel across at low quality.** The renderer (+0x00 = units per LCD pixel: 4 high, 2 medium,
+  1 low) sits in a display object whose stage rectangle in units is at renderer -0x84 (x0, x1, y0, y1).
+  At low quality it is 0..320 x 0..160 in Learning with Leap's activities and the BIOS's Rabbit River, but
+  0..160 x 0..160 in 1st Grade, on the same 160 x 160 surface (renderer +0x20). So a low-quality movie may
+  keep two units per LCD pixel across (`Pass::scale_x`). Taking two for every scale-1 render squeezed 1st
+  Grade into the left half; taking one drew Rabbit River's D-pad hint twice as wide over the right half
+  (the user's 2026-10-17 report) and stretched Learning with Leap's activities.
+* **Far-off edges.** The BIOS frames a mask's hole with straight edges at x = -32000 and 32000 (The Letter
+  Factory's iris wipe). Their difference does not fit an i16.
+* **Thin lines.** The stroker puts a line a pixel wide or less on the pixel its centre falls in once
+  rounded to a unit (outlines at high quality, centre -> outline in units: 139.0 -> 136..140, 144.4 ->
+  144..148, 163.6 -> 164..168, 171.4 -> 168..172, 639.99 -> 640..644, 16.4 -> 16..20). HD does the same
+  for straight up-down and across lines; other lines keep their exact centre. Outwit's and Math
+  Missions' frame lines on the stage's right and bottom edges are off screen on the device, and key
+  borders (The Batman's keyboard) were a pixel off.
+* **Blending painters** (fills with transparency) are found by the span painter they call when their
+  call offsets differ from the US v2.1 BIOS's: 2nd Grade's own player (0x8001_C98C gradient,
+  0x8001_C9F8 bitmap) and the 155-10072-a BIOS.
+* **Device-font glyphs** are drawn exactly as the BIOS draws them, so where the LCD disagrees with one,
+  the game drew over it in the same frame by other means; HD shows the LCD there until a render draws.
+* **Edges the capture does not see.** Star Wars Jedi Math's copyright lines stay on the LCD through two
+  full-screen renders whose edges leave them out (same renderer, same target pixels 0x3C01_7A50; how
+  the BIOS keeps them is UNKNOWN). HD now shows the LCD's pixel where its block is more than `FAR` (96)
+  from it in a channel and no HD block in the 3 x 3 around is within `AGREE` of it either (a thin line
+  a pixel over is not taken for a missing part). The same screen's frame lines along the stage's
+  edges are stroke pieces sharing the text's fill with no outline from the BIOS; a piece is now drawn
+  only where its fill has outline edges near it.
+* **Gradients** are drawn from their Flash definitions (matrix and 257-entry ramp) at HD resolution:
+  checked smooth on Digging for Dinosaurs' lab columns. Bitmaps keep their texels (nearest, or bilinear
+  only when the fill asks for smoothing), as on the device.
+* **Survey** (2026-11-15): the 79 Leapster cartridge images in `roms/` (two more, disprin and prinfrog,
+  are 64 MB images of other systems), 2 minutes each from power-on with a random stylus tap every
+  1.5 s, plus the BIOS's own games (US v2.1 and L-MAX v2.2, four menu paths each). HD (640 x 640) is
+  box-averaged to 160 x 160 and compared with the LCD every 6 s: a pixel counts as wrong when it is more
+  than 40 levels outside the range of its LCD pixel's 3 x 3 neighbourhood (anti-aliasing passes). After
+  the fixes above no snapshot exceeds 0.5% of pixels, against 12% (1st Grade), 88% (The Letter Factory,
+  all black), 40% (Rabbit River's D-pad, old build) before. That measure misses thin missing parts (a
+  line of text has background around it), so hdplay's count of far blocks was read too: it found
+  Star Wars Jedi Math's lines and The Batman's key borders. Left as they are: the LCD's 12-bit colours
+  of translucent fills (the BIOS blends quantized colours; HD is up to ~20 levels off, e.g.
+  Scooby-Doo's shadows), and games drawn by their own code (Sonic X and NASCAR gameplay, Cosmic Math,
+  Number Raiders, Schoolhouse Rock, Rock the World: 30-80% of blocks from the LCD). Many runs stop at
+  a cartridge's country or name screen, and the emulation is not deterministic from run to run (the
+  same seed reaches other screens), so a mismatch seen once may need several runs to show again.
+
+### The Leapster 2 family's player (2026-11-15)
+
+VERIFIED-FW (code read side by side with US v2.1, then HD run on it). The Leapster 2 0.6 (152-12206),
+Leapster Connected B5 (152-12076) and CIP3 m9 (152-12659) BIOSes carry a later build of the same Flash
+player, compiled by another compiler: none of the US v2.1 byte signatures match, but the functions, the
+edge record, the fill style (+0x0C order, +0x10 clip, +0x17 kind, +0x20 painter, +0x24 B G R A, bitmap
++0x34/+0x36/+0x38/+0x54, gradient +0x50/+0x94), the raster object (+0x00 scale, +0x28..+0x34 rectangle,
++0xA0 scanline) and the point-transform matrix are laid out as before. Its asserts are left in
+("FlashPlayer ASSERT - file: %s, line: %d", "./src/core/raster.cpp" etc.), and their line numbers match
+the few asserts US v2.1 kept (raster.cpp 3542, splay.cpp 1002/1042/1117): that is how the functions were
+matched. 0.6 and B5 are the same code at other addresses; m9 is compiled differently again (other
+registers). Signatures: `crates/ribbit-core/src/hd_l2.rs`.
+
+| Hook | US v2.1 | 0.6 | B5 | m9 |
+| --- | --- | --- | --- | --- |
+| Edge constructor (r1 = edge record) | 4004_E0D8 | 4007_40B8 | 4007_2DAC | 4007_3ED0 |
+| PaintActive (one scanline) | 4005_04A0 | 4007_6894 | 4007_5588 | 4007_65B8 |
+| Scanline hook (raster, y + 1 registers) | 4005_0514 (r14, r17) | 4007_6912 (r15, r13) | 4007_5606 | 4007_6616 (r13, r14) |
+| Paint loop (AddActive, Sort, PaintActive) | 4005_0EE0 | 4007_74AE | | 4007_716E |
+| Solid painter | 4005_544C | 4007_C21C | 4007_AF10 | 4007_C3E8 |
+| Bitmap painter / blending | 4005_4D24 / 4005_5504 | 4007_BA40 / 4007_C2E8 | 4007_A734 / 4007_AFDC | 4007_BC3C / 4007_C4B4 |
+| Gradient painter / blending | 4005_5394 / 4005_5498 | 4007_C13C / 4007_C264 | 4007_AE30 / 4007_AF58 | 4007_C318 / 4007_C440 |
+| Fill setup storing the painters | 4004_DBD0 | 4007_3B2A, 4007_3D42 | | 4007_39C8, 4007_3BD0 |
+| Point transform | 4004_A368 | 4006_FCA0 | 4006_E994 | 4006_FCE8 |
+| Shape reader returns: line end, control, curve end (curve register) | 4005_CAAE, 4005_CB12, 4005_CB42 (r15) | 4008_6EEE, 4008_6F46, 4008_6F76 (r14) | 4008_5BE2, 4008_5C3A, 4008_5C6A | 4008_6B40, 4008_6BA2, 4008_6BD2 (r13) |
+| Stroker "add a piece" | 4006_ADFC | 4009_7A20 | 4009_6714 | 4009_72F4 |
+| Glyph blit call in the text loop | 4009_7220 | 400C_9CBE | 400C_83BE | 400C_97B6 |
+
+* The painters are read from the fill setup's `mov_s r, limm` instructions (long immediates are stored
+  high half first), not matched by their own bytes (the two blending painters differ only in a call).
+* Text loop (same bytes in all three): the string pointer r18 is already past the character
+  (`ldb.ab r1,[r18,1]`), the run's font resource is at run +0x0C (+0x08 in US v2.1), r20 the baseline,
+  r19 the colour (r23 in US v2.1), r13 the pen x. Blitter arguments as in US v2.1.
+* The L2 renders SpongeBob, Kindergarten and its own menus at scale 2 (raster +0x00: half-pixel units),
+  where US v2.1 uses 4 for the same games, so the BIOS's rounding (e.g. the stroker snapping a line's
+  centre to its grid) is coarser: HD's exact lines can sit up to a quarter pixel from the LCD's.
+* Checked with hdplay (HD box-averaged to 160x160 against the LCD): system menus (warning, logos,
+  country, name entry) on 0.6, B5 and m9; SpongeBob Saves the Day (0.6, B5, m9), Sonic X and Cars and
+  Dora Wildlife Rescue (0.6), Kindergarten (m9), Disney Princess Enchanted Learning (B5). Solid,
+  gradient and bitmap fills, strokes, exact curves and device-font text (from outlines on m9 with
+  Kindergarten's fonts) all draw; mean difference 0.5-10 levels, as on US v2.1 for the same screens.
+
+### HD hooks in other BIOSes (2026-11-15, VERIFIED-FW)
+
+`hd::Hooks::find` tries US v2.1's player build, then the Leapster TV's (`examples/hdhooks.rs` lists them).
+
+* **UK v2.1 (152-11452, `leapster2_1004.bin`)**: every US signature matches at the US addresses (the same
+  player code). **Spanish v1.0 (152-11546, `leapster2_1008.bin`)**: all match, shifted (edge constructor
+  0x4005_1A74, scanline 0x4005_3EB0, solid 0x4005_8DE8, bitmap 0x4005_86C0, glyph call 0x4009_D728).
+* **German v2.1 (152-11435, `leapster2_1006.bin`, a known bad dump)**: its second 512 KiB is a copy of the
+  first (an address line stuck), so everything above 0x4008_0000 is missing. The rasterizer hooks lie
+  below that and are found (edge constructor 0x4004_E83C ... stroke 0x4006_B560); the device-text loop
+  (US 0x4009_7220) lies in the missing half, so its text stays as the LCD shows it.
+* **Leapster TV v2.1.11 (152-11594)**: another compiler build of the same player (the same functions,
+  structures and assertion line numbers, other registers and instruction order), so none of the US
+  signatures match; `TV_*_SIG` in hd.rs are its own. Found by comparing each US function with the TV
+  BIOS's instruction streams (registers ignored), then checked instruction by instruction:
+
+| Hook | US v2.1 | Leapster TV | TV difference |
+|---|---|---|---|
+| Edge constructor | 0x4004_E0D8 | 0x4006_B780 | none (r1 the record) |
+| Scanline point | 0x4005_0514 | 0x4006_DFDA (function 0x4006_DF5C) | renderer r15 (US r14), counter r13 (US r17); the player structure's mode word at +0x7AC (US +0x7A8) |
+| Solid painter | 0x4005_544C | 0x4007_38E4 | |
+| Bitmap painter | 0x4005_4D24 | 0x4007_3108 | |
+| Gradient painter (linear, radial) | 0x4005_5394 (0x4005_5194, 0x4005_5260) | 0x4007_3804 (0x4007_35B8, 0x4007_36A0) | |
+| Blending gradient / bitmap painters | 0x4005_5498 / 0x4005_5504 | 0x4007_392C / 0x4007_39B0 | |
+| Point transform | 0x4004_A368 | 0x4006_736C | |
+| Shape reader sites (line, control, end) | 0x4005_CAAE, 0x4005_CB12, 0x4005_CB42 | 0x4007_E5B6, 0x4007_E60E, 0x4007_E63E | the curve in r14 (US r15) |
+| Stroker "add a piece" | 0x4006_ADFC | 0x4008_F0E8 | |
+| Glyph blit call (text loop) | 0x4009_7220 | 0x4005_4352 | string walked by `ldb.ab r1,[r18,1]` (the character is at r18 - 1; US r22 + r14), colour r19 (US r23), baseline r20, the run's font resource at +0x0C (US +0x08) |
+| Render loop (calls the scanline function) | 0x4005_0E44 | 0x4006_EAB0 | |
+
+  Edge records, fill styles, bitmaps and the renderer's rectangle (+0x28..+0x34) have the US layout. A
+  render still ends with the LCD framebuffer transfer (format 4, 160x160): the TV BIOS keeps sending its
+  frame to the LCD controller and then converts it into the TV chip's picture (table[pixel], loop
+  0x4004_EA1E), so HD passes end as on the handheld and are matched against that LCD frame
+  (`Machine::render_hd_frame`). HD on the TV therefore shows the game's own colours, not the TV
+  conversion's (T10); the TV border (T11) is not shown, as without HD.
 
 ## Sequenced music: instruments, pitch bends (2026-10-15)
 

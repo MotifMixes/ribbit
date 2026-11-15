@@ -13,7 +13,7 @@ with the folder holding the English firmware set (archive.org item
 `EXPLORER_SHOT=<png>` (the screen at the end), `EXPLORER_RAM=<file>` (SDRAM; the
 kernel log is in it), `EXPLORER_BULK=<file>` (the Bulk partition as a UBI image),
 `EXPLORER_TRACE=<n>` (interpret to the first exception and print the last n PCs),
-`EXPLORER_JIT=0`, `EXPLORER_WAV=<file>` (the sound), `EXPLORER_INPUT=<million>:<what>;...` (`x,y` touches there, `lift`,
+`EXPLORER_JIT=0`, `EXPLORER_PROGRESS=<million>` (the wall time, and on Linux the resident memory, every so many million cycles; 393 million is 1 s), `EXPLORER_WAV=<file>` (the sound), `EXPLORER_INPUT=<million>:<what>;...` (`x,y` touches there, `lift`,
 a button name, `none`, `insert` / `remove` the cartridge), `EXPLORER_SHOTS=<million>,...` (screens along the way),
 `EXPLORER_CART=<file>` (a cartridge dump in the slot), `EXPLORER_STATE_OUT=<file>` /
 `EXPLORER_STATE=<file>` (save the machine at the end / start from it; with
@@ -55,6 +55,11 @@ mandatory firmware 1.4.11.2128, IDs `LST3-0x0017....`).
   address (0x0010_0000), payload size, header CRC (24 bytes), then a zImage.
 * Without the `.lf2` packages AppManager shows ATTENTION_NEEDED.png (PENDING_REPAIR:
   "connect me to LeapFrog Connect").
+  Tested 2026-11-15, one package left out at a time: it takes Language Pack.lf2 (the shared
+  one, with the fonts, LST3-0x00170030-000000) or Language Pack EN.lf2 (-000001) to be
+  missing; without Trailer 1, Pet Pad App, Pet Pad Unlocker MDL, Surgeon or Firmware Bulk
+  Empty it reaches the setup. Ribbit (`explorer::missing_packages`) then refuses to start
+  and names the missing language packs, instead of showing that picture.
 
 ## NAND partitions
 
@@ -231,6 +236,13 @@ Frozen x2, PJ Masks, Paw Patrol, Trolls, The Little Mermaid, Rusty Rivets) show 
 cartridge is not supported on this platform"; the 2 French ones ask for their language
 pack (only the English set was there). Those screens are the games' own. Test:
 `explorer_cartridges_are_explorer_games` (RIBBIT_EXPLORER_CARTS=<folder>).
+
+Enhanced (new) bug fixed 2026-11-15 (player report on 1.9.1): the HLE reads the cartridge's
+files from the raw flash the app gives it (`cart::files`). For a 64 MiB dump that raw flash (pages
+with erased spare areas) also passed `is_explorer_image`, so it was read as the FAT volume with
+the spare areas inside: the menu's first square stayed empty and tapping it opened an empty
+IconPopUp box. `is_explorer_image` now turns down data with an erased spare area after page 0.
+Original was not affected (its NAND controller reads the raw flash).
 
 In the app: every Didj cartridge in the library is listed on the Explorer's page too
 (tag "Didj cartridge"), and every Explorer cartridge on that page alone (tag

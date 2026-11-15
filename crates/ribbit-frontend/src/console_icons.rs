@@ -11,15 +11,16 @@ type C = egui::Color32;
 /// A console's own colour (its chip in the library).
 pub fn color(hw: Hardware) -> C {
     match hw {
-        Hardware::Leapster => C::from_rgb(150, 160, 175),
-        Hardware::LeapsterTv => C::from_rgb(230, 140, 40),
-        Hardware::LeapsterLmax => C::from_rgb(240, 120, 60),
+        Hardware::Leapster => C::from_rgb(110, 185, 50),
+        Hardware::LeapsterTv => C::from_rgb(240, 195, 40),
+        Hardware::LeapsterLmax => C::from_rgb(55, 100, 200),
         Hardware::Leapster2 => C::from_rgb(60, 150, 225),
-        Hardware::Zippity => C::from_rgb(245, 190, 40),
-        Hardware::RockItTwist => C::from_rgb(235, 80, 120),
-        Hardware::LeapPad => C::from_rgb(90, 140, 230),
-        Hardware::Didj => C::from_rgb(45, 95, 200),
-        Hardware::Explorer => C::from_rgb(110, 195, 60),
+        Hardware::Zippity => C::from_rgb(245, 140, 40),
+        Hardware::RockItTwist => C::from_rgb(150, 90, 215),
+        Hardware::LeapPad => C::from_rgb(30, 165, 160),
+        Hardware::Didj => C::from_rgb(160, 168, 182),
+        Hardware::Explorer => C::from_rgb(160, 205, 40),
+        Hardware::ClickStart => C::from_rgb(70, 185, 110),
     }
 }
 
@@ -35,6 +36,7 @@ pub fn name(hw: Hardware) -> &'static str {
         Hardware::LeapPad => "LeapPad",
         Hardware::Didj => "Didj",
         Hardware::Explorer => "Explorer",
+        Hardware::ClickStart => "ClickStart",
     }
 }
 
@@ -43,30 +45,12 @@ fn mix(a: C, b: C, t: f32) -> C {
     C::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
-/// A shape's body: its colour, a darker rim, a lighter band along the top
-/// (the light from above), as every icon has.
-fn body(p: &egui::Painter, r: egui::Rect, round: f32, base: C) {
-    p.rect_filled(r.translate(egui::vec2(0.0, r.height() * 0.06)), round, C::from_black_alpha(70));
-    p.rect_filled(r, round, mix(base, C::BLACK, 0.25));
-    let inner = r.shrink(r.height() * 0.04);
-    p.rect_filled(inner, round * 0.9, base);
-    let top = egui::Rect::from_min_max(inner.min, egui::pos2(inner.max.x, inner.center().y));
-    p.rect_filled(top.shrink2(egui::vec2(inner.width() * 0.04, 0.0)), round * 0.8, mix(base, C::WHITE, 0.22).gamma_multiply(0.85));
-    p.rect_filled(egui::Rect::from_min_max(egui::pos2(inner.min.x, inner.center().y - 1.0), inner.max).shrink2(egui::vec2(inner.width() * 0.02, 0.0)), round * 0.8, base);
-}
-
 /// A dark glass screen with a glint.
 fn screen(p: &egui::Painter, r: egui::Rect) {
     p.rect_filled(r.expand(r.height() * 0.08), r.height() * 0.1, C::from_gray(30));
     p.rect_filled(r, r.height() * 0.06, C::from_rgb(28, 52, 64));
     let glint = vec![r.min + egui::vec2(r.width() * 0.08, r.height() * 0.1), r.min + egui::vec2(r.width() * 0.4, r.height() * 0.1), r.min + egui::vec2(r.width() * 0.15, r.height() * 0.75)];
     p.add(egui::Shape::convex_polygon(glint, C::from_white_alpha(28), egui::Stroke::NONE));
-}
-
-fn dpad(p: &egui::Painter, c: egui::Pos2, s: f32) {
-    let col = C::from_gray(50);
-    p.rect_filled(egui::Rect::from_center_size(c, egui::vec2(s, s * 0.34)), s * 0.08, col);
-    p.rect_filled(egui::Rect::from_center_size(c, egui::vec2(s * 0.34, s)), s * 0.08, col);
 }
 
 fn button(p: &egui::Painter, c: egui::Pos2, r: f32, col: C) {
@@ -90,6 +74,74 @@ pub fn paint(p: &egui::Painter, rect: egui::Rect, radius: f32, hw: Hardware) {
     paint_device(p, rect, hw);
 }
 
+/// An ellipse turned by `turn` radians, as a polygon (egui's own ellipse
+/// does not turn).
+fn tilted(p: &egui::Painter, c: egui::Pos2, r: egui::Vec2, turn: f32, col: C) {
+    let (s, k) = turn.sin_cos();
+    let pts = (0..24)
+        .map(|i| {
+            let a = i as f32 / 24.0 * std::f32::consts::TAU;
+            let (x, y) = (a.cos() * r.x, a.sin() * r.y);
+            c + egui::vec2(x * k - y * s, x * s + y * k)
+        })
+        .collect();
+    p.add(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
+}
+
+fn oval(p: &egui::Painter, c: egui::Pos2, r: egui::Vec2, col: C) {
+    p.add(egui::Shape::ellipse_filled(c, r, col));
+}
+
+/// One piece of a case's outline: a rounded rectangle or an ellipse.
+#[derive(Clone, Copy)]
+enum Part {
+    Round(egui::Rect, f32),
+    Oval(egui::Pos2, egui::Vec2),
+}
+
+/// A case made of overlapping pieces: a drop shadow, a darker rim, its
+/// colour and a soft light along the top (the light from above), as every
+/// icon has.
+fn shell(p: &egui::Painter, parts: &[Part], base: C, u: f32) {
+    let fill = |off: egui::Vec2, grow: f32, col: C| {
+        for part in parts {
+            match *part {
+                Part::Round(r, round) => {
+                    p.rect_filled(r.translate(off).expand(grow), (round + grow).max(0.0), col);
+                }
+                Part::Oval(c, r) => oval(p, c + off, r + egui::vec2(grow, grow), col),
+            }
+        }
+    };
+    fill(egui::vec2(0.0, 3.0 * u), 0.0, C::from_black_alpha(45));
+    fill(egui::Vec2::ZERO, 0.0, mix(base, C::BLACK, 0.3));
+    fill(egui::Vec2::ZERO, -1.8 * u, base);
+    let b = parts.iter().fold(egui::Rect::NOTHING, |b, part| match *part {
+        Part::Round(r, _) => b.union(r),
+        Part::Oval(c, r) => b.union(egui::Rect::from_center_size(c, r * 2.0)),
+    });
+    oval(p, egui::pos2(b.center().x, b.min.y + b.height() * 0.2), egui::vec2(b.width() * 0.36, b.height() * 0.11), C::from_white_alpha(34));
+}
+
+/// A grille of short slots (a speaker).
+fn grille(p: &egui::Painter, c: egui::Pos2, w: f32, rows: usize, gap: f32, stroke: egui::Stroke) {
+    for i in 0..rows {
+        let y = c.y + (i as f32 - (rows - 1) as f32 / 2.0) * gap;
+        p.line_segment([egui::pos2(c.x - w / 2.0, y), egui::pos2(c.x + w / 2.0, y)], stroke);
+    }
+}
+
+/// A light plus-shaped D-pad (the Leapster family's, the Didj's).
+fn cross(p: &egui::Painter, c: egui::Pos2, s: f32, col: C) {
+    let edge = mix(col, C::BLACK, 0.35);
+    for (w, h) in [(s, s * 0.38), (s * 0.38, s)] {
+        p.rect_filled(egui::Rect::from_center_size(c + egui::vec2(0.0, s * 0.06), egui::vec2(w, h)), s * 0.1, edge);
+    }
+    for (w, h) in [(s, s * 0.38), (s * 0.38, s)] {
+        p.rect_filled(egui::Rect::from_center_size(c, egui::vec2(w, h)), s * 0.1, col);
+    }
+}
+
 /// The device alone (no tile), for chips.
 pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
     let u = rect.width().min(rect.height()) / 100.0;
@@ -97,110 +149,270 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
     let v = |x: f32, y: f32| egui::vec2(x * u, y * u);
     let at = |x: f32, y: f32| c + v(x, y);
     let stroke = |w: f32, col: C| egui::Stroke::new(w * u, col);
+    let rr = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_center_size(at(x, y), v(w, h));
     match hw {
-        // The Leapster family: a wide handheld whose grips hang below it,
-        // the screen in the middle, d-pad left, A/B right, and the stylus
-        // tucked along the top right. Silver (Leapster), blue (Leapster 2).
-        Hardware::Leapster | Hardware::Leapster2 => {
-            let base = if hw == Hardware::Leapster { C::from_rgb(200, 206, 214) } else { C::from_rgb(60, 150, 225) };
-            p.line_segment([at(14.0, -25.0), at(40.0, -25.0)], stroke(3.5, C::from_rgb(250, 190, 40)));
-            p.circle_filled(at(40.0, -25.0), 2.2 * u, C::from_gray(80));
-            for x in [-30.0, 30.0] {
-                p.circle_filled(at(x, 14.0), 17.0 * u, mix(base, C::BLACK, 0.25));
-                p.circle_filled(at(x, 13.0), 15.5 * u, base);
+        // Leapster (the 2005 handheld in its US green, as on its Parent
+        // Guide; the 2003 one is blue and silver): green wings either side
+        // of a silver face, its lower edge bowed. A big square screen, the
+        // D-pad in a raised green ring at the left, A (large) and B on a
+        // silver pill at the right over the speaker slots, the red power
+        // button top right, and the stylus lying in its tray under the screen.
+        Hardware::Leapster => {
+            let green = C::from_rgb(120, 196, 40);
+            let silver = C::from_rgb(178, 184, 192);
+            shell(p, &[Part::Round(rr(0.0, -2.0, 94.0, 54.0), 16.0 * u), Part::Oval(at(0.0, 18.0), v(36.0, 10.0))], green, u);
+            p.rect_filled(rr(0.0, 2.0, 56.0, 58.0), 9.0 * u, mix(silver, C::BLACK, 0.3));
+            p.rect_filled(rr(0.0, 1.5, 53.0, 55.0), 8.0 * u, silver);
+            screen(p, rr(0.0, -6.0, 31.0, 29.0));
+            // The stylus in its tray.
+            p.rect_filled(rr(0.0, 19.0, 40.0, 7.0), 3.5 * u, mix(silver, C::BLACK, 0.35));
+            p.line_segment([at(-17.0, 19.0), at(17.0, 19.0)], stroke(3.6, C::from_gray(225)));
+            for x in [-12.0, 12.0] {
+                p.rect_filled(rr(x, 19.0, 3.0, 7.0), 1.0 * u, green);
             }
-            body(p, egui::Rect::from_center_size(at(0.0, -2.0), v(90.0, 40.0)), 14.0 * u, base);
-            screen(p, egui::Rect::from_center_size(at(0.0, -2.0), v(32.0, 26.0)));
-            dpad(p, at(-31.0, 2.0), 15.0 * u);
-            button(p, at(26.0, 7.0), 5.0 * u, C::from_rgb(230, 70, 60));
-            button(p, at(35.0, -2.0), 5.0 * u, C::from_rgb(250, 190, 40));
+            // D-pad in its green ring, the three small buttons above it.
+            p.rect_filled(rr(-36.0, 1.0, 21.0, 21.0), 7.0 * u, mix(green, C::BLACK, 0.3));
+            p.rect_filled(rr(-36.0, 0.5, 19.0, 19.0), 6.5 * u, mix(green, C::WHITE, 0.15));
+            cross(p, at(-36.0, 0.5), 14.0 * u, mix(green, C::WHITE, 0.35));
+            for x in [-43.0, -36.0, -29.0] {
+                button(p, at(x, -16.0), 2.2 * u, green);
+            }
+            // A and B on their silver pill, speaker below, power above.
+            p.rect_filled(rr(36.0, -5.0, 22.0, 13.0), 6.5 * u, mix(silver, C::BLACK, 0.3));
+            p.rect_filled(rr(36.0, -5.5, 20.5, 11.5), 6.0 * u, silver);
+            button(p, at(32.0, -5.5), 4.6 * u, green);
+            button(p, at(41.5, -5.5), 3.0 * u, green);
+            grille(p, at(36.0, 9.0), 14.0 * u, 4, 2.8 * u, stroke(1.2, mix(green, C::BLACK, 0.45)));
+            button(p, at(41.0, -20.0), 2.4 * u, C::from_rgb(225, 40, 35));
         }
-        // L-MAX: the Leapster shape in orange in front of the TV it drives.
+        // L-MAX: the silver face held between deep blue grips, a blue
+        // D-pad and A button, the stylus on its cord at the top right; the
+        // TV it drives behind (its video out is what sets it apart).
         Hardware::LeapsterLmax => {
-            let tv = egui::Rect::from_center_size(at(0.0, -18.0), v(70.0, 46.0));
-            p.rect_filled(tv, 5.0 * u, C::from_gray(55));
-            p.rect_filled(tv.shrink(4.0 * u), 2.0 * u, C::from_rgb(28, 52, 64));
-            p.line_segment([at(-12.0, 6.0), at(12.0, 6.0)], stroke(3.0, C::from_gray(55)));
-            let base = C::from_rgb(240, 130, 50);
-            body(p, egui::Rect::from_center_size(at(0.0, 22.0), v(72.0, 28.0)), 12.0 * u, base);
-            screen(p, egui::Rect::from_center_size(at(0.0, 22.0), v(24.0, 17.0)));
-            dpad(p, at(-25.0, 23.0), 11.0 * u);
-            button(p, at(25.0, 23.0), 4.5 * u, C::from_rgb(60, 120, 230));
+            let blue = C::from_rgb(40, 90, 175);
+            let silver = C::from_rgb(196, 201, 210);
+            let tv = rr(-24.0, -27.0, 40.0, 28.0);
+            p.rect_filled(tv, 3.0 * u, C::from_gray(60));
+            p.rect_filled(tv.shrink(3.0 * u), 1.5 * u, C::from_rgb(70, 130, 200));
+            shell(p, &[Part::Round(rr(0.0, 2.0, 84.0, 44.0), 13.0 * u), Part::Oval(at(-33.0, 10.0), v(14.0, 16.0)), Part::Oval(at(33.0, 10.0), v(14.0, 16.0))], blue, u);
+            p.rect_filled(rr(0.0, 1.0, 62.0, 42.0), 10.0 * u, silver);
+            p.rect_filled(rr(0.0, -11.0, 80.0, 18.0), 9.0 * u, silver);
+            oval(p, at(0.0, -15.0), v(30.0, 5.0), C::from_white_alpha(40));
+            screen(p, rr(0.0, 0.0, 30.0, 28.0));
+            cross(p, at(-27.0, 0.0), 13.0 * u, blue);
+            button(p, at(27.0, 1.0), 5.0 * u, blue);
+            button(p, at(33.0, -8.0), 3.0 * u, blue);
+            // The stylus's cord, and the stylus in its holder at the top right.
+            p.add(egui::Shape::line(vec![at(40.0, -16.0), at(46.0, -24.0), at(44.0, -36.0)], stroke(1.2, C::from_rgb(90, 140, 220))));
+            p.line_segment([at(30.0, -22.0), at(40.0, -16.0)], stroke(3.0, C::from_gray(225)));
         }
-        // Leapster TV: a stick controller on a base.
+        // Leapster 2 (green and blue): a lime green case with wide round
+        // ends, blue grips along their lower edges, a blue D-pad in a green
+        // ring, a large blue A with a small B, the round speaker bottom right.
+        Hardware::Leapster2 => {
+            let lime = C::from_rgb(150, 205, 35);
+            let blue = C::from_rgb(35, 85, 185);
+            shell(p, &[Part::Round(rr(0.0, 0.0, 64.0, 46.0), 14.0 * u), Part::Oval(at(-30.0, 2.0), v(20.0, 22.0)), Part::Oval(at(30.0, 2.0), v(20.0, 22.0))], blue, u);
+            oval(p, at(-28.0, -2.0), v(18.0, 18.0), lime);
+            oval(p, at(28.0, -2.0), v(18.0, 18.0), lime);
+            p.rect_filled(rr(0.0, -0.5, 60.0, 43.0), 12.0 * u, lime);
+            oval(p, at(0.0, -16.0), v(30.0, 6.0), C::from_white_alpha(34));
+            p.rect_filled(rr(0.0, -1.0, 34.0, 30.0), 4.0 * u, mix(blue, C::BLACK, 0.2));
+            screen(p, rr(0.0, -1.0, 28.0, 25.0));
+            oval(p, at(-32.0, 0.0), v(9.5, 9.5), mix(lime, C::BLACK, 0.2));
+            cross(p, at(-32.0, 0.0), 13.0 * u, blue);
+            button(p, at(30.0, -2.0), 6.0 * u, blue);
+            button(p, at(37.0, -11.0), 3.0 * u, blue);
+            for r in [3.5f32, 6.0, 8.5] {
+                p.add(egui::Shape::circle_stroke(at(31.0, 13.0), r * u, stroke(1.0, mix(lime, C::BLACK, 0.45))));
+            }
+        }
+        // Leapster TV: a round blue console on green feet, a yellow rim
+        // round its green top, the yellow joystick standing in the middle,
+        // a big red and a small blue button in front, the cartridge slot
+        // in its side.
         Hardware::LeapsterTv => {
-            body(p, egui::Rect::from_center_size(at(0.0, 12.0), v(78.0, 40.0)), 14.0 * u, C::from_rgb(230, 140, 40));
-            p.rect_filled(egui::Rect::from_center_size(at(-14.0, -6.0), v(7.0, 26.0)), 3.0 * u, C::from_gray(60));
-            button(p, at(-14.0, -22.0), 9.0 * u, C::from_rgb(60, 120, 230));
-            button(p, at(14.0, 12.0), 6.0 * u, C::from_rgb(230, 70, 60));
-            button(p, at(28.0, 5.0), 6.0 * u, C::from_rgb(90, 190, 90));
+            let blue = C::from_rgb(45, 75, 190);
+            let yellow = C::from_rgb(250, 205, 40);
+            let green = C::from_rgb(110, 200, 60);
+            for (x, y) in [(-32.0, 30.0), (32.0, 30.0), (0.0, 36.0)] {
+                oval(p, at(x, y + 2.0), v(9.0, 5.0), C::from_black_alpha(60));
+                oval(p, at(x, y), v(9.0, 5.0), green);
+            }
+            oval(p, at(0.0, 18.0), v(45.0, 17.0), mix(blue, C::BLACK, 0.25));
+            p.rect_filled(egui::Rect::from_min_max(at(-45.0, 8.0), at(45.0, 18.0)), 0.0, mix(blue, C::BLACK, 0.25));
+            oval(p, at(0.0, 8.0), v(45.0, 17.0), yellow);
+            oval(p, at(0.0, 7.0), v(37.0, 13.0), blue);
+            oval(p, at(4.0, 5.0), v(22.0, 8.0), green);
+            p.rect_filled(rr(18.0, 22.0, 14.0, 5.0), 1.0 * u, C::from_gray(30));
+            button(p, at(-22.0, 9.0), 6.0 * u, C::from_rgb(230, 50, 45));
+            button(p, at(-12.0, 15.0), 3.8 * u, C::from_rgb(70, 140, 235));
+            p.line_segment([at(4.0, 4.0), at(4.0, -20.0)], stroke(6.0, mix(yellow, C::BLACK, 0.2)));
+            oval(p, at(4.0, 4.0), v(6.0, 2.5), mix(yellow, C::BLACK, 0.3));
+            button(p, at(4.0, -24.0), 9.0 * u, yellow);
         }
-        // Didj: wide and rounded like a capsule, blue grips around a silver
-        // face, a small screen in the middle, d-pad left, two buttons
-        // right and shoulder bumps on top.
+        // Didj: a wide white case round a grey face, a 4:3 screen in the
+        // middle, a white D-pad and white A and B on lighter grey panels,
+        // the small buttons along its top.
         Hardware::Didj => {
-            let blue = C::from_rgb(45, 95, 200);
-            for x in [-30.0, 30.0] {
-                p.rect_filled(egui::Rect::from_center_size(at(x, -18.0), v(22.0, 10.0)), 5.0 * u, mix(blue, C::BLACK, 0.3));
+            let white = C::from_rgb(238, 240, 244);
+            let grey = C::from_rgb(120, 126, 136);
+            shell(p, &[Part::Round(rr(0.0, 0.0, 96.0, 44.0), 16.0 * u)], white, u);
+            p.rect_filled(rr(0.0, -1.0, 84.0, 34.0), 9.0 * u, grey);
+            for x in [-31.0, 31.0] {
+                p.rect_filled(rr(x, 1.0, 20.0, 20.0), 5.0 * u, mix(grey, C::WHITE, 0.25));
             }
-            body(p, egui::Rect::from_center_size(c, v(96.0, 38.0)), 19.0 * u, blue);
-            let face = egui::Rect::from_center_size(c, v(50.0, 32.0));
-            p.rect_filled(face, 10.0 * u, C::from_rgb(205, 212, 222));
-            p.rect_filled(egui::Rect::from_min_max(face.min, egui::pos2(face.max.x, face.center().y)).shrink2(v(4.0, 0.0)), 8.0 * u, C::from_rgb(232, 236, 242));
-            screen(p, egui::Rect::from_center_size(c, v(28.0, 21.0)));
-            dpad(p, at(-36.0, 0.0), 14.0 * u);
-            button(p, at(32.0, 5.0), 4.5 * u, C::from_rgb(235, 235, 240));
-            button(p, at(40.0, -3.0), 4.5 * u, C::from_rgb(235, 235, 240));
+            screen(p, rr(0.0, -1.0, 34.0, 26.0));
+            cross(p, at(-31.0, 1.0), 13.0 * u, white);
+            for (x, y) in [(27.0, 3.0), (35.0, 0.0)] {
+                p.rect_filled(rr(x, y + 0.8, 6.5, 6.5), 1.8 * u, mix(white, C::BLACK, 0.35));
+                p.rect_filled(rr(x, y, 6.5, 6.5), 1.8 * u, white);
+            }
+            for x in [-35.0, -27.0, 35.0] {
+                p.rect_filled(rr(x, -14.0, 5.0, 3.0), 1.5 * u, white);
+            }
         }
-        // Leapster Explorer: a chunky, tall handheld in green, a large
-        // touch screen, its stylus standing along the right side, d-pad
-        // left and buttons right.
+        // Leapster Explorer: a lime green case, its top arched, round a
+        // charcoal face; a wide screen, the stylus tethered at the top left,
+        // the D-pad low on the left, A and B right over a round speaker.
         Hardware::Explorer => {
-            let green = C::from_rgb(110, 195, 60);
-            p.line_segment([at(44.0, -24.0), at(44.0, 22.0)], stroke(4.0, C::from_rgb(250, 140, 30)));
-            p.circle_filled(at(44.0, -25.0), 2.5 * u, C::from_gray(80));
-            body(p, egui::Rect::from_center_size(at(-2.0, 0.0), v(80.0, 58.0)), 16.0 * u, green);
-            p.rect_filled(egui::Rect::from_center_size(at(-2.0, -1.0), v(46.0, 40.0)), 5.0 * u, C::from_rgb(40, 110, 50));
-            screen(p, egui::Rect::from_center_size(at(-2.0, -1.0), v(40.0, 34.0)));
-            dpad(p, at(-32.0, 4.0), 13.0 * u);
-            button(p, at(27.0, 8.0), 4.5 * u, C::from_rgb(60, 120, 230));
-            button(p, at(29.0, -4.0), 4.5 * u, C::from_rgb(250, 200, 50));
+            let lime = C::from_rgb(140, 200, 40);
+            let face = C::from_rgb(52, 56, 62);
+            shell(p, &[Part::Round(rr(0.0, 3.0, 94.0, 52.0), 18.0 * u), Part::Oval(at(0.0, -16.0), v(36.0, 12.0))], lime, u);
+            p.rect_filled(rr(0.0, 2.0, 78.0, 42.0), 12.0 * u, face);
+            oval(p, at(0.0, -12.0), v(28.0, 9.0), face);
+            screen(p, rr(0.0, -1.0, 40.0, 28.0));
+            cross(p, at(-29.0, 8.0), 12.0 * u, C::from_gray(170));
+            button(p, at(28.0, -4.0), 4.0 * u, C::from_gray(185));
+            button(p, at(35.0, 3.0), 4.0 * u, C::from_gray(185));
+            for (x, y) in [(28.0, -15.0), (35.0, -12.0)] {
+                p.circle_filled(at(x, y), 1.8 * u, C::from_gray(150));
+            }
+            for k in 0..7 {
+                let a = k as f32 / 7.0 * std::f32::consts::TAU;
+                p.circle_filled(at(31.0 + 3.6 * a.cos(), 14.0 + 3.6 * a.sin()), 0.9 * u, C::from_gray(20));
+            }
+            p.circle_filled(at(31.0, 14.0), 0.9 * u, C::from_gray(20));
+            // The stylus, held at the top left.
+            p.line_segment([at(-40.0, -18.0), at(-20.0, -4.0)], stroke(3.5, C::from_gray(200)));
+            p.circle_filled(at(-40.0, -18.0), 2.6 * u, lime);
         }
-        // RockIt Twist: a round handheld whose halves twist (grip ridges on
-        // the rim), a small screen at its heart.
+        // ClickStart: a green and white keyboard shaped as a dog, two dark
+        // green ears and a face with eyes and a nose above the keys, a red
+        // space bar and a blue arrow pad, its paw-shaped mouse pad at the
+        // right.
+        Hardware::ClickStart => {
+            let green = C::from_rgb(120, 200, 70);
+            let dark = C::from_rgb(40, 120, 50);
+            let white = C::from_rgb(244, 246, 240);
+            for x in [-24.0f32, 8.0] {
+                tilted(p, at(x, -15.0), v(7.5, 13.0), if x < 0.0 { 0.35 } else { -0.35 }, dark);
+            }
+            oval(p, at(-8.0, -16.0), v(15.0, 12.0), white);
+            p.circle_filled(at(-14.0, -19.0), 2.4 * u, C::from_gray(25));
+            p.circle_filled(at(-2.0, -19.0), 2.4 * u, C::from_gray(25));
+            oval(p, at(-8.0, -11.5), v(3.6, 2.6), C::from_gray(25));
+            shell(p, &[Part::Round(rr(-8.0, 10.0, 74.0, 32.0), 10.0 * u)], green, u);
+            p.rect_filled(rr(-13.0, 9.0, 56.0, 22.0), 4.0 * u, white);
+            for (row, y) in [3.0f32, 9.0].into_iter().enumerate() {
+                for k in 0..8 {
+                    let x = -37.0 + 7.0 * k as f32 + 1.5 * row as f32;
+                    p.rect_filled(rr(x, y, 5.5, 4.6), 1.0 * u, mix(green, C::WHITE, 0.25));
+                }
+            }
+            p.rect_filled(rr(-13.0, 16.0, 30.0, 4.6), 1.5 * u, C::from_rgb(225, 45, 40));
+            cross(p, at(20.0, 9.0), 12.0 * u, C::from_rgb(45, 110, 220));
+            // The paw: a pad and three toes.
+            oval(p, at(40.0, 14.0), v(8.0, 7.0), mix(green, C::BLACK, 0.3));
+            oval(p, at(40.0, 13.5), v(7.0, 6.0), green);
+            for (x, y) in [(33.5, 4.0), (40.0, 2.0), (46.5, 4.0)] {
+                p.circle_filled(at(x, y), 3.2 * u, mix(green, C::BLACK, 0.3));
+                p.circle_filled(at(x, y - 0.4), 2.7 * u, green);
+            }
+        }
+        // RockIt Twist (its purple edition): a square handheld, a black
+        // face, the 4:3 screen in the middle and a control on each side: the
+        // green 3 x 3 button grid and the Switch along the top, the blue
+        // Spinner at the top right, the orange Slider down the right, the
+        // three dials along the bottom and the red D-pad at the left.
         Hardware::RockItTwist => {
-            let r = 40.0 * u;
-            p.circle_filled(c + v(0.0, 3.0), r, C::from_black_alpha(70));
-            p.circle_filled(c, r, C::from_rgb(180, 50, 90));
-            p.circle_filled(c, r * 0.92, C::from_rgb(235, 80, 120));
-            p.circle_filled(c - v(0.0, 6.0), r * 0.7, C::from_rgb(245, 120, 150).gamma_multiply(0.5));
-            for i in 0..12 {
-                let a = (i as f32 / 12.0) * std::f32::consts::TAU;
-                let d = egui::vec2(a.cos(), a.sin());
-                p.line_segment([c + d * r * 0.78, c + d * r * 0.92], stroke(2.5, C::from_rgb(180, 50, 90)));
+            let purple = C::from_rgb(135, 75, 200);
+            shell(p, &[Part::Round(rr(0.0, 0.0, 86.0, 88.0), 15.0 * u)], purple, u);
+            p.rect_filled(rr(0.0, 1.0, 78.0, 80.0), 11.0 * u, C::from_gray(22));
+            screen(p, rr(0.0, 3.0, 40.0, 30.0));
+            // Grid.
+            p.rect_filled(rr(12.0, -29.0, 22.0, 20.0), 3.0 * u, C::from_rgb(60, 200, 70));
+            for i in 0..9 {
+                let (x, y) = ((i % 3) as f32 * 6.0 + 6.0, (i / 3) as f32 * 5.6 - 34.6);
+                p.rect_filled(rr(x, y, 4.2, 3.8), 1.0 * u, C::from_rgb(25, 70, 30));
             }
-            screen(p, egui::Rect::from_center_size(c, v(30.0, 24.0)));
+            // Switch.
+            p.rect_filled(rr(-15.0, -31.0, 20.0, 9.0), 4.5 * u, C::from_rgb(170, 110, 235));
+            // Spinner.
+            p.circle_filled(at(33.0, -22.0), 8.5 * u, C::from_rgb(60, 140, 235));
+            p.circle_filled(at(33.0, -22.0), 3.5 * u, C::from_rgb(30, 80, 170));
+            // Slider.
+            p.rect_filled(rr(34.0, 7.0, 7.0, 26.0), 3.5 * u, C::from_rgb(250, 140, 30));
+            // Dials.
+            for (x, col) in [(-13.0, C::from_rgb(245, 210, 40)), (0.0, C::from_rgb(70, 200, 70)), (13.0, C::from_rgb(225, 45, 40))] {
+                p.rect_filled(rr(x, 32.0, 8.0, 10.0), 2.0 * u, col);
+            }
+            // D-pad.
+            cross(p, at(-31.0, 3.0), 13.0 * u, C::from_rgb(225, 45, 40));
         }
-        // Zippity: a dome-shaped TV pod with a big ball stick and two big
-        // buttons.
+        // Zippity: the round play mat (the orange home spot with its two
+        // footprints, the blue oval in front of it, red and green spots to
+        // the sides) and the blue Bopper standing beside it, its white
+        // handle topped in orange.
         Hardware::Zippity => {
-            body(p, egui::Rect::from_center_size(at(0.0, 14.0), v(84.0, 40.0)), 20.0 * u, C::from_rgb(245, 190, 40));
-            p.rect_filled(egui::Rect::from_center_size(at(-18.0, -4.0), v(7.0, 22.0)), 3.0 * u, C::from_gray(70));
-            button(p, at(-18.0, -20.0), 13.0 * u, C::from_rgb(60, 160, 230));
-            button(p, at(12.0, 14.0), 8.0 * u, C::from_rgb(230, 70, 60));
-            button(p, at(29.0, 6.0), 8.0 * u, C::from_rgb(90, 190, 90));
+            let blue = C::from_rgb(45, 110, 220);
+            oval(p, at(-8.0, 27.0), v(40.0, 17.0), C::from_black_alpha(60));
+            oval(p, at(-8.0, 25.0), v(40.0, 17.0), C::from_rgb(235, 240, 245));
+            oval(p, at(-8.0, 25.0), v(36.0, 14.5), C::from_rgb(110, 200, 220));
+            oval(p, at(-8.0, 17.0), v(11.0, 4.0), blue);
+            oval(p, at(-8.0, 27.0), v(11.0, 5.5), C::from_rgb(250, 140, 30));
+            for x in [-11.0, -5.0] {
+                oval(p, at(x, 27.0), v(1.8, 3.5), C::from_rgb(255, 220, 170));
+            }
+            oval(p, at(-32.0, 25.0), v(7.0, 4.5), C::from_rgb(230, 50, 45));
+            oval(p, at(16.0, 25.0), v(7.0, 4.5), C::from_rgb(90, 195, 60));
+            // The Bopper.
+            oval(p, at(33.0, 36.0), v(12.0, 5.0), mix(blue, C::BLACK, 0.3));
+            oval(p, at(33.0, 35.0), v(11.0, 4.2), blue);
+            p.line_segment([at(33.0, 34.0), at(33.0, -14.0)], stroke(6.0, blue));
+            p.line_segment([at(31.5, 34.0), at(31.5, -14.0)], stroke(1.5, mix(blue, C::WHITE, 0.35)));
+            p.rect_filled(rr(33.0, -24.0, 16.0, 22.0), 7.0 * u, mix(C::WHITE, C::BLACK, 0.2));
+            p.rect_filled(rr(33.0, -24.5, 14.5, 20.5), 6.5 * u, C::from_rgb(245, 246, 248));
+            p.circle_filled(at(33.0, -27.0), 6.0 * u, C::from_rgb(90, 195, 60));
+            button(p, at(33.0, -27.0), 4.3 * u, C::from_rgb(250, 140, 30));
         }
-        // LeapPad: an open book in a frame, its pen on a cord.
+        // LeapPad (1999): a teal case with its carrying handle at the top,
+        // the open book on its pale platform, the pen on its cord at the
+        // right and the speaker and GO along the bottom.
         Hardware::LeapPad => {
-            body(p, egui::Rect::from_center_size(at(-6.0, 0.0), v(74.0, 60.0)), 8.0 * u, C::from_rgb(70, 120, 220));
+            let teal = C::from_rgb(28, 150, 150);
+            p.add(egui::Shape::line(
+                (0..=12).map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 12.0);
+                    at(-4.0 + 16.0 * a.cos(), -27.0 + 9.0 * a.sin())
+                }).collect(),
+                stroke(5.0, mix(teal, C::BLACK, 0.2)),
+            ));
+            shell(p, &[Part::Round(rr(-4.0, 4.0, 80.0, 64.0), 9.0 * u)], teal, u);
+            p.rect_filled(rr(-4.0, 1.0, 72.0, 48.0), 4.0 * u, C::from_rgb(196, 230, 226));
             for x in [-1.0, 1.0] {
-                p.rect_filled(egui::Rect::from_center_size(at(-6.0 + x * 14.0, 2.0), v(27.0, 42.0)), 2.0 * u, C::from_rgb(248, 244, 230));
+                p.rect_filled(rr(-4.0 + x * 16.0, 1.0, 31.0, 43.0), 2.0 * u, C::from_rgb(255, 250, 236));
             }
-            for y in [-8.0, 0.0, 8.0] {
-                p.line_segment([at(-28.0, y), at(-12.0, y)], stroke(1.2, C::from_gray(170)));
+            p.line_segment([at(-4.0, -21.0), at(-4.0, 23.0)], stroke(1.2, C::from_gray(170)));
+            for y in [-12.0, -5.0, 2.0, 9.0] {
+                p.line_segment([at(-31.0, y), at(-9.0, y)], stroke(1.2, C::from_gray(175)));
             }
-            p.line_segment([at(36.0, -22.0), at(42.0, 20.0)], stroke(5.0, C::from_rgb(250, 170, 40)));
-            p.circle_filled(at(42.0, 22.0), 2.5 * u, C::from_gray(60));
+            p.rect_filled(rr(10.0, -6.0, 18.0, 14.0), 1.5 * u, C::from_rgb(240, 150, 60));
+            button(p, at(28.0, 30.0), 3.2 * u, C::from_rgb(40, 170, 70));
+            grille(p, at(-24.0, 30.0), 16.0 * u, 2, 2.6 * u, stroke(1.2, mix(teal, C::BLACK, 0.45)));
+            p.add(egui::Shape::line(vec![at(34.0, 30.0), at(42.0, 34.0), at(46.0, 26.0), at(44.0, 18.0)], stroke(1.2, C::from_gray(60))));
+            p.line_segment([at(44.0, 18.0), at(38.0, -18.0)], stroke(5.0, C::from_rgb(40, 90, 200)));
+            p.line_segment([at(38.0, -18.0), at(37.3, -22.0)], stroke(2.0, C::from_gray(70)));
         }
     }
 }

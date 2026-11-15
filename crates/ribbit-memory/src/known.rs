@@ -32,6 +32,10 @@ pub enum Hardware {
     /// LeapFrog Leapster Explorer (2010): the Didj's LF1000 with 64 MB, its
     /// NAND built from its firmware packages (ribbit_didj::explorer).
     Explorer,
+    /// LeapFrog ClickStart: My First Computer (2007 TV console with keyboard
+    /// and mouse): a Sunplus SPG28x (16-bit unSP), an 8 MB system ROM and
+    /// 4 MB ROM cartridges (crates/ribbit-clickstart). EXPERIMENTAL.
+    ClickStart,
 }
 
 impl Hardware {
@@ -47,6 +51,7 @@ impl Hardware {
             Hardware::LeapPad => "LeapPad",
             Hardware::Didj => "Didj",
             Hardware::Explorer => "Leapster Explorer",
+            Hardware::ClickStart => "ClickStart",
         }
     }
 }
@@ -224,6 +229,35 @@ pub const ZIPPITY_CARTRIDGES: &[KnownImage] = &[
         "00f454b629d7bcc7f58a43dd453d410a8ed60a99",
         false,
     ),
+];
+
+/// The ClickStart's system ROM (MAME's `clikstrt`).
+pub const CLICKSTART_SYSTEM: &[KnownImage] = &[fw(
+    "ClickStart system ROM",
+    Hardware::ClickStart,
+    0x80_0000,
+    0x7c83_3bd0,
+    "2e9ef38e1a7582705920339e6b9944f6404fcf9b",
+    false,
+)];
+
+/// ClickStart cartridges (MAME's clickstart_cart software list).
+pub const CLICKSTART_CARTRIDGES: &[KnownImage] = &[
+    fw("Animal Art Studio (UK)", Hardware::ClickStart, 0x40_0000, 0xf139_0fea, "3ace0c1b1ffe883e2dda8976c24f47729df53191", false),
+    fw("Estudio de Arte Animal (Spain)", Hardware::ClickStart, 0x40_0000, 0x1192_0f3a, "c6c1f153a6e17a31da1a079f2c8e0e57947d2ac9", false),
+    fw("Nick Jr. The Backyardigans - Number Pie Samurai! (UK)", Hardware::ClickStart, 0x40_0000, 0xd337_77fd, "3245cd4f86cf7d1e59f9484eeb61078981fcf6e8", false),
+    fw("Disney/Pixar The World of Cars - The Road to Learning! (UK)", Hardware::ClickStart, 0x40_0000, 0xb021_c6a7, "2553877ff49062dce71beb4c717740c62db243cd", false),
+    fw("Disney Princess - The Love of Letters (UK)", Hardware::ClickStart, 0x40_0000, 0xfe96_e198, "106b24cf48ba393d0541db36a60c790df9d95f2a", false),
+    fw("Nickelodeon Go Diego Go! - Learning Expeditions (UK)", Hardware::ClickStart, 0x40_0000, 0x5e5d_0617, "83c644d2728125c26bd32af4e07fe278d6f588a0", false),
+    fw("Learning Carnival (UK)", Hardware::ClickStart, 0x40_0000, 0x3163_3d96, "9b0252fe0f3cd539ad47132c6adee358a0c1cba8", false),
+    fw("Disney/Pixar Finding Nemo - Sea of Keys (UK)", Hardware::ClickStart, 0x40_0000, 0x33e0_2256, "caac98a66b714aa9addef42d31cd139fe138ea58", false),
+    fw("Nickelodeon Ni Hao, Kai-Lan (UK)", Hardware::ClickStart, 0x40_0000, 0xb9d6_a774, "9acd15a6b92d10e23e2364a251c71677efaae399", false),
+    fw("Scout's Puppy Pals (UK)", Hardware::ClickStart, 0x40_0000, 0xf9cf_74c7, "6ba8f0c74a8c6075632db29b9034f72190809305", false),
+    fw("Disney/Pixar Toy Story - To 100 and Beyond! (UK)", Hardware::ClickStart, 0x40_0000, 0x9021_fa2e, "841be50a7f0eb4f633469b04928d3085874866dc", false),
+    fw("Disney/Pixar Toy Story - ¡Al 100 y más allá! (Spain)", Hardware::ClickStart, 0x40_0000, 0x91a7_48f6, "05da46b6ded3fee24bc1167395f8139647368b68", false),
+    fw("Bob the Builder - Project: Learn It! (UK)", Hardware::ClickStart, 0x40_0000, 0x3879_20df, "ac071987f5389604f368ea0a59962a0c28f73a80", false),
+    fw("Thomas & Friends - Learning Destinations (UK)", Hardware::ClickStart, 0x40_0000, 0x8485_c99a, "2a4899868f383b8a6e8cdc0e65dfed86222ff697", false),
+    fw("Nick Jr. Dora the Explorer - Friends! ¡Amigos! (UK)", Hardware::ClickStart, 0x40_0000, 0xe93b_d91a, "e4c9649becd6370d555c6475cb491ba78c54ad17", false),
 ];
 
 pub fn lookup(table: &'static [KnownImage], id: &crate::ImageId) -> Option<&'static KnownImage> {

@@ -70,6 +70,81 @@ fn blend(over: u32, under: u32, alpha: u32, full: u32) -> u32 {
     ch(16) | ch(8) | ch(0)
 }
 
+/// Halfword 7 of a sprite placed through the corner converter: a rectangle
+/// (`QUAD` clear) or any four corners (`QUAD` set).
+const CORNERS: u32 = 0x8000;
+const QUAD: u32 = 0x4000;
+
+/// The corner converter's five results (a sprite's halfwords 1, 2, 5, 6 and
+/// 7) for four corners `c` (x0, y0, .., x3, y3: centred, y up; top left, top
+/// right, bottom right, bottom left of the picture). What the hardware
+/// returns is UNKNOWN; this encoding is read only by `draw_sprite`. A
+/// rectangle: the first and third corners, and `CORNERS`, as before (the
+/// sprite's x and y in halfwords 1 and 2, as without the converter). Other
+/// shapes (Little Einsteins' rocket turns as it climbs or dives, sent as
+/// strips of turned 64x16 and 16x16 sprites): `CORNERS | QUAD` and a 78-bit
+/// number, the first three corners in 10 bits each (-512 to 511) and the
+/// fourth's distance from the parallelogram's fourth corner in 9 bits each
+/// (-256 to 255; 0 for every turned sprite seen). Corners beyond are
+/// clamped (only sprites far off the screen).
+pub(crate) fn encode_corners(c: [i32; 8]) -> [u32; 5] {
+    let [x0, y0, x1, y1, x2, y2, x3, y3] = c;
+    if y1 == y0 && x1 == x2 && x3 == x0 && y3 == y2 {
+        return [x0 as u32 & 0xFFFF, y0 as u32 & 0xFFFF, x2 as u32 & 0xFFFF, y2 as u32 & 0xFFFF, CORNERS];
+    }
+    let field = |v: i32, bits: u32| (v.clamp(-(1 << (bits - 1)), (1 << (bits - 1)) - 1) as u128) & ((1 << bits) - 1);
+    let (dx, dy) = (x3 - (x0 + x2 - x1), y3 - (y0 + y2 - y1));
+    let v = [x0, y0, x1, y1, x2, y2].iter().enumerate().fold(0u128, |v, (i, &k)| v | field(k, 10) << (10 * i))
+        | field(dx, 9) << 60
+        | field(dy, 9) << 69;
+    let h = |i: u32| (v >> (16 * i)) as u32 & 0xFFFF;
+    [h(0), h(1), h(2), h(3), CORNERS | QUAD | (v >> 64) as u32 & 0x3FFF]
+}
+
+/// `encode_corners`'s turned shape back as four corners (x, y; centred, y
+/// up), from a sprite's halfwords 1, 2, 5, 6 and 7.
+fn decode_quad(h: [u32; 5]) -> [(i32, i32); 4] {
+    let v = (0..4).fold(0u128, |v, i| v | (h[i] as u128) << (16 * i)) | ((h[4] & 0x3FFF) as u128) << 64;
+    let field = |at: u32, bits: u32| {
+        let f = (v >> at) as i32 & ((1 << bits) - 1);
+        f << (32 - bits) >> (32 - bits)
+    };
+    let c: Vec<i32> = (0..6).map(|i| field(10 * i, 10)).collect();
+    let (dx, dy) = (field(60, 9), field(69, 9));
+    [(c[0], c[1]), (c[2], c[3]), (c[4], c[5]), (c[0] + c[4] - c[2] + dx, c[1] + c[5] - c[3] + dy)]
+}
+
+/// Where a screen point (pixel centres at +0.5) falls in a four-cornered
+/// shape: (u, v) from 0 to 1 across and down the picture, by the inverse of
+/// the bilinear map from the corners (`q`: top left, top right, bottom
+/// right, bottom left on screen); exact for parallelograms. None outside.
+fn quad_uv(q: &[(f64, f64); 4], px: f64, py: f64) -> Option<(f64, f64)> {
+    let cross = |a: (f64, f64), b: (f64, f64)| a.0 * b.1 - a.1 * b.0;
+    let [a, b, c, d] = *q;
+    let e = (b.0 - a.0, b.1 - a.1);
+    let f = (d.0 - a.0, d.1 - a.1);
+    let g = (a.0 - b.0 + c.0 - d.0, a.1 - b.1 + c.1 - d.1);
+    let h = (px - a.0, py - a.1);
+    let (k2, k1, k0) = (cross(g, f), cross(e, f) + cross(h, g), cross(h, e));
+    let v = if k2.abs() < 1e-9 {
+        if k1.abs() < 1e-12 {
+            return None;
+        }
+        -k0 / k1
+    } else {
+        let disc = k1 * k1 - 4.0 * k0 * k2;
+        if disc < 0.0 {
+            return None;
+        }
+        let w = disc.sqrt();
+        let (v1, v2) = ((-k1 - w) / (2.0 * k2), (-k1 + w) / (2.0 * k2));
+        if (0.0..1.0).contains(&v1) { v1 } else { v2 }
+    };
+    let (dx, dy) = (e.0 + g.0 * v, e.1 + g.1 * v);
+    let u = if dx.abs() > dy.abs() { (h.0 - f.0 * v) / dx } else { (h.1 - f.1 * v) / dy };
+    ((0.0..1.0).contains(&u) && (0.0..1.0).contains(&v)).then_some((u, v))
+}
+
 impl Bus {
     /// The maths unit's matrix product (0xF6004000; its arithmetic is
     /// `Bus::arith`): a row vector times a matrix, 16.16
@@ -122,10 +197,16 @@ impl Bus {
     /// Draws a text layer (registers at +reg: +0/+4 scroll, +8 attributes,
     /// +0xC control (bit 3 on), +0x10 tile map (32-bit entries: the tile's
     /// byte offset from the picture base, 0 for none), pages of 1024x512
-    /// pixels). Attributes: bits 1-0 depth (only 8 bits decoded), 5-4 and
-    /// 7-6 tile width and height (8 << n), 13-12 priority, 23-22 the
-    /// palette's 256-colour bank. Control bit 7: 16-bit pixels instead,
-    /// RGB 5:6:5 (depth 1) or YUV 4:2:2 (depth 3).
+    /// pixels). Attributes: bits 1-0 depth (2, 4, 6 or 8 bits per pixel),
+    /// 5-4 and 7-6 tile width and height (8 << n), 11-8 the palette (as a
+    /// sprite's: below 8 bits, colours from palette x 16, rounded down to
+    /// a multiple of the colour count), 13-12 priority, 23-22 the palette's
+    /// 256-colour bank. Control bit 7: 16-bit pixels instead, RGB 5:6:5
+    /// (depth 1) or YUV 4:2:2 (depth 3). The system's Learning Path screen
+    /// has its background on layer 1 at 6 bits (attributes 0xC08C72:
+    /// palette 0xC, colours 0x3C0-0x3FF); drawn only at 8 bits it was left
+    /// out, the screen black behind its buttons. UNVERIFIED on hardware;
+    /// 2 and 4 bits not seen yet.
     ///
     /// Each layer also has a zoom (registers at +xf: +0/+4 a centre on
     /// screen, +8 the step in the picture per screen pixel, 0x400 = 1;
@@ -143,12 +224,14 @@ impl Bus {
         let TextLayer { scroll: reg, attr: attr_reg, base: base_reg, zoom } = *layer;
         let attr = self.latch(0xD050_0000 + attr_reg);
         let control = self.latch(0xD050_0004 + attr_reg);
-        if control & 8 == 0 || (attr & 3 != 3 && control & 0x80 == 0) {
+        if control & 8 == 0 {
             return;
         }
         let (map, base) = (self.latch(0xD050_0008 + attr_reg), self.latch(0xD050_0000 + base_reg));
         let (tw, th) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
         let bank = ((attr >> 22) & 3) * 0x100;
+        let bpp = 2 * ((attr & 3) + 1);
+        let pal_base = bank + ((((attr >> 8) & 15) << 4) >> bpp << bpp);
         let (sx, sy) = (self.latch(0xD050_0000 + reg) as i32, self.latch(0xD050_0004 + reg) as i32);
         let zoom = |k: u32| zoom.map_or(0, |xf| self.latch(0xD050_0000 + xf + k));
         let (cx, cy) = (zoom(0) as i16 as i32, zoom(4) as i16 as i32);
@@ -200,16 +283,18 @@ impl Bus {
                         }
                     }
                 } else if entry != 0 {
-                    let src = base + entry + (py % th) * tw + px % tw;
-                    let put = |line: &mut [u32], i: u32, v: u8| {
-                        let k = (bank + v as u32) as usize & 2047;
+                    let p0 = (py % th) * tw + px % tw;
+                    let put = |line: &mut [u32], i: u32, v: u32| {
+                        let k = (pal_base + v) as usize & 2047;
                         if pal[k] & 0x8000 == 0 {
                             line[(x + i) as usize] = rgb[k];
                         }
                     };
-                    match self.bytes(src, span as usize) {
-                        Some(run) => (0..span).for_each(|i| put(line, i, run[i as usize])),
-                        None => (0..span).for_each(|i| put(line, i, self.peek8(src + i))),
+                    let src = base + entry + p0;
+                    match self.bytes(src, span as usize).filter(|_| bpp == 8) {
+                        Some(run) => (0..span).for_each(|i| put(line, i, run[i as usize] as u32)),
+                        None if bpp == 8 => (0..span).for_each(|i| put(line, i, self.peek8(src + i) as u32)),
+                        None => (0..span).for_each(|i| put(line, i, self.pixel(base + entry, bpp, p0 + i))),
                     }
                 }
                 x += span;
@@ -313,6 +398,10 @@ impl Bus {
                 let x0 = SCREEN_W as i32 / 2 + half(n, 1) as i16 as i32;
                 let y0 = SPRITE_Y0 - half(n, 2) as i16 as i32;
                 let (w, hh) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
+                if half(n, 7) & (CORNERS | QUAD) == CORNERS | QUAD {
+                    let q = decode_quad([half(n, 1), half(n, 2), half(n, 5), half(n, 6), half(n, 7)]);
+                    return format!("{n:3} {}  corners {q:?} {w}x{hh} depth {} pal {} prio {}", h.join(" "), attr & 3, (attr >> 8) & 15, (attr >> 12) & 3);
+                }
                 format!("{n:3} {}  at ({x0},{y0}) {w}x{hh} depth {} pal {} prio {}", h.join(" "), attr & 3, (attr >> 8) & 15, (attr >> 12) & 3)
             })
             .collect()
@@ -324,10 +413,20 @@ impl Bus {
         let x0 = SCREEN_W as i32 / 2 + half(1) as i16 as i32;
         let y0 = SPRITE_Y0 - half(2) as i16 as i32;
         let (w, h) = (8u32 << ((attr >> 4) & 3), 8u32 << ((attr >> 6) & 3));
+        // A shape from the corner converter that isn't a rectangle (a turned
+        // sprite): its four corners on screen (`encode_corners`).
+        let quad = (half(7) & (CORNERS | QUAD) == CORNERS | QUAD).then(|| {
+            decode_quad([half(1), half(2), half(5), half(6), half(7)]).map(|(x, y)| ((SCREEN_W as i32 / 2 + x) as f64, (SPRITE_Y0 - y) as f64))
+        });
+        let (x0, y0) = match quad {
+            Some(q) => (q[0].0 as i32, q[0].1 as i32),
+            None => (x0, y0),
+        };
         // The size on screen: the corner converter's third corner (this
-        // crate's own encoding, see the converter in bus.rs), or the
-        // picture's.
-        let (sw, sh) = if half(7) == 0x8000 {
+        // crate's own encoding, see `encode_corners`), or the picture's.
+        let (sw, sh) = if let Some(q) = quad {
+            ((q[2].0 - q[0].0 + 1.0).max(0.0) as u32, (q[2].1 - q[0].1 + 1.0).max(0.0) as u32)
+        } else if half(7) == CORNERS {
             let x2 = SCREEN_W as i32 / 2 + half(5) as i16 as i32;
             let y2 = SPRITE_Y0 - half(6) as i16 as i32;
             ((x2 - x0 + 1).max(0) as u32, (y2 - y0 + 1).max(0) as u32)
@@ -393,14 +492,70 @@ impl Bus {
         }
         let bank = ((attr >> 15) << 1 | ((half(4) >> 7) & 1)) * 0x100;
         let pal_base = bank + ((((attr >> 8) & 15) << 4) >> bpp << bpp);
+        // The picture's pixel (px, py) as a colour and opacity (0-63), None
+        // where transparent; `row` is its row, when that is all in one
+        // memory (8 and 16 bits per pixel: a byte or halfword a pixel).
+        let texel = |row: Option<&[u8]>, px: u32, py: u32| -> Option<(u32, u32)> {
+            if !wide {
+                let v = match row {
+                    Some(r) => r[px as usize] as u32,
+                    None => self.pixel(addr, bpp, py * w + px),
+                };
+                let k = (pal_base + v) as usize & 2047;
+                (pal[k] & 0x8000 == 0).then(|| (rgb[k], 63))
+            } else {
+                let v = match row {
+                    Some(r) => u16::from_le_bytes([r[px as usize * 2], r[px as usize * 2 + 1]]) as u32,
+                    None => self.peek16(addr + (py * w + px) * 2),
+                };
+                if v == 0 && (rgb16 || v & 0x4000 == 0) {
+                    None
+                } else if rgb16 {
+                    Some((rgb565(v), 63))
+                } else if v & 0x4000 == 0 {
+                    // Not seen in palette-and-opacity sprites (UNKNOWN):
+                    // taken as a colour, RGB 5:5:5.
+                    Some((rgb555(v), 63))
+                } else {
+                    let raw = pal[(bank + (v & 0xFF)) as usize];
+                    (raw & 0x8000 == 0).then(|| (rgb555(raw), (v >> 8) & 63))
+                }
+            }
+        };
+        let mut put = |o: usize, (colour, alpha): (u32, u32)| {
+            let alpha = alpha * level / 63;
+            img[o] = if alpha >= 63 { colour } else { blend(colour, img[o], alpha, 63) };
+        };
+        // A turned sprite: each screen pixel whose centre is inside the
+        // shape shows the picture's pixel at its place in it (the flips
+        // mirror the picture). The corners are points, so strips sharing
+        // corners meet without gaps or overlaps. Drawn as the rectangle of
+        // its first and third corners, a turned rocket came apart into
+        // strips, squashed or stretched, at the wrong places.
+        if let Some(q) = quad {
+            let lo = |i: usize| q.iter().map(|c| [c.0, c.1][i]).fold(f64::MAX, f64::min);
+            let hi = |i: usize| q.iter().map(|c| [c.0, c.1][i]).fold(f64::MIN, f64::max);
+            let (xa, xb) = ((lo(0).floor() as i32).max(0), (hi(0).ceil() as i32).min(SCREEN_W as i32 - 1));
+            let (ya, yb) = ((lo(1).floor() as i32).max(0), (hi(1).ceil() as i32).min(SCREEN_H as i32 - 1));
+            for y in ya..=yb {
+                for x in xa..=xb {
+                    let Some((u, v)) = quad_uv(&q, x as f64 + 0.5, y as f64 + 0.5) else { continue };
+                    let (px, py) = (((u * w as f64) as u32).min(w - 1), ((v * h as f64) as u32).min(h - 1));
+                    let px = if attr & 4 != 0 { w - 1 - px } else { px };
+                    let py = if attr & 8 != 0 { h - 1 - py } else { py };
+                    if let Some(t) = texel(None, px, py) {
+                        put(y as usize * SCREEN_W + x as usize, t);
+                    }
+                }
+            }
+            return;
+        }
         for sy in 0..sh {
             let y = y0 + if attr & 8 != 0 { (sh - 1 - sy) as i32 } else { sy as i32 };
             if y < 0 || y >= SCREEN_H as i32 {
                 continue;
             }
             let py = sy * h / sh;
-            // The picture's row, when it is all in one memory (8 and 16 bits
-            // per pixel: a byte or halfword a pixel).
             let row = match bpp {
                 8 => self.bytes(addr + py * w, w as usize),
                 16 => self.bytes(addr + py * w * 2, w as usize * 2),
@@ -411,43 +566,9 @@ impl Bus {
                 if x < 0 || x >= SCREEN_W as i32 {
                     continue;
                 }
-                let px = sx * w / sw;
-                let o = y as usize * SCREEN_W + x as usize;
-                // The pixel's colour and opacity (0-63).
-                let (colour, alpha) = if !wide {
-                    let v = match row {
-                        Some(r) => r[px as usize] as u32,
-                        None => self.pixel(addr, bpp, py * w + px),
-                    };
-                    let k = (pal_base + v) as usize & 2047;
-                    if pal[k] & 0x8000 != 0 {
-                        continue;
-                    }
-                    (rgb[k], 63)
-                } else {
-                    let v = match row {
-                        Some(r) => u16::from_le_bytes([r[px as usize * 2], r[px as usize * 2 + 1]]) as u32,
-                        None => self.peek16(addr + (py * w + px) * 2),
-                    };
-                    if v == 0 && (rgb16 || v & 0x4000 == 0) {
-                        continue;
-                    }
-                    if rgb16 {
-                        (rgb565(v), 63)
-                    } else if v & 0x4000 == 0 {
-                        // Not seen in palette-and-opacity sprites (UNKNOWN):
-                        // taken as a colour, RGB 5:5:5.
-                        (rgb555(v), 63)
-                    } else {
-                        let raw = pal[(bank + (v & 0xFF)) as usize];
-                        if raw & 0x8000 != 0 {
-                            continue;
-                        }
-                        (rgb555(raw), (v >> 8) & 63)
-                    }
-                };
-                let alpha = alpha * level / 63;
-                img[o] = if alpha >= 63 { colour } else { blend(colour, img[o], alpha, 63) };
+                if let Some(t) = texel(row, sx * w / sw, py) {
+                    put(y as usize * SCREEN_W + x as usize, t);
+                }
             }
         }
     }
@@ -495,6 +616,45 @@ mod tests {
         let mut img = vec![0; SCREEN_W * SCREEN_H];
         b.render(&mut img);
         img
+    }
+
+    /// The corner converter's encoding: a rectangle as before (first and
+    /// third corners, 0x8000), other shapes as all four corners.
+    #[test]
+    fn corner_encoding() {
+        assert_eq!(encode_corners([-275, 61, -212, 61, -212, -2, -275, -2]), [(-275i32) as u32 & 0xFFFF, 61, (-212i32) as u32 & 0xFFFF, (-2i32) as u32 & 0xFFFF, 0x8000]);
+        for c in [[-294, 38, -234, 59, -229, 44, -289, 23], [200, -100, -150, 90, 10, 7, 370, -180], [-10, 20, 30, 25, 28, -20, -15, -18]] {
+            let r = encode_corners(c);
+            assert_eq!(r[4] & 0xC000, 0xC000);
+            assert_eq!(decode_quad(r), [(c[0], c[1]), (c[2], c[3]), (c[4], c[5]), (c[6], c[7])]);
+        }
+    }
+
+    /// A turned sprite (four corners from the converter) is drawn turned:
+    /// an 8x8 picture, red on its left half and blue on its right, turned a
+    /// quarter clockwise, has red on its top half on screen and blue below.
+    #[test]
+    fn turned_sprite() {
+        let mut b = bus(1);
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                let a = (0x1000 + 2 * (y * 8 + x)) as usize;
+                b.ram[a..a + 2].copy_from_slice(&(if x < 4 { 0xF800u16 } else { 0x001F }).to_le_bytes());
+            }
+        }
+        sprite(&mut b, 0, 0x1000, 0, 0, 0x0303, 0x3F);
+        let r = encode_corners([0, 0, 0, -8, -8, -8, -8, 0]);
+        let e = SPRITES;
+        b.set_latch(e, b.latch(e) & 0xFFFF | r[0] << 16);
+        b.set_latch(e + 4, b.latch(e + 4) & !0xFFFF | r[1]);
+        b.set_latch(e + 8, b.latch(e + 8) & 0xFFFF | r[2] << 16);
+        b.set_latch(e + 12, r[3] | r[4] << 16);
+        let img = draw(&b);
+        let at = |x: usize, y: usize| img[y * SCREEN_W + x];
+        assert_eq!(at(315, 256), rgb565(0xF800));
+        assert_eq!(at(315, 261), rgb565(0x001F));
+        assert_eq!((at(321, 258), at(311, 258), at(315, 254), at(315, 263)), (0, 0, 0, 0));
+        assert_eq!(img.iter().filter(|&&p| p != 0).count(), 64);
     }
 
     /// 16-bit sprites with palette bits 1 and 0 set are RGB 5:6:5, 0
@@ -602,6 +762,22 @@ mod tests {
             b.ram[0x10800 + 2 * i as usize..][..2].copy_from_slice(&(i + 1).to_le_bytes());
         }
         assert_eq!(draw(&b)[2 * SCREEN_W + 3], rgb565(2 * 8 + 4 + 1));
+    }
+
+    /// A 6-bit text layer (the Learning Path screen's background): pixels
+    /// as one bit stream, colours from bank x 256 + palette x 16 (0xC: 0xC0).
+    #[test]
+    fn text_layer_6_bit() {
+        let mut b = Bus::new(Vec::new());
+        b.set_latch(0xD050_0048, 3 << 22 | 0xC << 8 | 2);
+        b.set_latch(0xD050_004C, 8);
+        b.set_latch(0xD050_0050, 0x100);
+        b.set_latch(0xD050_0080, 0x10000);
+        b.ram[0x100..0x104].copy_from_slice(&0x800u32.to_le_bytes());
+        // Pixel 1 is 5: bits 6-11 of the stream.
+        b.ram[0x10801] = 0x50;
+        palette(&mut b, 0x3C5, 0x7C00);
+        assert_eq!(draw(&b)[1], rgb555(0x7C00));
     }
 
     /// A sprite whose word 4 has bit 31 clear is filled with the colours in

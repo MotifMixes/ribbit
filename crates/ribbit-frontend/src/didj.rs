@@ -97,6 +97,11 @@ struct Shared {
     explorer: bool,
     /// The Explorer's stylus on the screen (pixels), None while lifted.
     touch: Mutex<Option<(f32, f32)>>,
+    /// A cartridge is in the slot (`set_cart`), for the app's window to
+    /// ask without waiting for the emulation thread's frame (which holds
+    /// `didj` while it runs; on a PC too slow for full speed that thread
+    /// takes it again at once, and the window starved).
+    cart_in: AtomicBool,
     /// Enhanced (new): the Didj's programs on the HLE, without its kernel
     /// (`Hle`). `didj` then only keeps the NAND the saves are written to.
     hle: Mutex<Option<Hle>>,
@@ -120,6 +125,22 @@ impl SaveTo {
     fn write(&self, flash: &Nand) -> std::io::Result<()> {
         let changes = flash.changes_from(&self.original);
         write_save(&self.path, &self.image, &changes, Some(&ribbit_didj::carry::files_beyond(flash, &self.original)))
+    }
+}
+
+/// Gives the memory freed after building a NAND image back to the system.
+/// glibc keeps freed heap memory for later: after the Explorer's packages
+/// were unpacked and its NAND built, 300 MB more stayed resident on Linux
+/// than on Windows, whose heap returns it.
+fn give_back_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's malloc_trim takes no pointers and only releases
+        // free memory.
+        unsafe { malloc_trim(0) };
     }
 }
 
@@ -276,6 +297,7 @@ impl DidjSession {
         let mut didj = Didj::with_sdram(flash, ribbit_didj::enhanced::sdram_size(mode.enhanced && !mode.hle));
         didj.set_cpu_scale(mode.cpu_scale);
         didj.bus.cart = cart;
+        let cart_in = didj.bus.cart.is_some();
         let original = Arc::new(original);
         let save_to = SaveTo { original: original.clone(), path: save_path.clone(), image: image.clone() };
         let shared = Arc::new(Shared {
@@ -300,12 +322,14 @@ impl DidjSession {
             serial,
             explorer: false,
             touch: Mutex::new(None),
+            cart_in: AtomicBool::new(cart_in),
             hle: Mutex::new(hle),
             save_to: Some(save_to),
         });
         shared.serial.note("--- Ribbit: the Didj powers on ---
 ");
         let s = shared.clone();
+        give_back_freed_memory();
         let thread = std::thread::Builder::new().name("ribbit-didj".into()).spawn(move || {
             crate::perf::raise_thread_priority();
             run(&s, autostart)
@@ -382,6 +406,7 @@ impl DidjSession {
     /// systems in its NAND, which `lx` then only keeps for the saves.
     pub fn start_explorer(built: ExplorerBuilt, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>, hle: bool) -> anyhow::Result<Self> {
         let ExplorerBuilt { lx, original, save_path, image, carried, dir } = built;
+        let lx_cart_in = lx.bus.cart.is_some();
         let hle = match hle {
             true => Some(Hle::new_explorer(&dir, &lx.bus.nand, lx.bus.nor.as_ref().map(|n| &n.data[..]), None)?),
             false => None,
@@ -409,10 +434,12 @@ impl DidjSession {
             serial,
             explorer: true,
             touch: Mutex::new(None),
+            cart_in: AtomicBool::new(lx_cart_in),
             hle: Mutex::new(hle),
             save_to: None,
         });
         shared.serial.note("--- Ribbit: the Leapster Explorer powers on ---\n");
+        give_back_freed_memory();
         let s = shared.clone();
         let thread = std::thread::Builder::new().name("ribbit-explorer".into()).spawn(move || {
             crate::perf::raise_thread_priority();
@@ -432,13 +459,15 @@ impl DidjSession {
             h.cart = raw.clone();
         }
         let cart = raw.map(ribbit_didj::cart::Cart::new).transpose()?;
+        let cart_in = cart.is_some();
         self.shared.didj.lock().unwrap().bus.cart = cart;
+        self.shared.cart_in.store(cart_in, Ordering::Relaxed);
         Ok(())
     }
 
-    /// A cartridge is in the slot.
+    /// A cartridge is in the slot (asked every frame the window draws).
     pub fn has_cart(&self) -> bool {
-        self.shared.didj.lock().unwrap().bus.cart.is_some()
+        self.shared.cart_in.load(Ordering::Relaxed)
     }
 
     /// The Explorer's stylus at `pos` on the screen (pixels; None lifts it).

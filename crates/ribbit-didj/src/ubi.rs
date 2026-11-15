@@ -118,9 +118,11 @@ pub fn write_volume(flash: &mut Nand, part: Partition, name: &str, data: &[u8]) 
     let ec = ec_header(1);
     let mut page0 = [0xFFu8; nand::PAGE];
     page0[..64].copy_from_slice(&ec);
-    for b in first..first + blocks {
-        flash.erase(b);
-        flash.write(b * nand::BLOCK, &page0);
+    // One block's memory for all of them (each written one is copied then).
+    flash.erase(first);
+    flash.write(first * nand::BLOCK, &page0);
+    for b in first + 1..first + blocks {
+        flash.share_block(first, b);
     }
     let mut sqnum = 0;
     let mut put = |flash: &mut Nand, block: usize, vid: [u8; 64], contents: &[u8]| {

@@ -110,6 +110,8 @@ pub struct App {
     session: Option<Session>,
     /// A Zippity being played (instead of `session`'s Leapster).
     zippity: Option<crate::zippity::ZipSession>,
+    /// A ClickStart being played.
+    clickstart: Option<crate::clickstart::CsSession>,
     /// A Didj being played.
     didj: Option<crate::didj::DidjSession>,
     /// Its latest picture.
@@ -318,6 +320,7 @@ impl App {
             settings_path,
             session: None,
             zippity: None,
+            clickstart: None,
             didj: None,
             tv_frame: Vec::new(),
             zippity_cleaning: None,
@@ -660,6 +663,9 @@ impl App {
         // Nothing stays held into the next game.
         self.console_view.release_all();
         self.held.clear();
+        // Fast-forward and rewind are held keys too.
+        self.fast_forward = false;
+        self.rewinding = false;
         if self.twist.take().is_some() {
             self.fit_window = FIT_TRIES;
         }
@@ -669,6 +675,10 @@ impl App {
         if let Some(z) = self.zippity.take() {
             z.stop();
             // Back to the Leapster's square screen.
+            self.fit_window = FIT_TRIES;
+        }
+        if let Some(c) = self.clickstart.take() {
+            c.stop();
             self.fit_window = FIT_TRIES;
         }
         if let Some(d) = self.didj.take() {
@@ -813,6 +823,9 @@ impl App {
         if hw == Hardware::Zippity {
             return self.start_zippity(bios.clone(), bios);
         }
+        if hw == Hardware::ClickStart {
+            return self.start_clickstart(bios, None);
+        }
         self.next_bios = Some(bios);
         if let Err(e) = self.boot(None) {
             let (title, explain) = explain_load_error(&e);
@@ -902,6 +915,22 @@ impl App {
                 self.ui.problem(title, explain, format!("{e:#}"));
             }
             return;
+        }
+        // The ClickStart: its system ROM's activities, or a cartridge on the
+        // system ROM from the library.
+        if internal.map(|g| g.family).or_else(|| crate::library::family_of(&path)) == Some(crate::library::Family::ClickStart) {
+            if internal.is_some() || crate::library::is_internal(&path) {
+                return self.start_clickstart(path, None);
+            }
+            return match self.library.bios_for(Hardware::ClickStart).map(Path::to_path_buf) {
+                Some(bios) => self.start_clickstart(bios, Some(path)),
+                None => self.ui.problem(
+                    "No ClickStart system ROM found",
+                    "ClickStart cartridges need the console's system ROM (an 8 MB dump) in one of your games \
+                     folders. Add the folder that holds it with \"Add games folder\".",
+                    "",
+                ),
+            };
         }
         if internal.is_some() || crate::library::is_internal(&path) {
             return self.start_zippity(path.clone(), path);
@@ -1073,6 +1102,43 @@ impl App {
         }
     }
 
+    /// Plays a ClickStart: its system ROM `bios`, with `cart` in the slot
+    /// (none: the console's own activities).
+    fn start_clickstart(&mut self, bios: PathBuf, cart: Option<PathBuf>) {
+        self.end_session();
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::clickstart::CsSession::start(&bios, cart.as_deref(), &self.save_dir(), sink) {
+            Ok(mut c) => {
+                self.fit_window = FIT_TRIES;
+                c.title = match &cart {
+                    Some(p) => self.library.games.iter().find(|g| &g.path == p).map_or_else(
+                        || p.file_stem().map_or_else(|| "ClickStart".to_string(), |s| s.to_string_lossy().into_owned()),
+                        |g| g.title.clone(),
+                    ),
+                    None => "ClickStart Built-in Activities".to_string(),
+                };
+                self.clickstart = Some(c);
+                self.paused = false;
+                if let Some(a) = &mut self.audio {
+                    a.clear();
+                }
+                self.update_title();
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't start the ClickStart",
+                match &cart {
+                    Some(c) => format!(
+                        "Ribbit couldn't load the ClickStart with the cartridge \"{}\" (and the system ROM \"{}\"). Either may be damaged or not a full dump.",
+                        file_name(c),
+                        file_name(&bios)
+                    ),
+                    None => format!("Ribbit couldn't load the ClickStart's system ROM \"{}\". It may be damaged or not a full dump.", file_name(&bios)),
+                },
+                format!("{e:#}"),
+            ),
+        }
+    }
+
     /// The Didj's mode from the settings: Enhanced, Enhanced (new) or
     /// Original, the processor's clock multiplier (1 in Original mode),
     /// frame skipping, HD drawing and in-between frames.
@@ -1196,6 +1262,8 @@ impl App {
                     );
                 }
                 d.set_dither(self.settings.didj_dither);
+                // As a change of settings sets it (it was off until one).
+                d.set_frame_skip(self.settings.didj_frame_skip);
                 // In the slot from power on (the kernel checks it at start).
                 if let Some(cart) = self.explorer_cart.take()
                     && let Err(e) = d.set_cart(Some(cart))
@@ -1210,11 +1278,22 @@ impl App {
                 }
                 self.update_title();
             }
-            Err(e) => self.ui.problem(
-                "Couldn't start the Leapster Explorer",
-                format!("Ribbit builds the Explorer's memory from its packages as LeapFrog Connect downloads them (Firmware Base.lfp, Firmware Bulk Empty.lfp and the .lf2 files), all in one folder: \"{}\". One may be missing or damaged.", dir.display()),
-                format!("{e:#}"),
-            ),
+            Err(e) => {
+                let e = format!("{e:#}");
+                // Without its language packs the firmware shows only
+                // "connect me to LeapFrog Connect": said here instead.
+                let explain = match e.strip_prefix(ribbit_didj::explorer::MISSING_PACKAGES) {
+                    Some(list) => format!(
+                        "These Leapster Explorer packages are missing from \"{}\": {list}. The Explorer can't start without them. Put them in that folder beside Firmware Base.lfp.",
+                        dir.display()
+                    ),
+                    None => format!(
+                        "Ribbit builds the Explorer's memory from its packages as LeapFrog Connect downloads them (Firmware Base.lfp, Firmware Bulk Empty.lfp and the .lf2 files), all in one folder: \"{}\". One may be missing or damaged.",
+                        dir.display()
+                    ),
+                };
+                self.ui.problem("Couldn't start the Leapster Explorer", explain, e)
+            }
         }
     }
 
@@ -1539,6 +1618,7 @@ impl App {
         let picking = self.native_pick.is_some();
         let busy = self.session.is_some()
             || self.zippity.is_some()
+            || self.clickstart.is_some()
             || self.didj.is_some()
             || self.twist.is_some()
             || self.leappad.is_some()
@@ -1564,7 +1644,7 @@ impl App {
         if span < STATUS_EVERY {
             return;
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
         tracing::info!(target: "ribbit::perf",
             fps = (self.status.1 as f64 / span.as_secs_f64()).round(),
             running,
@@ -1582,6 +1662,8 @@ impl App {
             Some(Hardware::RockItTwist)
         } else if self.zippity.is_some() {
             Some(Hardware::Zippity)
+        } else if self.clickstart.is_some() {
+            Some(Hardware::ClickStart)
         } else if let Some(d) = &self.didj {
             Some(if d.explorer { Hardware::Explorer } else { Hardware::Didj })
         } else {
@@ -1917,6 +1999,8 @@ impl App {
         } else {
             let system = if self.zippity.is_some() {
                 "Zippity"
+            } else if self.clickstart.is_some() {
+                "ClickStart"
             } else if let Some(d) = &self.didj {
                 if d.explorer { "Leapster Explorer" } else { "Didj" }
             } else if self.twist.is_some() { "RockIt Twist" } else { "no game" };
@@ -2000,6 +2084,7 @@ impl App {
                 .as_ref()
                 .map(|s| &s.title)
                 .or(self.zippity.as_ref().map(|z| &z.title))
+                .or(self.clickstart.as_ref().map(|c| &c.title))
                 .or(self.didj.as_ref().map(|d| &d.title))
                 .or(self.leappad.as_ref().map(|l| &l.title))
                 .or(self.twist.as_ref().map(|t| &t.title));
@@ -2647,6 +2732,12 @@ impl App {
             (Some(s), _, _) => s.state_key.clone(),
             (None, Some(_), _) => "zippity".to_string(),
             (None, None, Some(t)) if t.machine.is_some() => "rockit-twist".to_string(),
+            // A ClickStart's states hold no ROMs: one set per game title.
+            (None, None, None) if self.clickstart.is_some() => {
+                let title = self.clickstart.as_ref().map_or("", |c| c.title.as_str());
+                let name: String = title.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+                format!("clickstart-{name}")
+            }
             // A Didj's states hold no cartridge: one set per game title.
             (None, None, None) if self.didj.is_some() => {
                 let title = self.didj.as_ref().map_or("", |d| d.title.as_str());
@@ -2692,6 +2783,7 @@ impl App {
                 Some(Err(e)) => return self.ui.problem("Couldn't save the state", "The RockIt Twist didn't answer.", e),
                 None => return,
             },
+            (None, None, None) if self.clickstart.is_some() => self.clickstart.as_ref().unwrap().save_state(),
             (None, None, None) => match self.didj.as_ref().map(|d| d.save_state()) {
                 Some(Some(b)) => b,
                 Some(None) => return self.ui.toast("Couldn't make a state in Enhanced (new) (see the log)"),
@@ -2724,9 +2816,10 @@ impl App {
             None => match (&self.zippity, self.twist.as_ref().and_then(|t| t.machine.as_ref())) {
                 (Some(z), _) => z.load_state(&bytes).map_err(anyhow::Error::msg),
                 (None, Some(m)) => m.load_state(bytes).map_err(anyhow::Error::msg),
-                (None, None) => match &self.didj {
-                    Some(d) => d.load_state(&bytes).map_err(anyhow::Error::msg),
-                    None => Ok(()),
+                (None, None) => match (&self.clickstart, &self.didj) {
+                    (Some(c), _) => c.load_state(&bytes).map_err(anyhow::Error::msg),
+                    (None, Some(d)) => d.load_state(&bytes).map_err(anyhow::Error::msg),
+                    (None, None) => Ok(()),
                 },
             },
         });
@@ -2758,6 +2851,10 @@ impl App {
             z.reset();
             self.ui.toast("Reset");
         }
+        if let Some(c) = &self.clickstart {
+            c.reset();
+            self.ui.toast("Reset");
+        }
         if let Some(d) = &self.didj {
             // The Explorer has its own Enhanced (new) setting.
             let mode = crate::didj::Mode { hle: if d.explorer { self.settings.explorer_hle } else { self.didj_mode().hle }, ..self.didj_mode() };
@@ -2776,7 +2873,7 @@ impl App {
     }
 
     fn toggle_pause(&mut self) {
-        if self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() {
+        if self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() {
             self.paused = !self.paused;
             if let Some(a) = &mut self.audio {
                 a.clear();
@@ -3190,7 +3287,7 @@ impl App {
 
     fn record_test(&mut self) {
         let Some((secs, seen)) = &mut self.record_test else { return };
-        let running = self.session.is_some() || self.didj.is_some() || self.twist.is_some() || self.zippity.is_some();
+        let running = self.session.is_some() || self.didj.is_some() || self.twist.is_some() || self.zippity.is_some() || self.clickstart.is_some();
         if !running {
             return;
         }
@@ -3269,6 +3366,8 @@ impl App {
                 (ribbit_twist::SCREEN_W, ribbit_twist::SCREEN_H)
             } else if self.zippity.is_some() {
                 (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H)
+            } else if self.clickstart.is_some() {
+                (ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H)
             } else {
                 if self.leappad.is_some() {
                     self.ui.toast("The LeapPad has no screen to record");
@@ -3385,6 +3484,18 @@ impl App {
         if let Some(lp) = &self.leappad {
             lp.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
             self.speed_percent = lp.speed() as f64;
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
+        // It turned itself off: closed, as a Leapster that did.
+        if self.clickstart.as_ref().is_some_and(|c| c.powered_off()) {
+            self.end_session();
+            return;
+        }
+        if let Some(c) = &self.clickstart {
+            c.set_running(!halted);
+            c.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+            self.speed_percent = c.speed_percent();
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
@@ -3640,6 +3751,14 @@ impl App {
                 _ => {}
             }
         }
+        // The ClickStart's keyboard (clickstart::key_code: letters, digits,
+        // Enter, Backspace, arrows, Page Up/Down, Insert, Delete, Home,
+        // End...).
+        if let Some(c) = &self.clickstart
+            && c.key(code, pressed)
+        {
+            return;
+        }
         // The RockIt Twist has its own keys (twist::KEYS), Tab and Shift
         // included, while its session is open.
         if let Some(t) = &mut self.twist {
@@ -3650,8 +3769,10 @@ impl App {
             self.rewinding = pressed && self.session.is_some();
             return;
         }
+        // Only the Leapster fast-forwards: held on another console (which
+        // ignores it), it stayed on into the next Leapster game.
         if code == KeyCode::Tab {
-            self.fast_forward = pressed;
+            self.fast_forward = pressed && self.session.is_some();
             if let Some(s) = &self.session {
                 s.emu.resync();
             }
@@ -3695,7 +3816,7 @@ impl App {
         let open = self.ui.side_menu_open();
         let (was_open, paused_by_menu) = self.side_menu;
         if open && !was_open {
-            let running = self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some();
+            let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some();
             let pause = running && !self.paused;
             if pause {
                 self.toggle_pause();
@@ -3716,7 +3837,7 @@ impl App {
         let Some(set) = self.opts.keep_screen_on else {
             return;
         };
-        let playing = (self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
+        let playing = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
         if playing != self.screen_on {
             set(playing);
             self.screen_on = playing;
@@ -3830,7 +3951,7 @@ impl App {
                 PadEvent::Button(b, pressed) => self.press(Source::Gamepad, b, pressed),
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
-                    if (self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
+                    if (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
                         self.toggle_pause();
                     }
                 }
@@ -3859,7 +3980,14 @@ impl App {
         if let Some(s) = &mut self.session {
             let passes = {
                 let mut m = s.emu.lock();
-                m.render_frame(&mut self.frame);
+                // With HD on, the frame HD matches and falls back to: on a
+                // Leapster TV the BIOS's own frame before its TV colour
+                // conversion (`render_hd_frame`).
+                if s.hd.is_some() {
+                    m.render_hd_frame(&mut self.frame);
+                } else {
+                    m.render_frame(&mut self.frame);
+                }
                 m.hd.as_mut().map(|h| h.take()).unwrap_or_default()
             };
 
@@ -3922,6 +4050,9 @@ impl App {
         if let Some(z) = &self.zippity {
             z.frame(&mut self.tv_frame);
         }
+        if let Some(c) = &self.clickstart {
+            c.frame(&mut self.tv_frame);
+        }
         let didj_size = self.didj.as_ref().map(|d| d.frame(&mut self.tv_frame));
         if let Some(t) = &self.twist {
             t.frame(&mut self.tv_frame);
@@ -3940,6 +4071,8 @@ impl App {
             Some((ribbit_twist::SCREEN_W, ribbit_twist::SCREEN_H))
         } else if self.zippity.is_some() {
             Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
+        } else if self.clickstart.is_some() {
+            Some((ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H))
         } else if let Some(size) = didj_size {
             Some(size)
         } else if lmax_dual {
@@ -3975,7 +4108,7 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
+                running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 explorer_cart: self.didj.as_ref().filter(|d| d.explorer).map(|d| d.has_cart()),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 leappad: self.leappad.is_some(),
@@ -3997,6 +4130,7 @@ impl App {
                     .as_ref()
                     .map(|s| s.title.clone())
                     .or(self.zippity.as_ref().map(|z| z.title.clone()))
+                    .or(self.clickstart.as_ref().map(|c| c.title.clone()))
                     .or(self.didj.as_ref().map(|d| d.title.clone()))
                     .or(self.twist.as_ref().map(|t| t.title.clone()))
                     .or(self.leappad.as_ref().map(|l| l.title.clone()))
@@ -4066,6 +4200,10 @@ impl App {
             Some(s) => crate::discord::Presence::playing(&s.title, s.system, s.started),
             None => match (&self.zippity, &self.twist, &self.leappad) {
                 (Some(z), _, _) => crate::discord::Presence::playing(&z.title, "Zippity", z.started),
+                (None, _, _) if self.clickstart.is_some() => {
+                    let c = self.clickstart.as_ref().unwrap();
+                    crate::discord::Presence::playing(&c.title, "ClickStart", c.started)
+                }
                 (None, Some(t), _) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
                 (None, None, Some(l)) => crate::discord::Presence::playing(&l.title, "LeapPad", l.started).with_series(l.series.as_deref()),
                 (None, None, None) => match &self.didj {
@@ -4159,7 +4297,7 @@ impl App {
             None => Gpu::lcd_rect(px_area, display),
         };
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = (self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some())
+        let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some())
             .then_some((self.lcd_px, display, self.settings.ai));
         // The handheld LCD inset in the bottom-right corner of the TV picture.
         let inset = lmax_dual.then(|| {
@@ -4262,7 +4400,7 @@ impl App {
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.didj.is_some() || self.twist.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some();
         self.frame_diag.frame(frame_start, took, running && !self.halted());
         match picture {
             Some(hash) => self.details.frame(frame_start, hash, took),
@@ -4555,10 +4693,14 @@ impl ApplicationHandler for App {
             // losing the focus lets go of every key itself (`focus_changed`).
             WindowEvent::KeyboardInput { is_synthetic: true, .. } => {}
             WindowEvent::KeyboardInput { event: KeyEvent { physical_key, state, repeat: false, .. }, .. } => {
-                if consumed && self.egui_ctx.egui_wants_keyboard_input() {
+                let pressed = state == ElementState::Pressed;
+                // A release always reaches the game: egui reports Tab as
+                // consumed and focuses a widget with it, so Tab's release was
+                // dropped and fast-forward stayed on (letting go of a key not
+                // held does nothing).
+                if pressed && consumed && self.egui_ctx.egui_wants_keyboard_input() {
                     return;
                 }
-                let pressed = state == ElementState::Pressed;
                 match physical_key {
                     PhysicalKey::Code(code) => self.key(code, pressed, event_loop),
                     PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Android(code)) => {
@@ -4568,6 +4710,19 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // The ClickStart's mouse: the movement over its picture, in
+                // its pixels.
+                if let (Some(c), Some((ox, oy))) = (&self.clickstart, self.cursor)
+                    && !self.paused
+                {
+                    let (x, y, w, h) = self.lcd_px;
+                    let inside = |px: f64, py: f64| (x..x + w).contains(&(px as f32)) && (y..y + h).contains(&(py as f32));
+                    if inside(position.x, position.y) || inside(ox, oy) {
+                        let sx = ribbit_clickstart::SCREEN_W as f32 / w.max(1.0);
+                        let sy = ribbit_clickstart::SCREEN_H as f32 / h.max(1.0);
+                        c.mouse_move((position.x - ox) as f32 * sx, (position.y - oy) as f32 * sy);
+                    }
+                }
                 self.cursor = Some((position.x, position.y));
                 if self.mouse_down {
                     self.set_stylus(self.cursor);
@@ -4579,6 +4734,9 @@ impl ApplicationHandler for App {
                     return;
                 }
                 self.mouse_down = down;
+                if let Some(c) = &self.clickstart {
+                    c.mouse_button(down);
+                }
                 self.set_stylus(if down { self.cursor } else { None });
             }
             WindowEvent::Touch(t) => {

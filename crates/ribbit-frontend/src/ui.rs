@@ -1557,7 +1557,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         game_only_note(ui, info);
         if ui
             .checkbox(&mut settings.hd_vectors, "HD vectors (experimental)")
-            .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the movies' own coordinates, text from the fonts' own outlines, bitmaps from their own pixels. Art with no vector original shows its pixels (see HD pixel art); never AI-upscaled. Replaces the scaling options below while on. Original Leapster and L-MAX BIOSes, and cartridges with their own Flash player.")
+            .on_hover_text("Redraws the game's Flash art at your window's full resolution from the original vector data: shapes from the movies' own coordinates, text from the fonts' own outlines, bitmaps from their own pixels. Art with no vector original shows its pixels (see HD pixel art); never AI-upscaled. Replaces the scaling options below while on. Original Leapster (US, UK, Spanish), L-MAX and Leapster TV BIOSes, and cartridges with their own Flash player. On the Leapster TV it shows the game's own colours, before the TV's colour conversion.")
             .changed()
         {
             actions.push(Action::HdChanged);

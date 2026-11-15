@@ -53,12 +53,12 @@ Code: `crates/ribbit-core/src/io/tv_link.rs`, `io/lmax_tv.rs`.
 | T7 | Controller only on port 0; port 1 silent | Two-player or a second device (the console's own panel?) may exist | Trace what the BIOS does with each port's device type (dispatcher 0x4004_94C0 requires type 6) |
 | T8 | Transmission is instant (no 4800-baud timing); UART IRQ = control bit 6 (TX) or bit 2 with data waiting (RX) | Timing-sensitive code, interrupt load | UART datasheet/compare with the 0x0180_D500 UART; hardware timing |
 | T9 | GIODataIn bit 0x800 (display mode toggle at 0x400A_AE46) is never produced; display mode stays 1 (pad mode) | Mode 0 sends pointer events directly; what physical control sets it is unknown | Find which controller or console input sets 0x800 |
-| T10 | TV pixel widening: 5/6-bit fields zero-filled to 8 bits; BT.601 studio-range conversion | Exact colours (red decodes to F0 06 00) | ADV7179 datasheet and the TV chip's wiring; capture real TV output |
+| T10 | TV pixel widening: 5/6-bit fields zero-filled to 8 bits; BT.601 studio-range conversion | Exact colours (red decodes to F0 06 00). HD vectors on the TV show the BIOS's frame before this conversion (the game's own colours), so the picture's colours change when HD is turned on | ADV7179 datasheet and the TV chip's wiring; capture real TV output; then HD could map its output through the BIOS's table (0x400D_94A4) too |
 | T11 | Only the 160x160 game window is shown; the 200x160 frame's border (register +0x08) and the TV's aspect ratio are dropped | Faithful TV look | Decide display policy; check registers +0x00-+0x20 for position/size |
 | T12 | Straps 0x63FF_FFFF for the TV (bit 14 clear boots to a blank calibration screen) | Boot path | What the blank screen is (pad calibration?); real unit's straps |
 | T13 | TV chip registers +0x00-+0x20 other than the ID: unmodelled plain memory; +0x18 is a serial port to the encoder | Display mode bits (the mode setter flips +0x00 bits 0-1) | Trace writes; ADV7179 register map |
 | T14 | Sound on the TV uses the handheld's audio model unchanged | Audio correctness | Compare TV BIOS audio register use with the handheld's |
-| T15 | Only SpongeBob tested | Compatibility | Run the automated check over the library with the TV BIOS |
+| T15 | Only SpongeBob tested (2026-11-15: menus of Finding Nemo, Cars, Backyardigans, Digging for Dinosaurs, Batman: Strength in Numbers and Animal Genius also run, with HD vectors) | Compatibility | Run the automated check over the library with the TV BIOS |
 
 ## Dumping (for the user)
 

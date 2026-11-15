@@ -769,13 +769,13 @@ impl Bus {
             // +0x310/+0x318, y at +0x304/..), five results out (+0x320-
             // +0x330) that the kernel stores in a sprite's halfwords 1, 2, 5,
             // 6 and 7. What the hardware returns is UNKNOWN: this gives its
-            // own encoding, which only this crate's renderer reads (the first
-            // and third corners, and 0x8000).
-            (0xD050_0320, None) => self.latch(0xD050_0300) & 0xFFFF,
-            (0xD050_0324, None) => self.latch(0xD050_0304) & 0xFFFF,
-            (0xD050_0328, None) => self.latch(0xD050_0310) & 0xFFFF,
-            (0xD050_032C, None) => self.latch(0xD050_0314) & 0xFFFF,
-            (0xD050_0330, None) => 0x8000,
+            // own encoding, which only this crate's renderer reads
+            // (`video::encode_corners`: a rectangle as its first and third
+            // corners, a turned sprite as all four).
+            (0xD050_0320 | 0xD050_0324 | 0xD050_0328 | 0xD050_032C | 0xD050_0330, None) => {
+                let c = std::array::from_fn(|k| self.latch(0xD050_0300 + 4 * k as u32) as i16 as i32);
+                crate::video::encode_corners(c)[((a - 0xD050_0320) / 4) as usize]
+            }
             // The fixed-point maths unit (0xF6004000): its matrix product
             // (`geometry`, video.rs) and arithmetic (`arith`). Results are
             // ready at once: the kernels read them straight after starting.

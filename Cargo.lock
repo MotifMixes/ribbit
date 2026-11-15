@@ -3440,6 +3440,14 @@ name = "ribbit-audio"
 version = "1.9.1"
 
 [[package]]
+name = "ribbit-clickstart"
+version = "1.9.1"
+dependencies = [
+ "bincode",
+ "serde",
+]
+
+[[package]]
 name = "ribbit-core"
 version = "1.9.1"
 dependencies = [
@@ -3536,6 +3544,7 @@ dependencies = [
  "rayon",
  "rfd",
  "ribbit-audio",
+ "ribbit-clickstart",
  "ribbit-core",
  "ribbit-cpu",
  "ribbit-debug",

@@ -171,6 +171,13 @@ impl Nand {
         self.blocks[first..first + count].clone_from_slice(&from.blocks[first..first + count]);
     }
 
+    /// Block `to` as block `from` has it, sharing its memory until either
+    /// is written (blocks holding the same thing, like UBI's free blocks
+    /// with only an EC header: 4000 of them were 530 MB on the Explorer).
+    pub fn share_block(&mut self, from: usize, to: usize) {
+        self.blocks[to] = self.blocks[from].clone();
+    }
+
     /// Whether block `n` was written since it was last erased.
     pub fn is_written(&self, n: usize) -> bool {
         self.blocks[n].is_some()

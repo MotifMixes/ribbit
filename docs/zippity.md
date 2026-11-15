@@ -999,7 +999,18 @@ equal corners is hidden. Ribbit returns its own encoding, which only its
 renderer reads: the first corner (halfwords 1 and 2: the sprite's x and y,
 what the kernel would have stored without the converter), the third corner
 (5 and 6) and 0x8000 (7); its renderer scales the sprite to that rectangle.
-Skewed quads are not handled. The games keep their own positions for their
+Other shapes come from turned sprites: Little Einsteins' Rocket's Musical
+Mission (Level 2, the sky) turns the rocket as it climbs or dives (bopper up
+or down, standing on the home spot), sent as strips of turned 64x16 and 16x16
+sprites, e.g. (-294, 38), (-234, 59), (-229, 44), (-289, 23), a parallelogram
+whose corners the next strip shares. Drawn as the rectangle of the first and
+third corners the rocket came apart into squashed strips (a player's report).
+For these Ribbit returns all four corners packed (0xC000 in halfword 7; the
+first three corners in 10 bits each, the fourth's distance from the
+parallelogram's in 9 bits each) and draws each screen pixel whose centre is
+inside the shape from its place in the picture (inverse bilinear map), so the
+strips meet without gaps; `video::encode_corners`, tests `corner_encoding`,
+`turned_sprite`. The games keep their own positions for their
 logic (The Princess and the Frog's frog collects mushrooms with this
 encoding).
 

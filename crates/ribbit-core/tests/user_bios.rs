@@ -560,3 +560,26 @@ fn lmax_resume_after_idle_power_off_resets_the_timer() {
 fn leapster2_resume_after_idle_power_off_resets_the_timer() {
     resume_after_idle_power_off_resets_the_timer("leapster2/152-12206_0.6.bin", "Talking-Words-Factory_Leapster_EN.zip");
 }
+
+// ---------------------------------------------------------------------------
+// HD hooks (hd.rs, hd_l2.rs): every hook of the Leapster 2 family's player is
+// found, at the addresses read from the code (docs/hardware-research.md).
+
+#[test]
+fn leapster2_family_hd_hooks_are_found() {
+    use ribbit_core::hd::Hooks;
+    let cases = [
+        ("leapster2/152-12206_0.6.bin", 0x4007_40B8, 0x4007_6912, 0x4007_C21C, 0x400C_9CBE, (0x4008_6EEE, 0x4008_6F46, 0x4008_6F76)),
+        ("leapster2/152-12659_m9.bin", 0x4007_3ED0, 0x4007_6616, 0x4007_C3E8, 0x400C_97B6, (0x4008_6B40, 0x4008_6BA2, 0x4008_6BD2)),
+        ("152-12076_b5.bin", 0x4007_2DAC, 0x4007_5606, 0x4007_AF10, 0x400C_83BE, (0x4008_5BE2, 0x4008_5C3A, 0x4008_5C6A)),
+    ];
+    for (name, edge, scan, solid, glyph, sites) in cases {
+        let Some(fw) = firmware(name) else {
+            eprintln!("RIBBIT_BIOS_DIR not set; skipping");
+            return;
+        };
+        let h = Hooks::find(fw.data(), ribbit_memory::map::BIOS_MIRROR).unwrap_or_else(|| panic!("{name}: hooks"));
+        assert_eq!((h.edge_ctor, h.scanline, h.solid_painter, h.glyph, h.shape_sites()), (edge, scan, solid, Some(glyph), Some(sites)), "{name}");
+        assert!(h.gradient.is_some() && h.gradient_blend.is_some() && h.bitmap_blend.is_some() && h.transform.is_some() && h.stroke.is_some(), "{name}: {h:x?}");
+    }
+}

@@ -2,6 +2,8 @@
 //! with HD capture on, applies every finished pass to the HD canvas, and
 //! writes LCD-vs-HD snapshots, with timing:
 //!   cargo run --release -p ribbit-core --example hdplay -- <bios> <cart> <state> <ms> <every_ms> <out_prefix> [system.eeprom] [cart.sav]
+//! A cart of "-" runs the BIOS alone; a state of "-" starts from power-on.
+//! RIBBIT_HD_FROM=ms: no snapshots before then.
 //! RIBBIT_HD=0 runs the same span without capture (for the speed comparison).
 //! RIBBIT_HD_PRESS="a,3000,100;right,5000,100": button presses (name, ms from
 //! the start, ms held). RIBBIT_HD_TINT=1: the HD side shows the parts taken
@@ -22,8 +24,9 @@ fn main() {
         panic!("usage: hdplay <bios> <cart> <state> <ms> <every_ms> <out_prefix> [system.eeprom] [cart.sav]");
     };
     let fw = ribbit_memory::Firmware::from_bytes(ribbit_core::read_image(bios).unwrap()).unwrap();
-    let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap();
-    let mut m = Machine::with_straps(fw, Some(cart), 0x63FF_FFFF);
+    // "-" for no cartridge (the BIOS's own games).
+    let cart = (cart != "-").then(|| ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(cart).unwrap()).unwrap());
+    let mut m = Machine::with_straps(fw, cart, 0x63FF_FFFF);
     if let Some(p) = rest.first() {
         m.io.eeprom.load(&std::fs::read(p).unwrap());
     }
@@ -32,7 +35,10 @@ fn main() {
     }
     m.enable_experimental_mame_touch(Default::default());
     m.record_trace_tail = false;
-    m.load_state(&std::fs::read(state).unwrap()).unwrap();
+    // "-": start from power-on (e.g. a Leapster TV, with no saved state).
+    if state != "-" {
+        m.load_state(&std::fs::read(state).unwrap()).unwrap();
+    }
     let hd_on = std::env::var("RIBBIT_HD").map_or(true, |v| v != "0");
     let mut canvas = None;
     if hd_on {
@@ -64,6 +70,8 @@ fn main() {
     let mut shot = 0;
     let mut dumped = false;
     let mut painters: std::collections::BTreeMap<u32, usize> = Default::default();
+    let mut undrawable: std::collections::BTreeMap<u32, usize> = Default::default();
+    let mut seen_scales = std::collections::HashSet::new();
     let presses: Vec<(ribbit_input::Button, u64, u64)> = std::env::var("RIBBIT_HD_PRESS")
         .map(|v| {
             v.split(';')
@@ -120,15 +128,42 @@ fn main() {
             m.run_cycles(end - m.cpu.cycles, &Breakpoints::default());
         }
         emu_t += start.elapsed();
-        m.render_frame(&mut lcd);
+        // The BIOS's own frame (on a Leapster TV, before its TV conversion).
+        let status = if hd_on { m.render_hd_frame(&mut lcd) } else { m.render_frame(&mut lcd) };
+        if std::env::var_os("RIBBIT_HD_DIAG").is_some() && t % 1000 == 0 {
+            println!("{t} frame {status:?} lcd transfers {}", m.io.lcd.transfers);
+        }
+        // RIBBIT_HD_DUMPMEM=hexaddr,hexlen,ms: memory written to <prefix>mem.bin then.
+        if let Ok(v) = std::env::var("RIBBIT_HD_DUMPMEM") {
+            let q: Vec<&str> = v.split(',').collect();
+            let (at, len, when) = (u32::from_str_radix(q[0], 16).unwrap(), u32::from_str_radix(q[1], 16).unwrap(), q[2].parse::<u64>().unwrap());
+            if (when..when + 16).contains(&t) {
+                let mem: Vec<u8> = (0..len).map(|i| m.bus.peek8(at + i).unwrap_or(0)).collect();
+                std::fs::write(format!("{prefix}mem.bin"), mem).unwrap();
+            }
+        }
         if let (Some(c), Some(hd)) = (canvas.as_mut(), m.hd.as_mut()) {
             let start = Instant::now();
-            for p in hd.take() {
+            for mut p in hd.take() {
+                // RIBBIT_HD_NOEXACT=1: shapes from the BIOS's rounded points only.
+                if std::env::var_os("RIBBIT_HD_NOEXACT").is_some() {
+                    p.edges.iter_mut().for_each(|e| e.exact = None);
+                    p.strokes.clear();
+                }
+                // RIBBIT_HD_RENDERER=1: the renderer object's first words, once
+                // per scale (what describes each quality's units).
+                if std::env::var_os("RIBBIT_HD_RENDERER").is_some() && seen_scales.insert(p.scale) {
+                    let words: Vec<String> = (0..0x40u32).map(|i| format!("{:08x}", u32::from_le_bytes([0, 1, 2, 3].map(|k| m.bus.peek8(p.renderer + 4 * i + k).unwrap_or(0))))).collect();
+                    println!("{t} renderer {:08x} scale {} rect {:?}: {}", p.renderer, p.scale, p.rect, words.join(" "));
+                    let surf = u32::from_le_bytes([0, 1, 2, 3].map(|k| m.bus.peek8(p.renderer + 0x20 + k).unwrap_or(0)));
+                    let sw: Vec<String> = (0..0x10u32).map(|i| format!("{:08x}", u32::from_le_bytes([0, 1, 2, 3].map(|k| m.bus.peek8(surf + 4 * i + k).unwrap_or(0))))).collect();
+                    println!("   surface {surf:08x}: {}", sw.join(" "));
+                }
                 if std::env::var_os("RIBBIT_HD_LOG").is_some() {
                     let mut ps: Vec<String> = p.fills.values().map(|f| format!("{:x}{}", f.painter, if f.bitmap.is_some() { "b" } else { "" })).collect();
                     ps.sort();
                     ps.dedup();
-                    println!("{t:6} pass renderer {:08x} rect {:?} rows {:?} scale {} edges {} fills {} painters {ps:?}", p.renderer, p.rect, p.rows, p.scale, p.edges.len(), p.fills.len());
+                    println!("{t:6} pass renderer {:08x} target {:08x} rect {:?} rows {:?} scale {} edges {} fills {} painters {ps:?}", p.renderer, p.target, p.rect, p.rows, p.scale, p.edges.len(), p.fills.len());
                 }
                 // RIBBIT_HD_STROKEDBG=1: vertical stroke pieces against the BIOS's
                 // outline edges of their fill (pass units).
@@ -165,6 +200,10 @@ fn main() {
                         not_premultiplied += 1;
                     }
                     *painters.entry(f.painter).or_insert(0usize) += 1;
+                    // Fills HD cannot draw (shown from the LCD), by painter.
+                    if !f.mask && f.bitmap.is_none() && f.gradient.is_none() && f.painter != hd.hooks.solid_painter {
+                        *undrawable.entry(f.painter).or_insert(0usize) += 1;
+                    }
                 }
                 // RIBBIT_HD_PAINTER=hex: print the first few fills painted by
                 // that painter (0x100 bytes as words) with the pass's rect.
@@ -231,6 +270,44 @@ fn main() {
                         println!("{t} edge {:?} line {} rule {} dir {} fills {:08x?} exact {:?}", e.p, e.line, e.rule, e.dir, e.fills, e.exact);
                     }
                 }
+                // RIBBIT_HD_ROWCHECK=y (pass units): fills a row through the
+                // pass's rounded edges leaves open (odd crossings, or a
+                // winding count left over), with their crossings.
+                if let Ok(y) = std::env::var("RIBBIT_HD_ROWCHECK") {
+                    let sy = y.parse::<f32>().unwrap() + 0.5;
+                    let mut by: std::collections::BTreeMap<u32, (i32, Vec<f32>)> = Default::default();
+                    for e in &p.edges {
+                        let q = e.p.map(|(x, y)| (x as f32, y as f32));
+                        let n = if e.line { 1 } else { 16 };
+                        let at = |t: f32| {
+                            let u = 1.0 - t;
+                            (u * u * q[0].0 + 2.0 * u * t * q[1].0 + t * t * q[2].0, u * u * q[0].1 + 2.0 * u * t * q[1].1 + t * t * q[2].1)
+                        };
+                        for i in 0..n {
+                            let (a, b) = (at(i as f32 / n as f32), at((i + 1) as f32 / n as f32));
+                            if (a.1 <= sy) != (b.1 <= sy) {
+                                let x = a.0 + (sy - a.1) / (b.1 - a.1) * (b.0 - a.0);
+                                let fills: Vec<u32> = match e.rule {
+                                    1 | 2 => vec![e.fills[0]],
+                                    _ => e.fills.to_vec(),
+                                };
+                                for f in fills.into_iter().filter(|&f| f != 0) {
+                                    let v = by.entry(f).or_default();
+                                    v.0 += if e.rule == 2 { e.dir as i32 } else { 1 };
+                                    v.1.push(x);
+                                }
+                            }
+                        }
+                    }
+                    if std::env::var_os("RIBBIT_HD_ROWALL").is_some() {
+                        for (f, (n, xs)) in &by {
+                            println!("{t} pass {:?} row {sy}: fill {f:08x} ({n}) at {:?}", p.rect, xs);
+                        }
+                    }
+                    for (f, (n, xs)) in by.iter().filter(|(f, (n, _))| if p.edges.iter().any(|e| e.rule == 2 && e.fills[0] == **f) { *n != 0 } else { n % 2 != 0 }) {
+                        println!("{t} pass {:?} row {sy}: fill {f:08x} open ({n}) at {:?}", p.rect, xs);
+                    }
+                }
                 c.apply(&p);
                 if let Ok(from) = std::env::var("RIBBIT_HD_EACH") {
                     if t >= from.parse::<u64>().unwrap() {
@@ -249,7 +326,9 @@ fn main() {
             }
             draw_t += start.elapsed();
         }
-        if (t + 16) % every < 16 {
+        // RIBBIT_HD_FROM=ms: no snapshots before then.
+        let from = std::env::var("RIBBIT_HD_FROM").map_or(0, |v| v.parse::<u64>().unwrap());
+        if (t + 16) % every < 16 && t >= from {
             if let Some(c) = &canvas {
                 let mut hd = c.composed(&lcd[..]);
                 // RIBBIT_HD_FAR=1: the blocks that disagree with the LCD, by reason.
@@ -323,6 +402,7 @@ fn main() {
     println!("translucent fills brighter than their alpha: {not_premultiplied}");
     println!("text fonts (glyphs, from outlines): {text_fonts:?}");
     println!("fills by painter: {painters:x?}");
+    println!("fills HD cannot draw, by painter: {undrawable:x?}");
     if let Some(hd) = &m.hd {
         println!("dropped passes: {}", hd.dropped);
     }
