@@ -26,7 +26,19 @@ fn main() {
     // EXPLORER_HLE_SAVE=<file.nandblocks>: the file systems of the app's
     // save (Original's NAND with it applied; its .nandimage tells the 1 GB
     // NAND of older saves; its .nor beside).
-    let vfs = if let Ok(path) = std::env::var("EXPLORER_HLE_SAVE") {
+    // A folder of LeapPad Explorer packages: its file systems from the SD
+    // card built from them (EXPLORER_HLE_SAVE: the app's save of it).
+    let leappad = ribbit_didj::leappad::is_leappad_dir(dir.as_ref());
+    let mut card = None;
+    let vfs = if leappad {
+        let mut c = ribbit_didj::leappad::card_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+        if let Ok(path) = std::env::var("EXPLORER_HLE_SAVE") {
+            c.apply_changes(&std::fs::read(&path).expect("can't read the save")).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let vfs = ribbit_didj::hle::leappad::system_from_card(&c, None).unwrap_or_else(|e| panic!("{e}"));
+        card = Some(c);
+        vfs
+    } else if let Ok(path) = std::env::var("EXPLORER_HLE_SAVE") {
         let path = std::path::PathBuf::from(path);
         let mut flash = ribbit_didj::explorer::nand_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
         let image = std::fs::read_to_string(path.with_extension("nandimage")).unwrap_or_default();
@@ -51,9 +63,11 @@ fn main() {
         ribbit_didj::hle::explorer::system_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"))
     };
     eprintln!("[explorerhle] file systems read in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
-    let mut p = Process::new_explorer(vfs);
+    let mut p = if leappad { Process::new_leappad(vfs) } else { Process::new_explorer(vfs) };
     p.trace = std::env::var_os("EXPLORER_HLE_TRACE").is_some();
-    if let Some(rle) = ribbit_didj::hle::explorer::splash_from_packages(dir.as_ref()) {
+    if let Some(c) = &card {
+        p.leappad_splash(c);
+    } else if let Some(rle) = ribbit_didj::hle::explorer::splash_from_packages(dir.as_ref()) {
         p.explorer_splash(&rle);
     }
     // EXPLORER_HLE_CART=<dump>: a cartridge in the slot from power-on

@@ -541,16 +541,24 @@ impl Process {
     /// top one keeps the boot loader's size and stays on, the others
     /// blanked), the MLC on.
     pub(super) fn fb_init(&mut self) {
-        self.m.bus.write32(BASE + MLCSCREENSIZE, (320 - 1) | (240 - 1) << 16);
+        let (w, h) = self.x.screen();
+        self.m.bus.write32(BASE + MLCSCREENSIZE, (w - 1) | (h - 1) << 16);
         self.x.fb.layers = vec![Layer::default(); LAYERS];
         for l in 0..LAYERS {
             let mut var = vec![0u32; VAR_WORDS];
-            var[XRES] = 320;
-            var[YRES] = 240;
-            // ILI9322 (mach-lf1000/screen.c): hfp 50, hbp 36, vfp 4, vbp 17,
-            // hsw 2, vsw 1, 6.4 MHz.
-            var[LEFT_MARGIN..LEFT_MARGIN + 6].copy_from_slice(&[50, 36, 4, 17, 2, 1]);
-            var[PIXCLOCK] = 1_000_000_000 / (6_400_000 / 1000);
+            var[XRES] = w;
+            var[YRES] = h;
+            if w == 480 {
+                // ILI6480G2 (screen.c): hfp 5, hbp 40, vfp 8, vbp 8, hsw 2,
+                // vsw 1, 9.2 MHz.
+                var[LEFT_MARGIN..LEFT_MARGIN + 6].copy_from_slice(&[5, 40, 8, 8, 2, 1]);
+                var[PIXCLOCK] = 1_000_000_000 / (9_200_000 / 1000);
+            } else {
+                // ILI9322 (mach-lf1000/screen.c): hfp 50, hbp 36, vfp 4, vbp 17,
+                // hsw 2, vsw 1, 6.4 MHz.
+                var[LEFT_MARGIN..LEFT_MARGIN + 6].copy_from_slice(&[50, 36, 4, 17, 2, 1]);
+                var[PIXCLOCK] = 1_000_000_000 / (6_400_000 / 1000);
+            }
             if l == 0 {
                 let (left, top, right, bottom) = self.fb_get_position(0);
                 var[XRES] = (right - left) as u32;
@@ -567,7 +575,7 @@ impl Process {
                 layer.line_length = 4096;
                 layer.var = var;
                 self.fb_set_yuv_position(l, LAYERS as u32 - 1);
-                let _ = self.fb_set_video_scaler(l, 320, 240, false);
+                let _ = self.fb_set_video_scaler(l, w, h, false);
             } else {
                 var[NONSTD] = FORMAT_RGB << NONSTD_FORMAT;
                 layer.kind = FB_TYPE_PACKED_PIXELS;
