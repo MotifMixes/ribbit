@@ -20,6 +20,7 @@ pub fn color(hw: Hardware) -> C {
         Hardware::LeapPad => C::from_rgb(30, 165, 160),
         Hardware::Didj => C::from_rgb(160, 168, 182),
         Hardware::Explorer => C::from_rgb(160, 205, 40),
+        Hardware::LeapPadExplorer => C::from_rgb(95, 185, 60),
         Hardware::ClickStart => C::from_rgb(70, 185, 110),
     }
 }
@@ -36,6 +37,7 @@ pub fn name(hw: Hardware) -> &'static str {
         Hardware::LeapPad => "LeapPad",
         Hardware::Didj => "Didj",
         Hardware::Explorer => "Explorer",
+        Hardware::LeapPadExplorer => "LeapPad Explorer",
         Hardware::ClickStart => "ClickStart",
     }
 }
@@ -296,6 +298,25 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
             // The stylus, held at the top left.
             p.line_segment([at(-40.0, -18.0), at(-20.0, -4.0)], stroke(3.5, C::from_gray(200)));
             p.circle_filled(at(-40.0, -18.0), 2.6 * u, lime);
+        }
+        // LeapPad Explorer (2011): a tablet held upright, a white face in a
+        // green shell (the green and white model; its stylus orange), the
+        // camera above a tall screen, the big silver D-pad low on the left
+        // and the green Home button low on the right; the stylus on its
+        // cord at the side.
+        Hardware::LeapPadExplorer => {
+            let green = C::from_rgb(95, 185, 60);
+            let white = C::from_rgb(244, 246, 242);
+            shell(p, &[Part::Round(rr(-4.0, 0.0, 52.0, 58.0), 12.0 * u)], green, u);
+            p.rect_filled(rr(-4.0, 0.0, 44.0, 50.0), 9.0 * u, white);
+            p.circle_filled(at(-4.0, -21.5), 1.6 * u, C::from_gray(40));
+            screen(p, rr(-4.0, -5.0, 30.0, 27.0));
+            cross(p, at(-14.0, 16.0), 10.0 * u, C::from_gray(175));
+            button(p, at(7.0, 16.0), 3.6 * u, C::from_rgb(70, 170, 50));
+            // The stylus, on its cord at the right.
+            p.line_segment([at(22.0, -10.0), at(30.0, -4.0)], stroke(0.8, C::from_gray(90)));
+            p.line_segment([at(30.0, -16.0), at(34.0, 22.0)], stroke(3.0, C::from_rgb(245, 140, 40)));
+            p.circle_filled(at(30.0, -16.0), 1.8 * u, C::from_rgb(245, 140, 40));
         }
         // ClickStart: a green and white keyboard shaped as a dog, two dark
         // green ears and a face with eyes and a nose above the keys, a red

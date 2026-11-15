@@ -1264,6 +1264,8 @@ impl App {
                 d.set_dither(self.settings.didj_dither);
                 // As a change of settings sets it (it was off until one).
                 d.set_frame_skip(self.settings.didj_frame_skip);
+                d.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                d.set_upright(self.settings.leappad_upright);
                 // In the slot from power on (the kernel checks it at start).
                 if let Some(cart) = self.explorer_cart.take()
                     && let Err(e) = d.set_cart(Some(cart))
@@ -1665,7 +1667,7 @@ impl App {
         } else if self.clickstart.is_some() {
             Some(Hardware::ClickStart)
         } else if let Some(d) = &self.didj {
-            Some(if d.explorer { Hardware::Explorer } else { Hardware::Didj })
+            Some(if d.leappad { Hardware::LeapPadExplorer } else if d.explorer { Hardware::Explorer } else { Hardware::Didj })
         } else {
             self.session.as_ref().map(|s| s.hardware)
         }
@@ -2279,6 +2281,7 @@ impl App {
                     d.set_hd(self.settings.didj_hd.clamp(1, 4));
                     d.set_dither(self.settings.didj_dither);
                     d.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                    d.set_upright(self.settings.leappad_upright);
                     // In-between frames off for now (see didj_mode); ignore the setting.
                     d.set_smooth(false);
                 }
@@ -3360,6 +3363,9 @@ impl App {
             // view is shown (the screen at the picture's own size).
             let picture = if self.session.is_some() {
                 crate::record::LEAPSTER_SIZE
+            } else if let Some(d) = self.didj.as_ref().filter(|d| d.leappad) {
+                let (w, h) = (ribbit_didj::leappad::WIDTH as usize, ribbit_didj::leappad::HEIGHT as usize);
+                if d.upright() { (h, w) } else { (w, h) }
             } else if self.didj.is_some() {
                 (crate::didj::SCREEN_W, crate::didj::SCREEN_H)
             } else if self.twist.is_some() {
@@ -3660,9 +3666,24 @@ impl App {
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
     fn set_stylus(&mut self, pos: Option<(f64, f64)>) {
         // The Leapster Explorer's touch screen: the stylus in its pixels.
+        // The LeapPad Explorer's: its picture shown upright (272x480), the
+        // stylus in the panel's pixels (480x272).
+        if let Some(d) = self.didj.as_ref().filter(|d| d.leappad && d.upright()) {
+            let (x, y, w, h) = self.lcd_px;
+            let (sw, sh) = (ribbit_didj::leappad::HEIGHT as f32, ribbit_didj::leappad::WIDTH as f32);
+            d.set_touch(pos.and_then(|(cx, cy)| {
+                let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
+                ((0.0..sw).contains(&px) && (0.0..sh).contains(&py)).then(|| crate::didj::leappad_panel_point(px, py))
+            }));
+            return;
+        }
         if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
             let (x, y, w, h) = self.lcd_px;
-            let (sw, sh) = (crate::didj::SCREEN_W as f32, crate::didj::SCREEN_H as f32);
+            let (sw, sh) = if d.leappad {
+                (ribbit_didj::leappad::WIDTH as f32, ribbit_didj::leappad::HEIGHT as f32)
+            } else {
+                (crate::didj::SCREEN_W as f32, crate::didj::SCREEN_H as f32)
+            };
             d.set_touch(pos.and_then(|(cx, cy)| {
                 let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
                 ((0.0..sw).contains(&px) && (0.0..sh).contains(&py)).then_some((px, py))
@@ -4418,6 +4439,8 @@ impl App {
                 Hardware::Didj if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
                 Hardware::Explorer if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
                 Hardware::Explorer => " (Original)",
+                Hardware::LeapPadExplorer if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
+                Hardware::LeapPadExplorer => " (Original)",
                 Hardware::Didj if self.settings.didj_enhanced => " (Original+)",
                 Hardware::Didj => " (Original)",
                 _ => "",

@@ -1401,6 +1401,30 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 actions.push(Action::SettingsChanged);
             }
         });
+        sub_menu(ui, "LeapPad Explorer", |ui| {
+            // The Leapster Explorer's setting (the same firmware and modes).
+            let mut mode = if settings.explorer_hle { 0 } else { 1 };
+            let mut changed = ui
+                .radio_value(&mut mode, 0, "Enhanced (new, experimental)")
+                .on_hover_text("Runs the LeapPad's menu and games without its Linux system. Saves are shared with Original. The same setting as the Leapster Explorer's. From the next power-on.")
+                .changed();
+            changed |= ui
+                .radio_value(&mut mode, 1, "Original")
+                .on_hover_text("The LeapPad's own Linux system, as LeapFrog shipped it. The same setting as the Leapster Explorer's. From the next power-on.")
+                .changed();
+            if changed {
+                settings.explorer_hle = mode == 0;
+                actions.push(Action::SettingsChanged);
+            }
+            ui.separator();
+            if ui
+                .checkbox(&mut settings.leappad_upright, "Screen upright")
+                .on_hover_text("Its menus are drawn for the LeapPad held upright; its own games and the keyboard for it held sideways. Off shows the screen sideways. At once.")
+                .changed()
+            {
+                actions.push(Action::SettingsChanged);
+            }
+        });
         sub_menu(ui, "Leapster Explorer", |ui| {
             // 0 Enhanced (new), 1 Original.
             let mut mode = if settings.explorer_hle { 0 } else { 1 };
@@ -2663,7 +2687,7 @@ fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, ta
         turn_on_button(ui, settings, library, tab, actions);
         // Zippity and RockIt Twist games play on their own console: no
         // choice to make on their pages.
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer)) {
             // (Right to left: the BIOS button shows to the right of the
             // console menu.)
             bios_picker(ui, settings, library, actions);
@@ -2729,7 +2753,7 @@ fn phone_library_header(
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer)) {
             console_picker(ui, settings, library, tab, actions);
             bios_picker(ui, settings, library, actions);
         }
@@ -2888,6 +2912,15 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
                 .clicked()
         {
             actions.push(Action::Pick(Pick::ExplorerInstall));
+        }
+        return;
+    }
+    // The LeapPad Explorer's page: its FW Base package is the console.
+    if tab == Some(Family::LeapPadExplorer) {
+        if let Some(g) = library.games.iter().find(|g| g.family == Family::LeapPadExplorer && g.has_tag("System"))
+            && power_button(ui, "Turn on the LeapPad Explorer (its setup and menu)")
+        {
+            actions.push(Action::PlayFromLibrary(g.path.clone()));
         }
         return;
     }
@@ -3609,7 +3642,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a
         // Zippity's or RockIt Twist's belongs to the whole console.
-        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer);
+        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer);
         let delete = ui
             .add_enabled(
                 own_save,
