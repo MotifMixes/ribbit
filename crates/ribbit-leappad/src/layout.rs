@@ -184,14 +184,38 @@ pub struct View {
 /// A spread of the book, as its GO spot announces it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spread {
-    pub go: Shape,
+    /// The GO spot (Little Touch: a "page pointer" key, when the book has
+    /// one; it has the magnets instead).
+    pub go: Option<Shape>,
     /// The view touching GO opens.
     pub opens: usize,
+    /// Little Touch LeapPad: the spread's magnet pattern (`Bus::magnets`).
+    pub magnets: Option<u16>,
+}
+
+/// Which pad's app a cartridge holds; their headers differ (`read`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Family {
+    #[default]
+    LeapPad,
+    MyFirst,
+    LittleTouch,
+}
+
+impl Family {
+    pub fn model(self) -> crate::Model {
+        match self {
+            Family::LeapPad => crate::Model::LeapPad,
+            Family::MyFirst => crate::Model::MyFirst,
+            Family::LittleTouch => crate::Model::LittleTouch,
+        }
+    }
 }
 
 /// What a cartridge says about its book.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
+    pub family: Family,
     pub views: Vec<View>,
     /// In book order.
     pub spreads: Vec<Spread>,
@@ -202,10 +226,11 @@ impl Layout {
     /// else the first of its spread.
     pub fn main_view(&self, spread: &Spread) -> Option<&View> {
         let opens = self.views.iter().find(|v| v.index == spread.opens)?;
-        if opens.kind == 0 || opens.kind == STM {
+        let tnt = if self.family == Family::LittleTouch { 1 } else { 0 };
+        if opens.kind == tnt || opens.kind == STM {
             return Some(opens);
         }
-        self.views.iter().find(|v| v.kind == 0 && v.spread == opens.spread)
+        self.views.iter().find(|v| v.kind == tnt && v.spread == opens.spread)
     }
 }
 
@@ -263,37 +288,91 @@ fn shape(rom: &Rom, table: Option<usize>, scale: usize, id: u16) -> Result<Optio
 pub fn read(cart: &[u8]) -> Result<Layout, String> {
     let rom = Rom(cart);
     let header = rom.ptr(0x1013C)?.ok_or("the cartridge has no app header")?;
+    let version = rom.u8(header)?;
+    // My First LeapPad and Little Touch headers (VERIFIED on 8 and 6 dumps:
+    // the views each lists read as views, and their GO and magnet lists as
+    // the app uses them, traced with lpwatch / lpboot PWATCH):
+    // * My First LeapPad (versions 2-3; the LeapPad header's bytes 3-0x16
+    //   appear 10 bytes later): views at +21h/+23h; the GO list at +5 (app
+    //   0xC3B3 in The Foot Book, with the template off the pad; +0Bh is the
+    //   template's), or for version 3 the list whose pointer is at the word
+    //   +45h points to.
+    // * Little Touch (versions 1-2, "5A 0A 7F 5A 0A 73" at +9): views at
+    //   +1Fh/+21h, a list of page-pointer keys in the GO format at +23h
+    //   (often none), and the magnet list at +3Eh.
+    let at = |sig: &[u8], o: usize| cart.get(header + o..header + o + sig.len()) == Some(sig);
+    let family = if at(&[0x01, 0x78, 0x32, 0x7F, 0x5A, 0x0A, 0x7F], 0x0E) {
+        Family::MyFirst
+    } else if at(&[0x5A, 0x0A, 0x7F, 0x5A, 0x0A, 0x73], 9) {
+        Family::LittleTouch
+    } else {
+        Family::LeapPad
+    };
     // Version 2 is the "Prebuilt TnT, QnA3 & SnF" app; 0 is the LeapPad
     // Classic app, which keeps the same GO list, clickables and shapes under
     // a smaller header.
-    let classic = match rom.u8(header)? {
-        2 => false,
-        0 => true,
-        v => return Err(format!("the cartridge's app is of an unknown kind (header version {v})")),
+    let classic = match (family, version) {
+        (Family::LeapPad, 2) => false,
+        (Family::LeapPad, 0) => true,
+        (Family::MyFirst, 2..=3) | (Family::LittleTouch, 1..=2) => false,
+        (_, v) => return Err(format!("the cartridge's app is of an unknown kind (header version {v})")),
     };
     let table = rom.ptr(0x10134)?;
     // The header's own pointers are 16-bit addresses in its 32 KB bank.
     let hbank = header & !0x7FFF;
-    let go_list = hbank + rom.u16(header + if classic { 7 } else { 0x1F })? as usize;
+    let (count_at, views_at, clickables_at) = match family {
+        Family::LeapPad => (0x17, 0x19, 0x14),
+        Family::MyFirst => (0x21, 0x23, 0x14),
+        Family::LittleTouch => (0x1F, 0x21, 0x12),
+    };
+    let go_word = match family {
+        Family::LeapPad => rom.u16(header + if classic { 7 } else { 0x1F })?,
+        Family::MyFirst => {
+            let w = if version >= 3 { rom.u16(header + 0x45)? } else { 0xFFFF };
+            let alt = if w != 0xFFFF { rom.u16(hbank + w as usize)? } else { 0xFFFF };
+            if alt != 0xFFFF { alt } else { rom.u16(header + 5)? }
+        }
+        Family::LittleTouch => rom.u16(header + 0x23)?,
+    };
+    let go_list = (go_word != 0xFFFF).then(|| hbank + go_word as usize);
     // The table's entries count 4-byte units in every kernel read so far but
     // the oldest: LeapPad 1.5 of 08/26/99 (500-00263, kernel 0x1F39) and that
     // of 07/14/00 (500-11874) add the entry as bytes, while e.g. 500-11887's
     // shifts it left by 2 (kernel 0x26C1). Ribbit takes the scale under which
     // every GO spot is a shape.
     let mut go_ids = Vec::new();
-    let mut o = go_list;
-    loop {
-        let id = rom.u16(o)?;
-        go_ids.push((id, rom.u16(hbank + rom.u16(o + 2)? as usize + 1)? as usize));
-        if id & 0x4000 != 0 {
-            break;
+    let list = |start: usize, out: &mut Vec<(u16, usize)>, end: &dyn Fn(u16) -> bool| -> Result<(), String> {
+        let mut o = start;
+        loop {
+            let id = rom.u16(o)?;
+            out.push((id, rom.u16(hbank + rom.u16(o + 2)? as usize + 1)? as usize));
+            if end(id) {
+                return Ok(());
+            }
+            o += 4;
+            if out.len() > 1000 {
+                return Err("the GO list does not end".into());
+            }
         }
-        o += 4;
-        if go_ids.len() > 1000 {
-            return Err("the GO list does not end".into());
+    };
+    if let Some(go_list) = go_list {
+        list(go_list, &mut go_ids, &|id| id & 0x4000 != 0)?;
+    } else if family != Family::LittleTouch {
+        return Err("the cartridge lists no GO spots".into());
+    }
+    // The Little Touch's magnet list: a pattern (10 bits; 0FFFh, the
+    // default, ends the list) and a pointer to the view record, as in the GO
+    // list (Pooh Loves You!: 03E1 opens view 2; app reads traced with lpboot
+    // PWATCH). Pattern 0 (no magnet: no book) is left out.
+    let mut magnet_list = Vec::new();
+    if family == Family::LittleTouch {
+        let w = rom.u16(header + 0x3E)?;
+        if w != 0xFFFF {
+            list(hbank + w as usize, &mut magnet_list, &|id| id >= 0x400)?;
+            magnet_list.retain(|&(p, _)| p < 0x400 && p != 0);
         }
     }
-    let fits = |scale| go_ids.iter().all(|&(id, _)| matches!(shape(&rom, table, scale, id & 0xBFFF), Ok(Some(_))));
+    let fits = |scale| !go_ids.is_empty() && go_ids.iter().all(|&(id, _)| matches!(shape(&rom, table, scale, id & 0xBFFF), Ok(Some(_))));
     let scale = if classic && !fits(4) && fits(1) { 1 } else { 4 };
     let shape = |id: u16| shape(&rom, table, scale, id);
     // Each view: its name, its data and its spread. The Classic header's +5
@@ -302,15 +381,15 @@ pub fn read(cart: &[u8]) -> Result<Layout, String> {
     let mut entries = Vec::new();
     if classic {
         let mut o = hbank + rom.u16(header + 5)? as usize;
-        while o + 4 <= go_list {
+        while o + 4 <= go_list.unwrap_or(0) {
             let Some(data) = rom.ptr(o)? else { break };
             let spread = rom.u8(data + 2)?;
             entries.push((format!("Page {spread}"), Some(data), spread));
             o += 4;
         }
     } else {
-        let count = rom.u16(header + 0x17)? as usize;
-        let table = hbank + rom.u16(header + 0x19)? as usize;
+        let count = rom.u16(header + count_at)? as usize;
+        let table = hbank + rom.u16(header + views_at)? as usize;
         for index in 0..count {
             let entry = table + 9 * index;
             let name_at = hbank + rom.u16(entry)? as usize;
@@ -320,9 +399,21 @@ pub fn read(cart: &[u8]) -> Result<Layout, String> {
         }
     }
     let mut spreads = Vec::new();
-    for (id, opens) in go_ids {
-        if let Some(go) = shape(id & 0xBFFF)? {
-            spreads.push(Spread { go, opens });
+    if family == Family::LittleTouch {
+        // A spread per magnet pattern, with the page-pointer key that opens
+        // the same view if there is one.
+        for &(magnets, opens) in &magnet_list {
+            let go = match go_ids.iter().find(|g| g.1 == opens) {
+                Some(g) => shape(g.0 & 0xBFFF)?,
+                None => None,
+            };
+            spreads.push(Spread { go, opens, magnets: Some(magnets) });
+        }
+    } else {
+        for (id, opens) in go_ids {
+            if let Some(go) = shape(id & 0xBFFF)? {
+                spreads.push(Spread { go: Some(go), opens, magnets: None });
+            }
         }
     }
     let mut views = Vec::new();
@@ -334,10 +425,12 @@ pub fn read(cart: &[u8]) -> Result<Layout, String> {
             stm.push((views.len(), data));
         }
         let mut hotspots = Vec::new();
-        let mut o = (data & !0x7FFF) + rom.u16(data + 0x14)? as usize;
-        // Only Touch-and-Tell views' clickables are read.
+        let mut o = (data & !0x7FFF) + rom.u16(data + clickables_at)? as usize;
+        // Only Touch-and-Tell views' clickables are read (data byte +1: 0;
+        // the Little Touch's are 1, its activities 2).
+        let tnt = if family == Family::LittleTouch { 1 } else { 0 };
         for n in 0.. {
-            if kind != 0 {
+            if kind != tnt {
                 break;
             }
             let ty = rom.u8(o)?;
@@ -368,7 +461,7 @@ pub fn read(cart: &[u8]) -> Result<Layout, String> {
     if !stm.is_empty() {
         stm_touches(&rom, &mut views, &stm, &shape)?;
     }
-    Ok(Layout { views, spreads })
+    Ok(Layout { family, views, spreads })
 }
 
 /// The spots of the State Table Model app's views (`STM`). EVIDENCE: traced
@@ -512,7 +605,7 @@ mod tests {
     fn reads_views_shapes_and_go_spots() {
         let l = read(&cartridge()).expect("reads");
         assert_eq!(l.spreads.len(), 1);
-        assert_eq!(l.spreads[0].go, Shape { page: Side::Left, points: vec![(10.0, 30.0), (100.0, 130.0)], rect: true });
+        assert_eq!(l.spreads[0].go, Some(Shape { page: Side::Left, points: vec![(10.0, 30.0), (100.0, 130.0)], rect: true }));
         let v = l.main_view(&l.spreads[0]).expect("a Touch-and-Tell view");
         assert_eq!(v.name, "Pg23");
         assert_eq!(v.hotspots.len(), 2);
@@ -569,7 +662,7 @@ mod tests {
         d[0x40501] = 2;
         let l = read(&d).expect("reads");
         assert_eq!(l.spreads.len(), 1);
-        assert_eq!(l.spreads[0].go.points, vec![(10.0, 30.0), (100.0, 130.0)]);
+        assert_eq!(l.spreads[0].go.as_ref().unwrap().points, vec![(10.0, 30.0), (100.0, 130.0)]);
         let v = l.main_view(&l.spreads[0]).expect("the page's view");
         assert_eq!(v.name, "Page 0");
         assert_eq!(v.hotspots.iter().map(|h| h.modes).collect::<Vec<_>>(), [2, 0xFF]);

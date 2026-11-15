@@ -67,7 +67,8 @@ fn booted(with_cart: bool) -> Option<(Machine, String)> {
 
 /// Whether the app said it waits for the pen.
 fn idle(log: &str) -> bool {
-    log.contains("[Idle]") || log.contains("State: Idle")
+    // The Little Touch's app: "[STATE_Idle]".
+    log.contains("[Idle]") || log.contains("State: Idle") || log.contains("[STATE_Idle]")
 }
 
 /// Runs until the log after a touch holds `what` and the `words` words after
@@ -269,12 +270,28 @@ fn the_cartridge_answers_every_spot_its_layout_lists() {
         }
         // Touches GO and waits for the app to announce the spread and take
         // touches again.
+        // The Little Touch's spreads are opened by their magnets instead: the
+        // book is lifted off (no magnet) and laid down open at the spread.
         let open = |m: &mut Machine| {
-            let mut log = touch(m, spread.go.inside_point().unwrap());
-            wait_for(m, &mut log, "PPTouch", 1);
-            assert!(log.contains("PPTouch"), "spread {}: GO is a page-pointer touch:\n{log}", n + 1);
+            let (mut log, event) = match spread.magnets {
+                Some(p) => {
+                    // The kernel takes a pattern after 100 equal reads (about
+                    // a second); the same spread again needs the book off first.
+                    if m.bus.magnets == p {
+                        m.set_magnets(0);
+                        m.run_cycles(secs(2.0));
+                    }
+                    m.take_log();
+                    m.set_magnets(p);
+                    m.run_cycles(secs(0.5));
+                    (m.take_log(), "MagnetSwitch: pData")
+                }
+                None => (touch(m, spread.go.as_ref().and_then(|g| g.inside_point()).unwrap()), "PPTouch"),
+            };
+            wait_for(m, &mut log, event, 1);
+            assert!(log.contains(event), "spread {}: the app takes the spread ({event}):\n{log}", n + 1);
             for _ in 0..80 {
-                if idle(&log[log.find("PPTouch").unwrap()..]) {
+                if idle(&log[log.find(event).unwrap()..]) {
                     break;
                 }
                 m.run_cycles(secs(0.25));

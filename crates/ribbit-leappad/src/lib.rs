@@ -49,6 +49,77 @@ pub enum Image {
     Cartridge,
 }
 
+/// Which pad a base ROM belongs to. They share the FS80A363 chip, its
+/// banking, sound and cartridge check (docs/leappad-family.md); they differ
+/// in how the child picks a spot and a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Model {
+    /// LeapPad (1999-2004 bases: ILA2 Universal, Canada Full Base): pen,
+    /// two-page spreads, GO spots.
+    #[default]
+    LeapPad,
+    /// My First LeapPad (2002, 2004): pen, one landscape page, GO spots,
+    /// and a printed template for the built-in activity.
+    MyFirst,
+    /// Little Touch LeapPad (2005): no pen; a 5 x 12 matrix of switches
+    /// under the two pages and 10 magnet switches that read which page is
+    /// open.
+    LittleTouch,
+    /// LeapPad Plus Microphone (2004): a LeapPad with a recorder (Sunplus
+    /// PA7790) for the child's voice.
+    PlusMic,
+}
+
+impl Model {
+    /// The pad a base ROM is for, from what its kernel says about itself
+    /// ("MFLP US Base ROM - 2004", "MIB - LeapPad Plus Microphone baseROM",
+    /// the Little Touch's "MagnetSwitch"). VERIFIED on the 7 dumped bases.
+    pub fn of_base(bios: &[u8]) -> Model {
+        let has = |s: &[u8]| bios.windows(s.len()).any(|w| w == s);
+        if has(b"MagnetSwitch") {
+            Model::LittleTouch
+        } else if has(b"MFLP") {
+            Model::MyFirst
+        } else if has(b"Plus Microphone") || has(b"Internal Recorder") {
+            Model::PlusMic
+        } else {
+            Model::LeapPad
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Model::LeapPad => "LeapPad",
+            Model::MyFirst => "My First LeapPad",
+            Model::LittleTouch => "Little Touch LeapPad",
+            Model::PlusMic => "LeapPad Plus Microphone",
+        }
+    }
+
+    /// A page's size in the app's coordinates (what it logs for a touch).
+    /// LeapPad: from its calibration points; My First LeapPad: one page,
+    /// -180..8580 by -180..5976 eighths (calibration::my_first), and only the
+    /// left page is used; Little Touch: 6 x 5 switches 100 units apart (the
+    /// right page's start 26 units further in, `book::key_at`).
+    pub fn page_size(self) -> (f32, f32) {
+        match self {
+            Model::MyFirst => (1072.0, 747.0),
+            Model::LittleTouch => (626.0, 500.0),
+            _ => (book::PAGE_W, book::PAGE_H),
+        }
+    }
+
+    /// Whether a spread has two pages (all but My First LeapPad).
+    pub fn two_pages(self) -> bool {
+        self != Model::MyFirst
+    }
+
+    /// Whether the child uses a pen (all but the Little Touch).
+    pub fn has_pen(self) -> bool {
+        self != Model::LittleTouch
+    }
+}
+
 /// The 14-byte boot stub every LeapPad base ROM and cartridge starts with
 /// (docs/leappad.md, "Boot stub"; VERIFIED on 3 base ROMs and 19 of the 20
 /// cartridges in the user's set; the Mind Station cartridge lacks it).
@@ -146,6 +217,8 @@ pub fn lost_address_line(cart: &[u8]) -> Option<u32> {
 
 /// A LeapPad: the processor and what is on its bus.
 pub struct Machine {
+    /// The pad the base ROM is for.
+    pub model: Model,
     pub cpu: Mcs51,
     pub bus: Bus,
     /// Timer pin clock phase, in units of 1 / `hz`.
@@ -167,9 +240,10 @@ impl Machine {
     /// Powers on with this base ROM (and no cartridge). The EEPROM holds a
     /// factory calibration (calibration.rs) until `set_eeprom` replaces it.
     pub fn new(bios: Vec<u8>) -> Self {
+        let model = Model::of_base(&bios);
         let mut bus = Bus::new(bios);
-        bus.eeprom = eeprom::Eeprom::new(calibration::factory_eeprom());
-        Machine { cpu: Mcs51::new(), bus, pin_phase: 0, hz: MACHINE_HZ, pin_hz: TIMER_PIN_HZ, breakpoints: Vec::new(), hit: None, resume: false }
+        bus.eeprom = eeprom::Eeprom::new(Self::factory_eeprom(model));
+        Machine { model, cpu: Mcs51::new(), bus, pin_phase: 0, hz: MACHINE_HZ, pin_hz: TIMER_PIN_HZ, breakpoints: Vec::new(), hit: None, resume: false }
     }
 
     /// Loads a saved EEPROM (128 bytes; calibration and settings). One that
@@ -177,9 +251,32 @@ impl Machine {
     /// the pen would otherwise land in the wrong places, and so is Ribbit's
     /// own earlier factory image (calibration.rs).
     pub fn set_eeprom(&mut self, data: Vec<u8>) {
-        let usable = calibration::is_calibrated(&data) && !calibration::is_earlier_factory_image(&data);
-        let data = if usable { data } else { calibration::factory_eeprom() };
+        let usable = match self.model {
+            Model::MyFirst => calibration::my_first::is_calibrated(&data),
+            _ => calibration::is_calibrated(&data) && !calibration::is_earlier_factory_image(&data),
+        };
+        let data = if usable { data } else { Self::factory_eeprom(self.model) };
         self.bus.eeprom = eeprom::Eeprom::new(data);
+    }
+
+    /// The factory calibration for a model's pen (the Little Touch has no
+    /// EEPROM in use; it gets the LeapPad's, which it never reads).
+    pub fn factory_eeprom(model: Model) -> Vec<u8> {
+        match model {
+            Model::MyFirst => calibration::my_first::factory_eeprom(),
+            _ => calibration::factory_eeprom(),
+        }
+    }
+
+    /// Little Touch LeapPad: a hand on a spot of the open book (or lifted).
+    /// The switch under it is pressed (`book::key_at`).
+    pub fn set_touch(&mut self, spot: Option<book::Spot>) {
+        self.bus.key = spot.and_then(book::key_at);
+    }
+
+    /// Little Touch LeapPad: the open page's magnets (`layout::Spread::magnets`).
+    pub fn set_magnets(&mut self, magnets: u16) {
+        self.bus.magnets = magnets;
     }
 
     /// The EEPROM's contents, and whether they changed since last asked.
@@ -189,7 +286,11 @@ impl Machine {
 
     /// Puts the pen down on a spot of the open book, or lifts it (None).
     pub fn set_pen(&mut self, spot: Option<book::Spot>) {
-        self.bus.pen.input.position = spot.map(book::pen_ratios);
+        if self.model == Model::LittleTouch {
+            return self.set_touch(spot);
+        }
+        let model = self.model;
+        self.bus.pen.input.position = spot.map(|s| book::pen_ratios_for(model, s));
     }
 
     /// Text the firmware printed on its debug port since last asked.
