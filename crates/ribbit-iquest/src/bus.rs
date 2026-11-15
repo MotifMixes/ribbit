@@ -6,14 +6,50 @@
 use serde::{Deserialize, Serialize};
 
 pub const PHYS_SIZE: u32 = 1 << 25;
-/// Chip select 5: the cartridge (as on the LeapPad).
+/// Chip select 5: the cartridge (as on the LeapPad). iQuest cartridges are
+/// 8 MB and go on through chip select 6 (their pointer tables address
+/// 0x14xxxxx-0x17xxxxx: EVIDENCE).
 pub const CART_BASE: u32 = 0x0140_0000;
+pub const CART_SPAN: u32 = 0x80_0000;
 /// Chip select 7: on-chip RAM. Window 4 is pointed here by the kernel, and
 /// the firmware clears C268-C4FF through it (EVIDENCE).
 pub const RAM_BASE: u32 = 0x01C0_0000;
 pub const RAM_SIZE: usize = 0x4000;
 /// Chip select 4: the iQuest's own flash (flash.rs).
 pub const FLASH_BASE: u32 = 0x0100_0000;
+
+/// The view a base ROM starts in when its memory was lost: the shop demo
+/// ("Try Me"), which on both models plays, says goodbye and powers off, and
+/// starts again at the next power-on until the user's state has been
+/// saved, which only the menu's apps do (iQuest: Options writes "User state"
+/// to flash; EVIDENCE from the logs, 2026-11-15). How a real unit leaves it
+/// is UNKNOWN (docs/iquest.md, open questions); Ribbit can read the base's
+/// default view as its menu instead, as the LeapPad's Classic list is
+/// opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TryMe {
+    /// Physical address of the default view's byte.
+    pub at: u32,
+    /// The menu's view number, read there instead.
+    pub menu: u8,
+}
+
+impl TryMe {
+    /// VERIFIED-FW: found by tracing the view look-up after "AppRAMInit"
+    /// (iQuest base 152-10663: the base resource at 0x130000, +21h = 0Fh
+    /// "Try Me", +24h = 08h "Menu"; TTExtreme 152-10696: 0x7000E = 08h
+    /// "TryMe", view 1 is "Menu", checked by patching it to every value).
+    pub fn of(bios: &[u8]) -> Option<TryMe> {
+        let at = |a: usize| bios.get(a).copied();
+        if at(0x13_0021) == Some(0x0F) && at(0x13_0024) == Some(0x08) && crate::identify(bios) == Some(crate::Model::IQuest) {
+            return Some(TryMe { at: 0x13_0021, menu: 0x08 });
+        }
+        if at(0x7_000E) == Some(0x08) && crate::identify(bios) == Some(crate::Model::TurboTwistExtreme) {
+            return Some(TryMe { at: 0x7_000E, menu: 0x01 });
+        }
+        None
+    }
+}
 
 /// A memory or register access the model does not understand yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +85,11 @@ pub struct Bus {
     counter_phase: u64,
     pub eeprom: ribbit_leappad::eeprom::Eeprom,
     pub e2: crate::e2::FastE2,
+    /// Start in the menu instead of the shop demo (see `TryMe`). On by
+    /// default.
+    pub skip_try_me: bool,
+    #[serde(skip)]
+    pub try_me: Option<TryMe>,
     /// The keys held down (gpio.rs).
     #[serde(skip)]
     pub pressed: Vec<crate::gpio::Wire>,
@@ -77,7 +118,9 @@ pub const DSP_LATENCY: u32 = 100;
 
 impl Bus {
     pub fn new(bios: Vec<u8>) -> Self {
+        let try_me = TryMe::of(&bios);
         Bus {
+            try_me,
             bios,
             cart: None,
             banks: [[0; 2]; 5],
@@ -97,6 +140,7 @@ impl Bus {
             e2: Default::default(),
             flash: None,
             pressed: Vec::new(),
+            skip_try_me: true,
             sound: ribbit_leappad::sound::engine(),
             release: Default::default(),
             dsp_busy: 0,
@@ -146,7 +190,7 @@ impl Bus {
         if addr < 0x40_0000 {
             return (!self.bios.is_empty()).then(|| self.bios[addr as usize % self.bios.len()]);
         }
-        if (CART_BASE..CART_BASE + 0x40_0000).contains(&addr) {
+        if (CART_BASE..CART_BASE + CART_SPAN).contains(&addr) {
             return match &self.cart {
                 Some(c) if !c.is_empty() => Some(c[(addr - CART_BASE) as usize % c.len()]),
                 _ => None,
@@ -165,10 +209,16 @@ impl Bus {
 
     pub fn phys_read(&mut self, addr: u32) -> u8 {
         let addr = addr % PHYS_SIZE;
+        if self.skip_try_me
+            && let Some(t) = self.try_me
+            && addr == t.at
+        {
+            return t.menu;
+        }
         match self.peek_phys(addr) {
             Some(v) => v,
             None => {
-                if !(CART_BASE..CART_BASE + 0x40_0000).contains(&addr) {
+                if !(CART_BASE..CART_BASE + CART_SPAN).contains(&addr) {
                     self.note(format!("read phys {addr:07X}"));
                 }
                 0xFF

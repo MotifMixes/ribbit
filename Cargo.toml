@@ -105,3 +105,7 @@ opt-level = 3
 
 [profile.dev.package.ribbit-twist]
 opt-level = 3
+
+# The iQuest's 8051 runs its debug-log printf a lot; research runs need speed.
+[profile.dev.package.ribbit-iquest]
+opt-level = 3

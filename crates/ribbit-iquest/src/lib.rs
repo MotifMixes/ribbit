@@ -76,9 +76,31 @@ impl Machine {
     /// Presses or lets go of a key by name (keys.rs). Unknown names are
     /// ignored; returns whether the name was known.
     pub fn set_key(&mut self, name: &str, down: bool) -> bool {
+        if name == "power" {
+            if down {
+                self.press_power();
+            }
+            return true;
+        }
         let Some(w) = keys::wire(self.model, name) else { return false };
         self.set_wire(w, down);
         true
+    }
+
+    /// The ON/OFF button, as on the LeapPad: while running the firmware is
+    /// told (FC00 bit 3) and powers itself down; while off, the processor
+    /// starts again with its memory kept.
+    pub fn press_power(&mut self) {
+        if self.is_off() {
+            self.cpu.reset();
+        } else {
+            self.bus.status |= 0x08;
+        }
+    }
+
+    /// Whether the processor has stopped itself (PCON power-down).
+    pub fn is_off(&self) -> bool {
+        self.cpu.power_down
     }
 
     /// Joins or parts two pins directly (research; keys.rs names them).

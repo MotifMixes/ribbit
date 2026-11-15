@@ -20,6 +20,9 @@ pub fn iquest_key(index: usize) -> Wire {
 /// first place) or a name from `iquest_named`; for the Turbo Twist Extreme
 /// a name from `TT_KEYS`.
 pub fn wire(model: Model, name: &str) -> Option<Wire> {
+    if let Some(w) = name.strip_prefix("pin:") {
+        return parse_wire(w);
+    }
     match model {
         Model::IQuest => {
             let c = match name {
@@ -44,3 +47,21 @@ pub fn wire(model: Model, name: &str) -> Option<Wire> {
 /// The Turbo Twist Extreme's keys (found by trying every pair of pins at
 /// the menu, see docs/turbotwist.md).
 pub const TT_KEYS: &[(&str, Wire)] = &[];
+
+/// A wire written as pins (research): "C0" joins port C bit 0 to ground,
+/// "B3-A2" joins two pins.
+pub fn parse_wire(s: &str) -> Option<Wire> {
+    let pin = |t: &str| -> Option<Pin> {
+        let port = match t.as_bytes().first()? {
+            b'A' => Port::A,
+            b'B' => Port::B,
+            b'C' => Port::C,
+            _ => return None,
+        };
+        Some(Pin { port, bit: t[1..].parse().ok().filter(|b| *b < 8)? })
+    };
+    match s.split_once('-') {
+        Some((a, b)) => Some(Wire { a: Some(pin(a)?), b: pin(b)? }),
+        None => Some(Wire { a: None, b: pin(s)? }),
+    }
+}
