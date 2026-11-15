@@ -361,3 +361,116 @@ fn bench_loop() {
     let s = t.elapsed().as_secs_f64();
     println!("{} M instructions/s (r0 {})", (n as f64 / s / 1e6) as u64, a.r[0]);
 }
+
+// ---- ARMv7 (v7.rs) ------------------------------------------------------
+
+fn run_v7(code: &[u32], setup: impl FnOnce(&mut Arm, &mut Ram)) -> (Arm, Ram) {
+    run_arm(code, code.len(), |a, bus| {
+        a.v7 = Some(Box::default());
+        setup(a, bus)
+    })
+}
+
+#[test]
+fn v7_off_leaves_armv5_alone() {
+    // Without v7 MOVW is not one (the ARM926 model treats the encoding as before).
+    let (a, _) = run_arm(&[0xE301_0234], 1, |_, _| {});
+    assert_eq!(a.r[0], 0);
+    // VFP and the media instructions are undefined there.
+    let (a, _) = run_arm(&[0xEE00_1A10], 1, |_, _| {});
+    assert_eq!(a.mode(), mode::UND);
+}
+
+#[test]
+fn v7_movw_movt_and_extends() {
+    // movw r0,#0x1234; movt r1,#0x678 (r1 low half kept); uxtb r1,r2; rev r3? (rev r1,r2 -> r1)
+    let (a, _) = run_v7(&[0xE301_0234, 0xE340_1678], |a, _| a.r[1] = 0xAAAA_5555);
+    assert_eq!(a.r[0], 0x1234);
+    assert_eq!(a.r[1], 0x0678_5555);
+    let (a, _) = run_v7(&[0xE6EF_1072], |a, _| a.r[2] = 0x1234_56F8);
+    assert_eq!(a.r[1], 0xF8);
+    let (a, _) = run_v7(&[0xE6BF_1F32], |a, _| a.r[2] = 0x1122_3344);
+    assert_eq!(a.r[1], 0x4433_2211);
+    let (a, _) = run_v7(&[0xE6BF_1FB2], |a, _| a.r[2] = 0x1122_3344);
+    assert_eq!(a.r[1], 0x2211_4433);
+    let (a, _) = run_v7(&[0xE6FF_2F32], |a, _| a.r[2] = 1);
+    assert_eq!(a.r[2], 0x8000_0000);
+}
+
+#[test]
+fn v7_bitfields_and_mls() {
+    // ubfx r1,r0,#4,#8 ; sbfx r1,r0,#4,#8
+    let (a, _) = run_v7(&[0xE7E7_1250], |a, _| a.r[0] = 0x0000_0F80);
+    assert_eq!(a.r[1], 0xF8);
+    let (a, _) = run_v7(&[0xE7A7_1250], |a, _| a.r[0] = 0x0000_0F80);
+    assert_eq!(a.r[1], 0xFFFF_FFF8);
+    // bfi r0,r1,#3,#5
+    let (a, _) = run_v7(&[0xE7C7_0191], |a, _| {
+        a.r[0] = 0xFFFF_FFFF;
+        a.r[1] = 0;
+    });
+    assert_eq!(a.r[0], 0xFFFF_FF07);
+    // mls r3,r0,r1,r2: r3 = r2 - r0*r1
+    let (a, _) = run_v7(&[0xE063_2190], |a, _| {
+        a.r[0] = 3;
+        a.r[1] = 4;
+        a.r[2] = 100;
+    });
+    assert_eq!(a.r[3], 88);
+}
+
+#[test]
+fn v7_exclusives() {
+    // ldrex r2,[r0]; strex r3,r1,[r0]; strex r3,r1,[r0] (monitor cleared: fails)
+    let (a, mut bus) = run_v7(&[0xE190_2F9F, 0xE180_3F91, 0xE180_3F91], |a, bus| {
+        a.r[0] = 0x2000;
+        a.r[1] = 77;
+        bus.write32(0x2000, 5);
+    });
+    assert_eq!(a.r[2], 5);
+    assert_eq!(a.r[3], 1);
+    assert_eq!(bus.read32(0x2000), 77);
+}
+
+#[test]
+fn v7_vfp_convert_and_arith() {
+    // vmov s0,r1; vcvt.f32.s32 s0,s0; vmov s1,r1? use: s1 = 2.0 via vmov.f32 s0,#2 later.
+    // vmov s0,r1 ; vcvt.f32.s32 s0,s0 ; vmov r2,s0
+    let (a, _) = run_v7(&[0xEE00_1A10, 0xEEB8_0AC0, 0xEE10_2A10], |a, _| a.r[1] = -3i32 as u32);
+    assert_eq!(f32::from_bits(a.r[2]), -3.0);
+    // vmov.f32 s0,#2.0 ; vmov s1? -> vadd s0,s0,s1 with s1 = 0.5 ; vmul ; vcvt.s32.f32
+    let (a, _) = run_v7(&[0xEEB0_0A00, 0xEE30_0A20, 0xEE20_0A20, 0xEEBD_0AC0, 0xEE10_2A10], |a, _| {
+        a.v7.as_mut().unwrap().s[1] = 4.0f32.to_bits();
+    });
+    // (2 + 4) * 4 = 24
+    assert_eq!(a.r[2], 24);
+    // vcmpe.f32 s0,s1 ; vmrs APSR_nzcv,fpscr : 1 < 2 sets N.
+    let (a, _) = run_v7(&[0xEEB4_0AE0, 0xEEF1_FA10], |a, _| {
+        let st = a.v7.as_mut().unwrap();
+        st.s[0] = 1.0f32.to_bits();
+        st.s[1] = 2.0f32.to_bits();
+    });
+    assert!(a.cpsr & psr::N != 0 && a.cpsr & psr::Z == 0);
+}
+
+#[test]
+fn v7_vfp_memory_and_doubles() {
+    // vldr d0,[r0] ; vcvt.f64? (d0 holds 1.5) ; vmov r2,r3,d0 ; vpush {d8,d9} ; vpop {d8,d9} ; vstr s0,[r0,#4]
+    let (a, mut bus) = run_v7(&[0xED90_0B00, 0xEC53_2B10, 0xED2D_8B04, 0xECBD_8B04, 0xED80_0A01], |a, bus| {
+        a.r[0] = 0x2000;
+        a.r[13] = 0x3000;
+        let v = 1.5f64.to_bits();
+        bus.write32(0x2000, v as u32);
+        bus.write32(0x2004, (v >> 32) as u32);
+        let st = a.v7.as_mut().unwrap();
+        st.set_d(8, 11);
+        st.set_d(9, 22);
+    });
+    assert_eq!(f64::from_bits(a.r[2] as u64 | (a.r[3] as u64) << 32), 1.5);
+    assert_eq!(a.r[13], 0x3000);
+    assert_eq!(bus.read32(0x3000 - 16), 11);
+    assert_eq!(bus.read32(0x3000 - 8), 22);
+    let st = a.v7.as_ref().unwrap();
+    assert_eq!((st.d(8), st.d(9)), (11, 22));
+    assert_eq!(bus.read32(0x2004), 1.5f64.to_bits() as u32);
+}

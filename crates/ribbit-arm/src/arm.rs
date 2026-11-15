@@ -94,7 +94,18 @@ pub fn execute(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
     if !a.cond(cond) {
         return;
     }
+    let v7 = a.v7.is_some();
     match (w >> 25) & 7 {
+        0 if v7 && w & 0x0F80_00F0 == 0x0180_0090 => crate::v7::exclusive(a, bus, w),
+        0 if v7 && matches!(w & 0x0FF0_00F0, 0x0060_0090 | 0x0040_0090) => {
+            crate::v7::multiply_extra(a, w);
+        }
+        1 if v7 && w & 0x0FB0_0000 == 0x0300_0000 => crate::v7::mov_wide(a, w),
+        3 if v7 && w & 0x10 != 0 => crate::v7::media(a, w),
+        6 if v7 && crate::v7::is_vfp(w) => crate::v7::vfp_transfer(a, bus, w),
+        7 if v7 && crate::v7::is_vfp(w) && w & (1 << 24) == 0 => {
+            if w & 0x10 != 0 { crate::v7::vfp_register(a, w) } else { crate::v7::vfp_data(a, w) }
+        }
         0 => {
             if w & 0x0FC0_00F0 == 0x0000_0090 {
                 multiply(a, w);
@@ -155,6 +166,9 @@ pub fn execute(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
 
 /// cond = 0b1111: BLX (immediate), PLD; everything else undefined.
 fn unconditional(a: &mut Arm, _bus: &mut impl ArmBus, w: u32) {
+    if a.v7.is_some() && crate::v7::unconditional(a, w) {
+        return;
+    }
     if w & 0x0E00_0000 == 0x0A00_0000 {
         let offset = (((w & 0x00FF_FFFF) << 8) as i32 >> 6) as u32;
         let h = (w >> 24) & 1;
@@ -430,7 +444,13 @@ fn single_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
     let addr = if p { moved } else { base };
     a.user_access = !p && wb;
     if l {
-        let v = if b { a.load8(bus, addr) } else { a.load32(bus, addr) };
+        let v = if b {
+            a.load8(bus, addr)
+        } else if addr & 3 != 0 && a.v7.is_some() {
+            crate::v7::load32_unaligned(a, bus, addr)
+        } else {
+            a.load32(bus, addr)
+        };
         a.user_access = false;
         let v = match v {
             Ok(v) => v,
@@ -449,7 +469,13 @@ fn single_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
         // STR of r15 stores the instruction's address plus 12 (ARM9: +8 is
         // IMPLEMENTATION DEFINED; ARM926 stores +12).
         let v = if rd == 15 { a.current.wrapping_add(12) } else { a.r[rd as usize] };
-        let r = if b { a.store8(bus, addr, v) } else { a.store32(bus, addr, v) };
+        let r = if b {
+            a.store8(bus, addr, v)
+        } else if addr & 3 != 0 && a.v7.is_some() {
+            crate::v7::store32_unaligned(a, bus, addr, v)
+        } else {
+            a.store32(bus, addr, v)
+        };
         a.user_access = false;
         if let Err(f) = r {
             return a.data_abort(f);
@@ -497,7 +523,12 @@ fn halfword_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
         return;
     }
     if l {
+        let unaligned = addr & 1 != 0 && sh != 2 && a.v7.is_some();
         let v = match sh {
+            1 | 3 if unaligned => a
+                .load8(bus, addr)
+                .and_then(|lo| a.load8(bus, addr.wrapping_add(1)).map(|hi| lo | hi << 8))
+                .map(|v| if sh == 3 { v as u16 as i16 as i32 as u32 } else { v }),
             1 => a.load16(bus, addr),
             2 => a.load8(bus, addr).map(|v| v as u8 as i8 as i32 as u32),
             _ => a.load16(bus, addr).map(|v| v as u16 as i16 as i32 as u32),
@@ -512,7 +543,12 @@ fn halfword_transfer(a: &mut Arm, bus: &mut impl ArmBus, w: u32) {
         set_reg(a, rd, v);
     } else {
         let v = if rd == 15 { a.current.wrapping_add(12) } else { a.r[rd as usize] };
-        if let Err(f) = a.store16(bus, addr, v) {
+        let r = if addr & 1 != 0 && a.v7.is_some() {
+            a.store8(bus, addr, v).and_then(|_| a.store8(bus, addr.wrapping_add(1), v >> 8))
+        } else {
+            a.store16(bus, addr, v)
+        };
+        if let Err(f) = r {
             return a.data_abort(f);
         }
         if writeback {
@@ -614,6 +650,21 @@ fn register_transfer(a: &mut Arm, w: u32) {
             return;
         }
         return a.undefined(w);
+    }
+    if a.v7.is_some() && crn == 13 && op1 == 0 && crm == 0 && matches!(op2, 2 | 3) {
+        // TPIDRURW / TPIDRURO: the thread ID registers (user read; TPIDRURO
+        // is written by the kernel, here by `V7::tpidruro`).
+        if w & (1 << 20) != 0 {
+            let st = a.v7.as_ref().unwrap();
+            let v = if op2 == 2 { st.tpidrurw } else { st.tpidruro };
+            if rd != 15 {
+                a.r[rd as usize] = v;
+            }
+        } else if op2 == 2 {
+            let v = reg(a, rd);
+            a.v7.as_mut().unwrap().tpidrurw = v;
+        }
+        return;
     }
     if w & (1 << 20) != 0 {
         let v = a.cp15.read(crn, op1, crm, op2);
