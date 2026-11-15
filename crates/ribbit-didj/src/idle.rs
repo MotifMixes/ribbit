@@ -25,6 +25,44 @@ const ELF_MAGIC: u32 = 0x464C_457F;
 /// 420 s, and readings come about a second apart.
 const NEAR_SHUTDOWN_MS: u32 = 400_000;
 
+/// A build of libLightningBase.so: UpdateInactivity's offset and first
+/// instructions, a literal it loads and what it holds, the timer's offset,
+/// and the readings that mean the shutdown is near.
+struct Variant {
+    code: u32,
+    prologue: [u32; 3],
+    literal: u32,
+    value: Literal,
+    timer: u32,
+    near_ms: u32,
+}
+
+enum Literal {
+    /// The library's base plus this (the Didj's, linked at 0).
+    Based(u32),
+    /// This, whatever the base (position-independent code's PC offset).
+    Fixed(u32),
+}
+
+/// The Didj's, and the Leapster Explorer's and LeapPad Explorer's 2.x
+/// firmware's (one root file system for both; disassembled from Firmware
+/// Base 2.4.10.3030, 2026-11-15): UpdateInactivity at 0x354BC keeps its
+/// statics PC-relative (`ldr r3, [pc, #0x428]` = 0x30108, then `add r3,
+/// pc, r3`): the last time at +0x310, the state at +0x30C, the timer at
+/// +0x314, so at 0x65904; it shuts down past 239999 ms (599999 ms paused),
+/// dims past 119999 ms.
+const VARIANTS: [Variant; 2] = [
+    Variant { code: CODE, prologue: PROLOGUE, literal: TIMER_LITERAL, value: Literal::Based(TIMER), timer: TIMER, near_ms: NEAR_SHUTDOWN_MS },
+    Variant {
+        code: 0x3_54BC,
+        prologue: [0xE92D_45F0, 0xE59F_643C, 0xE280_7014],
+        literal: 0x3_5908,
+        value: Literal::Fixed(0x3_0108),
+        timer: 0x6_5904,
+        near_ms: 225_000,
+    },
+];
+
 /// A virtual address's place in SDRAM, by the ARM page tables at `ttb`.
 fn translate(sdram: &[u8], ttb: u32, va: u32) -> Option<usize> {
     let word = |a: u32| Some(u32::from_le_bytes(sdram.get(a as usize..a as usize + 4)?.try_into().unwrap()));
@@ -49,17 +87,26 @@ fn read(sdram: &[u8], ttb: u32, va: u32) -> Option<u32> {
     Some(u32::from_le_bytes(sdram[pa..pa + 4].try_into().unwrap()))
 }
 
-/// Whether this library, at `base`, is the one the offsets are for.
-fn is_library(sdram: &[u8], ttb: u32, base: u32) -> bool {
-    read(sdram, ttb, base) == Some(ELF_MAGIC)
-        && (0..3).all(|i| read(sdram, ttb, base + CODE + 4 * i as u32) == Some(PROLOGUE[i]))
-        && read(sdram, ttb, base + TIMER_LITERAL) == Some(base + TIMER)
+/// Which known build this library, at `base`, is.
+fn variant(sdram: &[u8], ttb: u32, base: u32) -> Option<usize> {
+    if read(sdram, ttb, base) != Some(ELF_MAGIC) {
+        return None;
+    }
+    VARIANTS.iter().position(|v| {
+        (0..3).all(|i| read(sdram, ttb, base + v.code + 4 * i as u32) == Some(v.prologue[i]))
+            && read(sdram, ttb, base + v.literal)
+                == Some(match v.value {
+                    Literal::Based(o) => base + o,
+                    Literal::Fixed(x) => x,
+                })
+    })
 }
 
 /// One console's view of the timer; `tick` about once a second.
 #[derive(Default)]
 pub struct IdleTimer {
     base: Option<u32>,
+    kind: usize,
     /// The timer's last reading, milliseconds.
     pub last_ms: u32,
 }
@@ -69,12 +116,15 @@ impl IdleTimer {
     /// process's: another process's has no such library) and, with
     /// `keep_awake`, puts it back to 0.
     pub fn tick(&mut self, sdram: &mut [u8], ttb: u32, keep_awake: bool) {
-        let found = match self.base {
-            Some(base) if is_library(sdram, ttb, base) => Some(base),
-            _ => LIBRARIES.step_by(0x1000).find(|&b| is_library(sdram, ttb, b)),
+        let found = match self.base.and_then(|b| variant(sdram, ttb, b).map(|k| (b, k))) {
+            Some(f) => Some(f),
+            None => LIBRARIES.step_by(0x1000).find_map(|b| variant(sdram, ttb, b).map(|k| (b, k))),
         };
-        self.base = found.or(self.base);
-        let Some(pa) = found.and_then(|b| translate(sdram, ttb, b + TIMER)) else { return };
+        self.base = found.map(|f| f.0).or(self.base);
+        if let Some((_, k)) = found {
+            self.kind = k;
+        }
+        let Some(pa) = found.and_then(|(b, k)| translate(sdram, ttb, b + VARIANTS[k].timer)) else { return };
         self.last_ms = u32::from_le_bytes(sdram[pa..pa + 4].try_into().unwrap());
         // Only once it has counted: then the page is the process's own, not
         // the file's.
@@ -87,7 +137,7 @@ impl IdleTimer {
     /// Whether a power-off now is the idle shutdown (not a cartridge's
     /// update or a crash).
     pub fn near_shutdown(&self) -> bool {
-        self.last_ms >= NEAR_SHUTDOWN_MS
+        self.last_ms >= VARIANTS[self.kind].near_ms
     }
 }
 

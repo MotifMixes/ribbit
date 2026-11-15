@@ -112,9 +112,15 @@ impl Nor {
 /// stay), pressure settings left 0 (an unknown version: the driver's
 /// defaults stay), locale en-US, version 1 (GUESS).
 pub fn mfg_data(serial: &str) -> Vec<u8> {
+    mfg_data_with(serial, crate::touch::POINTERCAL)
+}
+
+/// `mfg_data` with another touch calibration (pointercal order): the
+/// LeapPad Explorer's larger screen (`touch::pointercal_for`).
+pub fn mfg_data_with(serial: &str, pointercal: [i32; 7]) -> Vec<u8> {
     let mut r = vec![0u8; SECTOR];
     let put = |r: &mut Vec<u8>, at: usize, b: &[u8]| r[at..at + b.len()].copy_from_slice(b);
-    let cal: Vec<u8> = crate::touch::POINTERCAL.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let cal: Vec<u8> = pointercal.iter().flat_map(|v| v.to_le_bytes()).collect();
     put(&mut r, 0x00, &cal);
     put(&mut r, 0x2C, serial.as_bytes());
     put(&mut r, 0x44, &1i32.to_le_bytes());
@@ -128,8 +134,13 @@ pub fn mfg_data(serial: &str) -> Vec<u8> {
 /// The NOR as Ribbit makes it: no boot code (Ribbit boots the kernel
 /// itself), MfgData0 and MfgData1 the same record.
 pub fn image(serial: &str) -> Nor {
+    image_for(serial, crate::touch::POINTERCAL)
+}
+
+/// `image` with another touch calibration.
+pub fn image_for(serial: &str, pointercal: [i32; 7]) -> Nor {
     let mut data = vec![0xFF; SIZE];
-    let rec = mfg_data(serial);
+    let rec = mfg_data_with(serial, pointercal);
     data[0x7E000..0x7F000].copy_from_slice(&rec);
     data[0x7F000..0x80000].copy_from_slice(&rec);
     Nor::new(data)

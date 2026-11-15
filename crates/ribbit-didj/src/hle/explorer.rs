@@ -260,6 +260,11 @@ pub(super) fn add_files(vfs: &mut Vfs, at: &str, files: Vec<crate::ubifs_read::F
 /// What the kernel and boot add around the file systems: /dev, /tmp,
 /// /sys, /proc, the NOR's partitions.
 fn finish(vfs: &mut Vfs, nor: Option<&[u8]>) {
+    finish_with(vfs, nor, false);
+}
+
+/// `finish`, for the LeapPad Explorer with `leappad` (its /sys files).
+pub(super) fn finish_with(vfs: &mut Vfs, nor: Option<&[u8]>, leappad: bool) {
     for d in ["/tmp", "/dev/pts", "/var/volatile/run", "/var/volatile/log", "/LF/Cart", "/LF/fuse"] {
         vfs.mkdir_all(d);
     }
@@ -274,6 +279,11 @@ fn finish(vfs: &mut Vfs, nor: Option<&[u8]>) {
         None => set_nor(vfs, &crate::nor::image(crate::explorer::SERIAL).data),
     }
     add_sysfs(vfs);
+    if leappad {
+        for (path, text) in super::leappad::platform_overrides() {
+            vfs.add_file(&format!("{PLATFORM}/{path}"), text.into_bytes());
+        }
+    }
 }
 
 /// Emerald Boot's splash (FIRST.32.rle, Firmware Base's I18n_Screens
@@ -420,14 +430,24 @@ pub(crate) struct Explorer {
     /// Running the LeapPad 2's programs (leappad2.rs): ARMv7, LF2000.
     #[serde(default)]
     pub leappad2: bool,
-    /// The screen (frame buffer and MLC) size; (0, 0) is the Explorer's 320x240.
-    #[serde(default)]
-    pub screen: (u32, u32),
     /// The LeapPad 2's accelerometer as last reported: x, y, z, orientation.
     #[serde(default)]
     pub tilt: [i32; 4],
     #[serde(default)]
     pub tilt_tick: i32,
+    /// A LeapPad Explorer (`leappad.rs`): board ID 0x0B, its screen.
+    #[serde(default)]
+    pub leappad: bool,
+    /// The screen's size; (0, 0) is the Explorer's 320x240.
+    #[serde(default)]
+    pub screen: (u32, u32),
+}
+
+impl Explorer {
+    /// The screen's size in pixels.
+    pub fn screen(&self) -> (u32, u32) {
+        if self.screen.0 == 0 { (320, 240) } else { self.screen }
+    }
 }
 
 impl Process {
@@ -494,20 +514,15 @@ fn event(sec: u32, nsec: u32, kind: u16, code: u16, value: i32) -> [u8; 16] {
 impl Process {
     /// A process for the Leapster Explorer's programs.
     pub fn new_explorer(vfs: Vfs) -> Self {
-        Self::new_explorer_sized(vfs, SDRAM, (320, 240))
+        Self::new_explorer_sized(vfs, 320, 240)
     }
 
-    /// The screen's size (the Explorer's 320x240 unless set).
-    pub fn screen(&self) -> (u32, u32) {
-        if self.x.screen.0 == 0 { (320, 240) } else { self.x.screen }
-    }
-
-    /// The Explorer's HLE machine with `sdram` bytes and a screen of `screen`.
-    pub(super) fn new_explorer_sized(vfs: Vfs, sdram: usize, screen: (u32, u32)) -> Self {
-        let mut p = Self::with_memory(vfs, sdram, Some([(0x0010_0000, FB_BASE), (FB_BASE + FB_SIZE, sdram as u32)]));
+    /// `new_explorer` with a screen of `w` x `h` pixels (the LeapPad
+    /// Explorer's 480x272).
+    pub fn new_explorer_sized(vfs: Vfs, w: u32, h: u32) -> Self {
+        let mut p = Self::with_memory(vfs, SDRAM, Some([(0x0010_0000, FB_BASE), (FB_BASE + FB_SIZE, SDRAM as u32)]));
         p.x.on = true;
-        p.x.screen = screen;
-        let (w, h) = screen;
+        p.x.screen = (w, h);
         p.x.keys = vec![vec![0; 64]; 5];
         // The MLC as Emerald Boot leaves it showing its splash (as
         // explorer::show_splash; GUESS: its own register values are
@@ -1093,6 +1108,11 @@ const DEV_TAR: [&str; 2] = ["/var/dev_nodes.tar", "/var/dev_nodes_doom"];
 /// `saved` for a node: under /var/volatile only folders.
 fn saved_node(path: &str, node: &super::vfs::Node) -> bool {
     saved(path) && (!path.starts_with("/var/volatile/") || node.is_dir())
+}
+
+/// `tree_of`, for the LeapPad's saves (`leappad.rs`).
+pub(super) fn saved_tree(vfs: &Vfs, under: &str, keep: impl Fn(&str) -> bool) -> crate::ubifs::Tree {
+    tree_of(vfs, under, keep)
 }
 
 /// The UBIFS tree (paths relative to `under`) of the files below `under`

@@ -13,6 +13,7 @@ mod mlc;
 pub mod elf;
 pub mod explorer;
 pub mod leappad2;
+pub mod leappad;
 pub mod mem;
 mod state;
 mod signal;

@@ -95,6 +95,12 @@ struct Shared {
     serial: Arc<crate::serial::Serial>,
     /// A Leapster Explorer (`ribbit_didj::explorer`), not a Didj.
     explorer: bool,
+    /// A LeapPad Explorer (`ribbit_didj::leappad`; `explorer` too): its
+    /// screen shown turned upright (`rotate_upright`).
+    leappad: bool,
+    /// The LeapPad's picture shown upright (`rotate_upright`), else as the
+    /// panel.
+    upright: AtomicBool,
     /// The Explorer's stylus on the screen (pixels), None while lifted.
     touch: Mutex<Option<(f32, f32)>>,
     /// A cartridge is in the slot (`set_cart`), for the app's window to
@@ -190,6 +196,8 @@ pub struct ExplorerBuilt {
     dir: PathBuf,
     /// The player's files carried over from a save made on another image.
     carried: Option<usize>,
+    /// A LeapPad Explorer (its SD card in `lx.bus.nand`).
+    leappad: bool,
 }
 
 pub struct DidjSession {
@@ -212,6 +220,8 @@ pub struct DidjSession {
     pub carried: Option<usize>,
     /// A Leapster Explorer (`start_explorer`).
     pub explorer: bool,
+    /// A LeapPad Explorer (`start_explorer` with a LeapPad's packages).
+    pub leappad: bool,
     /// The packages' folder and the cartridge's dump, for building the
     /// HLE again (`reset`).
     dir: PathBuf,
@@ -321,6 +331,8 @@ impl DidjSession {
             usb_host: AtomicBool::new(false),
             serial,
             explorer: false,
+            leappad: false,
+            upright: AtomicBool::new(true),
             touch: Mutex::new(None),
             cart_in: AtomicBool::new(cart_in),
             hle: Mutex::new(hle),
@@ -335,7 +347,7 @@ impl DidjSession {
             run(&s, autostart)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false, dir: dir.to_path_buf(), cart: cart_dump })
+        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false, leappad: false, dir: dir.to_path_buf(), cart: cart_dump })
     }
 
     /// Builds a Leapster Explorer from the packages in `dir`
@@ -343,6 +355,9 @@ impl DidjSession {
     /// its NAND and NOR flash before. Takes seconds: the app runs it on a
     /// worker thread, then `start_explorer`.
     pub fn build_explorer(dir: &Path, save_dir: &Path) -> anyhow::Result<ExplorerBuilt> {
+        if ribbit_didj::leappad::is_leappad_dir(dir) {
+            return Self::build_leappad(dir, save_dir);
+        }
         use ribbit_didj::explorer::{nand_from_packages_blocks, nand_with_files, NAND_BLOCKS, NAND_BLOCKS_1GB};
         let original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
         let save_path = explorer_save_file(dir, save_dir);
@@ -398,17 +413,44 @@ impl DidjSession {
         if let Ok(nor) = std::fs::read(save_path.with_extension("nor")) {
             lx.bus.nor = Some(ribbit_didj::nor::Nor::new(nor));
         }
-        Ok(ExplorerBuilt { lx, original, save_path, image, carried, dir: dir.to_path_buf() })
+        Ok(ExplorerBuilt { lx, original, save_path, image, carried, dir: dir.to_path_buf(), leappad: false })
+    }
+
+    /// Builds a LeapPad Explorer from the packages in `dir`
+    /// (`ribbit_didj::leappad::card_from_packages`: its SD card), with what
+    /// it saved before. A save made on another card image is set aside
+    /// (its files aren't carried over yet).
+    fn build_leappad(dir: &Path, save_dir: &Path) -> anyhow::Result<ExplorerBuilt> {
+        let original = ribbit_didj::leappad::card_from_packages(dir).map_err(anyhow::Error::msg)?;
+        let save_path = leappad_save_file(dir, save_dir);
+        let image = format!("{:08x}", original.fingerprint());
+        let image_path = save_path.with_extension("nandimage");
+        let mut card = original.clone();
+        let saved_image = std::fs::read_to_string(&image_path).ok();
+        if save_path.exists() && saved_image.as_deref() != Some(image.as_str()) {
+            let aside = set_aside(&save_path);
+            tracing::warn!(target: "ribbit::saves", "{} was made on another SD card image; kept as {}", save_path.display(), aside.display());
+        } else if let Ok(changes) = std::fs::read(&save_path)
+            && let Err(e) = card.apply_changes(&changes)
+        {
+            tracing::warn!(target: "ribbit::saves", "{}: {e}", save_path.display());
+            card = original.clone();
+        }
+        let mut lx = ribbit_didj::leappad::boot(card, ribbit_didj::leappad::CMDLINE).map_err(anyhow::Error::msg)?;
+        if let Ok(nor) = std::fs::read(save_path.with_extension("nor")) {
+            lx.bus.nor = Some(ribbit_didj::nor::Nor::new(nor));
+        }
+        Ok(ExplorerBuilt { lx, original, save_path, image, carried: None, dir: dir.to_path_buf(), leappad: true })
     }
 
     /// Powers on the Leapster Explorer `build_explorer` made.
     /// With `hle`, Enhanced (new): its programs run on `Hle` from the file
     /// systems in its NAND, which `lx` then only keeps for the saves.
     pub fn start_explorer(built: ExplorerBuilt, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>, hle: bool) -> anyhow::Result<Self> {
-        let ExplorerBuilt { lx, original, save_path, image, carried, dir } = built;
+        let ExplorerBuilt { lx, original, save_path, image, carried, dir, leappad } = built;
         let lx_cart_in = lx.bus.cart.is_some();
         let hle = match hle {
-            true => Some(Hle::new_explorer(&dir, &lx.bus.nand, lx.bus.nor.as_ref().map(|n| &n.data[..]), None)?),
+            true => Some(Hle::new_explorer(&dir, &lx.bus.nand, lx.bus.nor.as_ref().map(|n| &n.data[..]), None, leappad)?),
             false => None,
         };
         let original = Arc::new(original);
@@ -433,12 +475,14 @@ impl DidjSession {
             usb_host: AtomicBool::new(false),
             serial,
             explorer: true,
+            leappad,
+            upright: AtomicBool::new(true),
             touch: Mutex::new(None),
             cart_in: AtomicBool::new(lx_cart_in),
             hle: Mutex::new(hle),
             save_to: None,
         });
-        shared.serial.note("--- Ribbit: the Leapster Explorer powers on ---\n");
+        shared.serial.note(if leappad { "--- Ribbit: the LeapPad Explorer powers on ---\n" } else { "--- Ribbit: the Leapster Explorer powers on ---\n" });
         give_back_freed_memory();
         let s = shared.clone();
         let thread = std::thread::Builder::new().name("ribbit-explorer".into()).spawn(move || {
@@ -446,7 +490,8 @@ impl DidjSession {
             run(&s, None)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Leapster Explorer".into(), started, original, save_path, image, extras_missing: Vec::new(), carried, explorer: true, dir, cart: None })
+        let title = if leappad { "LeapPad Explorer" } else { "Leapster Explorer" };
+        Ok(Self { shared, thread: Some(thread), title: title.into(), started, original, save_path, image, extras_missing: Vec::new(), carried, explorer: true, leappad, dir, cart: None })
     }
 
     /// Puts a cartridge dump (raw, as `read_cart` gives it) in the
@@ -492,6 +537,17 @@ impl DidjSession {
     /// itself off right after starting (see `run`).
     pub fn take_gave_up(&self) -> bool {
         self.shared.gave_up.swap(false, Ordering::Relaxed)
+    }
+
+    /// The LeapPad Explorer's picture upright (its menus) or as the panel
+    /// (its games), from the next frame.
+    pub fn set_upright(&self, on: bool) {
+        self.shared.upright.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the LeapPad's picture is shown upright.
+    pub fn upright(&self) -> bool {
+        self.shared.upright.load(Ordering::Relaxed)
     }
 
     /// Whether the Didj may shut itself down for idling ("Turn off when
@@ -620,7 +676,7 @@ impl DidjSession {
             let cart = self.shared.hle.lock().unwrap().as_ref().and_then(|h| h.cart.clone());
             let built = {
                 let d = self.shared.didj.lock().unwrap();
-                Hle::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), cart)
+                Hle::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), cart, self.leappad)
             };
             match built {
                 Ok(h) => *self.shared.hle.lock().unwrap() = Some(h),
@@ -643,7 +699,7 @@ impl DidjSession {
         unplug(&self.shared);
         let mut d = self.shared.didj.lock().unwrap();
         if self.explorer {
-            power_on_again(&mut d, true);
+            power_on_again(&mut d, true, self.leappad);
             return;
         }
         let (mut flash, cart) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take());
@@ -816,6 +872,78 @@ pub fn import_save(from: &Path, dir: &Path, save_dir: &Path) -> anyhow::Result<P
 
 /// Where a Leapster Explorer built from `dir` keeps its NAND's changes
 /// (and its NOR flash beside, `.nor`).
+/// Where a LeapPad Explorer built from the packages in `dir` keeps its SD
+/// card's changes (`.nandblocks`, as the NAND consoles': the card is kept
+/// in a `Nand`).
+pub fn leappad_save_file(dir: &Path, save_dir: &Path) -> PathBuf {
+    let name = dir.file_name().map_or_else(|| "leappad".into(), |s| s.to_string_lossy().into_owned());
+    save_dir.join(format!("leappad-explorer-{name}.nandblocks"))
+}
+
+/// The LeapPad Explorer's picture turned upright: its menus are drawn on
+/// the 480x272 panel turned clockwise (/var/screens/Madrid-Boot-logoCW.png
+/// for board B; the home screen is a tall page), so the frame is turned a
+/// quarter counter-clockwise, to 272x480 (times the HD scale).
+pub fn rotate_upright(w: usize, h: usize, px: &[u32]) -> (usize, usize, Vec<u32>) {
+    let mut out = vec![0; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            // (x, y) goes to (y, w - 1 - x) in the h-wide picture.
+            out[(w - 1 - x) * h + y] = px[y * w + x];
+        }
+    }
+    (h, w, out)
+}
+
+/// A point on the upright LeapPad picture (`rotate_upright`, 272x480) as
+/// the panel's (480x272).
+pub fn leappad_panel_point(x: f32, y: f32) -> (f32, f32) {
+    (ribbit_didj::leappad::WIDTH as f32 - 1.0 - y, x)
+}
+
+/// Whether `path` is the LeapPad Explorer's FW Base package (meta.inf:
+/// Device "LeapPadExplorer", Name "Firmware-Lpad-Base"): the console in
+/// the library.
+pub fn describe_leappad(path: &Path) -> Option<crate::library::Game> {
+    use crate::library::{Art, Family, Game};
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    if !name.ends_with(".lfp") || !(name.contains("fw base") || name.contains("fw-base") || name.starts_with("lpad-")) {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    let meta = ribbit_didj::package::meta_of(&data)?;
+    if meta.get("Device") != Some("LeapPadExplorer") || meta.get("Name") != Some("Firmware-Lpad-Base") {
+        return None;
+    }
+    let mut details = vec![("System", "LeapPad Explorer".to_string())];
+    for (label, key) in [("Version", "Version"), ("Locale", "Locale")] {
+        if let Some(v) = meta.get(key) {
+            details.push((label, v.to_string()));
+        }
+    }
+    details.push(("Status", "early emulation: starts Linux and the LeapPad's own setup and menu, built from the packages in this folder (its SD card); no camera or microphone".to_string()));
+    details.push(("File", path.display().to_string()));
+    let mb = (data.len() as u64).div_ceil(1 << 20);
+    Some(Game {
+        path: path.to_path_buf(),
+        family: Family::LeapPadExplorer,
+        title: "LeapPad Explorer".to_string(),
+        subtitle: format!("{}  ·  {mb} MB", meta.get("Version").unwrap_or("")),
+        details,
+        tags: vec!["System".into()],
+        key: format!("leappad-explorer-firmware-{}", meta.get("Locale").unwrap_or("")),
+        art: Art::Missing,
+    })
+}
+
+/// Whether `path` is one of the LeapPad Explorer's packages (an .lf2 or
+/// .lfp in a folder of its firmware: `leappad::is_leappad_dir`): not a
+/// Leapster Explorer game.
+pub fn is_leappad_package(path: &Path) -> bool {
+    let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()) else { return false };
+    (ext == "lf2" || ext == "lfp") && path.parent().is_some_and(ribbit_didj::leappad::is_leappad_dir)
+}
+
 pub fn explorer_save_file(dir: &Path, save_dir: &Path) -> PathBuf {
     let name = dir.file_name().map_or_else(|| "explorer".into(), |s| s.to_string_lossy().into_owned());
     save_dir.join(format!("explorer-{name}.nandblocks"))
@@ -823,11 +951,12 @@ pub fn explorer_save_file(dir: &Path, save_dir: &Path) -> PathBuf {
 
 /// Powers the console on again with the NAND (and the cartridge, and the
 /// Explorer's NOR flash) it has.
-fn power_on_again(d: &mut Didj, explorer: bool) {
+fn power_on_again(d: &mut Didj, explorer: bool, leappad: bool) {
     let (flash, cart, sdram, milli) = (std::mem::take(&mut d.bus.nand), d.bus.cart.take(), d.bus.sdram.len(), d.cpu_milli());
     if explorer {
         let nor = d.bus.nor.take();
-        match ribbit_didj::explorer::boot(flash, ribbit_didj::explorer::CMDLINE) {
+        let booted = if leappad { ribbit_didj::leappad::boot(flash, ribbit_didj::leappad::CMDLINE) } else { ribbit_didj::explorer::boot(flash, ribbit_didj::explorer::CMDLINE) };
+        match booted {
             Ok(lx) => *d = lx,
             // The NAND held a kernel when it started; this can't happen.
             Err(e) => tracing::error!(target: "ribbit::didj", "powering the Explorer on again: {e}"),
@@ -934,7 +1063,9 @@ fn run(s: &Shared, art: Option<Art>) {
             }
             d.bus.uart.iter_mut().for_each(String::clear);
             idle_frames += 1;
-            if idle_frames as f64 >= FPS && !s.explorer && !d.bus.powered_off {
+            // The LeapPad Explorer's firmware (2.x) has the timer too
+            // (`ribbit_didj::idle`); the Explorer's own 1.x isn't known.
+            if idle_frames as f64 >= FPS && (!s.explorer || s.leappad) && !d.bus.powered_off {
                 idle_frames = 0;
                 let ttb = d.cpu.cp15.ttb;
                 idle.tick(&mut d.bus.sdram, ttb, s.keep_awake.load(Ordering::Relaxed));
@@ -981,7 +1112,7 @@ fn run(s: &Shared, art: Option<Art>) {
                 // pulled (its client detaches), not a device that stopped
                 // answering ("USB device not recognized").
                 unplug(s);
-                power_on_again(&mut d, s.explorer);
+                power_on_again(&mut d, s.explorer, s.leappad);
                 auto = art.clone().map(AutoStart::new);
             }
             // A faster processor (Enhanced) only as far as the PC keeps up:
@@ -1032,7 +1163,9 @@ fn run(s: &Shared, art: Option<Art>) {
                     auto = None;
                 }
             }
-            if w % SCREEN_W == 0 && h % SCREEN_H == 0 && w * h == px.len() {
+            if s.leappad && s.upright.load(Ordering::Relaxed) && w * h == px.len() && w % ribbit_didj::leappad::WIDTH as usize == 0 {
+                *s.frame.lock().unwrap() = rotate_upright(w, h, &px);
+            } else if (s.leappad || w % SCREEN_W == 0 && h % SCREEN_H == 0) && w * h == px.len() {
                 *s.frame.lock().unwrap() = (w, h, px);
             }
         }
@@ -1106,6 +1239,8 @@ struct Hle {
     /// go to the NAND (`explorer_to_nand`), their fingerprints as last written.
     explorer: bool,
     written_fp: [u32; 2],
+    /// A LeapPad Explorer: its file systems go to the SD card instead.
+    leappad: bool,
 }
 
 impl Hle {
@@ -1147,6 +1282,7 @@ impl Hle {
             base: None,
             explorer: false,
             written_fp: [0; 2],
+            leappad: false,
         };
         h.written = h.user_files();
         Ok(h)
@@ -1155,14 +1291,23 @@ impl Hle {
     /// Enhanced (new) for the Leapster Explorer: its file systems out of
     /// its NAND (`flash`, with the save applied) and NOR, started from
     /// /sbin/init as its kernel would (rcS, then AppManager).
-    fn new_explorer(dir: &Path, flash: &Nand, nor: Option<&[u8]>, cart: Option<Vec<u8>>) -> anyhow::Result<Self> {
+    fn new_explorer(dir: &Path, flash: &Nand, nor: Option<&[u8]>, cart: Option<Vec<u8>>, leappad: bool) -> anyhow::Result<Self> {
         use ribbit_didj::hle;
-        let vfs = hle::explorer::system_from_nand(flash, nor).map_err(anyhow::Error::msg)?;
-        let written_fp = hle::explorer::fingerprints(&vfs);
-        let mut p = hle::Process::new_explorer(vfs);
-        if let Some(rle) = hle::explorer::splash_from_packages(dir) {
-            p.explorer_splash(&rle);
-        }
+        let (mut p, written_fp) = if leappad {
+            let vfs = hle::leappad::system_from_card(flash, nor).map_err(anyhow::Error::msg)?;
+            let fp = hle::leappad::fingerprints(&vfs);
+            let mut p = hle::Process::new_leappad(vfs);
+            p.leappad_splash(flash);
+            (p, fp)
+        } else {
+            let vfs = hle::explorer::system_from_nand(flash, nor).map_err(anyhow::Error::msg)?;
+            let fp = hle::explorer::fingerprints(&vfs);
+            let mut p = hle::Process::new_explorer(vfs);
+            if let Some(rle) = hle::explorer::splash_from_packages(dir) {
+                p.explorer_splash(&rle);
+            }
+            (p, fp)
+        };
         if let Some(raw) = &cart {
             p.explorer_cart(Some(raw)).map_err(anyhow::Error::msg)?;
         }
@@ -1187,6 +1332,7 @@ impl Hle {
             base: None,
             explorer: true,
             written_fp,
+            leappad,
         })
     }
 
@@ -1194,7 +1340,11 @@ impl Hle {
     /// the save, and its NOR, when they changed.
     fn explorer_to_nand(&mut self, d: &mut Didj) -> anyhow::Result<()> {
         use ribbit_didj::hle::explorer;
-        explorer::write_changed_to_nand(&self.p.vfs, &mut d.bus.nand, &mut self.written_fp).map_err(anyhow::Error::msg)?;
+        if self.leappad {
+            ribbit_didj::hle::leappad::write_changed_to_card(&self.p.vfs, &mut d.bus.nand, &mut self.written_fp).map_err(anyhow::Error::msg)?;
+        } else {
+            explorer::write_changed_to_nand(&self.p.vfs, &mut d.bus.nand, &mut self.written_fp).map_err(anyhow::Error::msg)?;
+        }
         let nor = explorer::nor(&self.p.vfs);
         if d.bus.nor.as_ref().is_none_or(|n| n.data != nor) {
             let mut n = ribbit_didj::nor::Nor::new(nor);
@@ -1207,6 +1357,10 @@ impl Hle {
     /// The file tree as built, without the player's files (they go in the
     /// states as changes).
     fn base(&mut self) -> Result<&ribbit_didj::hle::vfs::Vfs, String> {
+        if self.base.is_none() && self.leappad {
+            let card = ribbit_didj::leappad::card_from_packages(&self.dir)?;
+            self.base = Some(ribbit_didj::hle::leappad::system_from_card(&card, None)?);
+        }
         if self.base.is_none() && self.explorer {
             self.base = Some(ribbit_didj::hle::explorer::system_from_packages(&self.dir)?);
         }
@@ -1272,7 +1426,8 @@ impl Hle {
         // The Explorer's stylus (screen pixels).
         if self.explorer {
             let at = *s.touch.lock().unwrap();
-            self.p.stylus(at.map(|(x, y)| (x.clamp(0.0, 319.0) as i32, y.clamp(0.0, 239.0) as i32)));
+            let (w, h) = self.p.screen();
+            self.p.stylus(at.map(|(x, y)| (x.clamp(0.0, w as f32 - 1.0) as i32, y.clamp(0.0, h as f32 - 1.0) as i32)));
         }
         let hd = s.hd.load(Ordering::Relaxed) as usize;
         if self.p.m.bus.ga3d.hd.scale != hd.clamp(1, 4) {
@@ -1366,7 +1521,7 @@ impl Hle {
             if let Err(e) = self.explorer_to_nand(&mut d) {
                 tracing::warn!(target: "ribbit::saves", "keeping the Explorer's files: {e:#}");
             }
-            match Self::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), self.cart.clone()) {
+            match Self::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), self.cart.clone(), self.leappad) {
                 Ok(mut h) => {
                     h.quick_stops = quick_stops;
                     *self = h;
@@ -1940,6 +2095,20 @@ mod library_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The LeapPad's upright picture and its stylus mapping agree: a pixel
+    /// shown at (x, y) is the panel's `leappad_panel_point(x, y)`.
+    #[test]
+    fn leappad_upright_picture_and_stylus_agree() {
+        let (w, h) = (ribbit_didj::leappad::WIDTH as usize, ribbit_didj::leappad::HEIGHT as usize);
+        let panel: Vec<u32> = (0..w * h).map(|i| i as u32).collect();
+        let (uw, uh, up) = rotate_upright(w, h, &panel);
+        assert_eq!((uw, uh), (h, w));
+        for (x, y) in [(0usize, 0usize), (271, 0), (0, 479), (100, 300)] {
+            let (px, py) = leappad_panel_point(x as f32, y as f32);
+            assert_eq!(up[y * uw + x], panel[py as usize * w + px as usize]);
+        }
+    }
 
     /// The process's working set and private bytes in MB (Windows; zeros
     /// elsewhere), for the Explorer's memory checks.

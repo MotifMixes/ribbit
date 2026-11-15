@@ -236,7 +236,7 @@ impl Process {
     /// A process for the LeapPad 2's programs: the Explorer's HLE with the
     /// ARM core in ARMv7 mode and a 480x272 screen.
     pub fn new_leappad2(vfs: Vfs) -> Self {
-        let mut p = Self::new_explorer_sized(vfs, SDRAM, SCREEN);
+        let mut p = Self::new_explorer_sized(vfs, SCREEN.0, SCREEN.1);
         p.x.leappad2 = true;
         p.cpu.v7 = Some(Box::default());
         p.m.jit.v7 = true;
