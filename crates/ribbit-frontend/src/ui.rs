@@ -806,7 +806,7 @@ fn console_tabs(
     actions: &mut Vec<Action>,
 ) {
     let side = |g: &crate::library::Game| g.family.is_book() == books;
-    let count = |f: Option<Family>| library.games.iter().filter(|g| side(g) && f.map_or(!g.is_explorer_cart(), |f| f.lists(g.family))).count();
+    let count = |f: Option<Family>| library.games.iter().filter(|g| side(g) && f.map_or(!g.is_explorer_cart(), |f| g.listed_on(f))).count();
     // A page for each console that is here and has games.
     let families: Vec<Family> = Family::ALL
         .into_iter()
@@ -2344,7 +2344,7 @@ fn library_screen(
             let shown_games: Vec<&crate::library::Game> = library.games.iter().filter(|g| {
                 if let Some(hw) = filter && !plays_on(g, hw) { return false; }
                 if g.family.is_book() != *books { return false; }
-                if !tab.is_none_or(|f| f.lists(g.family)) { return false; }
+                if !tab.is_none_or(|f| g.listed_on(f)) { return false; }
                 if tab.is_none() && g.is_explorer_cart() { return false; }
                 if !matches(g) { return false; }
                 if *favorites_only && !settings.favorites.contains(&g.path) { return false; }
@@ -2939,7 +2939,7 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     // The LeapPad 2's page: its Firmware-Base package is the console.
     if tab == Some(Family::LeapPad2) {
         if let Some(g) = library.games.iter().find(|g| g.family == Family::LeapPad2 && g.has_tag("System"))
-            && power_button(ui, "Turn on the LeapPad 2 (Enhanced (new): its setup and menu; LeapPad cartridges from the Leapster Explorer page go in its slot)")
+            && power_button(ui, "Turn on the LeapPad 2 (Enhanced (new): its setup and menu; a LeapPad cartridge picked goes in its slot)")
         {
             actions.push(Action::PlayFromLibrary(g.path.clone()));
         }

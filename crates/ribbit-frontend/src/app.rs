@@ -861,6 +861,10 @@ impl App {
     fn open_cart(&mut self, path: PathBuf) {
         // A Didj cartridge: the Didj from the library, with it in the slot.
         if let Some(cart) = crate::didj::read_cart(&path) {
+            // A LeapPad cartridge: a LeapPad (`play_on_explorer`).
+            if crate::didj::describe_cart(&path, &cart).is_some_and(|g| g.is_leappad_cart()) {
+                return self.play_on_explorer(&path);
+            }
             // Before the library is scanned: the system package beside the
             // cartridge (not just any package: a reward add-on isn't a Didj).
             let beside = || crate::didj::find_package(path.parent()?, 0);
@@ -1309,11 +1313,28 @@ impl App {
 
     /// A Didj cartridge on the Explorer: into the slot of the Explorer that
     /// is running (its menu then shows the game), or an Explorer turned on
-    /// with it in.
+    /// with it in. A LeapPad cartridge goes to a LeapPad first: the LeapPad 2
+    /// or LeapPad Explorer that is on, or else one turned on with it in
+    /// (the LeapPad 2 first); an Explorer only when the library has neither.
     fn play_on_explorer(&mut self, path: &Path) {
         let Some(cart) = crate::didj::read_cart(path) else {
             return self.ui.problem("Not a cartridge", "This file isn't a Didj or Leapster Explorer cartridge dump.", path.display().to_string());
         };
+        if crate::didj::describe_cart(path, &cart).is_some_and(|g| g.is_leappad_cart()) {
+            if let Some(d) = self.didj.as_ref().filter(|d| d.explorer && d.leappad) {
+                match d.set_cart(Some(cart)) {
+                    Ok(()) => self.ui.toast("Cartridge in: tap it in the LeapPad's menu"),
+                    Err(e) => self.ui.problem("Couldn't put the cartridge in", "The dump may be damaged.", e),
+                }
+                return;
+            }
+            let system = |f: crate::library::Family| self.library.games.iter().find(|g| g.family == f && g.has_tag("System")).map(|g| g.path.clone());
+            if let Some(firmware) = system(crate::library::Family::LeapPad2).or_else(|| system(crate::library::Family::LeapPadExplorer)) {
+                self.start_explorer(firmware);
+                self.explorer_cart = Some(cart);
+                return;
+            }
+        }
         if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
             match d.set_cart(Some(cart)) {
                 Ok(()) => self.ui.toast("Cartridge in: pick it in the Explorer's menu"),

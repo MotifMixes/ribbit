@@ -1008,7 +1008,7 @@ pub fn describe_leappad2(path: &Path) -> Option<crate::library::Game> {
     }
     details.push((
         "Status",
-        "early emulation, Enhanced (new) only: its own setup, menu and LeapPad cartridges (put in from the Leapster Explorer page), graphics through Ribbit's OpenGL ES; no camera, microphone or USB".to_string(),
+        "early emulation, Enhanced (new) only: its own setup, menu and LeapPad cartridges (picking one starts it with the cartridge in), graphics through Ribbit's OpenGL ES; no camera, microphone or USB".to_string(),
     ));
     details.push(("File", path.display().to_string()));
     let mb = (data.len() as u64).div_ceil(1 << 20);
@@ -2135,7 +2135,7 @@ pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
     details.push((
         "Status",
         if leappad {
-            "early emulation: in the Explorer's slot, its menu shows the game; most LeapPad games then ask to be played on a LeapPad"
+            "early emulation: picked, it goes into the LeapPad that is on, or starts a LeapPad 2 (or a LeapPad Explorer) with it in the slot; a Leapster Explorer alone, which most LeapPad games refuse, if the library has neither"
         } else if explorer {
             "early emulation: in the Explorer's slot, its menu shows the game; take it out from the Emulation menu"
         } else {
@@ -2151,7 +2151,7 @@ pub fn describe_cart(path: &Path, data: &[u8]) -> Option<crate::library::Game> {
         title,
         subtitle: meta.get("Version").map_or(String::new(), |v| format!("version {v}")),
         details,
-        tags: vec![if explorer { EXPLORER_OWN_CART_TAG } else { "Cartridge" }.into()],
+        tags: if leappad { vec![EXPLORER_OWN_CART_TAG.into(), LEAPPAD_CART_TAG.into()] } else { vec![if explorer { EXPLORER_OWN_CART_TAG } else { "Cartridge" }.into()] },
         key: format!("{}-cart-{id}", if explorer { "explorer" } else { "didj" }),
         art,
     })
@@ -2189,6 +2189,10 @@ pub const EXPLORER_CART_TAG: &str = "Didj cartridge";
 
 /// The tag of an Explorer cartridge's own entry (`describe_cart`).
 pub const EXPLORER_OWN_CART_TAG: &str = "Cartridge";
+
+/// The second tag of a LeapPad cartridge's entry (Device="LeapPadExplorer"):
+/// it plays on the LeapPad 2 and the LeapPad Explorer first.
+pub const LEAPPAD_CART_TAG: &str = "LeapPad";
 
 /// The dump at `path` if it is a Didj cartridge (zipped or not): the raw
 /// flash, or an image of its FAT volume alone, made into the raw flash.

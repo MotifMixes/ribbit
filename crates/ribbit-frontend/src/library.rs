@@ -300,6 +300,17 @@ impl Game {
     pub fn plays_in_explorer_slot(&self) -> bool {
         self.is_explorer_cart() || (self.family == Family::Explorer && self.has_tag(crate::didj::EXPLORER_OWN_CART_TAG))
     }
+
+    /// A LeapPad cartridge (an Explorer-slot dump made for the LeapPads).
+    pub fn is_leappad_cart(&self) -> bool {
+        self.family == Family::Explorer && self.has_tag(crate::didj::LEAPPAD_CART_TAG)
+    }
+
+    /// Whether the library tab `tab` lists it: its console's, and LeapPad
+    /// cartridges on the LeapPad 2's and LeapPad Explorer's pages too.
+    pub fn listed_on(&self, tab: Family) -> bool {
+        tab.lists(self.family) || (matches!(tab, Family::LeapPad2 | Family::LeapPadExplorer) && self.is_leappad_cart())
+    }
 }
 
 /// The keys of the games installed on a console (`didj_library`): one card
