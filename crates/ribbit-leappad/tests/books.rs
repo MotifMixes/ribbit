@@ -357,3 +357,39 @@ fn a_drawn_book_saves_as_a_book_file() {
     let (back, _) = Book::parse(&book.to_toml(), Path::new(".")).expect("the saved file reads back");
     assert_eq!(back.spreads, book.spreads);
 }
+
+/// "Turn off when idle": left alone, the firmware powers the pad down after
+/// about 3 minutes ("Auto Power Down"); with `keep_awake` it is still on
+/// after 10 (idle.rs). Also checked by hand with `lpidle` on all 17
+/// cartridges (the Classic ones with RIBBIT_LEAPPAD_CLASSIC_CART too).
+#[test]
+#[ignore]
+fn idle_power_off_and_keep_awake() {
+    for cart in ["RIBBIT_LEAPPAD_CART", "RIBBIT_LEAPPAD_CLASSIC_CART"] {
+        let Some(cart) = std::env::var(cart).ok().and_then(|c| std::fs::read(c).ok()) else {
+            continue;
+        };
+        for keep_awake in [false, true] {
+            let mut m = Machine::new(std::fs::read(std::env::var("RIBBIT_LEAPPAD_BIOS").expect("set RIBBIT_LEAPPAD_BIOS")).unwrap());
+            m.bus.classic = true;
+            m.keep_awake = keep_awake;
+            m.insert_cartridge(cart.clone());
+            let mut off_at = None;
+            let mut log = String::new();
+            for t in 0..600 {
+                m.run_cycles(secs(1.0));
+                log += &m.take_log();
+                if m.is_off() {
+                    off_at = Some(t);
+                    break;
+                }
+            }
+            if keep_awake {
+                assert_eq!(off_at, None, "kept awake for 10 minutes");
+            } else {
+                let t = off_at.expect("powered down when left alone");
+                assert!((170..=185).contains(&t) && log.contains("Auto Power Down"), "off at {t} s");
+            }
+        }
+    }
+}

@@ -12,7 +12,8 @@
 //! to PCM out (16-bit stereo). EXPLORER_CART=<file> puts a cartridge in the
 //! slot; the inputs `insert` and `remove` put it in and take it out later.
 //! EXPLORER_STATE_OUT=<file> saves the machine at the end, EXPLORER_STATE=<file>
-//! starts from such a state (same firmware folder).
+//! starts from such a state (same firmware folder). EXPLORER_IDLE=1 or keep:
+//! AppManager's idle timer (see the loop).
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -110,6 +111,7 @@ fn main() {
     let mut commands = typed.split(";;").filter(|c| !c.is_empty()).map(|c| format!("{c}\n")).collect::<Vec<_>>().into_iter();
     let (mut prompts, mut quiet) = (0, 0);
     let mut last_frame: Vec<u32> = Vec::new();
+    let mut idle = ribbit_didj::idle::IdleTimer::default();
     for m in 0..millions {
         for (_, what) in input.iter().filter(|e| e.0 == m) {
             use ribbit_didj::machine::button::*;
@@ -132,6 +134,20 @@ fn main() {
         }
         lx.run(1_000_000);
         wav.extend(lx.bus.dma.pcm.drain(..));
+        // EXPLORER_IDLE=1: AppManager's idle timer (ribbit_didj::idle) read
+        // every emulated second and printed every 30; EXPLORER_IDLE=keep
+        // keeps it at 0, as the app does with "Turn off when idle" off.
+        if let Ok(mode) = std::env::var("EXPLORER_IDLE")
+            && (m + 1) % 393 == 0
+        {
+            let ttb = lx.cpu.cp15.ttb;
+            idle.tick(&mut lx.bus.sdram, ttb, mode == "keep");
+            if (m + 1) % (393 * 30) == 0 {
+                println!("\n[{} s: idle timer {:?}]", (m + 1) / 393, idle.reading());
+                if mode == "locate" {
+                    println!("[ttb {ttb:#x}: code at {:x?}]", ribbit_didj::idle::locate(&lx.bus.sdram, ttb));
+                }            }
+        }
         // EXPLORER_PROGRESS=<million>: the wall time every so many million
         // cycles, to measure the speed of one stretch (393 million = 1 s).
         if let Some(n) = std::env::var("EXPLORER_PROGRESS").ok().and_then(|v| v.parse::<u64>().ok())

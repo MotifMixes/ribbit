@@ -1110,6 +1110,7 @@ impl App {
         match crate::clickstart::CsSession::start(&bios, cart.as_deref(), &self.save_dir(), sink) {
             Ok(mut c) => {
                 self.fit_window = FIT_TRIES;
+                c.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 c.title = match &cart {
                     Some(p) => self.library.games.iter().find(|g| &g.path == p).map_or_else(
                         || p.file_stem().map_or_else(|| "ClickStart".to_string(), |s| s.to_string_lossy().into_owned()),
@@ -1334,6 +1335,7 @@ impl App {
                 if lp.book.is_none() {
                     lp.open_cartridge_book();
                 }
+                lp.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 lp.auto_go = self.settings.leappad_auto_go;
                 if lp.auto_go {
                     lp.go_first_page();
@@ -2273,6 +2275,12 @@ impl App {
                 }
                 if let Some(s) = &self.session {
                     s.emu.lock().keep_awake = !self.settings.turn_off_when_idle;
+                }
+                if let Some(lp) = &self.leappad {
+                    lp.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                }
+                if let Some(c) = &self.clickstart {
+                    c.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 }
                 if let Some(d) = &self.didj {
                     d.set_frame_skip(self.settings.didj_frame_skip);
@@ -3479,6 +3487,12 @@ impl App {
             }
             self.speed_percent = t.machine.as_ref().map_or(0.0, |m| m.speed_percent());
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
+        // It turned itself off for idling: closed, as a Leapster that did
+        // (the ON/OFF switch leaves it open, off).
+        if self.leappad.as_ref().is_some_and(|lp| lp.idle_powered_off()) && self.settings.turn_off_when_idle {
+            self.end_session();
             return;
         }
         if let Some(lp) = &self.leappad {

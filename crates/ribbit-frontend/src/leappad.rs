@@ -43,6 +43,11 @@ struct Shared {
     pen: Mutex<Option<Spot>>,
     power: AtomicBool,
     off: AtomicBool,
+    /// The firmware's idle power-off ("Auto Power Down") turned it off, not
+    /// the ON/OFF switch.
+    idle_off: AtomicBool,
+    /// Keep it on however long it is left alone ("Turn off when idle" off).
+    keep_awake: AtomicBool,
     log: Mutex<VecDeque<String>>,
     touches: Mutex<VecDeque<(Instant, TouchReport)>>,
     /// Percent of real time over the last second (f32 bits).
@@ -206,6 +211,8 @@ impl LeapPadSession {
             pen: Mutex::new(None),
             power: AtomicBool::new(false),
             off: AtomicBool::new(false),
+            idle_off: AtomicBool::new(false),
+            keep_awake: AtomicBool::new(true),
             log: Mutex::new(VecDeque::new()),
             touches: Mutex::new(VecDeque::new()),
             speed: AtomicU32::new(0),
@@ -520,6 +527,17 @@ impl LeapPadSession {
         self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
     }
 
+    /// "Turn off when idle": on, the firmware's own idle power-off (about 3
+    /// minutes) turns the pad off as on a real one; off, it stays on.
+    pub fn set_turn_off_when_idle(&self, on: bool) {
+        self.shared.keep_awake.store(!on, Ordering::Relaxed);
+    }
+
+    /// The pad turned itself off for idling ("Auto Power Down").
+    pub fn idle_powered_off(&self) -> bool {
+        self.shared.off.load(Ordering::Relaxed) && self.shared.idle_off.load(Ordering::Relaxed)
+    }
+
     fn set_pen(&mut self, pen: Option<(Spot, bool)>) {
         self.pen = pen;
         *self.shared.pen.lock().unwrap() = pen.filter(|p| p.1).map(|p| p.0);
@@ -621,8 +639,10 @@ fn run(s: &Shared) {
             report.5 = pen.is_some();
             m.set_pen(pen);
             if s.power.swap(false, Ordering::Relaxed) {
+                s.idle_off.store(false, Ordering::Relaxed);
                 m.press_power();
             }
+            m.keep_awake = s.keep_awake.load(Ordering::Relaxed);
             m.run_cycles(step);
             if let Some(h) = m.hit.take() {
                 *s.hit.lock().unwrap() = Some(h);
@@ -648,6 +668,9 @@ fn run(s: &Shared) {
             while let Some(nl) = partial.find('\n') {
                 let line: String = partial.drain(..=nl).collect();
                 let line = line.trim_end().to_string();
+                if line.contains("Auto Power Down") {
+                    s.idle_off.store(true, Ordering::Relaxed);
+                }
                 for t in book::touch_reports(&line) {
                     report.4 += 1;
                     let mut touches = s.touches.lock().unwrap();

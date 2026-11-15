@@ -679,6 +679,19 @@ are withdrawn.
   * The firmware's unit (count >> 3) is then 8 s, and the longest timeout 256 units (34 minutes).
   * Tried first: at 8 kHz the app powered itself off 0.8 s after starting, and at 8 Hz after 22 s.
   * Unverified against a real unit: a video of one left alone for 3 minutes would confirm it.
+* **Every cartridge has it (VERIFIED by execution, 2026-11-15, `lpidle`):** left alone, all 15 cartridges that start
+  print "Auto Power Down" and power down (PCON) at 175 s (the newer kernels: 00406, 00652, 00730, 01148, 11374) or
+  180.6 s (the Classic ones). 00104 and 01022-B, damaged dumps, are refused by the base, which powers off 11.6 s
+  later; the app repairs 01022-B's checksum.
+* **The activity bit (VERIFIED-FW, `src/idle.rs`):** a touch sets a bit in the bit-addressable RAM; the main loop
+  then moves the deadline on and clears it. Classic kernels: `JNB bit; MOV DPTR,#FC01h ... MOV DPTR,#F0xxh; MOV A,R7;
+  MOVX @DPTR,A; CLR bit` (500-00367 kernel 0x6BBC: bit 23h.6, deadline F0F0, (count + 180) >> 2). Newer kernels
+  and the Full Base: `JBC bit,+2; SJMP ...` then the same store (500-00406 app 0xA2E8: bit 23h.7, deadline F088).
+* **"Turn off when idle" (`Machine::keep_awake`, the setting off):** once a second Ribbit finds that routine in the
+  code the processor sees and sets its bit, as a touch would; the pad stays on (all 15 for 10 minutes, `lpidle`
+  with KEEP_AWAKE=1). On: it powers down as above, and the app closes the game when the firmware said
+  "Auto Power Down" (the ON/OFF switch still leaves it open, off). Test `idle_power_off_and_keep_awake` in
+  `tests/books.rs` (needs the dumps).
 * **Before this counter was modelled,** the app's main loop spun forever in the `>> 3` helper (app 0x8D7C),
   waiting for time to pass.
 

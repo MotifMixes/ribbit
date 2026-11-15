@@ -561,6 +561,56 @@ fn leapster2_resume_after_idle_power_off_resets_the_timer() {
     resume_after_idle_power_off_resets_the_timer("leapster2/152-12206_0.6.bin", "Talking-Words-Factory_Leapster_EN.zip");
 }
 
+#[test]
+fn tv_resume_after_idle_power_off_resets_the_timer() {
+    resume_after_idle_power_off_resets_the_timer("leapstertv/am29pl160cb-90sf.bin", "Talking-Words-Factory_Leapster_EN.zip");
+}
+
+#[test]
+fn b5_resume_after_idle_power_off_resets_the_timer() {
+    resume_after_idle_power_off_resets_the_timer("152-12076_b5.bin", "Talking-Words-Factory_Leapster_EN.zip");
+}
+
+/// "Turn off when idle" off (`keep_awake`): the count is refilled, so with
+/// two seconds left the console is still on ten seconds later, with about
+/// its full timeout left.
+fn keep_awake_refills_the_idle_count(name: &str, cart: &str) {
+    let Some(dir) = std::env::var_os("RIBBIT_BIOS_DIR") else {
+        eprintln!("RIBBIT_BIOS_DIR not set; skipping");
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    let Some(cart) = dir.parent().map(|p| p.join(cart)).filter(|p| p.exists()) else {
+        eprintln!("{cart} not found next to RIBBIT_BIOS_DIR; skipping");
+        return;
+    };
+    let fw = Firmware::from_bytes_any_model(std::fs::read(dir.join(name)).unwrap()).unwrap();
+    let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(&cart).unwrap()).unwrap();
+    let mut m = Machine::with_straps(fw, Some(cart), STRAPS_SKIP_CALIBRATION);
+    m.keep_awake = true;
+    let second = m.clock.cpu_hz;
+    for _ in 0..15 * 60 {
+        m.run_cycles(second / 60, &Breakpoints::default());
+        m.idle_seconds_left();
+    }
+    let full = m.idle_seconds_left().unwrap_or_else(|| panic!("{name}: idle timer found"));
+    m.cap_idle_count(2);
+    for _ in 0..10 * 60 {
+        m.run_cycles(second / 60, &Breakpoints::default());
+    }
+    assert!(!m.idle_powered_off(), "{name}: still on");
+    let left = m.idle_seconds_left().unwrap();
+    assert!(left + 2 >= full, "{name}: {left} s left (full timeout {full} s)");
+    eprintln!("{name}: timeout {full} s, kept full");
+}
+
+#[test]
+fn keep_awake_refills_the_idle_count_on_every_model() {
+    for bios in [V15, V21, "leapsterlmx/152-11476_v2.2.bin", "leapstertv/am29pl160cb-90sf.bin", "leapster2/152-12206_0.6.bin", "152-12076_b5.bin"] {
+        keep_awake_refills_the_idle_count(bios, "Talking-Words-Factory_Leapster_EN.zip");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HD hooks (hd.rs, hd_l2.rs): every hook of the Leapster 2 family's player is
 // found, at the addresses read from the code (docs/hardware-research.md).

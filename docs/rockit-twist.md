@@ -447,6 +447,17 @@ system packages and content.
 **Sound level:** the sound unit's mix is raised 4 times, its peaks eased in rather than clipped (`LOUDNESS` in
 `crates/ribbit-frontend/src/twist.rs`), then the app's volume applies. How loud a real unit is is UNVERIFIED.
 
+## No idle power-off (2026-11-15)
+
+The System (Base 1.0.50.0) has no timer that turns the console off when left alone, so "Turn off when idle"
+changes nothing here (EVIDENCE, read from the code). It exports `System_enableAutoPowerOff` (0x1621C),
+`System_clearAutoPowerOffTimer` (0x16220) and `System_powerOff` (0x16218), and all three are a bare `bx lr`.
+Its calls to the bootloader's power-off (0xFFF06C) come only from `Ptp_powerOff` (0xABB4, a USB command), a USB
+handler (0x27858, through a pointer at 0x26F20), the power button task (0x32EA0: the button held, or the battery
+monitor 0x31824) and an error path (0x6E854-0x6E888: a check fails, 0xFFF0A8 is toggled seven times 0.5 s apart, then off). No string mentions inactivity or auto-off.
+Apps link these names like every other export (every app's import list names them), so an app asking for an
+auto power-off gets nothing.
+
 ## Open work (end of 2026-10-17)
 
 **Sound gaps when the console is busy.** The app's log (`ribbit::audio` "audio ran dry", `ribbit::twist` "fell

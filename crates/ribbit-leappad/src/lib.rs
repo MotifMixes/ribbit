@@ -15,6 +15,7 @@ pub mod bus;
 pub mod calibration;
 pub mod disasm;
 pub mod eeprom;
+pub mod idle;
 pub mod layout;
 pub mod mcs51;
 pub mod pen;
@@ -161,6 +162,12 @@ pub struct Machine {
     /// Run the next instruction even if it is a breakpoint (continuing from
     /// one).
     pub resume: bool,
+    /// Keep the pad on however long it is left alone: the firmware's idle
+    /// power-off (about 3 minutes) is told of activity once a second
+    /// (idle.rs). Off (the default), it powers down as a real pad does.
+    pub keep_awake: bool,
+    /// Cycles run since `keep_awake` last acted.
+    since_awake: u64,
 }
 
 impl Machine {
@@ -169,7 +176,7 @@ impl Machine {
     pub fn new(bios: Vec<u8>) -> Self {
         let mut bus = Bus::new(bios);
         bus.eeprom = eeprom::Eeprom::new(calibration::factory_eeprom());
-        Machine { cpu: Mcs51::new(), bus, pin_phase: 0, hz: MACHINE_HZ, pin_hz: TIMER_PIN_HZ, breakpoints: Vec::new(), hit: None, resume: false }
+        Machine { cpu: Mcs51::new(), bus, pin_phase: 0, hz: MACHINE_HZ, pin_hz: TIMER_PIN_HZ, breakpoints: Vec::new(), hit: None, resume: false, keep_awake: false, since_awake: 0 }
     }
 
     /// Loads a saved EEPROM (128 bytes; calibration and settings). One that
@@ -260,6 +267,24 @@ impl Machine {
             }
             self.resume = false;
             done += self.step();
+        }
+        // Counted here: the processor's own count restarts at power-on.
+        self.since_awake += done as u64;
+        if self.keep_awake && self.since_awake >= self.hz as u64 {
+            self.since_awake = 0;
+            self.tell_activity();
+        }
+    }
+
+    /// Sets the running firmware's activity bit (idle.rs), as a touch does,
+    /// so that its idle power-off moves its deadline on.
+    fn tell_activity(&mut self) {
+        if self.is_off() {
+            return;
+        }
+        let code: Vec<u8> = (0..=0xFFFFu16).map(|a| self.bus.code_peek(a)).collect();
+        if let Some(bit) = idle::activity_bit(&code) {
+            self.cpu.iram[0x20 + (bit >> 3) as usize] |= 1 << (bit & 7);
         }
     }
 }

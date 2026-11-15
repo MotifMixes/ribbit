@@ -390,6 +390,13 @@ it lifts both feet, a jump, and letting go lands (games such as Dress Dash
 act on both footprints pressed at once, which standing still never gives).
 Every one of the ten inputs has a key.
 
+**No idle power-off (EVIDENCE, 2026-11-15).** The system has no timer that turns it off when left alone, so
+"Turn off when idle" changes nothing here. Its only power-down strings are "LVD power down requested" (low
+voltage) and the user-data screen's "Will power down in: %d" (the test mode's Clear Data); no inactivity or
+auto-off text. Left alone headlessly (`zrun` with ZRUN_LOGT, no input), it stayed on 60 minutes on the first
+start's language screen and 63 minutes on the game-select ring (after the screens test's route to it), with no
+power-down log line and the picture unchanged.
+
 ### Mickey Says
 
 The game (its own kernel, `mmch_kernel`: "LK file found, size is

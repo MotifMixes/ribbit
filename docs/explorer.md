@@ -322,6 +322,22 @@ A click turns the Explorer on. Ribbit doesn't pick the game in the Explorer's me
 - **Tested**: no Explorer game package is on this PC. The ignored test `didj::library_tests::explorer_install_list_uninstall` makes a stand-in package at test time in the real layout (`RibbitTest/meta.inf`, icon, App.so; none is kept in the repo), or takes RIBBIT_EXPLORER_LF2. It installs, lists, is on the NAND `build_explorer` starts with, exports, comes back after the save is deleted and imported, and uninstalls. UNTESTED with a real game, and the game was not started (its App.so is a stub).
 - **Real Explorers**: over USB a real Explorer offers only a 50 MB file for LeapFrog Connect's DFTP protocol, not its file system (see USB). So no safe way is known to copy files onto one. "Export the Explorer's files" writes `LF/Bulk/{Data,ProgramFiles,Downloads}` as a backup in the real layout (UNTESTED ON HARDWARE). "Import from a real Explorer" takes a copy of `/LF/Bulk` (e.g. made over the developer image's telnet/ftp) or a folder holding a 512 MB NAND dump as `explorer.nand`. It adds Data, ProgramFiles and Downloads and leaves `settings.cfg` and the language packs out. UNTESTED ON HARDWARE.
 
+## Idle power-off (2026-11-15)
+
+AppManager's CAppManager::UpdateInactivity (/LF/Base/lib/libLightningBase.so, 0x36148) is the Didj's with other
+limits (VERIFIED-FW): it adds the time since its last call to a static timer (0x66DEC, in .bss, reached
+pc-relative) and zeroes it on a button or a touch; past 120 s it dims the screen, past 240 s it logs "System
+shutting down due to inactivity after %d [ms] !" and shuts the Explorer down (600 s while paused).
+`ribbit_didj::idle` knows both libraries, so "Turn off when idle" works as on the Didj in Original and Enhanced
+(new): off (the default), the timer is kept at 0; on, the Explorer shuts down and the app closes it. `explorerboot`
+with EXPLORER_IDLE=1 (or `keep`) prints the timer every 30 emulated seconds. Checked so (no input, Original):
+with 1 the timer read 26 870 ms at 30 s and 236 760 at 240 s, and at 244 s rcS logged "Shutting down system" and
+the Explorer powered off; with `keep` it read 0 throughout and the Explorer was still on at 407 s. Two things the
+Didj didn't need: the Explorer's SDRAM is at physical 0x8000_0000 (its page tables hold such addresses), and
+AppManager never touches the library's first page (the ELF header), so the library is recognised by the
+function's page alone. (Before this, 1.9.2 left the Explorer's timer alone: it shut down after 4 minutes
+whatever the setting, and the app restarted it.)
+
 ## Not done yet
 
 * The LFP100 power chip, the Explorer's real cartridge type bits and chip IDs (guessed), LeapFrog Connect over USB (untested), carrying the root file system's /flags over. The app's start is untested by a player.

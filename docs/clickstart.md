@@ -450,9 +450,36 @@ make no difference.
 Scout wave with an A1600 sound (6172 bytes) for about 7 s, the screen
 goes black (the pointer sprite stays), then the ROM sets bit 15 of
 0x3d20 (the system control register) after 0x3f0726(3 or 7) and loops at
-0x3f0370 for good (0x3f0340). Ribbit ignores 0x3d20, so it keeps running
-that loop on a black screen with the pointer; the app doesn't notice the
-console turned off. The capture's console turns off (no signal).
+0x3f0370 for good (0x3f0340). The capture's console turns off (no signal).
+Ribbit notes the bit (`ClickStart::powered_off`) and the app then closes
+the game, as for a Leapster that turned off.
+
+**Idle power-off** (VERIFIED-FW and headlessly, 2026-11-15; `src/idle.rs`):
+the home screen's handler (0x28f2f6, screen 1) counts its passes, 30 a
+second, in word 6 of the state [0x1328] points to (0x174a there), and sets
+it back to 0 on a key, an arrow or a pointer move (0x28f56e-0x28f57e).
+Past 4499 (`cmp r3,0x1193` at 0x28f5ef), unless bit 10 of the state's
+first word is set, it asks for screen 0x0c (0x28f5fc): the shutdown above.
+So the home screen left alone for 150 s turns the console off. Nothing
+else counts: the only other ways to screen 0x0c are 's' in developer mode
+(0x28f463) and 0x28ee2b, which nothing found calls; Player Profile and
+Log-In time out to the home screen instead (a blank EEPROM reaches it
+after about 4.5 minutes); and the 13 English cartridges write 0x3d20 only
+with bit 15 clear (0x4017, at start-up). Left alone, the system ROM ran an
+hour on its home screen and Finding Nemo an hour on its menu without
+turning off: headlessly the home screen puts the pointer back itself now
+and then (0x29714d through 0x3fff0a, every 20-60 s), which counts as a
+move, so the count was never seen past 0x381. Whether a real console does
+that is unknown (no capture of one left alone).
+
+"Turn off when idle" (`ClickStart::keep_awake`, the setting off): the
+count is set back to 0 once a second while the home screen shows, as a key
+would. On: the count runs, and when it runs out the console waves goodbye
+and the app closes the game. The developer mode's shutdown closes it
+either way. Test `tests/idle.rs` (needs the ROM): two seconds before the
+count runs out, on turns the console off within 5-15 s, off keeps it on.
+`csrun`'s CSRUN_WATCH=addr[:frame] prints where a word is written smaller
+(how the count's resets were found).
 
 ## Save states
 
@@ -507,7 +534,8 @@ that has since been formatted.
 - What the slot's cartridge header reads on a real console with no
   cartridge (Ribbit shows the system ROM's "BaseRom" header there, so a
   "BaseRom" icon on the home screen), and port A bits 12 and 14.
-- Whether to turn the console off on 0x3d20 bit 15 (the shutdown).
+- Whether a real console's home screen puts the pointer back by itself
+  as it does headlessly, which keeps its 150 s idle count from running out.
 - The one-frame text glitches on Player Profile and Log-In.
 - The older system ROM (Beta, Jan 2007, PN 152-11757) with the country
   screen isn't dumped.

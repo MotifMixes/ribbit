@@ -934,7 +934,7 @@ fn run(s: &Shared, art: Option<Art>) {
             }
             d.bus.uart.iter_mut().for_each(String::clear);
             idle_frames += 1;
-            if idle_frames as f64 >= FPS && !s.explorer && !d.bus.powered_off {
+            if idle_frames as f64 >= FPS && !d.bus.powered_off {
                 idle_frames = 0;
                 let ttb = d.cpu.cp15.ttb;
                 idle.tick(&mut d.bus.sdram, ttb, s.keep_awake.load(Ordering::Relaxed));
