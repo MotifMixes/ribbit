@@ -168,7 +168,7 @@ const PROC_FILES: &[(&str, &str)] = &[
 
 /// The Explorer's /dev as Original has it (`ls -l /dev`, 2026-11-12):
 /// (name, major, minor). rcS also unpacks /var/dev_nodes.tar over it.
-const DEV_NODES: &[(&str, u32, u32)] = &[
+pub(super) const DEV_NODES: &[(&str, u32, u32)] = &[
     ("console", 5, 1),
     ("fb0", 29, 0),
     ("fb1", 29, 1),
@@ -238,7 +238,7 @@ pub fn system_from_packages(dir: &std::path::Path) -> Result<Vfs, String> {
 }
 
 /// Puts a UBIFS volume's files into `vfs` under `at` ("" for the root).
-fn add_files(vfs: &mut Vfs, at: &str, files: Vec<crate::ubifs_read::File>) {
+pub(super) fn add_files(vfs: &mut Vfs, at: &str, files: Vec<crate::ubifs_read::File>) {
     for f in files {
         if f.path == "/" {
             continue;
@@ -417,6 +417,17 @@ pub(crate) struct Explorer {
     /// register address.
     pub i2c_addr: u32,
     pub i2c_map: u8,
+    /// Running the LeapPad 2's programs (leappad2.rs): ARMv7, LF2000.
+    #[serde(default)]
+    pub leappad2: bool,
+    /// The screen (frame buffer and MLC) size; (0, 0) is the Explorer's 320x240.
+    #[serde(default)]
+    pub screen: (u32, u32),
+    /// The LeapPad 2's accelerometer as last reported: x, y, z, orientation.
+    #[serde(default)]
+    pub tilt: [i32; 4],
+    #[serde(default)]
+    pub tilt_tick: i32,
 }
 
 impl Process {
@@ -483,8 +494,20 @@ fn event(sec: u32, nsec: u32, kind: u16, code: u16, value: i32) -> [u8; 16] {
 impl Process {
     /// A process for the Leapster Explorer's programs.
     pub fn new_explorer(vfs: Vfs) -> Self {
-        let mut p = Self::with_memory(vfs, SDRAM, Some([(0x0010_0000, FB_BASE), (FB_BASE + FB_SIZE, SDRAM as u32)]));
+        Self::new_explorer_sized(vfs, SDRAM, (320, 240))
+    }
+
+    /// The screen's size (the Explorer's 320x240 unless set).
+    pub fn screen(&self) -> (u32, u32) {
+        if self.x.screen.0 == 0 { (320, 240) } else { self.x.screen }
+    }
+
+    /// The Explorer's HLE machine with `sdram` bytes and a screen of `screen`.
+    pub(super) fn new_explorer_sized(vfs: Vfs, sdram: usize, screen: (u32, u32)) -> Self {
+        let mut p = Self::with_memory(vfs, sdram, Some([(0x0010_0000, FB_BASE), (FB_BASE + FB_SIZE, sdram as u32)]));
         p.x.on = true;
+        p.x.screen = screen;
+        let (w, h) = screen;
         p.x.keys = vec![vec![0; 64]; 5];
         // The MLC as Emerald Boot leaves it showing its splash (as
         // explorer::show_splash; GUESS: its own register values are
@@ -492,7 +515,7 @@ impl Process {
         for off in (0..=0xA4).step_by(4) {
             p.m.bus.preset(crate::mlc::BASE + off, 0);
         }
-        for (off, v) in [(0x00, 0x2), (0x04, 239 << 16 | 319), (0x0C, 319), (0x10, 239), (0x24, 0x0653_0020), (0x28, 4), (0x2C, 320 * 4), (0x38, FB_BASE)] {
+        for (off, v) in [(0x00, 0x2), (0x04, (h - 1) << 16 | (w - 1)), (0x0C, w - 1), (0x10, h - 1), (0x24, 0x0653_0020), (0x28, 4), (0x2C, w * 4), (0x38, FB_BASE)] {
             p.m.bus.preset(crate::mlc::BASE + off, v);
         }
         p.fb_init();
@@ -568,6 +591,34 @@ impl Process {
         }
         self.x.touch = at;
         self.x_events(TOUCH, &out);
+    }
+
+    /// The LeapPad 2's accelerometer reading (lf2000_aclmtr.c's report on
+    /// /dev/input/event3: ABS_X, ABS_Y, ABS_Z in -32..31, ABS_MISC the
+    /// orientation 0-7, ABS_WHEEL a tick counting reports).
+    pub fn tilt(&mut self, x: i32, y: i32, z: i32, orientation: i32) {
+        if !self.x.leappad2 {
+            return;
+        }
+        // The driver reports only while enabled (its sysfs `enable`, written by
+        // AccelerometerMPI), and the orientation only with `orient` on.
+        let on = |p: &Self, f: &str| matches!(p.vfs.get(&format!("/sys/devices/platform/lf2000-aclmtr/{f}")).map(|n| &n.data), Some(super::vfs::Data::File(d)) if d.first() == Some(&b'1'));
+        if !on(self, "enable") {
+            return;
+        }
+        let orientation = if on(self, "orient") { orientation } else { self.x.tilt[3] };
+        let (sec, nsec) = self.now(0);
+        let mut out = Vec::new();
+        for (i, (code, v)) in [(0u16, x), (1, y), (2, z), (0x28, orientation)].into_iter().enumerate() {
+            if self.x.tilt[i] != v {
+                self.x.tilt[i] = v;
+                out.push(event(sec, nsec, 3, code, v));
+            }
+        }
+        self.x.tilt_tick = self.x.tilt_tick.wrapping_add(1);
+        out.push(event(sec, nsec, 3, 8, self.x.tilt_tick));
+        out.push(event(sec, nsec, 0, 0, 0));
+        self.x_events(3, &out);
     }
 
     pub(super) fn x_read(&mut self, rdev: u32, nonblock: bool, len: usize) -> Result<Vec<u8>, i32> {
@@ -693,10 +744,13 @@ impl Process {
             v
         };
         match cmd & 0xFF {
-            0x01 => self.x_put(arg, &0x1_0000u32.to_le_bytes()), // EVIOCGVERSION
+            // EVIOCGVERSION: EV_VERSION, 0x010000 in 2.6.31, 0x010001 in the
+            // LeapPad 2's 2.6.37 (include/linux/input.h); tslib wants it equal.
+            0x01 => self.x_put(arg, &(if self.x.leappad2 { 0x1_0001u32 } else { 0x1_0000 }).to_le_bytes()),
             0x02 => self.x_put(arg, &[0x19, 0, 1, 0, 1, 0, 1, 0]), // EVIOCGID: BUS_HOST 1 1 1
             0x06 => {
-                let mut name = INPUT_NAMES[n].as_bytes().to_vec();
+                let names = if self.x.leappad2 { super::leappad2::INPUT_NAMES } else { INPUT_NAMES };
+                let mut name = names[n].as_bytes().to_vec();
                 name.push(0);
                 name.truncate(size);
                 self.x_put(arg, &name)?;
@@ -722,6 +776,10 @@ impl Process {
                     (2, 0) => &[0xB],
                     (2, 1) => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x400],
                     (2, 3) => &[0x100_0003],
+                    // The LeapPad 2's event3 is the accelerometer (lf2000_aclmtr.c:
+                    // EV_KEY, EV_ABS; X, Y, Z, WHEEL, MISC).
+                    (3, 0) if self.x.leappad2 => &[0xB],
+                    (3, 3) if self.x.leappad2 => &[0x107, 0x100],
                     (3, 0) => &[0x9],
                     (3, 3) => &[0x7FF],
                     (4, 0) => &[0x21],
@@ -736,13 +794,17 @@ impl Process {
             0x40..=0x7F => {
                 // EVIOCGABS(axis): value, min, max, fuzz, flat. GUESS: the
                 // screen's size for x and y, 0-100 for pressure.
-                let (v, max) = match cmd & 0x3F {
-                    0 => (self.x.abs[0], 319),
-                    1 => (self.x.abs[1], 239),
-                    24 => (self.x.abs[2], 100),
-                    _ => (0, 65535),
+                let (w, h) = self.screen();
+                let (v, min, max) = match (n, cmd & 0x3F) {
+                    // The accelerometer: -32..31 on x, y, z, orientation 0-7.
+                    (3, 0..=2) if self.x.leappad2 => (self.x.tilt[(cmd & 0x3F) as usize], -32, 31),
+                    (3, 0x28) if self.x.leappad2 => (self.x.tilt[3], 0, 7),
+                    (_, 0) => (self.x.abs[0], 0, w as i32 - 1),
+                    (_, 1) => (self.x.abs[1], 0, h as i32 - 1),
+                    (_, 24) => (self.x.abs[2], 0, 100),
+                    _ => (0, 0, 65535),
                 };
-                let bytes: Vec<u8> = [v, 0, max, 0, 0].iter().flat_map(|w| w.to_le_bytes()).collect();
+                let bytes: Vec<u8> = [v, min, max, 0, 0].iter().flat_map(|w| w.to_le_bytes()).collect();
                 self.x_put(arg, &bytes[..size.min(20)])
             }
             0x90 => Ok(0), // EVIOCGRAB
@@ -919,7 +981,12 @@ impl Process {
     fn x_uname(&mut self, buf: u32) -> Result<u32, i32> {
         let mut u = vec![0u8; 6 * 65];
         let host = if self.x.hostname.is_empty() { "(none)".to_string() } else { self.x.hostname.clone() };
-        for (i, s) in ["Linux", host.as_str(), "2.6.31-leapfrog", "#1 Tue Sep 25 13:39:13 PDT 2012", "armv5tejl", "(none)"].iter().enumerate() {
+        let (release, version, machine) = if self.x.leappad2 {
+            (super::leappad2::UNAME[0], super::leappad2::UNAME[1], super::leappad2::UNAME[2])
+        } else {
+            ("2.6.31-leapfrog", "#1 Tue Sep 25 13:39:13 PDT 2012", "armv5tejl")
+        };
+        for (i, s) in ["Linux", host.as_str(), release, version, machine, "(none)"].iter().enumerate() {
             let s = &s.as_bytes()[..s.len().min(64)];
             u[i * 65..i * 65 + s.len()].copy_from_slice(s);
         }

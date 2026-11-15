@@ -12,6 +12,7 @@
 //! a key name (hle::key::by_name) pressed for 100 ms. EXPLORER_HLE_WAV=<file>
 //! saves the sound; EXPLORER_HLE_FRAMES=<folder> the screen whenever it
 //! changed (named by host ms); EXPLORER_HLE_FPS=1 prints frames a second.
+//! EXPLORER_HLE_LEAPPAD2=1 runs a LeapPad 2 package folder instead.
 
 use ribbit_didj::hle::Process;
 use std::io::Write;
@@ -23,6 +24,9 @@ fn main() {
         std::process::exit(2);
     };
     let t = std::time::Instant::now();
+    // EXPLORER_HLE_LEAPPAD2=1: the folder holds the LeapPad 2's packages
+    // (hle::leappad2: ARMv7, a 480x272 screen).
+    let leappad2 = std::env::var_os("EXPLORER_HLE_LEAPPAD2").is_some();
     // EXPLORER_HLE_SAVE=<file.nandblocks>: the file systems of the app's
     // save (Original's NAND with it applied; its .nandimage tells the 1 GB
     // NAND of older saves; its .nor beside).
@@ -47,13 +51,19 @@ fn main() {
         }
         let nor = std::fs::read(path.with_extension("nor")).ok();
         ribbit_didj::hle::explorer::system_from_nand(&flash, nor.as_deref()).unwrap_or_else(|e| panic!("{e}"))
+    } else if leappad2 {
+        let (vfs, skipped) = ribbit_didj::hle::leappad2::system_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+        for s in skipped {
+            eprintln!("[explorerhle] skipped {s}");
+        }
+        vfs
     } else {
         ribbit_didj::hle::explorer::system_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"))
     };
     eprintln!("[explorerhle] file systems read in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
-    let mut p = Process::new_explorer(vfs);
+    let mut p = if leappad2 { Process::new_leappad2(vfs) } else { Process::new_explorer(vfs) };
     p.trace = std::env::var_os("EXPLORER_HLE_TRACE").is_some();
-    if let Some(rle) = ribbit_didj::hle::explorer::splash_from_packages(dir.as_ref()) {
+    if let Some(rle) = ribbit_didj::hle::explorer::splash_from_packages(dir.as_ref()).filter(|_| !leappad2) {
         p.explorer_splash(&rle);
     }
     // EXPLORER_HLE_CART=<dump>: a cartridge in the slot from power-on
@@ -124,6 +134,13 @@ fn main() {
         }
         while let Some(i) = ups.iter().position(|&(at, _)| at <= ms) {
             p.key(ups.remove(i).1, false);
+        }
+        // EXPLORER_HLE_TILT=x,y,z,orientation: the LeapPad 2's accelerometer, reported every step.
+        if let Ok(v) = std::env::var("EXPLORER_HLE_TILT") {
+            let n: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            if n.len() == 4 {
+                p.tilt(n[0], n[1], n[2], n[3]);
+            }
         }
         let recording = frames_dir.is_some() && t.elapsed().as_millis() >= frames_from;
         let step = if recording { 1_000_000 } else { 5_000_000 };
