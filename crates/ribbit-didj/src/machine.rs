@@ -211,6 +211,12 @@ pub mod button {
         (VOLUME_UP, 7), (LEFT, 8), (UP, 9), (BRIGHTNESS, 10), (B, 11), (MENU, 12), (L, 13),
     ];
     pub const EXPLORER_ALL: u32 = 0x3FFF;
+    /// The LeapPad Explorer's buttons: (button, port, pin) (gpio_map.h
+    /// MADRID_*, LeapFrog's 2.6.37 kernel source; the LeapPad's 2.6.31
+    /// kernel is the same family): the d-pad, Home, volume up and down.
+    /// It has no A, B, shoulder, hint or pause buttons.
+    pub const MADRID: [(u32, usize, u32); 7] =
+        [(LEFT, 0, 29), (UP, 0, 28), (DOWN, 2, 3), (RIGHT, 2, 4), (MENU, 2, 6), (VOLUME_UP, 2, 2), (VOLUME_DOWN, 2, 14)];
     /// Pin 20, high while pressed (hwmon-lf1000.c: rising-edge interrupt,
     /// reported as KEY_POWER to monitord, which tells the app to shut down).
     pub const POWER: u32 = 1 << 20;
@@ -273,6 +279,10 @@ pub struct Bus {
     /// (gpio_map.h EMERALD_*).
     #[serde(default)]
     pub explorer: bool,
+    /// A LeapPad Explorer (with `explorer`): its 480x272 screen and its
+    /// buttons' pins (gpio_map.h MADRID_*).
+    #[serde(default)]
+    pub leappad: bool,
     /// Where the touch screen is touched (screen pixels), on the Explorer.
     #[serde(default)]
     pub touch: Option<(f32, f32)>,
@@ -298,6 +308,11 @@ pub struct Bus {
     /// I2C0 and the sound codec on it (Explorer only).
     #[serde(default)]
     pub i2c: crate::i2c::I2c,
+    /// The SD controllers, on a machine whose storage is an SD card (the
+    /// LeapPad Explorer, `sd.rs`); the card's contents are `nand`'s data
+    /// area, and the NAND controller then finds no internal chip.
+    #[serde(default)]
+    pub sd: Option<crate::sd::Sdhc>,
     /// Registers with no model: the last value written.
     regs: Regs,
     /// Unmodelled addresses in order of first access: (address, first PC,
@@ -411,6 +426,34 @@ impl Bus {
         self.ga3d.skip = self.skip_frames && self.skipped_in_row < 2;
     }
 
+    /// Moves SD data for the DMA commands waiting on the SD controllers.
+    fn sd_pump(&mut self) {
+        let Some(sd) = self.sd.as_mut() else { return };
+        for c in 0..2 {
+            while let Some((ch, src, dst, len, from_sd)) = self.dma.waiting(crate::sd::DMA_REQUESTS[c]) {
+                if from_sd {
+                    let Some(data) = sd.dma_read(c, len) else { break };
+                    let at = dst.wrapping_sub(self.ram_base) as usize;
+                    if let Some(m) = self.sdram.get_mut(at..at + data.len()) {
+                        m.copy_from_slice(&data);
+                        let pa = at + self.ram_base as usize;
+                        for page in (pa >> 10..=(pa + data.len().max(1) - 1) >> 10).map(|p| p << 10) {
+                            self.code.wrote(page);
+                        }
+                    }
+                } else {
+                    if !sd.wants_write(c) {
+                        break;
+                    }
+                    let at = src.wrapping_sub(self.ram_base) as usize;
+                    let data = self.sdram.get(at..at + len).map(<[u8]>::to_vec).unwrap_or_default();
+                    sd.dma_write(c, &data, &mut self.nand);
+                }
+                self.dma.served_done(ch, &self.sdram);
+            }
+        }
+    }
+
     /// Sets a register as a boot loader leaves it (no side effects).
     pub(crate) fn preset(&mut self, addr: u32, v: u32) {
         self.regs.insert(addr, v);
@@ -436,6 +479,9 @@ impl Bus {
     /// LFP100 interrupt (pin 14, high: GUESS, idle) and the headphone jack
     /// (pin 18, low: nothing plugged in).
     fn explorer_pad(&self, port: usize) -> u32 {
+        if self.leappad {
+            return self.leappad_pad(port);
+        }
         let base = GPIO + port as u32 * 0x40;
         match port {
             0 => {
@@ -454,10 +500,36 @@ impl Bus {
         }
     }
 
+    /// The touch point as the touch model takes it (Explorer screen pixels).
+    fn touch_point(&self) -> Option<(f32, f32)> {
+        if self.leappad { crate::touch::scale_touch(self.touch, crate::leappad::WIDTH, crate::leappad::HEIGHT) } else { self.touch }
+    }
+
+    /// The LeapPad Explorer's pins: port A the touch screen (as the
+    /// Explorer's), the cartridge detect and the d-pad's left and up; port C
+    /// the other buttons, the external power / LFP100 interrupt (pin 12,
+    /// high: GUESS, idle), the headphone jack (pin 10, low: nothing plugged
+    /// in) and the power button (pin 20, as the Explorer's: GUESS).
+    fn leappad_pad(&self, port: usize) -> u32 {
+        let base = GPIO + port as u32 * 0x40;
+        let released = |port: usize| {
+            button::MADRID.iter().filter(|&&(_, p, _)| p == port).fold(0, |v, &(b, _, pin)| if self.buttons & b != 0 { v } else { v | 1 << pin })
+        };
+        match port {
+            0 => {
+                let levels = crate::touch::levels(self.reg(base), self.reg(base + GPIOOUTENB), self.reg(base + GPIOPUENB), self.touch_point());
+                crate::touch::pad(levels) | if self.cart.is_some() { 0 } else { CART_DETECT } | released(0)
+            }
+            1 if let Some(c) = &self.cart => c.cart_type() << CART_CFG_SHIFT,
+            2 => released(2) | 1 << 12 | button::POWER & self.buttons,
+            _ => 0,
+        }
+    }
+
     /// An ADC reading: the Explorer's channels 4-7 are the touch screen.
     fn adc_reading(&self, ch: u32) -> u32 {
         if self.explorer && ch >= crate::touch::FIRST_ADC {
-            let levels = crate::touch::levels(self.reg(GPIO), self.reg(GPIO + GPIOOUTENB), self.reg(GPIO + GPIOPUENB), self.touch);
+            let levels = crate::touch::levels(self.reg(GPIO), self.reg(GPIO + GPIOOUTENB), self.reg(GPIO + GPIOPUENB), self.touch_point());
             return crate::touch::adc(levels[(ch - crate::touch::FIRST_ADC) as usize]);
         }
         ADC_READINGS[ch as usize]
@@ -593,6 +665,7 @@ impl Bus {
                 // is UNKNOWN. Saves made on the 1 GB Ribbit used before
                 // keep it, so it answers as Samsung K9K8G08 (8 Gbit).
                 let id = match self.nand.size() {
+                    _ if self.sd.is_some() => [0xFF; 5],
                     s if s > 512 << 20 => [0xEC, 0xD3, 0x51, 0x95, 0x58],
                     s if s > nand::SIZE => [0xEC, 0xDC, 0x10, 0x95, 0x54],
                     _ => [0x2C, 0xDA, 0x10, 0x95, 0x44],
@@ -757,6 +830,14 @@ impl Bus {
         if self.explorer && (crate::i2c::BASE..crate::i2c::END).contains(&addr) {
             return self.i2c.read(addr - crate::i2c::BASE);
         }
+        if let Some(c) = crate::sd::Sdhc::channel(addr)
+            && let Some(sd) = self.sd.as_mut()
+        {
+            let off = addr - crate::sd::BASES[c];
+            let v = sd.read(c, off & !3, &self.nand);
+            self.sd_pump();
+            return (v >> (8 * (addr & 3))) & if size == 4 { u32::MAX } else { (1 << (8 * size)) - 1 };
+        }
         if (crate::udc::BASE..crate::udc::END).contains(&addr) {
             return self.udc.read(addr - crate::udc::BASE, size);
         }
@@ -802,6 +883,12 @@ impl Bus {
         if self.explorer && (crate::i2c::BASE..crate::i2c::END).contains(&addr) {
             return self.i2c.write(addr - crate::i2c::BASE, v);
         }
+        if let Some(c) = crate::sd::Sdhc::channel(addr)
+            && let Some(sd) = self.sd.as_mut()
+        {
+            sd.write(c, (addr - crate::sd::BASES[c]) & !3, v, &mut self.nand);
+            return self.sd_pump();
+        }
         if (crate::udc::BASE..crate::udc::END).contains(&addr) {
             return self.udc.write(addr - crate::udc::BASE, v, size);
         }
@@ -818,7 +905,8 @@ impl Bus {
             let shift = 8 * (addr & 3);
             let mask = if size == 4 { u32::MAX } else { ((1 << (8 * size)) - 1) << shift };
             let old = self.dma.read(base);
-            return self.dma.write(base, (old & !mask) | ((v << shift) & mask), &self.sdram);
+            self.dma.write(base, (old & !mask) | ((v << shift) & mask), &self.sdram);
+            return self.sd_pump();
         }
         let shift = 8 * (addr & 3);
         let mask = if size == 4 { u32::MAX } else { ((1 << (8 * size)) - 1) << shift };
@@ -982,6 +1070,8 @@ impl Didj {
             sdram,
             ram_base: 0,
             explorer: false,
+            leappad: false,
+            sd: None,
             touch: None,
             nor: None,
             code: CodeWatch::default(),
@@ -1273,6 +1363,7 @@ impl Didj {
                     let skip = self.bus.timers.next_event(cpu_hz, plls).min(self.bus.dma.next_event(cpu_hz)).min(frame).min(end.saturating_sub(self.cpu.cycles));
                     // The USB host has work: wake again soon (`Udc::tick`).
                     let skip = if self.bus.udc.busy() { skip.min(cpu_hz / 20_000) } else { skip };
+                    let skip = skip.min(self.bus.sd.as_ref().map_or(u64::MAX, |s| s.next_event()));
                     self.cpu.cycles += skip.max(SLICE) - 1;
                     break;
                 }
@@ -1282,6 +1373,9 @@ impl Didj {
             self.bus.dma.tick(self.cpu.cycles - before, cpu_hz, &self.bus.sdram);
             self.bus.ga3d.tick(self.cpu.cycles - before, cpu_hz);
             self.bus.udc.tick(self.cpu.cycles - before, cpu_hz);
+            if let Some(sd) = self.bus.sd.as_mut() {
+                sd.tick(self.cpu.cycles - before);
+            }
             self.bus.frame_cycles += self.cpu.cycles - before;
             if self.bus.frame_cycles >= cpu_hz / FRAME_HZ {
                 self.bus.frame_cycles = 0;
@@ -1312,6 +1406,11 @@ impl Didj {
             }
             if self.bus.gpio_tick() {
                 self.bus.timers.raise(GPIO_IRQ);
+            }
+            if let Some(sd) = &self.bus.sd {
+                for irq in sd.irq_lines() {
+                    self.bus.timers.raise(irq);
+                }
             }
             (self.cpu.irq_line, self.cpu.fiq_line) = self.bus.timers.lines();
         }

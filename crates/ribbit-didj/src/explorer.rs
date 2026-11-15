@@ -115,6 +115,19 @@ pub fn tar_entries(tar: &[u8]) -> Result<Vec<(String, Entry)>, String> {
                 }
             }
             b'0' | 0 | b'7' => Kind::File(data.to_vec()),
+            // Device nodes and FIFOs (the LeapPad Explorer's root file
+            // system tar has /dev's): the number as UBIFS keeps it
+            // (new_encode_dev).
+            b'3' | b'4' | b'6' => {
+                let (major, minor) = (octal(&h[329..337]) as u32, octal(&h[337..345]) as u32);
+                let t = match kind {
+                    b'3' => 0o020000,
+                    b'4' => 0o060000,
+                    _ => 0o010000,
+                };
+                let dev = (minor & 0xFF) | major << 8 | (minor & !0xFF) << 12;
+                Kind::Special(t, if kind == b'6' { Vec::new() } else { dev.to_le_bytes().to_vec() })
+            }
             // Devices, FIFOs: nothing a package installs.
             _ => continue,
         };
@@ -335,15 +348,20 @@ fn show_splash(bus: &mut crate::machine::Bus) {
 /// FIRST.32.rle (the boot splash, `show_splash`) as 320x240 ARGB pixels;
 /// None if it doesn't fill the screen.
 pub fn splash_pixels(rle: &[u8]) -> Option<Vec<u32>> {
-    let mut pixels = Vec::with_capacity(320 * 240);
-    for w in rle.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)) {
-        let (n, c) = ((w >> 24) as usize, w & 0xFF_FFFF);
-        if n == 0 || pixels.len() + n > 320 * 240 {
+    rle_pixels(rle, 320, 240)
+}
+
+/// A 32-bit RLE splash (`splash_pixels`) of `w` x `h` pixels.
+pub fn rle_pixels(rle: &[u8], w: usize, h: usize) -> Option<Vec<u32>> {
+    let mut pixels = Vec::with_capacity(w * h);
+    for word in rle.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)) {
+        let (n, c) = ((word >> 24) as usize, word & 0xFF_FFFF);
+        if n == 0 || pixels.len() + n > w * h {
             break;
         }
         pixels.extend(std::iter::repeat_n(0xFF00_0000 | c, n));
     }
-    (pixels.len() == 320 * 240).then_some(pixels)
+    (pixels.len() == w * h).then_some(pixels)
 }
 
 pub fn boot(flash: Nand, cmdline: &str) -> Result<Didj, String> {
@@ -359,8 +377,18 @@ pub fn boot(flash: Nand, cmdline: &str) -> Result<Didj, String> {
     // Didj::with_sdram copied the NAND's first block to SDRAM 0, as the
     // Didj's boot ROM does; the Explorer starts from a clean memory.
     bus.sdram.fill(0);
+    start_kernel(&mut didj, &image, cmdline, BOARD_ID)?;
+    show_splash(&mut didj.bus);
+    Ok(didj)
+}
+
+/// What Emerald Boot (and the LeapPad Explorer's boot loader) do last:
+/// the kernel `image` at 0x8000_8000, the boot tags, the clocks and the
+/// Alive scratch register with `board_id`, the CPU at the kernel's start.
+pub(crate) fn start_kernel(didj: &mut Didj, image: &[u8], cmdline: &str, board_id: u8) -> Result<(), String> {
+    let bus = &mut didj.bus;
     let at = (KERNEL_AT - RAM_BASE) as usize;
-    bus.sdram.get_mut(at..at + image.len()).ok_or("the kernel doesn't fit in SDRAM")?.copy_from_slice(&image);
+    bus.sdram.get_mut(at..at + image.len()).ok_or("the kernel doesn't fit in SDRAM")?.copy_from_slice(image);
     let tags = boot_tags(cmdline);
     let at = (TAGS_AT - RAM_BASE) as usize;
     bus.sdram[at..at + tags.len()].copy_from_slice(&tags);
@@ -374,8 +402,7 @@ pub fn boot(flash: Nand, cmdline: &str) -> Result<Didj, String> {
     // mach-lf1000/include/mach/gpio.h layout): power COLD (bits 0-1), boot
     // image PLAY (6-7; RECOVERY makes rcS start recovery mode), board ID
     // (8-12) and boot source NAND (17-19).
-    bus.preset(0xC001_9018, 1 | 1 << 6 | (BOARD_ID as u32) << 8 | 2 << 17);
-    show_splash(bus);
+    bus.preset(0xC001_9018, 1 | 1 << 6 | (board_id as u32) << 8 | 2 << 17);
     didj.jit = crate::machine::jit_for(RAM_BASE, SDRAM_SIZE);
     let cpu = &mut didj.cpu;
     cpu.set_mode(mode::SVC);
@@ -383,7 +410,7 @@ pub fn boot(flash: Nand, cmdline: &str) -> Result<Didj, String> {
     cpu.r[1] = MACHINE;
     cpu.r[2] = TAGS_AT;
     cpu.r[15] = KERNEL_AT;
-    Ok(didj)
+    Ok(())
 }
 
 /// ATAG_CORE, ATAG_MEM (all of SDRAM; the command line's `mem=` narrows

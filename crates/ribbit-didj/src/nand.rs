@@ -269,6 +269,20 @@ impl Nand {
         }
     }
 
+    /// Writes `data` at any byte `offset` of the data area, leaving the
+    /// spare areas as they are: the NAND used as plain storage (the
+    /// LeapPad Explorer's SD card, `sd.rs`).
+    pub fn write_bytes(&mut self, offset: usize, data: &[u8]) {
+        let mut o = offset;
+        let mut rest = data;
+        while !rest.is_empty() {
+            let n = (PAGE - o % PAGE).min(rest.len());
+            self.page_mut(o / PAGE)[o % PAGE..][..n].copy_from_slice(&rest[..n]);
+            o += n;
+            rest = &rest[n..];
+        }
+    }
+
     /// Reads the data area from byte `offset` (spare areas skipped).
     pub fn read(&self, offset: usize, len: usize) -> Vec<u8> {
         let mut out = Vec::with_capacity(len);
