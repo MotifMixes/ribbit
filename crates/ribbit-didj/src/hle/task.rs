@@ -588,6 +588,9 @@ impl Process {
                 POLLNVAL
             };
             let word = events as u32 | (revents as u32) << 16;
+            if self.trace && revents != 0 {
+                eprintln!("[hle {}] poll fd {fd} events {events:#x} revents {revents:#x}", self.tid);
+            }
             self.mem().put32(at + 4, word);
             count += (revents != 0) as u32;
         }

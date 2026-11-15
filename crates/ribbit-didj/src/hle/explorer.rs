@@ -168,7 +168,7 @@ const PROC_FILES: &[(&str, &str)] = &[
 
 /// The Explorer's /dev as Original has it (`ls -l /dev`, 2026-11-12):
 /// (name, major, minor). rcS also unpacks /var/dev_nodes.tar over it.
-const DEV_NODES: &[(&str, u32, u32)] = &[
+pub(super) const DEV_NODES: &[(&str, u32, u32)] = &[
     ("console", 5, 1),
     ("fb0", 29, 0),
     ("fb1", 29, 1),
@@ -238,7 +238,7 @@ pub fn system_from_packages(dir: &std::path::Path) -> Result<Vfs, String> {
 }
 
 /// Puts a UBIFS volume's files into `vfs` under `at` ("" for the root).
-fn add_files(vfs: &mut Vfs, at: &str, files: Vec<crate::ubifs_read::File>) {
+pub(super) fn add_files(vfs: &mut Vfs, at: &str, files: Vec<crate::ubifs_read::File>) {
     for f in files {
         if f.path == "/" {
             continue;
@@ -260,6 +260,11 @@ fn add_files(vfs: &mut Vfs, at: &str, files: Vec<crate::ubifs_read::File>) {
 /// What the kernel and boot add around the file systems: /dev, /tmp,
 /// /sys, /proc, the NOR's partitions.
 fn finish(vfs: &mut Vfs, nor: Option<&[u8]>) {
+    finish_with(vfs, nor, false);
+}
+
+/// `finish`, for the LeapPad Explorer with `leappad` (its /sys files).
+pub(super) fn finish_with(vfs: &mut Vfs, nor: Option<&[u8]>, leappad: bool) {
     for d in ["/tmp", "/dev/pts", "/var/volatile/run", "/var/volatile/log", "/LF/Cart", "/LF/fuse"] {
         vfs.mkdir_all(d);
     }
@@ -274,6 +279,11 @@ fn finish(vfs: &mut Vfs, nor: Option<&[u8]>) {
         None => set_nor(vfs, &crate::nor::image(crate::explorer::SERIAL).data),
     }
     add_sysfs(vfs);
+    if leappad {
+        for (path, text) in super::leappad::platform_overrides() {
+            vfs.add_file(&format!("{PLATFORM}/{path}"), text.into_bytes());
+        }
+    }
 }
 
 /// Emerald Boot's splash (FIRST.32.rle, Firmware Base's I18n_Screens
@@ -417,6 +427,32 @@ pub(crate) struct Explorer {
     /// register address.
     pub i2c_addr: u32,
     pub i2c_map: u8,
+    /// Running the LeapPad 2's programs (leappad2.rs): ARMv7, LF2000.
+    #[serde(default)]
+    pub leappad2: bool,
+    /// The LeapPad 2's accelerometer as last reported: x, y, z, orientation.
+    #[serde(default)]
+    pub tilt: [i32; 4],
+    #[serde(default)]
+    pub tilt_tick: i32,
+    #[serde(skip)]
+    pub jitter: bool,
+    /// SysV semaphore sets by id: (key, values).
+    #[serde(default)]
+    pub sems: std::collections::BTreeMap<u32, (u32, Vec<i32>)>,
+    /// A LeapPad Explorer (`leappad.rs`): board ID 0x0B, its screen.
+    #[serde(default)]
+    pub leappad: bool,
+    /// The screen's size; (0, 0) is the Explorer's 320x240.
+    #[serde(default)]
+    pub screen: (u32, u32),
+}
+
+impl Explorer {
+    /// The screen's size in pixels.
+    pub fn screen(&self) -> (u32, u32) {
+        if self.screen.0 == 0 { (320, 240) } else { self.screen }
+    }
 }
 
 impl Process {
@@ -483,8 +519,15 @@ fn event(sec: u32, nsec: u32, kind: u16, code: u16, value: i32) -> [u8; 16] {
 impl Process {
     /// A process for the Leapster Explorer's programs.
     pub fn new_explorer(vfs: Vfs) -> Self {
+        Self::new_explorer_sized(vfs, 320, 240)
+    }
+
+    /// `new_explorer` with a screen of `w` x `h` pixels (the LeapPad
+    /// Explorer's 480x272).
+    pub fn new_explorer_sized(vfs: Vfs, w: u32, h: u32) -> Self {
         let mut p = Self::with_memory(vfs, SDRAM, Some([(0x0010_0000, FB_BASE), (FB_BASE + FB_SIZE, SDRAM as u32)]));
         p.x.on = true;
+        p.x.screen = (w, h);
         p.x.keys = vec![vec![0; 64]; 5];
         // The MLC as Emerald Boot leaves it showing its splash (as
         // explorer::show_splash; GUESS: its own register values are
@@ -492,7 +535,7 @@ impl Process {
         for off in (0..=0xA4).step_by(4) {
             p.m.bus.preset(crate::mlc::BASE + off, 0);
         }
-        for (off, v) in [(0x00, 0x2), (0x04, 239 << 16 | 319), (0x0C, 319), (0x10, 239), (0x24, 0x0653_0020), (0x28, 4), (0x2C, 320 * 4), (0x38, FB_BASE)] {
+        for (off, v) in [(0x00, 0x2), (0x04, (h - 1) << 16 | (w - 1)), (0x0C, w - 1), (0x10, h - 1), (0x24, 0x0653_0020), (0x28, 4), (0x2C, w * 4), (0x38, FB_BASE)] {
             p.m.bus.preset(crate::mlc::BASE + off, v);
         }
         p.fb_init();
@@ -554,7 +597,15 @@ impl Process {
             let bits = &mut self.x.keys[TOUCH][BTN_TOUCH as usize / 8];
             *bits ^= 1 << (BTN_TOUCH % 8);
         }
-        let (x, y) = at.or(was).unwrap_or((0, 0));
+        let (mut x, y) = at.or(was).unwrap_or((0, 0));
+        // The LeapPad 2's driver reports samples all the time the stylus is
+        // down, each a little different, and tslib's variance and dejitter
+        // filters want several to pass one on; a held stylus moves a pixel
+        // back and forth here (the Explorer's own setup works without).
+        if self.x.leappad2 && at.is_some() && was == at {
+            self.x.jitter = !self.x.jitter;
+            x += self.x.jitter as i32;
+        }
         let values = [x, y, if at.is_some() { PRESSURE } else { 0 }];
         for (i, v) in values.into_iter().enumerate() {
             let code = if i == 2 { 24 } else { i as u16 };
@@ -568,6 +619,34 @@ impl Process {
         }
         self.x.touch = at;
         self.x_events(TOUCH, &out);
+    }
+
+    /// The LeapPad 2's accelerometer reading (lf2000_aclmtr.c's report on
+    /// /dev/input/event3: ABS_X, ABS_Y, ABS_Z in -32..31, ABS_MISC the
+    /// orientation 0-7, ABS_WHEEL a tick counting reports).
+    pub fn tilt(&mut self, x: i32, y: i32, z: i32, orientation: i32) {
+        if !self.x.leappad2 {
+            return;
+        }
+        // The driver reports only while enabled (its sysfs `enable`, written by
+        // AccelerometerMPI), and the orientation only with `orient` on.
+        let on = |p: &Self, f: &str| matches!(p.vfs.get(&format!("/sys/devices/platform/lf2000-aclmtr/{f}")).map(|n| &n.data), Some(super::vfs::Data::File(d)) if d.first() == Some(&b'1'));
+        if !on(self, "enable") {
+            return;
+        }
+        let orientation = if on(self, "orient") { orientation } else { self.x.tilt[3] };
+        let (sec, nsec) = self.now(0);
+        let mut out = Vec::new();
+        for (i, (code, v)) in [(0u16, x), (1, y), (2, z), (0x28, orientation)].into_iter().enumerate() {
+            if self.x.tilt[i] != v {
+                self.x.tilt[i] = v;
+                out.push(event(sec, nsec, 3, code, v));
+            }
+        }
+        self.x.tilt_tick = self.x.tilt_tick.wrapping_add(1);
+        out.push(event(sec, nsec, 3, 8, self.x.tilt_tick));
+        out.push(event(sec, nsec, 0, 0, 0));
+        self.x_events(3, &out);
     }
 
     pub(super) fn x_read(&mut self, rdev: u32, nonblock: bool, len: usize) -> Result<Vec<u8>, i32> {
@@ -693,10 +772,13 @@ impl Process {
             v
         };
         match cmd & 0xFF {
-            0x01 => self.x_put(arg, &0x1_0000u32.to_le_bytes()), // EVIOCGVERSION
+            // EVIOCGVERSION: EV_VERSION, 0x010000 in 2.6.31, 0x010001 in the
+            // LeapPad 2's 2.6.37 (include/linux/input.h); tslib wants it equal.
+            0x01 => self.x_put(arg, &(if self.x.leappad2 { 0x1_0001u32 } else { 0x1_0000 }).to_le_bytes()),
             0x02 => self.x_put(arg, &[0x19, 0, 1, 0, 1, 0, 1, 0]), // EVIOCGID: BUS_HOST 1 1 1
             0x06 => {
-                let mut name = INPUT_NAMES[n].as_bytes().to_vec();
+                let names = if self.x.leappad2 { super::leappad2::INPUT_NAMES } else { INPUT_NAMES };
+                let mut name = names[n].as_bytes().to_vec();
                 name.push(0);
                 name.truncate(size);
                 self.x_put(arg, &name)?;
@@ -722,6 +804,10 @@ impl Process {
                     (2, 0) => &[0xB],
                     (2, 1) => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x400],
                     (2, 3) => &[0x100_0003],
+                    // The LeapPad 2's event3 is the accelerometer (lf2000_aclmtr.c:
+                    // EV_KEY, EV_ABS; X, Y, Z, WHEEL, MISC).
+                    (3, 0) if self.x.leappad2 => &[0xB],
+                    (3, 3) if self.x.leappad2 => &[0x107, 0x100],
                     (3, 0) => &[0x9],
                     (3, 3) => &[0x7FF],
                     (4, 0) => &[0x21],
@@ -736,13 +822,17 @@ impl Process {
             0x40..=0x7F => {
                 // EVIOCGABS(axis): value, min, max, fuzz, flat. GUESS: the
                 // screen's size for x and y, 0-100 for pressure.
-                let (v, max) = match cmd & 0x3F {
-                    0 => (self.x.abs[0], 319),
-                    1 => (self.x.abs[1], 239),
-                    24 => (self.x.abs[2], 100),
-                    _ => (0, 65535),
+                let (w, h) = self.screen();
+                let (v, min, max) = match (n, cmd & 0x3F) {
+                    // The accelerometer: -32..31 on x, y, z, orientation 0-7.
+                    (3, 0..=2) if self.x.leappad2 => (self.x.tilt[(cmd & 0x3F) as usize], -32, 31),
+                    (3, 0x28) if self.x.leappad2 => (self.x.tilt[3], 0, 7),
+                    (_, 0) => (self.x.abs[0], 0, w as i32 - 1),
+                    (_, 1) => (self.x.abs[1], 0, h as i32 - 1),
+                    (_, 24) => (self.x.abs[2], 0, 100),
+                    _ => (0, 0, 65535),
                 };
-                let bytes: Vec<u8> = [v, 0, max, 0, 0].iter().flat_map(|w| w.to_le_bytes()).collect();
+                let bytes: Vec<u8> = [v, min, max, 0, 0].iter().flat_map(|w| w.to_le_bytes()).collect();
                 self.x_put(arg, &bytes[..size.min(20)])
             }
             0x90 => Ok(0), // EVIOCGRAB
@@ -765,6 +855,8 @@ impl Process {
         Some(match n {
             14 => self.x_mknod(a[0], a[1], a[2]),
             281..=297 | 366 => self.x_socket_call(n, a),
+            // SysV semaphores (semop, semget, semctl, semtimedop): libvr5 and dmix use them.
+            298..=300 | 312 => self.sysv_sem(n, a),
             5 | 322 => {
                 // /proc/uptime is made when read.
                 let at = if n == 5 { a[0] } else { a[1] };
@@ -919,7 +1011,12 @@ impl Process {
     fn x_uname(&mut self, buf: u32) -> Result<u32, i32> {
         let mut u = vec![0u8; 6 * 65];
         let host = if self.x.hostname.is_empty() { "(none)".to_string() } else { self.x.hostname.clone() };
-        for (i, s) in ["Linux", host.as_str(), "2.6.31-leapfrog", "#1 Tue Sep 25 13:39:13 PDT 2012", "armv5tejl", "(none)"].iter().enumerate() {
+        let (release, version, machine) = if self.x.leappad2 {
+            (super::leappad2::UNAME[0], super::leappad2::UNAME[1], super::leappad2::UNAME[2])
+        } else {
+            ("2.6.31-leapfrog", "#1 Tue Sep 25 13:39:13 PDT 2012", "armv5tejl")
+        };
+        for (i, s) in ["Linux", host.as_str(), release, version, machine, "(none)"].iter().enumerate() {
             let s = &s.as_bytes()[..s.len().min(64)];
             u[i * 65..i * 65 + s.len()].copy_from_slice(s);
         }
@@ -1026,6 +1123,11 @@ const DEV_TAR: [&str; 2] = ["/var/dev_nodes.tar", "/var/dev_nodes_doom"];
 /// `saved` for a node: under /var/volatile only folders.
 fn saved_node(path: &str, node: &super::vfs::Node) -> bool {
     saved(path) && (!path.starts_with("/var/volatile/") || node.is_dir())
+}
+
+/// `tree_of`, for the LeapPad's saves (`leappad.rs`).
+pub(super) fn saved_tree(vfs: &Vfs, under: &str, keep: impl Fn(&str) -> bool) -> crate::ubifs::Tree {
+    tree_of(vfs, under, keep)
 }
 
 /// The UBIFS tree (paths relative to `under`) of the files below `under`
@@ -1269,7 +1371,7 @@ const CART_MTD: &str = "mtd10: 04000000 00004000 \"Cartridge\"\nmtd11: 03b5ec00 
 const CART_MOUNT: &str = "/dev/mtdblock11 /LF/Cart vfat ro,relatime,fmask=0022,dmask=0022,codepage=cp437,iocharset=iso8859-1,errors=remount-ro 0 0\n";
 
 impl Process {
-    fn proc_file(&self, path: &str) -> String {
+    pub(super) fn proc_file(&self, path: &str) -> String {
         match self.vfs.get(path).map(|n| &n.data) {
             Some(Data::File(d)) => String::from_utf8_lossy(d).into_owned(),
             _ => String::new(),
@@ -1284,6 +1386,9 @@ impl Process {
     /// /LF/Cart through the HLE (`mount`). At power-on CartManager finds it
     /// by itself.
     pub fn explorer_cart(&mut self, raw: Option<&[u8]>) -> Result<(), String> {
+        if self.x.leappad2 {
+            return self.leappad2_cart(raw);
+        }
         let files = match raw {
             Some(r) => Some(crate::cart::files(r).ok_or("no cartridge volume in the dump")?),
             None => None,

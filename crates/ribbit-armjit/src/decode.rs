@@ -99,8 +99,33 @@ fn reg_operand(w: u32) -> Operand {
 
 /// The instruction `w` at address `pc`.
 pub(crate) fn decode(w: u32, pc: u32) -> Instr {
+    decode_for(w, pc, false)
+}
+
+/// The instruction `w` at `pc`, for an ARMv7 processor when `v7` (MOVW
+/// compiled as a MOV; MOVT, the exclusives, the media and VFP instructions
+/// interpreted without ending the block).
+pub(crate) fn decode_for(w: u32, pc: u32, v7: bool) -> Instr {
     let cond = w >> 28;
     let exec = Instr::Exec { cond, w, ends: false };
+    if v7 && cond != 0xF {
+        if w & 0x0FF0_0000 == 0x0300_0000 {
+            let rd = (w >> 12) & 0xF;
+            if rd != 15 {
+                let imm = ((w >> 4) & 0xF000) | (w & 0xFFF);
+                return Instr::Alu { cond, op: 0xD, s: false, rn: 0, rd, op2: Operand::Imm(imm, None) };
+            }
+            return Instr::Exec { cond, w, ends: true };
+        }
+        if w & 0x0FF0_0000 == 0x0340_0000 {
+            let rd = (w >> 12) & 0xF;
+            return Instr::Exec { cond, w, ends: rd == 15 };
+        }
+        // VFP (coprocessors 10 and 11): never a branch (VMRS APSR_nzcv only sets flags).
+        if matches!((w >> 25) & 7, 6 | 7) && matches!((w >> 8) & 0xF, 10 | 11) && w & 0x0F00_0000 != 0x0F00_0000 {
+            return exec;
+        }
+    }
     if cond == 0xF {
         if w & 0x0D70_F000 == 0x0550_F000 {
             return Instr::Nop;

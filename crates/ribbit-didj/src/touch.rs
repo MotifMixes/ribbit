@@ -38,6 +38,24 @@ const CAL: [f64; 7] = [25_786_444.0, -29_676.0, -170.0, 21_441_222.0, -632.0, -2
 /// MfgData gives it.
 pub const POINTERCAL: [i32; 7] = [-29_676, -170, 25_786_444, -632, -26_927, 21_441_222, 65_536];
 
+/// The calibration for a screen of `w` x `h` pixels (pointercal order):
+/// the Explorer's scaled, so that a point reads the same at the ADC as the
+/// same place on the Explorer's 320x240 screen (`scale_touch`). For the
+/// LeapPad Explorer's 480x272. GUESS: its real factory values are UNKNOWN.
+pub fn pointercal_for(w: u32, h: u32) -> [i32; 7] {
+    let [a1, a2, a0, a4, a5, a3, a6] = POINTERCAL;
+    let (sx, sy) = (w as f64 / 320.0, h as f64 / 240.0);
+    let x = |v: i32| (v as f64 * sx).round() as i32;
+    let y = |v: i32| (v as f64 * sy).round() as i32;
+    [x(a1), x(a2), x(a0), y(a4), y(a5), y(a3), a6]
+}
+
+/// A point on a `w` x `h` screen as the same place on the Explorer's
+/// 320x240 one (what the touch model works in).
+pub fn scale_touch(touch: Option<(f32, f32)>, w: u32, h: u32) -> Option<(f32, f32)> {
+    touch.map(|(x, y)| ((x + 0.5) * 320.0 / w as f32 - 0.5, (y + 0.5) * 240.0 / h as f32 - 0.5))
+}
+
 /// The ADC readings the driver averages into its position for a screen
 /// point (the calibration solved backwards, aiming at the pixel's middle).
 fn raw_for(sx: f64, sy: f64) -> (f64, f64) {

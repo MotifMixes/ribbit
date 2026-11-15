@@ -555,10 +555,17 @@ pub fn files(lebs: &BTreeMap<u32, Vec<u8>>) -> Result<Vec<File>, String> {
         .collect())
 }
 
-/// The files of the UBIFS in a UBI image (erase blocks of 128 KiB, user
-/// volume 0).
+/// A UBI image's erase block size: where the second erase counter header
+/// starts (128 KiB on the LF1000's NAND, 1 MiB on the LeapPad 2's,
+/// "C4G-E1M-W4K"); 128 KiB when there's one block or none.
+pub fn ubi_peb_size(image: &[u8]) -> usize {
+    (1..=64).map(|k| k * (16 << 10)).find(|&at| image.get(at..at + 4) == Some(b"UBI#")).unwrap_or(128 << 10)
+}
+
+/// The files of the UBIFS in a UBI image (user volume 0; erase blocks of
+/// `ubi_peb_size`).
 pub fn files_in_ubi(image: &[u8]) -> Result<Vec<File>, String> {
-    let lebs = ubi_lebs(image, 128 << 10, 0);
+    let lebs = ubi_lebs(image, ubi_peb_size(image), 0);
     if lebs.is_empty() {
         return Err("no UBI volume 0 in the image".into());
     }

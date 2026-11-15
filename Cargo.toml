@@ -6,6 +6,7 @@ members = [
     "crates/ribbit-jit",
     "crates/ribbit-arm",
     "crates/ribbit-armjit",
+    "crates/ribbit-gles",
     "crates/ribbit-zippity",
     "crates/ribbit-clickstart",
     "crates/ribbit-twist",
@@ -27,6 +28,7 @@ default-members = [
     "crates/ribbit-jit",
     "crates/ribbit-arm",
     "crates/ribbit-armjit",
+    "crates/ribbit-gles",
     "crates/ribbit-zippity",
     "crates/ribbit-clickstart",
     "crates/ribbit-twist",
@@ -56,6 +58,7 @@ ribbit-cpu = { path = "crates/ribbit-cpu" }
 ribbit-jit = { path = "crates/ribbit-jit" }
 ribbit-arm = { path = "crates/ribbit-arm" }
 ribbit-armjit = { path = "crates/ribbit-armjit" }
+ribbit-gles = { path = "crates/ribbit-gles" }
 ribbit-zippity = { path = "crates/ribbit-zippity" }
 ribbit-clickstart = { path = "crates/ribbit-clickstart" }
 ribbit-twist = { path = "crates/ribbit-twist" }

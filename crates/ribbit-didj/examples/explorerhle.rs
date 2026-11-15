@@ -12,6 +12,7 @@
 //! a key name (hle::key::by_name) pressed for 100 ms. EXPLORER_HLE_WAV=<file>
 //! saves the sound; EXPLORER_HLE_FRAMES=<folder> the screen whenever it
 //! changed (named by host ms); EXPLORER_HLE_FPS=1 prints frames a second.
+//! EXPLORER_HLE_LEAPPAD2=1 runs a LeapPad 2 package folder instead.
 
 use ribbit_didj::hle::Process;
 use std::io::Write;
@@ -23,10 +24,25 @@ fn main() {
         std::process::exit(2);
     };
     let t = std::time::Instant::now();
+    // EXPLORER_HLE_LEAPPAD2=1: the folder holds the LeapPad 2's packages
+    // (hle::leappad2: ARMv7, a 480x272 screen).
+    let leappad2 = std::env::var_os("EXPLORER_HLE_LEAPPAD2").is_some();
     // EXPLORER_HLE_SAVE=<file.nandblocks>: the file systems of the app's
     // save (Original's NAND with it applied; its .nandimage tells the 1 GB
     // NAND of older saves; its .nor beside).
-    let vfs = if let Ok(path) = std::env::var("EXPLORER_HLE_SAVE") {
+    // A folder of LeapPad Explorer packages: its file systems from the SD
+    // card built from them (EXPLORER_HLE_SAVE: the app's save of it).
+    let leappad = ribbit_didj::leappad::is_leappad_dir(dir.as_ref());
+    let mut card = None;
+    let vfs = if leappad {
+        let mut c = ribbit_didj::leappad::card_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+        if let Ok(path) = std::env::var("EXPLORER_HLE_SAVE") {
+            c.apply_changes(&std::fs::read(&path).expect("can't read the save")).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let vfs = ribbit_didj::hle::leappad::system_from_card(&c, None).unwrap_or_else(|e| panic!("{e}"));
+        card = Some(c);
+        vfs
+    } else if let Ok(path) = std::env::var("EXPLORER_HLE_SAVE") {
         let path = std::path::PathBuf::from(path);
         let mut flash = ribbit_didj::explorer::nand_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
         let image = std::fs::read_to_string(path.with_extension("nandimage")).unwrap_or_default();
@@ -47,13 +63,35 @@ fn main() {
         }
         let nor = std::fs::read(path.with_extension("nor")).ok();
         ribbit_didj::hle::explorer::system_from_nand(&flash, nor.as_deref()).unwrap_or_else(|e| panic!("{e}"))
+    } else if leappad2 {
+        let (vfs, skipped) = ribbit_didj::hle::leappad2::system_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+        for s in skipped {
+            eprintln!("[explorerhle] skipped {s}");
+        }
+        vfs
     } else {
         ribbit_didj::hle::explorer::system_from_packages(dir.as_ref()).unwrap_or_else(|e| panic!("{e}"))
     };
     eprintln!("[explorerhle] file systems read in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
-    let mut p = Process::new_explorer(vfs);
+    // EXPLORER_HLE_STATE=<file>: start from a save state (made by
+    // EXPLORER_HLE_STATE_OUT=<file> at the end of a run of the same folder).
+    let base = vfs.clone();
+    let mut p = if leappad2 {
+        Process::new_leappad2(vfs)
+    } else if leappad {
+        Process::new_leappad(vfs)
+    } else {
+        Process::new_explorer(vfs)
+    };
+    let from_state = std::env::var("EXPLORER_HLE_STATE").ok();
+    if let Some(path) = &from_state {
+        p.load_state(&std::fs::read(path).expect("the state"), &base).unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("[explorerhle] started from {path}");
+    }
     p.trace = std::env::var_os("EXPLORER_HLE_TRACE").is_some();
-    if let Some(rle) = ribbit_didj::hle::explorer::splash_from_packages(dir.as_ref()) {
+    if let Some(c) = &card {
+        p.leappad_splash(c);
+    } else if let Some(rle) = ribbit_didj::hle::explorer::splash_from_packages(dir.as_ref()).filter(|_| !leappad2) {
         p.explorer_splash(&rle);
     }
     // EXPLORER_HLE_CART=<dump>: a cartridge in the slot from power-on
@@ -65,12 +103,18 @@ fn main() {
     }
     // EXPLORER_HLE_CONSOLE_OUT=1: /flags/console_out, so /usr/bin/app lets
     // AppManager and CartManager print to the console.
+    // EXPLORER_HLE_ADD=<path>,...: empty files put in the file tree first (flags).
+    for path in std::env::var("EXPLORER_HLE_ADD").unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
+        p.vfs.add_file(path, Vec::new());
+    }
     if std::env::var_os("EXPLORER_HLE_CONSOLE_OUT").is_some() {
         p.vfs.add_file("/flags/console_out", Vec::new());
     }
     let argv: Vec<&str> = if args.len() > 1 { args[1..].iter().map(String::as_str).collect() } else { vec!["/sbin/init"] };
     let envp = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/", "TERM=vt100"];
-    p.exec(argv[0], &argv, &envp).unwrap_or_else(|e| panic!("{e}"));
+    if from_state.is_none() {
+        p.exec(argv[0], &argv, &envp).unwrap_or_else(|e| panic!("{e}"));
+    }
     let until_ms: u128 = std::env::var("EXPLORER_HLE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(20000);
     let shot_path = std::env::var("EXPLORER_HLE_SHOT").unwrap_or_else(|_| "shot.png".into());
     let mut shots: Vec<u128> = std::env::var("EXPLORER_HLE_SHOTS").unwrap_or_default().split(',').filter_map(|v| v.parse().ok()).collect();
@@ -86,6 +130,7 @@ fn main() {
         .collect();
     input.sort_by_key(|e| e.0);
     let mut ups: Vec<(u128, u16)> = Vec::new();
+    let mut held: Option<(i32, i32)> = None;
     let mut sound: Vec<i16> = Vec::new();
     let (mut rate, mut channels) = (32000, 2);
     let frames_dir = std::env::var("EXPLORER_HLE_FRAMES").ok();
@@ -111,8 +156,10 @@ fn main() {
                 p.explorer_cart(raw.as_deref()).unwrap_or_else(|e| panic!("{e}"));
             } else if what == "lift" {
                 p.stylus(None);
+                held = None;
             } else if let Some((x, y)) = what.split_once(',') {
-                p.stylus(Some((x.parse().expect("x"), y.parse().expect("y"))));
+                held = Some((x.parse().expect("x"), y.parse().expect("y")));
+                p.stylus(held);
             } else {
                 // A key name, or k<Linux key code> (k115 volume up, k114
                 // down); `+<ms>` holds it that long (else 100 ms).
@@ -122,8 +169,19 @@ fn main() {
                 ups.push((ms + hold, code));
             }
         }
+        // A held stylus is reported again every step (the driver samples it).
+        if held.is_some() {
+            p.stylus(held);
+        }
         while let Some(i) = ups.iter().position(|&(at, _)| at <= ms) {
             p.key(ups.remove(i).1, false);
+        }
+        // EXPLORER_HLE_TILT=x,y,z,orientation: the LeapPad 2's accelerometer, reported every step.
+        if let Ok(v) = std::env::var("EXPLORER_HLE_TILT") {
+            let n: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            if n.len() == 4 {
+                p.tilt(n[0], n[1], n[2], n[3]);
+            }
         }
         let recording = frames_dir.is_some() && t.elapsed().as_millis() >= frames_from;
         let step = if recording { 1_000_000 } else { 5_000_000 };
@@ -179,6 +237,14 @@ fn main() {
         f.extend((data.len() as u32).to_le_bytes());
         f.extend(&data);
         std::fs::write(&path, f).expect("can't write the WAV");
+    }
+    // EXPLORER_HLE_JIT_STATS=1: the JIT's counters at the end.
+    if std::env::var_os("EXPLORER_HLE_JIT_STATS").is_some() {
+        eprintln!("[explorerhle] JIT: {:?}", p.m.jit.stats);
+    }
+    if let Ok(path) = std::env::var("EXPLORER_HLE_STATE_OUT") {
+        std::fs::write(&path, p.save_state(&base)).expect("write the state");
+        eprintln!("[explorerhle] state saved to {path}");
     }
     // EXPLORER_HLE_CAT=<path>,...: files' contents at the end (folders
     // listed).

@@ -13,6 +13,15 @@
 //!   and shuts down after 4 (10 paused). The timer is reached pc-relative,
 //!   with no relocation (`ldr r3,[pc,#0x428]` = 0x30964: 0x66AD8 + 0x314 =
 //!   0x66DEC, in .bss).
+//! * Leapster Explorer and LeapPad Explorer 2.x firmware (one root file
+//!   system for both; Firmware Base 2.4.10.3030, disassembled 2026-11-15):
+//!   UpdateInactivity at 0x354BC, its statics pc-relative (`ldr r3,[pc,
+//!   #0x428]` = 0x30108, then `add r3, pc, r3`), the timer at 0x65904; it
+//!   shuts down past 239 999 ms (599 999 ms paused), dims past 119 999 ms.
+//! * LeapPad 2 (Firmware-Base 4.6.0.784, ARMv7; disassembled 2026-11-15):
+//!   UpdateInactivity at 0x3DC30 (`push {r4-sl, lr}`, `add r7, r0, #0x14`,
+//!   `sub sp, sp, #0x30`), its statics from the literal at 0x3E174 (0x29898)
+//!   plus pc at 0x3DC60, the timer at 0x6780C; the Explorer 2.x's limits.
 //!
 //! "Turn off when idle" off (Ribbit's default): the timer is kept at 0 from
 //! outside, as the Leapster's BIOS count is refilled, on every mode. Found
@@ -43,7 +52,7 @@ enum Literal {
     Word(u32),
 }
 
-const KNOWN: [Library; 2] = [
+const KNOWN: [Library; 4] = [
     // Didj: shuts down at 420 s.
     Library {
         code: 0x2_8768,
@@ -61,6 +70,24 @@ const KNOWN: [Library; 2] = [
         literal_value: Literal::Word(0x3_0964),
         timer: 0x6_6DEC,
         near_shutdown_ms: 220_000,
+    },
+    // Leapster Explorer and LeapPad Explorer, 2.x firmware: 240 s.
+    Library {
+        code: 0x3_54BC,
+        prologue: [0xE92D_45F0, 0xE59F_643C, 0xE280_7014],
+        literal: 0x3_5908,
+        literal_value: Literal::Word(0x3_0108),
+        timer: 0x6_5904,
+        near_shutdown_ms: 225_000,
+    },
+    // LeapPad 2: 240 s.
+    Library {
+        code: 0x3_DC30,
+        prologue: [0xE92D_47F0, 0xE280_7014, 0xE24D_D030],
+        literal: 0x3_E174,
+        literal_value: Literal::Word(0x2_9898),
+        timer: 0x6_780C,
+        near_shutdown_ms: 225_000,
     },
 ];
 /// Where Linux and the HLE load libraries (TASK_UNMAPPED_BASE on; the

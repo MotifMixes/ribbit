@@ -32,6 +32,14 @@ pub enum Hardware {
     /// LeapFrog Leapster Explorer (2010): the Didj's LF1000 with 64 MB, its
     /// NAND built from its firmware packages (ribbit_didj::explorer).
     Explorer,
+    /// LeapFrog LeapPad Explorer (2011, the first LeapPad tablet): the
+    /// Explorer's LF1000 with a 480x272 screen and its storage on an SD
+    /// card, built from its firmware packages (ribbit_didj::leappad).
+    LeapPadExplorer,
+    /// LeapFrog LeapPad 2 (2012): an LF2000 (Nexell NXP3200, ARMv7) tablet,
+    /// 480x272; Enhanced (new) only, its programs on the HLE from its
+    /// firmware packages (ribbit_didj::hle::leappad2, docs/leappad2.md).
+    LeapPad2,
     /// LeapFrog ClickStart: My First Computer (2007 TV console with keyboard
     /// and mouse): a Sunplus SPG28x (16-bit unSP), an 8 MB system ROM and
     /// 4 MB ROM cartridges (crates/ribbit-clickstart). EXPERIMENTAL.
@@ -51,6 +59,8 @@ impl Hardware {
             Hardware::LeapPad => "LeapPad",
             Hardware::Didj => "Didj",
             Hardware::Explorer => "Leapster Explorer",
+            Hardware::LeapPadExplorer => "LeapPad Explorer",
+            Hardware::LeapPad2 => "LeapPad 2",
             Hardware::ClickStart => "ClickStart",
         }
     }

@@ -176,6 +176,17 @@ pub struct Changes {
     next_ino: u32,
 }
 
+impl Changes {
+    /// Only the changes to paths `keep` accepts.
+    pub fn only(self, keep: impl Fn(&str) -> bool) -> Changes {
+        Changes {
+            nodes: self.nodes.into_iter().filter(|(p, _)| keep(p)).collect(),
+            removed: self.removed.into_iter().filter(|p| keep(p)).collect(),
+            next_ino: self.next_ino,
+        }
+    }
+}
+
 impl Vfs {
     pub fn changes_from(&self, base: &Vfs) -> Changes {
         Changes {
@@ -197,6 +208,26 @@ impl Vfs {
 }
 
 impl Process {
+    /// Every thread's VFP registers, FPSCR, FPEXC and TPIDRURW: the running
+    /// one first, then `tasks` in order.
+    fn v7_registers(&self) -> Vec<(Vec<u32>, u32, u32, u32)> {
+        std::iter::once(&self.cpu)
+            .chain(self.tasks.iter().map(|t| &t.cpu))
+            .map(|c| c.v7.as_ref().map_or((Vec::new(), 0, 0, 0), |v| (v.s.to_vec(), v.fpscr, v.fpexc, v.tpidrurw)))
+            .collect()
+    }
+
+    fn set_v7_registers(&mut self, regs: &[(Vec<u32>, u32, u32, u32)]) {
+        let cpus = std::iter::once(&mut self.cpu).chain(self.tasks.iter_mut().map(|t| &mut t.cpu));
+        for (c, r) in cpus.zip(regs.iter().chain(std::iter::repeat(&(Vec::new(), 0, 0, 0)))) {
+            let mut v = ribbit_arm::V7 { fpscr: r.1, fpexc: if r.2 == 0 { 1 << 30 } else { r.2 }, tpidrurw: r.3, ..Default::default() };
+            if r.0.len() == 64 {
+                v.s.copy_from_slice(&r.0);
+            }
+            c.v7 = Some(Box::new(v));
+        }
+    }
+
     /// The programs and the machine now (a save state), the file tree as
     /// its changes from `base`.
     pub fn save_state(&self, base: &Vfs) -> Vec<u8> {
@@ -205,6 +236,11 @@ impl Process {
         // pass that would mark every shared value written.
         let mut data = Vec::new();
         bincode::serialize_into(&mut data, &(self, self.vfs.changes_from(base))).expect("serialise the HLE");
+        // ARMv7 processors' VFP registers (the LeapPad 2), after the rest:
+        // `Arm` doesn't serialise them, and older states end before this.
+        if self.x.leappad2 {
+            bincode::serialize_into(&mut data, &self.v7_registers()).expect("serialise the VFP registers");
+        }
         let mut out = MAGIC.to_le_bytes().to_vec();
         out.extend(miniz_oxide::deflate::compress_to_vec(&data, 1));
         out
@@ -222,15 +258,21 @@ impl Process {
         }
         let data = miniz_oxide::inflate::decompress_to_vec(&state[4..]).map_err(|_| "a damaged Didj state".to_string())?;
         let now = Instant::now();
+        let mut cursor = std::io::Cursor::new(&data[..]);
         let (mut p, changes): (Process, Changes) = {
             let _s = Session::new(now);
-            bincode::deserialize(&data).map_err(|e| e.to_string())?
+            bincode::deserialize_from(&mut cursor).map_err(|e| e.to_string())?
         };
+        if p.x.leappad2 {
+            let regs: Vec<(Vec<u32>, u32, u32, u32)> = bincode::deserialize_from(&mut cursor).unwrap_or_default();
+            p.set_v7_registers(&regs);
+        }
         p.vfs = Vfs::with_changes(base, changes);
         p.paused_at = self.paused_at.map(|_| now);
         let m = &mut p.m;
         m.jit = crate::machine::jit_for(m.bus.ram_base, m.bus.sdram.len());
         super::set_up_jit(m);
+        m.jit.v7 = p.x.leappad2;
         m.bus.nand = std::mem::take(&mut self.m.bus.nand);
         m.bus.flips = self.m.bus.flips;
         let (old, new) = (&mut self.m.bus.ga3d, &mut m.bus.ga3d);

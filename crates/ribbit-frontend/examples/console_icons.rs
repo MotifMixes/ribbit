@@ -11,7 +11,7 @@ mod console_icons;
 use ribbit_memory::known::Hardware;
 use std::collections::HashMap;
 
-const ALL: [Hardware; 10] = [
+const ALL: [Hardware; 12] = [
     Hardware::Leapster,
     Hardware::LeapsterLmax,
     Hardware::Leapster2,
@@ -21,6 +21,8 @@ const ALL: [Hardware; 10] = [
     Hardware::Zippity,
     Hardware::RockItTwist,
     Hardware::LeapPad,
+    Hardware::LeapPadExplorer,
+    Hardware::LeapPad2,
     Hardware::ClickStart,
 ];
 

@@ -53,6 +53,19 @@ pub(crate) struct Sockets {
 }
 
 impl Process {
+    /// Drops a path name's binding when its socket node is gone (unlinked,
+    /// as the Brio event module does before binding its own; VideoDaemon and
+    /// AppManager both bind /tmp/cart_events_socket on the LeapPad 2).
+    fn forget_unlinked(&mut self, name: &str) {
+        if !name.starts_with('@') && self.vfs.get(name).is_none() {
+            if let Some(id) = self.x.sockets.names.remove(name)
+                && let Some(s) = self.x.sockets.all.get_mut(&id)
+            {
+                s.name = None;
+            }
+        }
+    }
+
     /// The socket an fd is, if it is one.
     fn sock_of(&self, fd: u32) -> Result<u32, i32> {
         match self.g.fds.get(fd as usize).and_then(|f| f.as_ref()) {
@@ -128,6 +141,9 @@ impl Process {
             282 => {
                 let id = self.sock_of(a[0])?;
                 let name = self.sock_name(a[1], a[2])?;
+                // A name whose node was unlinked is free again (the socket
+                // bound to it stays, nameless), as unix_bind finds it.
+                self.forget_unlinked(&name);
                 if self.x.sockets.names.contains_key(&name) || !name.starts_with('@') && self.vfs.get(&name).is_some() {
                     return Err(EADDRINUSE);
                 }
@@ -146,6 +162,7 @@ impl Process {
             283 => {
                 let id = self.sock_of(a[0])?;
                 let name = self.sock_name(a[1], a[2])?;
+                self.forget_unlinked(&name);
                 let target = *self.x.sockets.names.get(&name).ok_or(if self.vfs.get(&name).is_some() { ECONNREFUSED } else { ENOENT })?;
                 let s = &mut self.x.sockets;
                 let kind = s.all[&id].kind;

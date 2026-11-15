@@ -3519,6 +3519,7 @@ dependencies = [
  "ribbit-arm",
  "ribbit-armjit",
  "ribbit-core",
+ "ribbit-gles",
  "ribbit-twist",
  "serde",
 ]
@@ -3566,6 +3567,10 @@ dependencies = [
  "windows-sys 0.61.2",
  "winit",
 ]
+
+[[package]]
+name = "ribbit-gles"
+version = "1.9.3"
 
 [[package]]
 name = "ribbit-input"

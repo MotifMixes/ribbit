@@ -13,8 +13,10 @@
 mod arm;
 mod cp15;
 mod thumb;
+mod v7;
 
 pub use cp15::Cp15;
+pub use v7::V7;
 
 /// The memory and devices the processor sees (physical addresses).
 pub trait ArmBus {
@@ -167,6 +169,11 @@ pub struct Arm {
     /// Undefined instructions met, for the machine to report.
     #[serde(skip)]
     pub undefined_log: Vec<(u32, u32)>,
+    /// ARMv7-A (MOVW, the exclusives, the media instructions, VFP; v7.rs)
+    /// and its state, for programs built for a Cortex-A9; None on the
+    /// ARM926 machines. Not in save states: its owner keeps it.
+    #[serde(skip)]
+    pub v7: Option<Box<V7>>,
 }
 
 impl Default for Arm {
@@ -193,6 +200,7 @@ impl Arm {
             current: 0,
             user_access: false,
             undefined_log: Vec::new(),
+            v7: None,
         };
         a.r[15] = 0;
         a
