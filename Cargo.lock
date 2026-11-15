@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-android"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "android_logger",
  "jni 0.21.1",
@@ -3420,14 +3420,14 @@ dependencies = [
 
 [[package]]
 name = "ribbit-arm"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ribbit-armjit"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "dynasm",
  "dynasmrt",
@@ -3437,11 +3437,11 @@ dependencies = [
 
 [[package]]
 name = "ribbit-audio"
-version = "1.9.1"
+version = "1.9.2"
 
 [[package]]
 name = "ribbit-clickstart"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "bincode",
  "serde",
@@ -3449,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-core"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "backtrace",
  "bincode",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-cpu"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "ribbit-memory",
  "serde",
@@ -3481,7 +3481,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-debug"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -3489,7 +3489,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-desktop"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3508,7 +3508,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-didj"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "bincode",
  "bzip2",
@@ -3525,7 +3525,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-frontend"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3569,14 +3569,24 @@ dependencies = [
 
 [[package]]
 name = "ribbit-input"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
+name = "ribbit-iquest"
+version = "1.9.2"
+dependencies = [
+ "ribbit-core",
+ "ribbit-leappad",
+ "ribbit-memory",
+ "serde",
+]
+
+[[package]]
 name = "ribbit-jit"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "dynasm",
  "dynasmrt",
@@ -3588,7 +3598,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-leappad"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "ribbit-audio",
  "ribbit-core",
@@ -3599,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-memory"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "crc32fast",
  "serde",
@@ -3610,7 +3620,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-speech"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3623,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "ribbit-twist"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "bincode",
  "png",
@@ -3634,14 +3644,14 @@ dependencies = [
 
 [[package]]
 name = "ribbit-video"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ribbit-zippity"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "bincode",
  "ribbit-arm",
