@@ -66,7 +66,27 @@ TrapDoor).
 ## What works
 
 - Boots to its menu (Hazard Spelling, Hazard Math, Missing Letter, …) with
-  the monkey host's animations, speech and music.
+  the monkey host's animations, speech and music (14 s from power-on: RMS
+  900-2700 a second, peaks 11576; not compared with a real unit).
+- Every key reaches the menu app (table above); the twist moves the
+  highlighted item ("[PrevItem]").
+- **Plays:** Slam at the menu starts Hazard Spelling (its intro, points
+  announcement, "HAZARD / OPTIONS" title, Slam again: the game screen with
+  the monkey and the clock filling). VERIFIED by frames and the log.
+- **Idle:** the menu turns it off after about 55 s ("Auto Power Down");
+  with "Turn off when idle" off Ribbit refuses that (bus.rs `IdleGuard`,
+  view 0 written to hCurView at C0AE) and the menu starts over; it stayed
+  on for 200 s, and the ON/OFF button still turns it off.
+- In the app: Library tab "Turbo Twist Extreme" (its base ROM, played
+  alone), keys: arrows D-pad, W/S twist, E/D twist fast, Space/Enter Slam,
+  Home/M Menu, End/R Repeat, -/= volume, Pause ON/OFF. Its E2 is kept as
+  `turbotwist.e2` in the save folder.
+
+## Not done / unknown
+
+- No cartridge to test with (none dumped publicly that we found).
+- The device's look: the icon is drawn from its controls (no photo found).
+- The clock speed, the E2's size and part.
 
 ## Reproducing
 

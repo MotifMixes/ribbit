@@ -3550,6 +3550,7 @@ dependencies = [
  "ribbit-debug",
  "ribbit-didj",
  "ribbit-input",
+ "ribbit-iquest",
  "ribbit-leappad",
  "ribbit-memory",
  "ribbit-speech",

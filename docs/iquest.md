@@ -115,6 +115,12 @@ Challenge … 8 Menu, 9 Power Down, 10-12 TrapDoor, 15 Try Me).
   Down"); with "Turn off when idle" off Ribbit refuses that view change
   (`Bus::keep_awake`, see bus.rs `IdleGuard`) and the app starts over.
 
+- **In the app:** Library tab "iQuest" (cartridges, and the base ROM alone
+  as "iQuest (no cartridge)"); the PC's letters, digits, space and '.' type,
+  Enter is Enter, Backspace/Delete Del, arrows the D-pad, Home Menu, End
+  Repeat, -/= volume, Pause ON/OFF. The flash is kept as `iquest.flash` in
+  the save folder.
+
 ## Not done / unknown
 
 - The clock speed, the RTC registers, the LCD's contrast and grey levels.

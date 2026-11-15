@@ -21,6 +21,8 @@ pub fn color(hw: Hardware) -> C {
         Hardware::Didj => C::from_rgb(160, 168, 182),
         Hardware::Explorer => C::from_rgb(160, 205, 40),
         Hardware::ClickStart => C::from_rgb(70, 185, 110),
+        Hardware::IQuest => C::from_rgb(110, 125, 200),
+        Hardware::TurboTwist => C::from_rgb(240, 120, 40),
     }
 }
 
@@ -37,6 +39,8 @@ pub fn name(hw: Hardware) -> &'static str {
         Hardware::Didj => "Didj",
         Hardware::Explorer => "Explorer",
         Hardware::ClickStart => "ClickStart",
+        Hardware::IQuest => "iQuest",
+        Hardware::TurboTwist => "Turbo Twist",
     }
 }
 
@@ -329,6 +333,55 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
                 p.circle_filled(at(x, y), 3.2 * u, mix(green, C::BLACK, 0.3));
                 p.circle_filled(at(x, y - 0.4), 2.7 * u, green);
             }
+        }
+        // iQuest (from its box photo): a blue-grey case, rounded and wider
+        // at the bottom, the square screen at the top in a dark bezel, the
+        // purple D-pad at the left under it, the round Enter button at the
+        // right, and the silver keyboard below: four rows of small keys
+        // with the space bar in the middle of the last.
+        Hardware::IQuest => {
+            let body = C::from_rgb(120, 135, 190);
+            let purple = C::from_rgb(110, 70, 175);
+            shell(p, &[Part::Round(rr(0.0, -12.0, 60.0, 58.0), 16.0 * u), Part::Oval(at(0.0, 20.0), v(36.0, 26.0))], body, u);
+            p.rect_filled(rr(0.0, -18.0, 44.0, 36.0), 5.0 * u, mix(body, C::BLACK, 0.45));
+            screen(p, rr(0.0, -18.0, 36.0, 28.0));
+            // The D-pad: a purple diamond.
+            let d = at(-22.0, 8.0);
+            p.add(egui::Shape::convex_polygon(vec![d + v(0.0, -6.0), d + v(6.0, 0.0), d + v(0.0, 6.0), d + v(-6.0, 0.0)], purple, egui::Stroke::NONE));
+            p.circle_filled(d, 1.6 * u, mix(purple, C::WHITE, 0.4));
+            button(p, at(22.0, 8.0), 5.0 * u, purple);
+            // The keyboard.
+            oval(p, at(0.0, 27.0), v(28.0, 13.0), C::from_rgb(200, 205, 215));
+            for (row, y, n) in [(0, 18.5, 8), (1, 23.5, 9), (2, 28.5, 8), (3, 33.5, 3)] {
+                for k in 0..n {
+                    let w = if row == 3 && k == 1 { 12.0 } else { 4.2 };
+                    let x = if row == 3 { [-11.0, 0.0, 11.0][k] } else { (k as f32 - (n - 1) as f32 / 2.0) * 5.4 };
+                    p.rect_filled(rr(x, y, w, 3.6), 1.0 * u, C::from_rgb(70, 78, 100));
+                }
+            }
+        }
+        // Turbo Twist Extreme (drawn from its controls, no photo found): a
+        // long orange body, the D-pad end at the left, the wide LCD in the
+        // middle with Menu and Repeat under it, the big Slam button on top,
+        // and the ribbed blue handle that twists at the right.
+        Hardware::TurboTwist => {
+            let orange = C::from_rgb(245, 125, 40);
+            let blue = C::from_rgb(45, 110, 220);
+            // The twist handle.
+            shell(p, &[Part::Round(rr(33.0, 4.0, 26.0, 34.0), 9.0 * u)], blue, u);
+            for i in 0..5 {
+                let x = 24.0 + 4.5 * i as f32;
+                p.line_segment([at(x, -9.0), at(x, 17.0)], stroke(1.4, mix(blue, C::BLACK, 0.35)));
+            }
+            shell(p, &[Part::Round(rr(-10.0, 4.0, 68.0, 40.0), 14.0 * u)], orange, u);
+            p.rect_filled(rr(-6.0, -1.0, 40.0, 18.0), 4.0 * u, mix(orange, C::BLACK, 0.5));
+            screen(p, rr(-6.0, -1.0, 34.0, 12.0));
+            cross(p, at(-35.0, 4.0), 13.0 * u, C::from_rgb(255, 215, 50));
+            button(p, at(-12.0, 15.0), 2.6 * u, C::from_rgb(90, 195, 60));
+            button(p, at(0.0, 15.0), 2.6 * u, C::from_rgb(230, 50, 45));
+            // Slam, on top.
+            oval(p, at(-6.0, -17.0), v(11.0, 4.5), mix(blue, C::BLACK, 0.3));
+            oval(p, at(-6.0, -18.5), v(10.0, 4.0), C::from_rgb(70, 140, 240));
         }
         // RockIt Twist (its purple edition): a square handheld, a black
         // face, the 4:3 screen in the middle and a control on each side: the
