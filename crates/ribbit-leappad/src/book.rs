@@ -257,7 +257,15 @@ impl Book {
     /// for each GO spot, with every spot its Touch-and-Tell view answers as
     /// a region. It has no pictures; Ribbit draws the outlines.
     pub fn from_cartridge(cart: &[u8], title: &str, part: Option<&str>) -> Result<Book, String> {
-        let layout = crate::layout::read(cart)?;
+        Self::from_layout(crate::layout::read(cart)?, title, part)
+    }
+
+    /// The book built into a base ROM (layout::read_base), drawn the same way.
+    pub fn from_base(bios: &[u8], title: &str) -> Result<Book, String> {
+        Self::from_layout(crate::layout::read_base(bios)?, title, None)
+    }
+
+    fn from_layout(layout: crate::layout::Layout, title: &str, part: Option<&str>) -> Result<Book, String> {
         let model = layout.family.model();
         let (page_w, page_h) = model.page_size();
         let clamp = |(x, y): (f32, f32)| [x.clamp(0.0, page_w), y.clamp(0.0, page_h)];

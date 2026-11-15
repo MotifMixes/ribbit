@@ -417,6 +417,88 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
     }
 }
 
+/// The LeapPad models other than the LeapPad itself, in the same style
+/// (original art, from the pads' general look: no logos or box art). They
+/// are LeapPad books in the library, so they share its colour; the device
+/// tells them apart.
+///
+/// * My First LeapPad: a rounder, chunkier pad for preschoolers, its handle
+///   a big arch on top, one landscape page, the pen fat and short on a
+///   coiled cord.
+/// * Little Touch LeapPad: a soft pad for babies with no pen at all, two
+///   thick board pages with finger tabs down the edge and a big round
+///   button.
+/// * LeapPad Plus Microphone: the LeapPad with the microphone on its stalk
+///   at the top right.
+pub fn paint_leappad_model(p: &egui::Painter, rect: egui::Rect, model: ribbit_leappad::Model) {
+    use ribbit_leappad::Model;
+    let u = rect.width().min(rect.height()) / 100.0;
+    let c = rect.center();
+    let v = |x: f32, y: f32| egui::vec2(x * u, y * u);
+    let at = |x: f32, y: f32| c + v(x, y);
+    let stroke = |w: f32, col: C| egui::Stroke::new(w * u, col);
+    let rr = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_center_size(at(x, y), v(w, h));
+    let paper = C::from_rgb(255, 250, 236);
+    match model {
+        Model::LeapPad => paint_device(p, rect, Hardware::LeapPad),
+        Model::PlusMic => {
+            paint_device(p, rect, Hardware::LeapPad);
+            p.line_segment([at(30.0, -26.0), at(38.0, -40.0)], stroke(2.5, C::from_gray(70)));
+            oval(p, at(39.0, -42.0), v(5.0, 6.0), C::from_gray(50));
+            grille(p, at(39.0, -42.0), 5.0 * u, 3, 2.0 * u, stroke(0.8, C::from_gray(120)));
+        }
+        Model::MyFirst => {
+            let blue = C::from_rgb(40, 110, 200);
+            let yellow = C::from_rgb(250, 200, 40);
+            p.add(egui::Shape::line(
+                (0..=14).map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 14.0);
+                    at(-6.0 + 22.0 * a.cos(), -26.0 + 14.0 * a.sin())
+                }).collect(),
+                stroke(8.0, yellow),
+            ));
+            shell(p, &[Part::Round(rr(-4.0, 6.0, 84.0, 60.0), 16.0 * u)], blue, u);
+            p.rect_filled(rr(-6.0, 4.0, 66.0, 42.0), 6.0 * u, mix(blue, C::WHITE, 0.55));
+            p.rect_filled(rr(-6.0, 4.0, 58.0, 36.0), 3.0 * u, paper);
+            // A picture and a word on the page.
+            p.circle_filled(at(-20.0, 0.0), 8.0 * u, C::from_rgb(240, 120, 60));
+            for y in [-4.0, 4.0] {
+                p.line_segment([at(-6.0, y), at(16.0, y)], stroke(1.6, C::from_gray(170)));
+            }
+            // GO along the top edge of the page.
+            p.circle_filled(at(10.0, -11.0), 3.0 * u, C::from_rgb(40, 170, 70));
+            // The fat pen on its coiled cord.
+            p.add(egui::Shape::line((0..=16).map(|i| at(34.0 + (i as f32 * 1.4).sin() * 2.0, 30.0 - i as f32 * 2.6)).collect(), stroke(1.2, C::from_gray(60))));
+            p.line_segment([at(36.0, -12.0), at(30.0, -30.0)], stroke(8.0, C::from_rgb(220, 50, 50)));
+            p.circle_filled(at(30.0, -31.0), 3.5 * u, C::from_rgb(250, 200, 40));
+        }
+        Model::LittleTouch => {
+            let green = C::from_rgb(120, 190, 60);
+            let soft = C::from_rgb(245, 245, 235);
+            p.add(egui::Shape::line(
+                (0..=14).map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 14.0);
+                    at(0.0 + 20.0 * a.cos(), -28.0 + 12.0 * a.sin())
+                }).collect(),
+                stroke(9.0, C::from_rgb(250, 160, 40)),
+            ));
+            shell(p, &[Part::Round(rr(0.0, 6.0, 90.0, 62.0), 22.0 * u)], green, u);
+            p.rect_filled(rr(0.0, 4.0, 74.0, 46.0), 10.0 * u, soft);
+            for x in [-1.0, 1.0] {
+                p.rect_filled(rr(x * 18.0, 4.0, 33.0, 40.0), 6.0 * u, paper);
+            }
+            // Thick board pages: finger tabs down the right edge.
+            for (i, col) in [C::from_rgb(230, 80, 80), C::from_rgb(70, 140, 230), C::from_rgb(250, 200, 40), C::from_rgb(160, 90, 200)].iter().enumerate() {
+                p.rect_filled(rr(37.0, -10.0 + i as f32 * 9.0, 6.0, 7.0), 2.0 * u, *col);
+            }
+            // A big friendly picture on each page, and the round button.
+            p.circle_filled(at(-18.0, 2.0), 9.0 * u, C::from_rgb(250, 170, 60));
+            p.circle_filled(at(18.0, 2.0), 9.0 * u, C::from_rgb(90, 170, 230));
+            button(p, at(0.0, 31.0), 5.0 * u, C::from_rgb(230, 70, 90));
+        }
+    }
+}
+
 /// The All tab's console filter (a chip clicked), kept in egui's memory.
 pub fn filter_id() -> egui::Id {
     egui::Id::new("ribbit-console-filter")

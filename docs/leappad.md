@@ -687,7 +687,7 @@ are withdrawn.
 **Base ROM:** `leappadbios.bin`, 1 MB, CRC32 c886cddc, SHA1 f8a83b156feb28315d2321758678e141600a0d4e. It is
 MAME's `leappad` "ila2_universal" BIOS (found in the user's "LeapFrog ROM Dumps Collection.zip" as
 `leappadbios (1).bin`). The same zip holds My First LeapPad and Little Touch LeapPad BIOSes (4 MB each, also in
-MAME), which are not the subject here.
+MAME): those pads, and the LeapPad Plus Microphone, are in `docs/leappad-family.md`.
 
 **Full Base ROM:** `leappadbioscanada.bin`, 2 MB, SHA1 adf52232adcfd4de5d8e31c0e0c09be61718a9d4, beside the
 ILA2 one in a MAME-style `leappad.zip`. It prints "2MB Canada Full Base ROM: US Library: Cart start app:", part
@@ -701,11 +701,11 @@ use**; the ILA2 base remains supported.
 same dump. Two are Quantum LeapPad cartridges (read, above, but not run; said to use the same cartridges as the
 original, UNTESTED) and one is Mind Station.
 
-**Other bases (reported by a player, 2026-10, not in the user's set):** an 8 MB "Plus Microphone" base boots
-cartridges in Ribbit (a checksum sits at its end; it may not be trimmed). The My First LeapPad base boots but
-says "Whoops! That's not a My First LeapPad cartridge" to standard cartridges. None of the dumped bases holds a
-book of its own: the ILA2 base's sound tables hold only the start-up jingle, so Ribbit calls a session without a
-cartridge "no cartridge".
+**Other bases:** the 8 MB Plus Microphone base, both My First LeapPad bases and both Little Touch bases are
+in the user's set since 2026-11-15; see `docs/leappad-family.md`. My First LeapPad's "Whoops! That's not a My
+First LeapPad cartridge" to LeapPad books is its product ID check (13 against the books' 14). The ILA2 and
+Canada bases hold no book of their own (the ILA2 base's sound tables hold only the start-up jingle), so Ribbit
+calls a session without a cartridge "no cartridge"; the Little Touch's US base holds one.
 
 **LBK files:** what the Mind Station software writes when it dumps a cartridge (`ms2002 <file>.lbk /save`): the
 ROM after a 0x13C-byte header. Ribbit drops the header when the boot stub sits at 0x13C (`unwrap_lbk`) and keeps

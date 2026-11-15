@@ -114,6 +114,26 @@ impl Model {
         self != Model::MyFirst
     }
 
+    /// The pad a cartridge is for (its app header, `layout::family`): a
+    /// LeapPad cartridge also plays on the Plus Microphone.
+    pub fn of_cartridge(cart: &[u8]) -> Model {
+        layout::family(cart).model()
+    }
+
+    /// Whether a cartridge for `cart` plays on this pad: the LeapPad and the
+    /// Plus Microphone take each other's books; My First LeapPad and Little
+    /// Touch books need their own pads (a My First LeapPad answers others
+    /// "Whoops! That's not a My First LeapPad cartridge").
+    pub fn plays(self, cart: Model) -> bool {
+        match self {
+            Model::LeapPad | Model::PlusMic => matches!(cart, Model::LeapPad | Model::PlusMic),
+            m => m == cart,
+        }
+    }
+
+    /// Every model, in the order the app lists them.
+    pub const ALL: [Model; 4] = [Model::LeapPad, Model::PlusMic, Model::MyFirst, Model::LittleTouch];
+
     /// Whether the child uses a pen (all but the Little Touch).
     pub fn has_pen(self) -> bool {
         self != Model::LittleTouch

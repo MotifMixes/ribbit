@@ -234,7 +234,9 @@ impl Layout {
     }
 }
 
-struct Rom<'a>(&'a [u8]);
+/// An image and the physical address it sits at (its pointers are
+/// physical): a cartridge at CS5, a base ROM at 0.
+struct Rom<'a>(&'a [u8], u32);
 
 impl Rom<'_> {
     fn at(&self, o: usize, n: usize) -> Result<&[u8], String> {
@@ -251,7 +253,7 @@ impl Rom<'_> {
     fn ptr(&self, o: usize) -> Result<Option<usize>, String> {
         let b = self.at(o, 4)?;
         let p = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-        Ok((CART..CART + self.0.len() as u32).contains(&p).then(|| (p - CART) as usize))
+        Ok((self.1..self.1 + self.0.len() as u32).contains(&p).then(|| (p - self.1) as usize))
     }
 }
 
@@ -284,9 +286,43 @@ fn shape(rom: &Rom, table: Option<usize>, scale: usize, id: u16) -> Result<Optio
     Ok(Some(Shape { page, points, rect }))
 }
 
+/// Which pad's app the header at `header` is (see `read`).
+fn family_at(cart: &[u8], header: usize) -> Family {
+    let at = |sig: &[u8], o: usize| cart.get(header + o..header + o + sig.len()) == Some(sig);
+    if at(&[0x01, 0x78, 0x32, 0x7F, 0x5A, 0x0A, 0x7F], 0x0E) {
+        Family::MyFirst
+    } else if at(&[0x5A, 0x0A, 0x7F, 0x5A, 0x0A, 0x73], 9) {
+        Family::LittleTouch
+    } else {
+        Family::LeapPad
+    }
+}
+
+/// Which pad a cartridge is made for, from its app header (a LeapPad one
+/// when it has none that Ribbit knows). VERIFIED on the 8 My First LeapPad
+/// and 6 Little Touch dumps and the 20 LeapPad ones.
+pub fn family(cart: &[u8]) -> Family {
+    match Rom(cart, CART).ptr(0x1013C) {
+        Ok(Some(header)) => family_at(cart, header),
+        _ => Family::LeapPad,
+    }
+}
+
 /// Reads the layout from a cartridge image.
 pub fn read(cart: &[u8]) -> Result<Layout, String> {
-    let rom = Rom(cart);
+    read_from(cart, CART)
+}
+
+/// Reads the layout of the book built into a base ROM: the Little Touch's
+/// bases hold one ("Full Base ROM: V1.1 - One Bear in the Bedroom"), and My
+/// First LeapPad's its template activity. The base's app header is found as
+/// a cartridge's, its pointers at physical 0.
+pub fn read_base(bios: &[u8]) -> Result<Layout, String> {
+    read_from(bios, 0)
+}
+
+fn read_from(cart: &[u8], origin: u32) -> Result<Layout, String> {
+    let rom = Rom(cart, origin);
     let header = rom.ptr(0x1013C)?.ok_or("the cartridge has no app header")?;
     let version = rom.u8(header)?;
     // My First LeapPad and Little Touch headers (VERIFIED on 8 and 6 dumps:
@@ -300,14 +336,7 @@ pub fn read(cart: &[u8]) -> Result<Layout, String> {
     // * Little Touch (versions 1-2, "5A 0A 7F 5A 0A 73" at +9): views at
     //   +1Fh/+21h, a list of page-pointer keys in the GO format at +23h
     //   (often none), and the magnet list at +3Eh.
-    let at = |sig: &[u8], o: usize| cart.get(header + o..header + o + sig.len()) == Some(sig);
-    let family = if at(&[0x01, 0x78, 0x32, 0x7F, 0x5A, 0x0A, 0x7F], 0x0E) {
-        Family::MyFirst
-    } else if at(&[0x5A, 0x0A, 0x7F, 0x5A, 0x0A, 0x73], 9) {
-        Family::LittleTouch
-    } else {
-        Family::LeapPad
-    };
+    let family = family_at(cart, header);
     // Version 2 is the "Prebuilt TnT, QnA3 & SnF" app; 0 is the LeapPad
     // Classic app, which keeps the same GO list, clickables and shapes under
     // a smaller header.
@@ -425,7 +454,16 @@ pub fn read(cart: &[u8]) -> Result<Layout, String> {
             stm.push((views.len(), data));
         }
         let mut hotspots = Vec::new();
-        let mut o = (data & !0x7FFF) + rom.u16(data + clickables_at)? as usize;
+        // A view whose words at +0Eh and +14h are the same and +10h FFFF
+        // points to another view's data, whose clickables it uses (the
+        // cover views "FCTnT" of Leap's Big Day and El gran día de Croki,
+        // My First LeapPad, 2002). EVIDENCE: the pointed-to data is laid out
+        // as a view's.
+        let mut list_of = data;
+        if clickables_at == 0x14 && rom.u16(data + 0x10)? == 0xFFFF && rom.u16(data + 0x14)? == rom.u16(data + 0x0E)? {
+            list_of = (data & !0x7FFF) + rom.u16(data + 0x0E)? as usize;
+        }
+        let mut o = (list_of & !0x7FFF) + rom.u16(list_of + clickables_at)? as usize;
         // Only Touch-and-Tell views' clickables are read (data byte +1: 0;
         // the Little Touch's are 1, its activities 2).
         let tnt = if family == Family::LittleTouch { 1 } else { 0 };
@@ -437,7 +475,7 @@ pub fn read(cart: &[u8]) -> Result<Layout, String> {
             let id = rom.u16(o + 4)?;
             let size = match ty {
                 0 | 7 => 8,
-                1 | 8 => 8 + 2 * (rom.u8(data + 0x25)? as usize).saturating_sub(1),
+                1 | 8 => 8 + 2 * (rom.u8(list_of + 0x25)? as usize).saturating_sub(1),
                 2..=6 | 9 | 11 => 10,
                 10 => 14,
                 12 => 9,

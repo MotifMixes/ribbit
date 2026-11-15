@@ -308,8 +308,13 @@ impl App {
         crate::zippity::set_bindings(&settings.zippity_keys);
         if let Some(f) = &opts.firmware {
             // A LeapPad base ROM is the LeapPad's; the Leapster's BIOS stays.
-            if std::fs::read(f).is_ok_and(|d| ribbit_leappad::identify(&d) == Some(ribbit_leappad::Image::BaseRom)) {
-                settings.leappad_bios = Some(f.clone());
+            if let Some(d) = std::fs::read(f).ok().filter(|d| ribbit_leappad::identify(d) == Some(ribbit_leappad::Image::BaseRom)) {
+                match ribbit_leappad::Model::of_base(&d) {
+                    ribbit_leappad::Model::LeapPad => settings.leappad_bios = Some(f.clone()),
+                    m => {
+                        settings.leappad_bases.insert(m.name().to_string(), f.clone());
+                    }
+                }
             } else {
                 settings.bios = Some(f.clone());
             }
@@ -716,10 +721,18 @@ impl App {
 
     fn set_bios(&mut self, path: PathBuf) {
         // A LeapPad base ROM: kept as the LeapPad's; the Leapster's BIOS stays.
-        if std::fs::read(&path).is_ok_and(|d| ribbit_leappad::identify(&d) == Some(ribbit_leappad::Image::BaseRom)) {
-            self.settings.leappad_bios = Some(path);
+        // My First LeapPad, Little Touch and Plus Microphone bases are kept
+        // by model, beside it.
+        if let Some(d) = std::fs::read(&path).ok().filter(|d| ribbit_leappad::identify(d) == Some(ribbit_leappad::Image::BaseRom)) {
+            let model = ribbit_leappad::Model::of_base(&d);
+            match model {
+                ribbit_leappad::Model::LeapPad => self.settings.leappad_bios = Some(path),
+                m => {
+                    self.settings.leappad_bases.insert(m.name().to_string(), path);
+                }
+            }
             self.save_settings();
-            self.ui.toast("BIOS: LeapPad base ROM");
+            self.ui.toast(format!("BIOS: {} base ROM", model.name()));
             return;
         }
         // A Zippity's system NAND (as dropping it on the window takes it):
@@ -869,8 +882,9 @@ impl App {
         match std::fs::read(&path).ok().and_then(|d| ribbit_leappad::identify(&d)) {
             Some(ribbit_leappad::Image::Cartridge) => return self.start_leappad(Some(path)),
             Some(ribbit_leappad::Image::BaseRom) => {
+                let model = std::fs::read(&path).map_or(ribbit_leappad::Model::LeapPad, |d| ribbit_leappad::Model::of_base(&d));
                 self.set_bios(path);
-                return self.start_leappad(None);
+                return self.start_leappad_model(Some(model), None);
             }
             None => {}
         }
@@ -1303,12 +1317,53 @@ impl App {
     /// Plays the original LeapPad: its base ROM (`leappad_bios`) with a
     /// cartridge, or none.
     fn start_leappad(&mut self, cart: Option<PathBuf>) {
-        let Some(bios) = self.settings.leappad_bios.clone() else {
+        // The pad the cartridge is made for: My First LeapPad and Little
+        // Touch books play only on their own pads.
+        let model = cart.as_ref().and_then(|c| std::fs::read(c).ok()).map(|mut d| {
+            ribbit_leappad::unwrap_lbk(&mut d);
+            ribbit_leappad::Model::of_cartridge(&d)
+        });
+        self.start_leappad_model(model, cart)
+    }
+
+    /// The base ROM kept for a model (the LeapPad's books also play on the
+    /// Plus Microphone, and its on the LeapPad).
+    fn leappad_base(&self, model: ribbit_leappad::Model) -> Option<PathBuf> {
+        use ribbit_leappad::Model;
+        let of = |m: Model| match m {
+            Model::LeapPad => self.settings.leappad_bios.clone(),
+            m => self.settings.leappad_bases.get(m.name()).cloned(),
+        };
+        match model {
+            Model::LeapPad => of(Model::LeapPad).or_else(|| of(Model::PlusMic)),
+            Model::PlusMic => of(Model::PlusMic).or_else(|| of(Model::LeapPad)),
+            m => of(m),
+        }
+        .filter(|p| p.is_file())
+    }
+
+    /// Starts a LeapPad model (None: the LeapPad, or the first model with a
+    /// base ROM) with a cartridge or none.
+    fn start_leappad_model(&mut self, model: Option<ribbit_leappad::Model>, cart: Option<PathBuf>) {
+        use ribbit_leappad::Model;
+        let bios = match model {
+            Some(m) => self.leappad_base(m),
+            None => Model::ALL.into_iter().find_map(|m| self.leappad_base(m)),
+        };
+        let Some(bios) = bios else {
+            let name = model.unwrap_or(Model::LeapPad).name();
             return self.ui.problem(
-                "No LeapPad base ROM",
-                "The LeapPad needs the system software from your own pad (a dump of its base ROM). The 2 MB \
-                 \"Canada Full Base ROM\" plays every book; the 1 MB \"ILA2 Universal Base ROM\" lacks sounds some \
-                 older books use. Open it with File > Open BIOS…, then the cartridge again.",
+                &format!("No {name} base ROM"),
+                &match model.unwrap_or(Model::LeapPad) {
+                    Model::LeapPad | Model::PlusMic => "The LeapPad needs the system software from your own pad (a dump of its base ROM). The 2 MB \
+                         \"Canada Full Base ROM\" plays every book; the 1 MB \"ILA2 Universal Base ROM\" lacks sounds some \
+                         older books use. Open it with File > Open BIOS…, then the cartridge again."
+                        .to_string(),
+                    _ => format!(
+                        "This cartridge is a {name} book, which plays only on a {name}: open the {name}'s own base ROM \
+                         (a dump of the pad's system software) with File > Open BIOS…, then the cartridge again."
+                    ),
+                },
                 "",
             );
         };
@@ -2160,7 +2215,7 @@ impl App {
                 self.save_settings();
             }
             Action::OpenTwist => self.start_twist(None),
-            Action::StartLeapPad => self.start_leappad(None),
+            Action::StartLeapPad(model) => self.start_leappad_model(model, None),
             Action::OpenLeapPadBook(path) => self.open_leappad_book(Some(path)),
             Action::SetTwistContent(path) => self.set_twist_content(path),
             Action::SetTwistUsb(on) => {

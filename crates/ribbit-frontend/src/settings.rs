@@ -171,6 +171,10 @@ pub struct Settings {
     pub zippity_keys: BTreeMap<String, String>,
     /// The original LeapPad's base ROM (kept apart from the Leapster's BIOS).
     pub leappad_bios: Option<PathBuf>,
+    /// The base ROMs of the other LeapPad models (My First LeapPad, Little
+    /// Touch LeapPad, LeapPad Plus Microphone), by `Model::name`.
+    #[serde(default)]
+    pub leappad_bases: BTreeMap<String, PathBuf>,
     /// The virtual book opened last with each LeapPad cartridge (cartridge
     /// file -> book file; "" is the pad with no cartridge).
     pub leappad_books: BTreeMap<String, PathBuf>,
@@ -321,6 +325,7 @@ impl Default for Settings {
             twist_keys: BTreeMap::new(),
             zippity_keys: BTreeMap::new(),
             leappad_bios: None,
+            leappad_bases: BTreeMap::new(),
             leappad_books: BTreeMap::new(),
             leappad_book_only: false,
             leappad_debug: false,

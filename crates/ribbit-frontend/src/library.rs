@@ -1224,9 +1224,13 @@ fn describe_leappad(path: &Path, data: &[u8]) -> Game {
     };
     let id = ribbit_memory::ImageId::of(data);
     let size = format!("{} MB", id.size.div_ceil(1 << 20));
-    let subtitle = [part.clone(), region, Some(size.clone())].into_iter().flatten().collect::<Vec<_>>().join("  ·  ");
+    // My First LeapPad and Little Touch books need their own pads: named
+    // first on the card.
+    let model = ribbit_leappad::Model::of_cartridge(data);
+    let pad = (model != ribbit_leappad::Model::LeapPad).then(|| model.name().to_string());
+    let subtitle = [pad, part.clone(), region, Some(size.clone())].into_iter().flatten().collect::<Vec<_>>().join("  ·  ");
     let key = format!("{:08x}", id.crc32);
-    let mut details = vec![("System", "LeapPad".to_string())];
+    let mut details = vec![("System", model.name().to_string())];
     if let Some(p) = part {
         details.push(("Part number", p));
     }
