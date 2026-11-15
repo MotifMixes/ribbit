@@ -16,9 +16,15 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut m = Machine::new(std::fs::read(&a[1]).expect("BIOS"));
     if let Some(c) = a.get(2).filter(|c| *c != "-") {
-        m.insert_cartridge(std::fs::read(c).expect("cart"));
+        let mut cart = std::fs::read(c).expect("cart");
+        if let Some(r) = ribbit_iquest::repair_checksum(&mut cart) {
+            eprintln!("checksum repaired: {r:?}");
+        }
+        m.insert_cartridge(cart);
     }
     let secs: f64 = a[3].parse().unwrap();
+    // AWAKE=1: "Turn off when idle" off.
+    m.keep_awake = std::env::var("AWAKE").is_ok();
     // IO=reg:val,... (hex): preset register latches (research).
     for kv in std::env::var("IO").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
         let (r, v) = kv.split_once(':').unwrap();
@@ -35,6 +41,7 @@ fn main() {
         })
         .collect();
     let slice = m.hz / 100;
+    let mut audio: Vec<i16> = Vec::new();
     let mut t = 0.0;
     let mut n = 0;
     let mut next = every;
@@ -56,6 +63,9 @@ fn main() {
             held = None;
         }
         m.run_cycles(slice);
+        let mut chunk = vec![0i16; m.bus.sound.output.len()];
+        m.bus.sound.output.pop_into(&mut chunk);
+        audio.extend_from_slice(&chunk);
         t += 0.01;
         if std::env::var("LOG").is_ok() {
             for l in m.take_log().lines() {
@@ -69,6 +79,26 @@ fn main() {
             n += 1;
             next += every;
         }
+    }
+    // WAV=path: the sound (8 kHz mono).
+    if let Ok(p) = std::env::var("WAV") {
+        let mut w = Vec::new();
+        let n = audio.len() as u32 * 2;
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&(36 + n).to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        w.extend_from_slice(&[16, 0, 0, 0, 1, 0, 1, 0]);
+        w.extend_from_slice(&8000u32.to_le_bytes());
+        w.extend_from_slice(&16000u32.to_le_bytes());
+        w.extend_from_slice(&[2, 0, 16, 0]);
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&n.to_le_bytes());
+        for v in &audio {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(p, w).unwrap();
+        let loud = audio.iter().filter(|v| v.unsigned_abs() > 1000).count();
+        println!("audio: {} samples, {} above 1000, peak {}", audio.len(), loud, audio.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0));
     }
     if let Some(f) = &m.bus.flash {
         let used = f.data.iter().filter(|&&b| b != 0xFF).count();

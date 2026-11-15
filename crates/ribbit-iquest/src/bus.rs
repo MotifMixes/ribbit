@@ -51,6 +51,34 @@ impl TryMe {
     }
 }
 
+/// Where an app's idle timeout lands, so that "Turn off when idle" off can
+/// refuse it. Each app's state machine has its own idle states (the menu's
+/// "[ExitIdlePowerDown]" after about 2 minutes, "[XIdlePowerOffView" /
+/// "[XIdlePowerDown" specials) and they all end by setting the current view
+/// (AGX hCurView) to Power Down. A write of that view when the ON/OFF
+/// button was not just pressed is idleness; refused, the view stays and the
+/// app starts again from its beginning. EVIDENCE (the view writes found in
+/// every app bank's library copy; the iQuest's AGX at C087 per AppRAMInit,
+/// kernel log "hCurView:9:Power Down"; the TT's at C0AE, Power Down = 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdleGuard {
+    /// Offset of hCurView in on-chip RAM (XDATA - C000).
+    pub cur_view: usize,
+    pub power_down: u8,
+}
+
+impl IdleGuard {
+    pub fn of(bios: &[u8]) -> Option<IdleGuard> {
+        match crate::identify(bios)? {
+            crate::Model::IQuest => Some(IdleGuard { cur_view: 0x87, power_down: 9 }),
+            crate::Model::TurboTwistExtreme => Some(IdleGuard { cur_view: 0xAE, power_down: 0 }),
+        }
+    }
+}
+
+/// How long after the ON/OFF button a power-down is taken as its (3 s).
+const POWER_PRESS_WINDOW: u32 = 3 * crate::MACHINE_HZ;
+
 /// A memory or register access the model does not understand yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unknown {
@@ -90,6 +118,14 @@ pub struct Bus {
     pub skip_try_me: bool,
     #[serde(skip)]
     pub try_me: Option<TryMe>,
+    /// "Turn off when idle" is off: the apps' idle power-down is refused
+    /// (see `IdleGuard`).
+    pub keep_awake: bool,
+    #[serde(skip)]
+    pub idle_guard: Option<IdleGuard>,
+    /// Machine cycles since the ON/OFF button was pressed (a power-down
+    /// within a few seconds of it is the button's, not idleness).
+    pub since_power_press: u32,
     /// The keys held down (gpio.rs).
     #[serde(skip)]
     pub pressed: Vec<crate::gpio::Wire>,
@@ -119,6 +155,7 @@ pub const DSP_LATENCY: u32 = 100;
 impl Bus {
     pub fn new(bios: Vec<u8>) -> Self {
         let try_me = TryMe::of(&bios);
+        let idle_guard = IdleGuard::of(&bios);
         Bus {
             try_me,
             bios,
@@ -141,6 +178,9 @@ impl Bus {
             flash: None,
             pressed: Vec::new(),
             skip_try_me: true,
+            keep_awake: false,
+            idle_guard,
+            since_power_press: u32::MAX,
             sound: ribbit_leappad::sound::engine(),
             release: Default::default(),
             dsp_busy: 0,
@@ -152,6 +192,7 @@ impl Bus {
     }
 
     pub fn tick(&mut self, cycles: u32, hz: u32) {
+        self.since_power_press = self.since_power_press.saturating_add(cycles);
         self.delay = self.delay.saturating_sub(cycles.min(255) as u8);
         self.counter_phase += cycles as u64;
         if self.counter_phase >= hz as u64 {
@@ -229,7 +270,18 @@ impl Bus {
     pub fn phys_write(&mut self, addr: u32, v: u8) {
         let addr = addr % PHYS_SIZE;
         if (RAM_BASE..RAM_BASE + RAM_SIZE as u32).contains(&addr) {
-            self.ram[(addr - RAM_BASE) as usize] = v;
+            let off = (addr - RAM_BASE) as usize;
+            if self.keep_awake
+                && let Some(g) = self.idle_guard
+                && off == g.cur_view
+                && v == g.power_down
+                && self.ram[off] != v
+                && self.since_power_press > POWER_PRESS_WINDOW
+            {
+                self.note(format!("idle power-down refused (view {})", self.ram[off]));
+                return;
+            }
+            self.ram[off] = v;
             return;
         }
         if let Some(f) = &mut self.flash

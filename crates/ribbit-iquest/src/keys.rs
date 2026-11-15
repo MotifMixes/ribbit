@@ -26,7 +26,12 @@ pub fn wire(model: Model, name: &str) -> Option<Wire> {
     match model {
         Model::IQuest => {
             let c = match name {
-                "enter" | "answer" => b'a',
+                // The round Enter button and Del pull port C bits 0 and 1 to
+                // ground (the kernel reads FC48 bits 0-1 directly; the Try
+                // Me demo printed "{Enter}" and "{Del}").
+                "enter" => return Some(ground(pin(Port::C, 0))),
+                "del" => return Some(ground(pin(Port::C, 1))),
+                "repeat" => b'a',
                 "up" => b'u',
                 "down" => b'd',
                 "left" => b'l',
@@ -44,9 +49,39 @@ pub fn wire(model: Model, name: &str) -> Option<Wire> {
     }
 }
 
-/// The Turbo Twist Extreme's keys (found by trying every pair of pins at
-/// the menu, see docs/turbotwist.md).
-pub const TT_KEYS: &[(&str, Wire)] = &[];
+const fn pin(port: Port, bit: u8) -> Pin {
+    Pin { port, bit }
+}
+
+const fn join(a: Pin, b: Pin) -> Wire {
+    Wire { a: Some(a), b }
+}
+
+const fn ground(b: Pin) -> Wire {
+    Wire { a: None, b }
+}
+
+/// The Turbo Twist Extreme's keys, VERIFIED-FW: found by joining every pair
+/// of the pins its scans use at the menu and reading what the menu app
+/// printed ("{DPadLf}", "TwistUpFast}", "{VUp:115}" ...; docs/turbotwist.md).
+/// The D-pad end is a 2 x 2 matrix (port A bits 0-1 drive, port B bits 0-1
+/// read), the twist end another (port A bits 3-4, port B bits 3-4); the other
+/// buttons pull a pin to ground.
+pub const TT_KEYS: &[(&str, Wire)] = &[
+    ("left", join(pin(Port::A, 0), pin(Port::B, 0))),
+    ("up", join(pin(Port::A, 0), pin(Port::B, 1))),
+    ("right", join(pin(Port::A, 1), pin(Port::B, 0))),
+    ("down", join(pin(Port::A, 1), pin(Port::B, 1))),
+    ("twist-up", join(pin(Port::A, 3), pin(Port::B, 3))),
+    ("twist-up-fast", join(pin(Port::A, 3), pin(Port::B, 4))),
+    ("twist-down", join(pin(Port::A, 4), pin(Port::B, 3))),
+    ("twist-down-fast", join(pin(Port::A, 4), pin(Port::B, 4))),
+    ("repeat", ground(pin(Port::B, 5))),
+    ("slam", ground(pin(Port::B, 6))),
+    ("menu", ground(pin(Port::B, 7))),
+    ("vol-", ground(pin(Port::A, 6))),
+    ("vol+", ground(pin(Port::A, 7))),
+];
 
 /// A wire written as pins (research): "C0" joins port C bit 0 to ground,
 /// "B3-A2" joins two pins.
