@@ -1,0 +1,234 @@
+# LeapPad Academy and LeapFrog Epic
+
+Research notes and plan for the Android-based LeapFrog tablets. Written 2026-11-15 from the
+stock firmware (inventoried, nothing executed) and public sources. The first code is in
+`crates/ribbit-lfandroid`.
+
+## Summary
+
+- Both tablets run Android. Their LeapFrog games are **the Brio SDK games of the
+  LeapPad 2/3, Ultra and Explorer line, rebuilt for Android**. Each title is a small Java shell
+  (`LFMainActivity`) plus one ARMv7 native library. That library statically links the game, its
+  engine and Brio itself: `LeapFrog::Brio::CDisplayMPI`, `CAudioMPI`, `CButtonMPI`, `CKernelMPI`,
+  `CEventMPI`, `CFontMPI` and the rest, with `_android` back ends and `LF::Android::LFAppManager`.
+- The Epic (`com.leapfrog.ANDS.app.*`, Brio SDK 8.x) and the LeapPad Academy
+  (`com.leapfrog.AND4.app.*`, SDK 8.9 to 9.0) use the same format, the same 40 JNI entry points
+  and nearly the same import list. **One HLE can run both.**
+- The **LeapFrog Academy program** (the subscription learning path) is a different thing. It is a
+  PlayCanvas/HTML5 web app inside a Crosswalk WebView. It needs a LeapFrog account and
+  LeapFrog's servers, and only the menu UI ships in the firmware. It is out of scope.
+- Recommendation: path **(b)**, an "Enhanced (new)"-style HLE of the Brio-on-Android runtime that
+  runs the titles' own ARM code. The main costs are an ARMv7 + VFPv3 CPU and a GLES 1.1
+  renderer. See "Paths" below.
+
+## Hardware
+
+| | LeapFrog Epic / Epic Academy Edition / LeapPad Academy, 1st gen | LeapPad Academy, 2nd gen (2021 revision) |
+|---|---|---|
+| SoC | MediaTek MT8127: 4x Cortex-A7 at 1.3 GHz, Mali-450 MP4 | Rockchip RK3326: 4x Cortex-A35 at 1.5 GHz, Mali-G31 |
+| OS | Android 4.4.2 KitKat (`KOT49H`) | Android 10 Go (`rk3326_qgo`, `ro.config.low_ram=true`) |
+| Firmware ID | `EPICv3`, device `UYT3`, board `quanta27_tb_uyt_kk` (ODM Quanta, "narnia") | `EPICv4`, device `UYT4`, brand `LeapFrog4`, display id `EPIC4.user.1.7.2109.312280833` |
+| Common | 1 GB RAM, 16 GB flash + microSD, 7" 1024x600, 2 MP cameras front and back, Wi-Fi b/g/n, BT 4.0 | same |
+
+- The Epic came out in 2016, the Epic Academy Edition in 2017 and the LeapPad Academy in 2019.
+  In 2021 LeapFrog quietly changed the LeapPad Academy from the MT8127 to the RK3326 and left
+  the rest the same ([Wikipedia: LeapFrog Epic](https://en.wikipedia.org/wiki/LeapFrog_Epic),
+  citing FCC ID G2R-6022).
+- The RK3326 unit has a sub-variant called "MIPI" (LCD interface). Its firmware is separate and
+  not interchangeable with the other one
+  ([archive.org: leapfrog-epicv4-firmware_MIPI](https://archive.org/details/leapfrog-epicv4-firmware_MIPI)).
+- Bootloader: LeapFrog offers no official unlock. On the MT8127 Epic, the community unlocked it
+  by exploiting the firmware being signed with MediaTek reference keys (SP Flash Tool, TWRP,
+  LineageOS 14.1) ([XDA article](https://www.xda-developers.com/developers-port-lineageos-leapfrog-epic-tablet-for-children),
+  [The Register](https://www.theregister.com/2020/09/15/lineageos_port_for_leapfrog_tablet/),
+  [TWRP tree](https://github.com/huckleberrypie/device_quanta_narnia)). On the RK3326, the dump
+  comes with a patched U-Boot that enables rockusb, and a 2nd-gen unit has been shown running
+  LineageOS 18.1.
+
+## Obtainable material
+
+All of this is on archive.org. Nothing has to come from a device.
+
+| Item | What | Local copy |
+|---|---|---|
+| [leapfrog-epicv4-firmware](https://archive.org/details/leapfrog-epicv4-firmware) | Full RK3326 LeapPad Academy eMMC dump (rkDumper). Identical to `EPIC4.user.1.7.2109.312280833.7z` | `D:/ribbit-roms/LeapFrogEpic4/` |
+| [leapfrog-epicv4-firmware_MIPI](https://archive.org/details/leapfrog-epicv4-firmware_MIPI) | Same, MIPI sub-variant (1.3 GB) | not downloaded |
+| [epic4-rk3326-source](https://archive.org/details/epic4-rk3326-source) | GPL source (kernel, U-Boot) for the RK3326 build | not downloaded |
+| [leapfrog-android-apps](https://archive.org/details/leapfrog-android-apps) | 725 files, 231 GB: 117 Epic game APKs (`ANDS.app`), 30 Academy game APKs (`AND4.app`), about 117 music and about 436 video APKs, plus `SystemImages/1stGen_System.img.xz` and `2ndGen_System.img.xz` and the system apps | `D:/ribbit-roms/LeapFrogEpic/` (1st-gen system and system apps, 3 game APKs) |
+| [android_kernel_quanta_narnia](https://github.com/huckleberrypie/android_kernel_quanta_narnia) | GPL kernel for the MT8127 Epic | - |
+
+The archive item's description says the apps use a modified Android LVL licence check, and
+videos use Widevine DRM in an obfuscated (DexProtector) player. The licence check lives in the
+Java side, which an HLE does not run. Video APKs are out of scope.
+
+### RK3326 dump (`D:/ribbit-roms/LeapFrogEpic4`)
+
+- `img/`: the unpacked archive. `parameter` holds the partition map (EFI_part, uboot, trust,
+  misc, dtb, dtbo, vbmeta, boot, recovery, backup, security, cache, metadata, app, frp, super,
+  userdata). `uboot-patched.img` is the community rockusb U-Boot.
+- `super/`: the logical partitions taken out of `super.img` (liblp metadata v10.0): system
+  (1.5 GB, system-as-root), vendor, product and odm, all ext4. Unpacked with a small Python
+  lpunpack.
+- `userdata.img` is a factory-fresh sparse image and `backup.img` is all zeros, so nothing
+  downloaded is in the dump. `app.img` (8 MB) is about half high-entropy data, and
+  `libAppArea.so` reads it; it is probably encrypted per-device data.
+- LeapFrog apps are in `/system/priv-app/vtech-*` (`apks/` holds the copies examined):
+  - **Brio games and utilities, "NoSO" APKs**. Their native library is in `/system/lib`
+    (copied to `gamelibs/`):
+    - `AND4.app.x00200026.AP_SM2`: `libStretchyMonkey2.so`
+    - `x00370009.PPAD2`: `libPPAD2.so`
+    - `x00280010/12/14.NUTL`: `libVoiceMemo_Utility.so`, `libCalculator_Utility.so`, `libClock_Utility.so`
+    - `/system/lib` also has `libAP_CCHAT.so`, `libAP_PWR04.so`, `libAP_XCOOK.so` and
+      `libAP_XSCOUT.so`, whose APKs are not installed.
+  - **Shells:**
+    - `vtech-KidLauncher`: Unity (`libunity.so`, `libmono.so`).
+    - `vtech-com.leapfrog.lfeshell.webview-939`: the LeapFrog Academy program. A Crosswalk
+      WebView over `www.zip`, with a PlayCanvas `KIDUI` front end (`deploy.json`: kidver 1.2.52)
+      and a `dj.zip` store page.
+  - **Plain Java apps:** EngagementDaily/Weekly (JSON picture data), RewardStore, Camera,
+    Gallery, Notepad, MusicPlayer, VideoPlayer, AppCenter, OOBE, DrmLiteServices, ContentProfile.
+  - **4 music APKs** (`ands.music.*`): OGG files plus art, with no code that matters.
+
+### MT8127 system image (`D:/ribbit-roms/LeapFrogEpic`)
+
+`1stGen_System.img` (sparse; unsparsed to `sys/system.raw.img`, ext4) is `EPICv3`,
+`KOT49H.user.1.1.171.20190530`, Android 4.4.2, MT8127. Its system apps
+(`com.lvlstudio.leapfrog.kidlauncher`, contentmanager, drmliteservices, narnia fotaclient,
+and so on) are in `apps/`. LVL Studio (`leapfrog-build.lvlstudio.local` appears in the Academy
+web bundle too) built both launchers.
+
+## How a title is built
+
+These are the results of `lfa_inspect` (see below). They are the same for the Epic and the
+Academy builds:
+
+- APK: `classes.dex` (Java shell, about 2-3 MB) plus `assets/<CODE>/...` (game data) plus
+  `assets/LF/Bulk/...` (shared tutorials, language pack). The manifest declares
+  `android.app.lib_name` (the native library), `contentType` (`learning-game`, `utility`) and
+  `sdkVersion` (Brio SDK: 8.0.0.6 and 8.6.0.6 on the Epic, 8.9.0.23 and 9.0.0.23 on the Academy).
+- Native library: ELF32 ARM, `armeabi-v7a`: ARMv7-A, mostly ARM mode (about 12,000 ARM
+  functions, about 100 Thumb-2), **VFPv3** (about 25,000-46,000 VFP instructions per library),
+  a few hundred NEON-looking words, soft-float ABI. Each library is 6-9 MB, with about
+  14,000-18,000 REL relocations (all RELATIVE, GLOB_DAT and JUMP_SLOT) and about 220-320
+  constructors.
+- Brio is linked in: about 2,500 exported `LeapFrog::Brio` symbols per library. The MPIs are
+  Accelerometer, Audio, BootSafeKernel, Button, Camera, Debug, Display, Event, Font, Kernel,
+  Microphone, Power, Video, Wireless and ICoreMPI. The games still use Brio paths
+  (`/LF/Bulk/`, `/LF/Base/Brio/Module/`, even `/LF/Base/DidjAvatars/`) and Brio's
+  CAppInterface/GameApp structure. That is the same API Ribbit's Explorer and Didj HLE already
+  serve at the Linux level, except that here the MPIs are compiled into the game.
+- Game data formats (AP_SM2): `.texar`, `.atlas`, `.poly-anim`, `.til3`, `.fun`,
+  `.fdata`/`.ftex` (fonts), `.phrs`, OGG/WAV audio and PNG. PPAD2 uses `game-*.rdt`. These were
+  not yet compared with Explorer cartridges (none were found unpacked on this PC).
+- What an HLE must provide is about 400 imports, taking the union over 6 libraries:
+  - bionic libc/libm: about 230
+  - pthread: about 38
+  - OpenGL ES: about 80, mostly **GLES 1.1 fixed-function** (glMatrixMode, glOrthof,
+    glVertexPointer, glTexEnvi, OES framebuffer objects); `naIsGLES2Enabled` lets the shell
+    choose
+  - EGL: 7-9 queries
+  - OpenSL ES: `slCreateEngine` + 8 IIDs (buffer-queue PCM, record)
+  - OpenMAX AL: 6 (video playback, `.mp4.ts` tutorials)
+  - libandroid: 22 (AAsset*, ASensor*, ALooper*, ANativeWindow_fromSurface)
+  - zlib: 6
+  - libdl: 4
+  - liblog: 1
+- JNI: `JNI_OnLoad` registers 40 natives on `LFMainActivity` and the adapter classes
+  (from `AppManager-android/Src/LFNativeMethods.cpp`):
+  - lifecycle: `naInitMainActivity`, `naLFGLSurfaceViewSurfaceCreated/Changed/Destroyed`,
+    `naDrawFrame`, `naSuspend/Resume`
+  - touch: `naTouchDown/Up/Move(FFI)V`
+  - buttons: `naPressA/B/Home/Hint/Pause/Back/Joystick` and the matching releases
+  - `naSetVideoSurface`
+  - adapter inits for logging, profiles, rewards, camera and wireless
+
+  The native code calls back into Java through a few methods: logging events, camera paths and
+  capture, wireless state, and `naActivityDone`. A fake JNIEnv only has to answer those.
+
+## Paths
+
+**(a) Full Android system emulation.** Boot the RK3326 image: a Cortex-A35 SoC (AArch64 kernel
+with a 32-bit userland), Mali-G31, eMMC, Rockchip peripherals, Android 10's SELinux and
+binder, then the Unity launcher and Crosswalk.
+- Effort: many months. Risk: very high (Mali GPU, SoC documentation).
+- Ribbit would need a 64-bit ARM core and a GPU.
+- Even QEMU has no RK3326 machine. The MT8127/Android 4.4 image would be smaller but has the
+  same problems.
+- Not recommended.
+
+**(b) HLE of the Brio-on-Android runtime (recommended).** Load the title's `.so` (done:
+`ribbit-lfandroid`), run it on Ribbit's ARM core, and give it Rust stand-ins for the about 400
+imports and the Java shell. The work, with estimates:
+1. **CPU: about 2-4 weeks.** `ribbit-arm`/`ribbit-armjit` are ARMv5TE (ARM926). Missing:
+   - ARMv7 ARM-mode additions: movw/movt, ldrex/strex, dmb, ubfx/sbfx/bfi, rbit, and so on
+     (small)
+   - **VFPv3**: single and double precision, used everywhere (large, but regular)
+   - Thumb-2 for about 100 functions (medium)
+   - a NEON subset (check what is really used first)
+   - The JIT can follow later; at first, interpreted speed on the desktop should be fine for 2D
+     games.
+2. **Loader and user-mode runtime: about 1-2 weeks.** Thunk traps at `THUNK_BASE`, TLS,
+   threads (Brio starts a few pthreads; the Didj HLE's task model can be reused), heap,
+   constructors, C++ exceptions (`__cxa_*`/unwind come from the library's own static libstdc++,
+   only 2 C++ imports), and a file system over the APK assets with `/sdcard/LF/Bulk` mapped to
+   a folder.
+3. **Graphics: about 2-3 weeks.** A GLES 1.1 fixed-function implementation (the list above)
+   into Ribbit's renderer, or a CPU rasterizer at 1024x600 first. EGL is just queries and swap.
+4. **Sound and video: about 1 week.** OpenSL ES buffer queues to Ribbit audio. OpenMAX AL
+   tutorial videos (MPEG-TS, H.264) can at first be skipped, or decoded through the existing
+   FFmpeg route if there is one.
+5. **Shell and front end: about 1 week.** A Rust LFMainActivity that calls the `na*` natives,
+   maps touch and buttons, and gives Ribbit library cards from the APK icon and title. Saves
+   go to a per-title folder (Brio profile and settings files).
+
+In total it is about 2-3 months of focused work before the first title is playable. After
+that, most titles should follow, because they share one SDK and one import list. Risks: VFP
+correctness, threads (Brio uses pthread conditions and timed waits), GLES state details, and
+titles that use the camera or microphone. Practical notes: only the user's own downloads or
+dumps are used, and Ribbit never distributes APKs. The licence check is in Java, which this
+path never runs. The Academy program, KidLauncher, Engagement apps, music and videos are not
+covered.
+
+**(c) A standard Android emulator, with Ribbit as launcher.** The titles want LeapFrog system
+services (ContentProfile, DrmLiteServices, LoggingServices, `com.leapfrog.permission.*`), the
+modified LVL check, and a `/sdcard/LF/Bulk` layout. The NoSO titles also need their library in
+`/system/lib`. On an x86 emulator they need ARM translation (libndk/houdini). The Android
+emulator's ARM images are slow, and 32-bit ARM support is being dropped.
+- Effort: about 1-2 weeks of glue for a fragile result.
+- It needs a large external dependency, so it isn't "the same way as the other ones".
+- Possible only as an experiment.
+
+**(d) Not feasible: the LeapFrog Academy program itself.** It is subscription content served
+from LeapFrog's servers. Only the UI shell is in the firmware, and offline play covers just up
+to 24 downloaded favourites. Nothing of it can be preserved or run without the service. The
+Unity KidLauncher could be replaced by Ribbit's own library screen.
+
+## First code: `crates/ribbit-lfandroid`
+
+- `apk.rs`: a read-only ZIP reader (stored and deflate, through `miniz_oxide`) and the
+  binary-manifest string pool.
+- `elf.rs`: ELF32 ARM shared-object loader. It maps PT_LOAD at a base, reads PT_DYNAMIC, applies
+  RELATIVE, ABS32, GLOB_DAT and JUMP_SLOT relocations, binds each import to a caller-chosen
+  address (one 8-byte thunk slot each), and collects exports, DT_INIT/INIT_ARRAY and the aeabi
+  CPU attributes.
+- `lib.rs`: `open_title()` reads the manifest metadata and finds the library in the APK or in
+  the firmware's `/system/lib` (for NoSO titles). It returns the loaded image, imports grouped
+  by Android library (`api_area`), and the JNI natives.
+- `examples/lfa_inspect.rs`:
+  `cargo run -p ribbit-lfandroid --example lfa_inspect -- [--lib <system/lib>] [-v] <apk>...`
+
+Checked on 3 Academy built-ins and 3 store APKs (Epic AP_SM2 and AP_DINO, Academy AP_DINO).
+All loaded with 0 unbound relocations. The import union is 401-404.
+
+Next steps, in order:
+1. VFPv3 and the ARMv7 additions in `ribbit-arm` (with tests).
+2. Run `JNI_OnLoad` with a fake JavaVM/JNIEnv until it has registered its 40 natives.
+3. Run the constructors and `naInitMainActivity`, stubbing libc as it is reached.
+4. A GLES 1.1 software path and a headless frame dump of `naDrawFrame`.
+
+## Questions for the user
+
+- Do you own a LeapPad Academy or an Epic? Which one (MT8127 or RK3326; a MIPI unit)? It would
+  help to check behaviour on hardware and to dump a device that has store titles installed.
+- Which titles matter most? Each of the 147 game APKs on archive.org is 70-210 MB, so they should
+  be downloaded only as needed.

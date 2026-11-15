@@ -8,6 +8,7 @@ members = [
     "crates/ribbit-armjit",
     "crates/ribbit-zippity",
     "crates/ribbit-clickstart",
+    "crates/ribbit-lfandroid",
     "crates/ribbit-twist",
     "crates/ribbit-didj",
     "crates/ribbit-leappad",
