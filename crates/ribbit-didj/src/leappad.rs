@@ -188,6 +188,15 @@ pub fn card_with_files(dir: &std::path::Path, extra: &Tree) -> Result<Nand, Stri
             Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
+    // Bulk Empty marks the folders of packages the firmware needs with a
+    // `doom` file (libLightningBase: "critical package doom file
+    // detected"): the package isn't there yet. Installed, it goes, as the
+    // console's lfpkg replaces the folder (else every game asked for its
+    // language pack).
+    let doomed: Vec<String> = tree.keys().filter(|p| p.ends_with("/doom")).filter(|p| tree.contains_key(&format!("{}/meta.inf", &p[..p.len() - 5]))).cloned().collect();
+    for p in doomed {
+        tree.remove(&p);
+    }
     let missing = missing_packages(&installed);
     if !missing.is_empty() {
         return Err(format!("{MISSING_PACKAGES}{}", missing.join(", ")));
