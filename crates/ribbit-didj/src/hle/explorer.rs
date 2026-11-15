@@ -435,6 +435,8 @@ pub(crate) struct Explorer {
     pub tilt: [i32; 4],
     #[serde(default)]
     pub tilt_tick: i32,
+    #[serde(skip)]
+    pub jitter: bool,
     /// SysV semaphore sets by id: (key, values).
     #[serde(default)]
     pub sems: std::collections::BTreeMap<u32, (u32, Vec<i32>)>,
@@ -595,7 +597,15 @@ impl Process {
             let bits = &mut self.x.keys[TOUCH][BTN_TOUCH as usize / 8];
             *bits ^= 1 << (BTN_TOUCH % 8);
         }
-        let (x, y) = at.or(was).unwrap_or((0, 0));
+        let (mut x, y) = at.or(was).unwrap_or((0, 0));
+        // The LeapPad 2's driver reports samples all the time the stylus is
+        // down, each a little different, and tslib's variance and dejitter
+        // filters want several to pass one on; a held stylus moves a pixel
+        // back and forth here (the Explorer's own setup works without).
+        if self.x.leappad2 && at.is_some() && was == at {
+            self.x.jitter = !self.x.jitter;
+            x += self.x.jitter as i32;
+        }
         let values = [x, y, if at.is_some() { PRESSURE } else { 0 }];
         for (i, v) in values.into_iter().enumerate() {
             let code = if i == 2 { 24 } else { i as u16 };

@@ -103,6 +103,10 @@ fn main() {
     }
     // EXPLORER_HLE_CONSOLE_OUT=1: /flags/console_out, so /usr/bin/app lets
     // AppManager and CartManager print to the console.
+    // EXPLORER_HLE_ADD=<path>,...: empty files put in the file tree first (flags).
+    for path in std::env::var("EXPLORER_HLE_ADD").unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
+        p.vfs.add_file(path, Vec::new());
+    }
     if std::env::var_os("EXPLORER_HLE_CONSOLE_OUT").is_some() {
         p.vfs.add_file("/flags/console_out", Vec::new());
     }
@@ -126,6 +130,7 @@ fn main() {
         .collect();
     input.sort_by_key(|e| e.0);
     let mut ups: Vec<(u128, u16)> = Vec::new();
+    let mut held: Option<(i32, i32)> = None;
     let mut sound: Vec<i16> = Vec::new();
     let (mut rate, mut channels) = (32000, 2);
     let frames_dir = std::env::var("EXPLORER_HLE_FRAMES").ok();
@@ -151,8 +156,10 @@ fn main() {
                 p.explorer_cart(raw.as_deref()).unwrap_or_else(|e| panic!("{e}"));
             } else if what == "lift" {
                 p.stylus(None);
+                held = None;
             } else if let Some((x, y)) = what.split_once(',') {
-                p.stylus(Some((x.parse().expect("x"), y.parse().expect("y"))));
+                held = Some((x.parse().expect("x"), y.parse().expect("y")));
+                p.stylus(held);
             } else {
                 // A key name, or k<Linux key code> (k115 volume up, k114
                 // down); `+<ms>` holds it that long (else 100 ms).
@@ -161,6 +168,10 @@ fn main() {
                 p.key(code, true);
                 ups.push((ms + hold, code));
             }
+        }
+        // A held stylus is reported again every step (the driver samples it).
+        if held.is_some() {
+            p.stylus(held);
         }
         while let Some(i) = ups.iter().position(|&(at, _)| at <= ms) {
             p.key(ups.remove(i).1, false);
@@ -226,6 +237,10 @@ fn main() {
         f.extend((data.len() as u32).to_le_bytes());
         f.extend(&data);
         std::fs::write(&path, f).expect("can't write the WAV");
+    }
+    // EXPLORER_HLE_JIT_STATS=1: the JIT's counters at the end.
+    if std::env::var_os("EXPLORER_HLE_JIT_STATS").is_some() {
+        eprintln!("[explorerhle] JIT: {:?}", p.m.jit.stats);
     }
     if let Ok(path) = std::env::var("EXPLORER_HLE_STATE_OUT") {
         std::fs::write(&path, p.save_state(&base)).expect("write the state");

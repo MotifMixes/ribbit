@@ -176,6 +176,17 @@ pub struct Changes {
     next_ino: u32,
 }
 
+impl Changes {
+    /// Only the changes to paths `keep` accepts.
+    pub fn only(self, keep: impl Fn(&str) -> bool) -> Changes {
+        Changes {
+            nodes: self.nodes.into_iter().filter(|(p, _)| keep(p)).collect(),
+            removed: self.removed.into_iter().filter(|p| keep(p)).collect(),
+            next_ino: self.next_ino,
+        }
+    }
+}
+
 impl Vfs {
     pub fn changes_from(&self, base: &Vfs) -> Changes {
         Changes {

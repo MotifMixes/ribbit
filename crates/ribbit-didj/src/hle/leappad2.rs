@@ -391,3 +391,60 @@ impl Process {
         }
     }
 }
+
+/// Whether `dir` holds the LeapPad 2's firmware (a Firmware-Base .lfp with
+/// Device "LeapPad2Explorer").
+pub fn is_leappad2_dir(dir: &std::path::Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else { return false };
+    rd.flatten().map(|e| e.path()).any(|p| {
+        p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lfp"))
+            && p.file_name().is_some_and(|n| n.to_string_lossy().contains("Firmware-Base") || n.to_string_lossy().starts_with("PAD2-"))
+            && std::fs::read(&p).is_ok_and(|d| for_leappad2(&d))
+    })
+}
+
+/// The folders whose files a LeapPad 2 save keeps: what its programs write
+/// that lives on its NAND (Bulk: profiles, downloads, game saves; /flags:
+/// settings, the touch calibration). The rest of the tree is rebuilt from
+/// the packages at every power-on.
+const SAVED: [&str; 2] = ["/LF/Bulk/", "/flags/"];
+
+fn saved(path: &str) -> bool {
+    SAVED.iter().any(|d| path.starts_with(d) || format!("{path}/") == *d)
+}
+
+/// A save: the saved folders' files that differ from `base` (the tree as
+/// built from the packages), and the ones removed. GUESS: the real NAND
+/// layout isn't known, so a LeapPad 2's save is Ribbit's own format
+/// (bincode of `vfs::Changes`, deflated) rather than a NAND image.
+pub fn save_files(vfs: &Vfs, base: &Vfs) -> Vec<u8> {
+    let all = vfs.changes_from(base);
+    let kept = all.only(saved);
+    let data = bincode::serialize(&kept).expect("serialise the save");
+    let mut out = b"RBLP2SV1".to_vec();
+    out.extend(miniz_oxide::deflate::compress_to_vec(&data, 6));
+    out
+}
+
+/// Puts a `save_files` save on top of `base` (built from the packages).
+pub fn load_files(base: &Vfs, save: &[u8]) -> Result<Vfs, String> {
+    if save.get(..8) != Some(&b"RBLP2SV1"[..]) {
+        return Err("not a LeapPad 2 save".into());
+    }
+    let data = miniz_oxide::inflate::decompress_to_vec(&save[8..]).map_err(|_| "a damaged LeapPad 2 save".to_string())?;
+    let changes: super::state::Changes = bincode::deserialize(&data).map_err(|e| e.to_string())?;
+    Ok(Vfs::with_changes(base, changes))
+}
+
+/// The saved folders' fingerprint, to tell when a save is due.
+pub fn fingerprint(vfs: &Vfs) -> u32 {
+    let mut h = crc32fast::Hasher::new();
+    for (path, node) in vfs.nodes.iter().filter(|(p, _)| saved(p)) {
+        h.update(path.as_bytes());
+        if let Data::File(d) = &node.data {
+            h.update(&(d.len() as u64).to_le_bytes());
+            h.update(d);
+        }
+    }
+    h.finalize()
+}

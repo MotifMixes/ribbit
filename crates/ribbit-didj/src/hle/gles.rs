@@ -182,6 +182,9 @@ impl Process {
             ribbit_gles::abi::Outcome::Value(v) => v,
             ribbit_gles::abi::Outcome::Swap(_) => {
                 host.swaps += 1;
+                if host.log && host.swaps.is_power_of_two() {
+                    eprintln!("[gles] swap {} at {:.1} s, {} draws since start", host.swaps, self.since_start().as_secs_f64(), host.gl.draws);
+                }
                 self.gles_present(&host.gl.surface);
                 1
             }

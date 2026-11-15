@@ -51,7 +51,12 @@ enum Literal {
 /// pc, r3`): the last time at +0x310, the state at +0x30C, the timer at
 /// +0x314, so at 0x65904; it shuts down past 239999 ms (599999 ms paused),
 /// dims past 119999 ms.
-const VARIANTS: [Variant; 2] = [
+/// The LeapPad 2's (Firmware-Base 4.6.0.784, ARMv7; disassembled
+/// 2026-11-15): UpdateInactivity at 0x3DC30 (`push {r4-sl, lr}`, `add r7,
+/// r0, #0x14`, `sub sp, sp, #0x30`), its statics from the literal at 0x3E174
+/// (0x29898) plus pc at 0x3DC60, the timer at +0x314, so at 0x6780C; the
+/// same limits as the Explorer's 2.x (240 s, 600 s paused, dims at 120 s).
+const VARIANTS: [Variant; 3] = [
     Variant { code: CODE, prologue: PROLOGUE, literal: TIMER_LITERAL, value: Literal::Based(TIMER), timer: TIMER, near_ms: NEAR_SHUTDOWN_MS },
     Variant {
         code: 0x3_54BC,
@@ -59,6 +64,14 @@ const VARIANTS: [Variant; 2] = [
         literal: 0x3_5908,
         value: Literal::Fixed(0x3_0108),
         timer: 0x6_5904,
+        near_ms: 225_000,
+    },
+    Variant {
+        code: 0x3_DC30,
+        prologue: [0xE92D_47F0, 0xE280_7014, 0xE24D_D030],
+        literal: 0x3_E174,
+        value: Literal::Fixed(0x2_9898),
+        timer: 0x6_780C,
         near_ms: 225_000,
     },
 ];
