@@ -150,6 +150,9 @@ pub enum Family {
     Explorer,
     /// The LeapPad Explorer's firmware package (its menu).
     LeapPadExplorer,
+    /// The LeapPad 2's firmware package (its menu); its cartridges are the
+    /// Explorer-slot dumps (Enhanced (new) only).
+    LeapPad2,
     /// A ClickStart cartridge, or its system ROM's built-in activities.
     ClickStart,
 }
@@ -162,13 +165,14 @@ const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 impl Family {
     /// The library tabs: the game consoles in alphabetical order, then the
     /// LeapPad (a book reader; Ribbit is a game emulator first).
-    pub const ALL: [Family; 9] = [
+    pub const ALL: [Family; 10] = [
         Family::ClickStart,
         Family::Didj,
         Family::Leapster,
         Family::Leapster2,
         Family::Explorer,
         Family::LeapPadExplorer,
+        Family::LeapPad2,
         Family::RockItTwist,
         Family::Zippity,
         Family::LeapPad,
@@ -189,6 +193,7 @@ impl Family {
             Family::Didj => "Didj",
             Family::Explorer => "Leapster Explorer",
             Family::LeapPadExplorer => "LeapPad Explorer",
+            Family::LeapPad2 => "LeapPad 2",
             Family::ClickStart => "ClickStart",
         }
     }
@@ -198,7 +203,7 @@ impl Family {
         match self {
             Family::Leapster => !matches!(
                 hw,
-                Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::ClickStart
+                Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart
             ),
             Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
@@ -207,6 +212,7 @@ impl Family {
             Family::Didj => hw == Hardware::Didj,
             Family::Explorer => hw == Hardware::Explorer,
             Family::LeapPadExplorer => hw == Hardware::LeapPadExplorer,
+            Family::LeapPad2 => hw == Hardware::LeapPad2,
             Family::ClickStart => hw == Hardware::ClickStart,
         }
     }
@@ -222,6 +228,7 @@ impl Family {
             Family::Didj => Hardware::Didj,
             Family::Explorer => Hardware::Explorer,
             Family::LeapPadExplorer => Hardware::LeapPadExplorer,
+            Family::LeapPad2 => Hardware::LeapPad2,
             Family::ClickStart => Hardware::ClickStart,
         }
     }
@@ -717,7 +724,7 @@ impl Library {
             // book played without one says so.
             Hardware::LeapPad => true,
             // Started from its packages (it says which are missing).
-            Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer => true,
+            Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 => true,
             _ => self.bios_for(hw).is_some(),
         }
     }
@@ -732,7 +739,7 @@ impl Library {
             .filter(|&hw| {
                 !matches!(
                     hw,
-                    Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::ClickStart
+                    Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart
                 )
             })
             .filter(|&hw| self.bios_for(hw).is_some())
@@ -757,6 +764,7 @@ impl Library {
             Hardware::Didj => Family::Didj,
             Hardware::Explorer => Family::Explorer,
             Hardware::LeapPadExplorer => Family::LeapPadExplorer,
+            Hardware::LeapPad2 => Family::LeapPad2,
             Hardware::ClickStart => Family::ClickStart,
             _ => Family::Leapster,
         }
@@ -1106,6 +1114,14 @@ fn classify(path: &Path) -> Option<Found> {
         return Some(Found::Didj(game));
     }
     if crate::didj::is_leappad_package(path) {
+        return None;
+    }
+    // The LeapPad 2's Firmware-Base package: the console; its other
+    // packages are found beside it.
+    if let Some(game) = crate::didj::describe_leappad2(path) {
+        return Some(Found::Didj(game));
+    }
+    if crate::didj::is_leappad2_package(path) {
         return None;
     }
     // A Leapster Explorer game's package (.lf2, or an .lfp for it).

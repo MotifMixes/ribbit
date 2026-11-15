@@ -2687,7 +2687,7 @@ fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, ta
         turn_on_button(ui, settings, library, tab, actions);
         // Zippity and RockIt Twist games play on their own console: no
         // choice to make on their pages.
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2)) {
             // (Right to left: the BIOS button shows to the right of the
             // console menu.)
             bios_picker(ui, settings, library, actions);
@@ -2753,7 +2753,7 @@ fn phone_library_header(
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2)) {
             console_picker(ui, settings, library, tab, actions);
             bios_picker(ui, settings, library, actions);
         }
@@ -2919,6 +2919,15 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
     if tab == Some(Family::LeapPadExplorer) {
         if let Some(g) = library.games.iter().find(|g| g.family == Family::LeapPadExplorer && g.has_tag("System"))
             && power_button(ui, "Turn on the LeapPad Explorer (its setup and menu)")
+        {
+            actions.push(Action::PlayFromLibrary(g.path.clone()));
+        }
+        return;
+    }
+    // The LeapPad 2's page: its Firmware-Base package is the console.
+    if tab == Some(Family::LeapPad2) {
+        if let Some(g) = library.games.iter().find(|g| g.family == Family::LeapPad2 && g.has_tag("System"))
+            && power_button(ui, "Turn on the LeapPad 2 (Enhanced (new): its setup and menu; LeapPad cartridges from the Leapster Explorer page go in its slot)")
         {
             actions.push(Action::PlayFromLibrary(g.path.clone()));
         }
@@ -3642,7 +3651,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a
         // Zippity's or RockIt Twist's belongs to the whole console.
-        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer);
+        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2);
         let delete = ui
             .add_enabled(
                 own_save,

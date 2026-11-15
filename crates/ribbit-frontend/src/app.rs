@@ -876,7 +876,7 @@ impl App {
         }
         // The Leapster Explorer's firmware: the Explorer, built from the
         // packages beside it.
-        if crate::didj::describe_explorer(&path).is_some() {
+        if crate::didj::describe_explorer(&path).is_some() || crate::didj::describe_leappad2(&path).is_some() {
             return self.start_explorer(path);
         }
         // A game installed on the Explorer, or a game package for it: the
@@ -1667,7 +1667,15 @@ impl App {
         } else if self.clickstart.is_some() {
             Some(Hardware::ClickStart)
         } else if let Some(d) = &self.didj {
-            Some(if d.leappad { Hardware::LeapPadExplorer } else if d.explorer { Hardware::Explorer } else { Hardware::Didj })
+            Some(if d.leappad2 {
+                Hardware::LeapPad2
+            } else if d.leappad {
+                Hardware::LeapPadExplorer
+            } else if d.explorer {
+                Hardware::Explorer
+            } else {
+                Hardware::Didj
+            })
         } else {
             self.session.as_ref().map(|s| s.hardware)
         }
@@ -3363,7 +3371,7 @@ impl App {
             // view is shown (the screen at the picture's own size).
             let picture = if self.session.is_some() {
                 crate::record::LEAPSTER_SIZE
-            } else if let Some(d) = self.didj.as_ref().filter(|d| d.leappad) {
+            } else if let Some(d) = self.didj.as_ref().filter(|d| d.leappad || d.leappad2) {
                 let (w, h) = (ribbit_didj::leappad::WIDTH as usize, ribbit_didj::leappad::HEIGHT as usize);
                 if d.upright() { (h, w) } else { (w, h) }
             } else if self.didj.is_some() {
@@ -3668,7 +3676,7 @@ impl App {
         // The Leapster Explorer's touch screen: the stylus in its pixels.
         // The LeapPad Explorer's: its picture shown upright (272x480), the
         // stylus in the panel's pixels (480x272).
-        if let Some(d) = self.didj.as_ref().filter(|d| d.leappad && d.upright()) {
+        if let Some(d) = self.didj.as_ref().filter(|d| (d.leappad || d.leappad2) && d.upright()) {
             let (x, y, w, h) = self.lcd_px;
             let (sw, sh) = (ribbit_didj::leappad::HEIGHT as f32, ribbit_didj::leappad::WIDTH as f32);
             d.set_touch(pos.and_then(|(cx, cy)| {
@@ -3679,7 +3687,7 @@ impl App {
         }
         if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
             let (x, y, w, h) = self.lcd_px;
-            let (sw, sh) = if d.leappad {
+            let (sw, sh) = if d.leappad || d.leappad2 {
                 (ribbit_didj::leappad::WIDTH as f32, ribbit_didj::leappad::HEIGHT as f32)
             } else {
                 (crate::didj::SCREEN_W as f32, crate::didj::SCREEN_H as f32)

@@ -395,6 +395,18 @@ impl Process {
 /// Whether `dir` holds the LeapPad 2's firmware (a Firmware-Base .lfp with
 /// Device "LeapPad2Explorer").
 pub fn is_leappad2_dir(dir: &std::path::Path) -> bool {
+    // Asked for every package of a folder while the library scans it: the
+    // answer is kept (a Firmware-Base package is 33 MB to read).
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, bool>>> = std::sync::Mutex::new(None);
+    if let Some(&known) = SEEN.lock().unwrap().get_or_insert_with(Default::default).get(dir) {
+        return known;
+    }
+    let found = find_leappad2_firmware(dir);
+    SEEN.lock().unwrap().get_or_insert_with(Default::default).insert(dir.to_path_buf(), found);
+    found
+}
+
+fn find_leappad2_firmware(dir: &std::path::Path) -> bool {
     let Ok(rd) = std::fs::read_dir(dir) else { return false };
     rd.flatten().map(|e| e.path()).any(|p| {
         p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lfp"))

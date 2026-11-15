@@ -7,10 +7,12 @@ docs/explorer-enhanced-hle.md): the firmware's own ARM programs on Ribbit's ARM 
 their Linux system calls instead of a kernel. There is no Original (real kernel) mode for these: the SoCs
 (Nexell NXP3200 / NXP4330) aren't emulated.
 
-Status (2026-11-15): the ARM core runs ARMv7 programs (`Arm::v7`); the HLE has a LeapPad 2 mode
-(`hle::leappad2`, `Process::new_leappad2`) that boots the real firmware through the first-time setup to the
-home menu, and a LeapPad cartridge passes its "play this on a LeapPad" check there. Games don't draw yet: the
-LeapPad 2's Lightning draws with OpenGL ES on the LF2000's Nexell VR5 GPU, not emulated. Not in the app.
+Status (2026-11-15): the ARM core runs ARMv7 programs (`Arm::v7`); the HLE's LeapPad 2 mode
+(`hle::leappad2`, `Process::new_leappad2`) boots the real firmware through the first-time setup to the
+home menu; LeapPad cartridges play: their OpenGL ES drawing goes to Ribbit's own GLES 1.1 renderer
+(crates/ribbit-gles, `hle::gles`). Cinderella - The Heart that Believes shows its title and turns to its
+first page; Thomas & Friends shows its title. In the app (experimental): a "LeapPad 2" library tab
+started from its Firmware-Base package, Enhanced (new) only.
 
 ## Hardware
 
@@ -118,9 +120,12 @@ run's end, start from it). The file systems take 7-20 s to build (the language p
   /tmp/cart_events_socket). The home menu's Cartridge square shows the game's icon (Thomas & Friends).
   Tapped, the cartridge's launcher (App.so, UEBLApp) logs "screen stats (480 x 272)", "Firmware and Device
   OK...", "Microphone widget OK..." and AppManager loads the game, BookApp.so (here LeapFrog's LexPatches.json
-  replaces Thomas's with the "LBA7 Patch" BookApp). The game then sets up OpenGL ES (eglInitialize,
-  eglCreateWindowSurface, eglCreateContext) and crashes: libvr5 wants SysV semaphores (semget/semctl,
-  system calls 299/300, not in the HLE) and the GPU (/dev/ogl_vr5, /dev/vmem).
+  replaces Thomas's with the "LBA7 Patch" BookApp). The game draws with OpenGL ES (below): Thomas &
+  Friends and Cinderella show their title screens; a tap on Cinderella's arrow plays the page-turn sound
+  and opens its first page ("Cinderella was nice and kind."). Frames:
+  D:/ribbit-scratch/leappad2/evidence/lp2_thomas_title.png, lp2_cinderella_title.png,
+  lp2_cinderella_page1.png. A tap on the menu's Cartridge square sometimes doesn't start the game the
+  first time (the square still loading); a second tap does.
 * Speed: 40-100 million instructions a second while busy (video, Flash) on the i9; the real CPU is about
   530 MHz, so screens change slowly (a setup step takes 5-20 s). The JIT interprets every ARMv7 and VFP
   instruction inside its blocks (only MOVW is compiled).
@@ -129,17 +134,44 @@ Fixed on the way (shared with the Explorer's HLE): a socket name whose node was 
 (VideoDaemon and AppManager both bind /tmp/cart_events_socket after unlinking it); save states keep the VFP
 registers (appended after the state, older states still load); the JIT keeps its ARMv7 mode after a load.
 
+## Graphics: OpenGL ES in Ribbit (2026-11-15)
+
+The LeapPad 2's Lightning (libLightning2D: textures, quads, eglSwapBuffers) and so every Lightning game
+draws with OpenGL ES 1.1 through Nexell's libvr5 (/dev/ogl_vr5, /dev/vmem, SysV semaphores) on the
+undocumented VR5 GPU. Ribbit answers the GL API instead of modelling the chip:
+
+* crates/ribbit-gles: a self-contained GLES 1.1 fixed-function context and EGL in software (no machine
+  dependency): matrix stacks, client arrays and buffer objects read through a `Memory` trait, fixed/float/
+  short/byte vertices, one 2D texture unit (RGBA/RGB/LA/L/A, 565/4444/5551, paletted and ETC1
+  compression), NEAREST/LINEAR, REPEAT/CLAMP, the texture environments, alpha/depth/scissor tests,
+  blending, masks, culling, clipping, the top-left fill rule. `abi::gl_call`/`egl_call` take a C entry
+  point's name and the arguments of a 32-bit ARM soft-float caller: the LeapPad Academy's armeabi-v7a
+  Brio games (docs/leappad-academy.md) can use the same crate with their own `Guest`.
+* hle/gles.rs: every exported function of /usr/lib/libEGL.so.1.4, libGLESv1_CM.so.1.1, libGLES.so,
+  libvr5.so and libGLESv2.so.2.0 is replaced in the file tree by `svc #0xF0nnnn; bx lr` (the index table in
+  /proc/ribbit-gles-hooks); the system call handler passes those to ribbit-gles, and eglSwapBuffers copies
+  the picture into the RGB layer the MLC shows (layer 0; GUESS: DisplayMPI's GL layer, as it looks right).
+  `__vr5_set_swap_buffer_callback` is not called back. GL state is not in save states.
+* The calls the games make: about 50 (eglInitialize ... eglSwapBuffers; glTexImage2D, glBufferData,
+  glDrawElements with fixed-point vertices and texture coordinates, glOrthox, glLoadMatrixx, glBlendFunc,
+  glColor4x, ...). Rendering keeps up: Thomas's title swaps about 85 times a second.
+* SysV semaphores (semget, semctl, semop, semtimedop) are in the HLE too.
+
+Input on the LeapPad 2: the touch screen is read by AppManager through tslib (variance, dejitter, linear);
+its driver reports samples all the time the stylus is down, so the HLE repeats a held stylus with a
+pixel of jitter (a single sample didn't get through tslib's filters). Linux 2.6.37's evdev version is
+0x010001 (tslib refuses another).
+
+JIT (measured 2026-11-15, Cinderella's title and first page, 110 s): 3.6 G instructions ran compiled,
+47 M "other" (MOVT, the extends, exclusives, media) and 0.9 M VFP instructions through the interpreter
+inside blocks (1.3%), 3.3 M interpreted outside blocks; the programs mostly wait (5-50 M instructions a
+second). Compiling the ARMv7/VFP instructions isn't worth it yet.
+
 ## What's missing
 
-* **The GPU.** LeapPad 2 Lightning (libLightning2D: textures, eglSwapBuffers) and so every Lightning game
-  draws with OpenGL ES 1.1 through Nexell's libvr5.so: /dev/ogl_vr5 (ioctls), /dev/vmem (video memory),
-  /dev/mem, SysV semaphores. The VR5 is undocumented; the kernel's side is in the GPL source
-  (arch/arm/mach-nxp3200/vr5). Two ways: emulate the VR5 at its registers/command buffers (reverse
-  engineering libvr5's command stream), or HLE the GL API (answer libGLESv1_CM/libEGL's exported functions
-  in Rust, as Ribbit answers system calls, with a software or host-GPU renderer). The second looks smaller:
-  GLES 1.1 is documented and Lightning uses a small part of it (textured quads).
-* SysV IPC (semget/semop/semctl, shm*): needed by libvr5 and by ALSA's dmix (the Explorer's HLE lives
-  without dmix already).
+* GL: lighting, fog, stencil, multitexture and point sprites aren't drawn (none seen used); the swap
+  callback isn't called; a save state starts a new GL context (textures lost until the game uploads them
+  again). SysV shared memory (shm*) isn't there.
 * Instructions: everything the scans found is implemented. Not implemented: Thumb-2 (only 63 libgcc_s
   functions are Thumb; none were called), NEON (tagged in the LeapPad 3's uClibc, not found in use).
   The JIT runs MOVT, the extends, the exclusives, the media and VFP instructions through the interpreter one
@@ -157,18 +189,23 @@ reads it), its kernel a uImage in a FAT partition. Its uClibc, Lightning and App
 instructions as the LeapPad 2's (no NEON found in them). Its platform is CABO, 480x272. The same work
 applies (an ext4 reader, the LF3000's /sys and devices, and the GPU, likely a different one).
 
-## Plan for the app
+## In the app (experimental, 2026-11-15)
 
-1. The GPU (HLE of GLES 1.1 as above), then a LeapPad cartridge to its title and play, checked frame by frame.
-2. Library: a LeapPad 2 family (Device "LeapPad2Explorer" packages: Firmware-Base `PAD2-0x0022...`), its
-   cartridges the Explorer dumps whose meta.inf says LeapPadExplorer (and the Explorer games, which it also
-   runs), started in Enhanced (new) only (no Original mode: no LF2000 machine).
-3. A session as `Hle::new_explorer` with `Process::new_leappad2`: the stylus, the d-pad and buttons (gpio-keys),
-   volume, the accelerometer from the keyboard or a gamepad's tilt, saves of Bulk and /flags (the NAND layout
-   of a LeapPad 2 is a GUESS: keep its files as a folder or a UBI image of our own), save states.
-4. Settings: "Turn off when idle" must hold (off: never idles off; the LeapPad 2's AppManager has the
-   Explorer's shutdown timer, "Shutdown Timer set for 12000 [ms]", so the Explorer's idle handling applies).
-5. Speed: compile the common ARMv7/VFP instructions in the JIT.
+* Library: a "LeapPad 2" tab; its Firmware-Base package (Device "LeapPad2Explorer") is the console, the
+  other packages in its folder aren't listed as Explorer games. The power button starts it.
+* Session (frontend didj.rs): `DidjSession::build_explorer` sees a LeapPad 2 folder
+  (`hle::leappad2::is_leappad2_dir`) and starts Enhanced (new) alone (`Hle::new_leappad2`; the session's
+  machine is a small stand-in that never runs), whatever the Explorer's mode setting. The picture is shown
+  upright or as the panel as the LeapPad Explorer's ("Screen upright"), the mouse is the stylus, the keys
+  are the Explorer's (d-pad, A/B, Home, volume). LeapPad cartridges from the Leapster Explorer page go into
+  its slot while it runs (`set_cart` -> `leappad2_cart`).
+* Saves: `leappad2-<folder>.lp2save` (Bulk and /flags as changes from the packages' tree,
+  `hle::leappad2::save_files`), written when they changed and on closing; read back at power-on. Test
+  `leappad2_session` (RIBBIT_LEAPPAD2_DIR).
+* "Turn off when idle": the LeapPad 2's AppManager timer (`ribbit_didj::idle`, UpdateInactivity at
+  0x3DC30) is kept at 0 when the setting is off, as the other consoles'; on, it dims at 2 minutes and shuts
+  down at 4.
+* Not yet: save states keep the HLE but not the GL context; the accelerometer has no control; no USB.
 
 ## Open questions
 

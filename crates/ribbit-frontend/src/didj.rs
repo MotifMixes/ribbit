@@ -198,6 +198,9 @@ pub struct ExplorerBuilt {
     carried: Option<usize>,
     /// A LeapPad Explorer (its SD card in `lx.bus.nand`).
     leappad: bool,
+    /// A LeapPad 2 (Enhanced (new) only: `lx` a stand-in that never runs;
+    /// its save is the HLE's own, `Hle::lp2_save`).
+    leappad2: bool,
 }
 
 pub struct DidjSession {
@@ -222,6 +225,8 @@ pub struct DidjSession {
     pub explorer: bool,
     /// A LeapPad Explorer (`start_explorer` with a LeapPad's packages).
     pub leappad: bool,
+    /// A LeapPad 2 (`start_explorer` with its packages; Enhanced (new) only).
+    pub leappad2: bool,
     /// The packages' folder and the cartridge's dump, for building the
     /// HLE again (`reset`).
     dir: PathBuf,
@@ -347,7 +352,7 @@ impl DidjSession {
             run(&s, autostart)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false, leappad: false, dir: dir.to_path_buf(), cart: cart_dump })
+        Ok(Self { shared, thread: Some(thread), title: "Didj".into(), started, original, save_path, image, extras_missing, carried, explorer: false, leappad: false, leappad2: false, dir: dir.to_path_buf(), cart: cart_dump })
     }
 
     /// Builds a Leapster Explorer from the packages in `dir`
@@ -357,6 +362,9 @@ impl DidjSession {
     pub fn build_explorer(dir: &Path, save_dir: &Path) -> anyhow::Result<ExplorerBuilt> {
         if ribbit_didj::leappad::is_leappad_dir(dir) {
             return Self::build_leappad(dir, save_dir);
+        }
+        if ribbit_didj::hle::leappad2::is_leappad2_dir(dir) {
+            return Self::build_leappad2(dir, save_dir);
         }
         use ribbit_didj::explorer::{nand_from_packages_blocks, nand_with_files, NAND_BLOCKS, NAND_BLOCKS_1GB};
         let original = ribbit_didj::explorer::nand_from_packages(dir).map_err(anyhow::Error::msg)?;
@@ -413,7 +421,7 @@ impl DidjSession {
         if let Ok(nor) = std::fs::read(save_path.with_extension("nor")) {
             lx.bus.nor = Some(ribbit_didj::nor::Nor::new(nor));
         }
-        Ok(ExplorerBuilt { lx, original, save_path, image, carried, dir: dir.to_path_buf(), leappad: false })
+        Ok(ExplorerBuilt { lx, original, save_path, image, carried, dir: dir.to_path_buf(), leappad: false, leappad2: false })
     }
 
     /// Builds a LeapPad Explorer from the packages in `dir`
@@ -440,16 +448,27 @@ impl DidjSession {
         if let Ok(nor) = std::fs::read(save_path.with_extension("nor")) {
             lx.bus.nor = Some(ribbit_didj::nor::Nor::new(nor));
         }
-        Ok(ExplorerBuilt { lx, original, save_path, image, carried: None, dir: dir.to_path_buf(), leappad: true })
+        Ok(ExplorerBuilt { lx, original, save_path, image, carried: None, dir: dir.to_path_buf(), leappad: true, leappad2: false })
+    }
+
+    /// A LeapPad 2 from the packages in `dir`: Enhanced (new) alone (no
+    /// LF2000 machine), so `lx` is a small stand-in that never runs and the
+    /// save is the HLE's own (`leappad2_save_file`).
+    fn build_leappad2(dir: &Path, save_dir: &Path) -> anyhow::Result<ExplorerBuilt> {
+        let original = Nand::erased();
+        let lx = Didj::with_sdram(Nand::erased(), 1 << 20);
+        let save_path = leappad2_save_file(dir, save_dir).with_extension("nandblocks");
+        Ok(ExplorerBuilt { lx, original, save_path, image: String::new(), carried: None, dir: dir.to_path_buf(), leappad: false, leappad2: true })
     }
 
     /// Powers on the Leapster Explorer `build_explorer` made.
     /// With `hle`, Enhanced (new): its programs run on `Hle` from the file
     /// systems in its NAND, which `lx` then only keeps for the saves.
     pub fn start_explorer(built: ExplorerBuilt, sink: Option<AudioSink>, serial: Arc<crate::serial::Serial>, hle: bool) -> anyhow::Result<Self> {
-        let ExplorerBuilt { lx, original, save_path, image, carried, dir, leappad } = built;
+        let ExplorerBuilt { lx, original, save_path, image, carried, dir, leappad, leappad2 } = built;
         let lx_cart_in = lx.bus.cart.is_some();
-        let hle = match hle {
+        let hle = match hle || leappad2 {
+            true if leappad2 => Some(Hle::new_leappad2(&dir, &save_path, None)?),
             true => Some(Hle::new_explorer(&dir, &lx.bus.nand, lx.bus.nor.as_ref().map(|n| &n.data[..]), None, leappad)?),
             false => None,
         };
@@ -475,7 +494,8 @@ impl DidjSession {
             usb_host: AtomicBool::new(false),
             serial,
             explorer: true,
-            leappad,
+            // Its picture is the LeapPad Explorer's size and shown the same way.
+            leappad: leappad || leappad2,
             upright: AtomicBool::new(true),
             touch: Mutex::new(None),
             cart_in: AtomicBool::new(lx_cart_in),
@@ -490,8 +510,14 @@ impl DidjSession {
             run(&s, None)
         })?;
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let title = if leappad { "LeapPad Explorer" } else { "Leapster Explorer" };
-        Ok(Self { shared, thread: Some(thread), title: title.into(), started, original, save_path, image, extras_missing: Vec::new(), carried, explorer: true, leappad, dir, cart: None })
+        let title = if leappad2 {
+            "LeapPad 2"
+        } else if leappad {
+            "LeapPad Explorer"
+        } else {
+            "Leapster Explorer"
+        };
+        Ok(Self { shared, thread: Some(thread), title: title.into(), started, original, save_path, image, extras_missing: Vec::new(), carried, explorer: true, leappad, leappad2, dir, cart: None })
     }
 
     /// Puts a cartridge dump (raw, as `read_cart` gives it) in the
@@ -671,6 +697,15 @@ impl DidjSession {
     pub fn reset(&self, mode: Mode) {
         if let Err(e) = self.hle_to_nand() {
             tracing::warn!(target: "ribbit::saves", "keeping the Didj's files: {e:#}");
+        }
+        if self.leappad2 {
+            // Enhanced (new) is all it has, whatever the mode.
+            let cart = self.shared.hle.lock().unwrap().as_ref().and_then(|h| h.cart.clone());
+            match Hle::new_leappad2(&self.dir, &self.save_path, cart) {
+                Ok(h) => *self.shared.hle.lock().unwrap() = Some(h),
+                Err(e) => tracing::error!(target: "ribbit::didj", "starting the LeapPad 2: {e:#}"),
+            }
+            return;
         }
         if mode.hle && self.explorer {
             let cart = self.shared.hle.lock().unwrap().as_ref().and_then(|h| h.cart.clone());
@@ -942,6 +977,58 @@ pub fn describe_leappad(path: &Path) -> Option<crate::library::Game> {
 pub fn is_leappad_package(path: &Path) -> bool {
     let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()) else { return false };
     (ext == "lf2" || ext == "lfp") && path.parent().is_some_and(ribbit_didj::leappad::is_leappad_dir)
+}
+
+/// Where a LeapPad 2 built from the packages in `dir` keeps its save
+/// (`.lp2save`: `hle::leappad2::save_files`).
+pub fn leappad2_save_file(dir: &Path, save_dir: &Path) -> PathBuf {
+    let name = dir.file_name().map_or_else(|| "leappad2".into(), |s| s.to_string_lossy().into_owned());
+    save_dir.join(format!("leappad2-{name}.lp2save"))
+}
+
+/// Whether `path` is the LeapPad 2's Firmware-Base package (meta.inf:
+/// Device "LeapPad2Explorer", Name "Firmware-Base"): the console in the
+/// library.
+pub fn describe_leappad2(path: &Path) -> Option<crate::library::Game> {
+    use crate::library::{Art, Family, Game};
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    if !name.ends_with(".lfp") || !(name.contains("firmware-base") || name.contains("firmware base") || name.starts_with("pad2-")) {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    let meta = ribbit_didj::package::meta_of(&data)?;
+    if meta.get("Device") != Some("LeapPad2Explorer") || meta.get("Name") != Some("Firmware-Base") {
+        return None;
+    }
+    let mut details = vec![("System", "LeapPad 2".to_string())];
+    for (label, key) in [("Version", "Version"), ("Locale", "Locale")] {
+        if let Some(v) = meta.get(key) {
+            details.push((label, v.to_string()));
+        }
+    }
+    details.push((
+        "Status",
+        "early emulation, Enhanced (new) only: its own setup, menu and LeapPad cartridges (put in from the Leapster Explorer page), graphics through Ribbit's OpenGL ES; no camera, microphone or USB".to_string(),
+    ));
+    details.push(("File", path.display().to_string()));
+    let mb = (data.len() as u64).div_ceil(1 << 20);
+    Some(Game {
+        path: path.to_path_buf(),
+        family: Family::LeapPad2,
+        title: "LeapPad 2".to_string(),
+        subtitle: format!("{}  ·  {mb} MB", meta.get("Version").unwrap_or("")),
+        details,
+        tags: vec!["System".into()],
+        key: format!("leappad2-firmware-{}", meta.get("Locale").unwrap_or("")),
+        art: Art::Missing,
+    })
+}
+
+/// Whether `path` is one of the LeapPad 2's packages (in a folder of its
+/// firmware): not a Leapster Explorer game.
+pub fn is_leappad2_package(path: &Path) -> bool {
+    let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()) else { return false };
+    (ext == "lf2" || ext == "lfp") && path.parent().is_some_and(ribbit_didj::hle::leappad2::is_leappad2_dir)
 }
 
 pub fn explorer_save_file(dir: &Path, save_dir: &Path) -> PathBuf {
@@ -1241,6 +1328,10 @@ struct Hle {
     written_fp: [u32; 2],
     /// A LeapPad Explorer: its file systems go to the SD card instead.
     leappad: bool,
+    /// A LeapPad 2: its saved folders go to this file (`hle::leappad2::
+    /// save_files`) when their fingerprint changes from the one written.
+    lp2_save: Option<PathBuf>,
+    lp2_fp: u32,
 }
 
 impl Hle {
@@ -1283,6 +1374,8 @@ impl Hle {
             explorer: false,
             written_fp: [0; 2],
             leappad: false,
+            lp2_save: None,
+            lp2_fp: 0,
         };
         h.written = h.user_files();
         Ok(h)
@@ -1333,6 +1426,57 @@ impl Hle {
             explorer: true,
             written_fp,
             leappad,
+            lp2_save: None,
+            lp2_fp: 0,
+        })
+    }
+
+    /// Enhanced (new) for the LeapPad 2: its file systems from its packages
+    /// with the save at `save_path`'s `.lp2save` beside it put on top, started
+    /// from /sbin/init. GL is drawn by ribbit-gles (`hle::gles`).
+    fn new_leappad2(dir: &Path, save_path: &Path, cart: Option<Vec<u8>>) -> anyhow::Result<Self> {
+        use ribbit_didj::hle;
+        let (base, skipped) = hle::leappad2::system_from_packages(dir).map_err(anyhow::Error::msg)?;
+        for s in skipped {
+            tracing::info!(target: "ribbit::didj", "LeapPad 2: package not installed: {s}");
+        }
+        let save = save_path.with_extension("lp2save");
+        let vfs = match std::fs::read(&save) {
+            Ok(bytes) => hle::leappad2::load_files(&base, &bytes).unwrap_or_else(|e| {
+                tracing::warn!(target: "ribbit::saves", "{}: {e}", save.display());
+                base.clone()
+            }),
+            Err(_) => base.clone(),
+        };
+        let fp = hle::leappad2::fingerprint(&vfs);
+        let mut p = hle::Process::new_leappad2(vfs);
+        if let Some(raw) = &cart {
+            p.explorer_cart(Some(raw)).map_err(anyhow::Error::msg)?;
+        }
+        let envp = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/", "TERM=vt100"];
+        p.exec("/sbin/init", &["/sbin/init"], &envp).map_err(anyhow::Error::msg)?;
+        let now = Instant::now();
+        Ok(Self {
+            p,
+            dir: dir.to_path_buf(),
+            cart,
+            mode: Mode { enhanced: true, cpu_scale: 1, frame_skip: false, hd: 1, hle: true, smooth: false },
+            built: Default::default(),
+            written: Vec::new(),
+            keys: 0,
+            smooth: false,
+            flips: (0, now, now),
+            started: now,
+            quick_stops: 0,
+            idle: Default::default(),
+            idle_at: now,
+            off: false,
+            base: Some(base),
+            explorer: true,
+            written_fp: [0; 2],
+            leappad: false,
+            lp2_save: Some(save),
+            lp2_fp: fp,
         })
     }
 
@@ -1340,6 +1484,19 @@ impl Hle {
     /// the save, and its NOR, when they changed.
     fn explorer_to_nand(&mut self, d: &mut Didj) -> anyhow::Result<()> {
         use ribbit_didj::hle::explorer;
+        if let Some(save) = self.lp2_save.clone() {
+            let fp = ribbit_didj::hle::leappad2::fingerprint(&self.p.vfs);
+            if fp != self.lp2_fp {
+                self.base().map_err(anyhow::Error::msg)?;
+                let bytes = ribbit_didj::hle::leappad2::save_files(&self.p.vfs, self.base.as_ref().unwrap());
+                if let Some(parent) = save.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&save, bytes)?;
+                self.lp2_fp = fp;
+            }
+            return Ok(());
+        }
         if self.leappad {
             ribbit_didj::hle::leappad::write_changed_to_card(&self.p.vfs, &mut d.bus.nand, &mut self.written_fp).map_err(anyhow::Error::msg)?;
         } else {
@@ -1357,6 +1514,9 @@ impl Hle {
     /// The file tree as built, without the player's files (they go in the
     /// states as changes).
     fn base(&mut self) -> Result<&ribbit_didj::hle::vfs::Vfs, String> {
+        if self.base.is_none() && self.lp2_save.is_some() {
+            self.base = Some(ribbit_didj::hle::leappad2::system_from_packages(&self.dir)?.0);
+        }
         if self.base.is_none() && self.leappad {
             let card = ribbit_didj::leappad::card_from_packages(&self.dir)?;
             self.base = Some(ribbit_didj::hle::leappad::system_from_card(&card, None)?);
@@ -1521,7 +1681,11 @@ impl Hle {
             if let Err(e) = self.explorer_to_nand(&mut d) {
                 tracing::warn!(target: "ribbit::saves", "keeping the Explorer's files: {e:#}");
             }
-            match Self::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), self.cart.clone(), self.leappad) {
+            let again = match &self.lp2_save {
+                Some(save) => Self::new_leappad2(&self.dir, &save.with_extension("nandblocks"), self.cart.clone()),
+                None => Self::new_explorer(&self.dir, &d.bus.nand, d.bus.nor.as_ref().map(|n| &n.data[..]), self.cart.clone(), self.leappad),
+            };
+            match again {
                 Ok(mut h) => {
                     h.quick_stops = quick_stops;
                     *self = h;
@@ -2432,6 +2596,49 @@ mod tests {
         let has = lx.shared.hle.lock().unwrap().as_ref().unwrap().p.vfs.get("/LF/Bulk/Data/ribbit-test.txt").is_some();
         lx.stop();
         assert!(has);
+    }
+
+    /// LeapPad 2 Enhanced (new) in a session as the app runs it: starts from
+    /// the packages (RIBBIT_LEAPPAD2_DIR), draws its boot (480x272), keeps
+    /// a file put on Bulk and one on /flags in its save (.lp2save) and finds
+    /// them when started again. "Turn off when idle" off keeps it on.
+    #[test]
+    #[ignore]
+    fn leappad2_session() {
+        let dir = PathBuf::from(std::env::var("RIBBIT_LEAPPAD2_DIR").expect("RIBBIT_LEAPPAD2_DIR"));
+        let saves = std::env::temp_dir().join("ribbit-leappad2-test");
+        let _ = std::fs::remove_dir_all(&saves);
+        let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+        let lp = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), false).unwrap();
+        assert!(lp.is_hle() && lp.leappad2 && lp.explorer);
+        lp.set_turn_off_when_idle(false);
+        std::thread::sleep(Duration::from_secs(40));
+        let mut px = Vec::new();
+        let (w, h) = lp.frame(&mut px);
+        let lit = px.iter().filter(|&&p| p & 0xFF_FFFF != 0).count();
+        eprintln!("picture {w}x{h}, {lit} pixels not black, speed {:.0}%", lp.speed_percent());
+        if let Ok(path) = std::env::var("RIBBIT_LEAPPAD2_SHOT") {
+            let mut enc = png::Encoder::new(std::fs::File::create(path).unwrap(), w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgb);
+            let rgb: Vec<u8> = px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+            enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+        }
+        assert!(w * h == 480 * 272 && lit > w * h / 4);
+        {
+            let mut hle = lp.shared.hle.lock().unwrap();
+            let vfs = &mut hle.as_mut().unwrap().p.vfs;
+            vfs.add_file("/LF/Bulk/Data/ribbit-test.txt", b"hello".to_vec());
+            vfs.add_file("/flags/ribbit-test", b"flag".to_vec());
+        }
+        let save = leappad2_save_file(&dir, &saves);
+        lp.stop();
+        assert!(save.is_file(), "no save at {}", save.display());
+        let built = DidjSession::build_explorer(&dir, &saves).unwrap();
+        let lp = DidjSession::start_explorer(built, None, Arc::new(crate::serial::Serial::default()), false).unwrap();
+        let has = |p: &str| lp.shared.hle.lock().unwrap().as_ref().unwrap().p.vfs.get(p).is_some();
+        let (bulk, flag) = (has("/LF/Bulk/Data/ribbit-test.txt"), has("/flags/ribbit-test"));
+        lp.stop();
+        assert!(bulk && flag);
     }
 
     /// Original (the Explorer's kernel) started from `flash`: `commands`
