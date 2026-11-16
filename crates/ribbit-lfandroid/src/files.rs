@@ -172,7 +172,7 @@ fn errno_of(e: &std::io::Error) -> u32 {
 pub fn handles(name: &str) -> bool {
     matches!(
         name,
-        "open" | "fopen" | "fdopen" | "access" | "stat" | "lstat" | "fstat" | "mkdir" | "rmdir" | "unlink" | "remove" | "rename" | "opendir"
+        "open" | "fopen" | "fdopen" | "access" | "stat" | "lstat" | "fstat" | "statfs" | "fstatfs" | "mkdir" | "rmdir" | "unlink" | "remove" | "rename" | "opendir"
             | "readdir" | "closedir" | "close" | "read" | "write" | "lseek" | "ftruncate" | "fsync" | "fileno"
     )
 }
@@ -312,6 +312,33 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
                 Some(Err(e)) => rt.fail(errno_of(&e), false),
                 None => rt.fail(ENOENT, false),
             }
+        }
+        // statfs(path, out), fstatfs(fd, out): free space on the storage. GUESS: a fixed 8 GB
+        // ext4 volume with 4 GB free, so a title never sees the host disk or refuses to save.
+        "statfs" | "fstatfs" => {
+            let out = rt.arg(1);
+            let there = if name == "statfs" {
+                rt.path_arg(0, name).1.is_some_and(|h| h.exists())
+            } else {
+                let fd = rt.arg(0);
+                rt.files.fds.contains_key(&fd)
+            };
+            if !there {
+                return Ok(rt.fail(if name == "statfs" { ENOENT } else { EBADF }, false));
+            }
+            // bionic's 32-bit ARM struct statfs: 88 bytes, block counts are 64-bit.
+            const BLOCK: u64 = 4096;
+            let (total, free) = ((8u64 << 30) / BLOCK, (4u64 << 30) / BLOCK);
+            rt.mem.write(out, &[0; 88]);
+            rt.mem.w32(out, 0xEF53);
+            rt.mem.w32(out + 4, BLOCK as u32);
+            for (off, v) in [(8, total), (16, free), (24, free), (32, 1 << 20), (40, 1 << 19)] {
+                rt.mem.w32(out + off, v as u32);
+                rt.mem.w32(out + off + 4, (v >> 32) as u32);
+            }
+            rt.mem.w32(out + 56, 255);
+            rt.mem.w32(out + 60, BLOCK as u32);
+            rt.ret(0)
         }
         // fstat(fd, out): host files and asset descriptors
         "fstat" => {

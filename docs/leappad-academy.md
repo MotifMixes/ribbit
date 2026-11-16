@@ -408,7 +408,8 @@ Next steps, in order:
    on from the next part of the intro; without a folder its pictures are the same as before.
    `fscanf`/`vfscanf`/`sscanf`/`vsscanf` (2026-11-16, `scan` in `imports.rs`): white space,
    literals, `*`, widths, lengths, d i u o x p, f e g a, s c `[...]`, n; EOF when the input
-   ends before the first conversion. Left: `statfs` (free space), what the real
+   ends before the first conversion. `statfs`/`fstatfs` (2026-11-16): a fixed 8 GB ext4
+   volume with 4 GB free (GUESS; no title seen so far calls it). Left: what the real
    `/tmp/ts_driver` holds.
 4. Speed: this CPU runs about 15-20 million instructions a second here, so a frame with
    drawing takes 30-60 ms on the host.

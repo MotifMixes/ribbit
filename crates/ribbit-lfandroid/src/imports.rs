@@ -1226,7 +1226,7 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         }
 
         // ---- sockets and the rest: none (ENOENT). Files are in files.rs.
-        "socket" | "popen" | "statfs" | "readlink" | "syscall" | "getaddrinfo" | "inet_aton" | "gethostname" => {
+        "socket" | "popen" | "readlink" | "syscall" | "getaddrinfo" | "inet_aton" | "gethostname" => {
             rt.set_errno(2);
             rt.ret(if name == "popen" { 0 } else { u32::MAX })
         }
