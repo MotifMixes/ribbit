@@ -35,10 +35,11 @@ fn main() {
         let v = l.main_view(s);
         let opens = l.views.iter().find(|v| v.index == s.opens).map_or("?", |v| v.name.as_str());
         println!(
-            "spread {}: GO {:?} {:?} opens {opens}; touch view {} ({} clickables)",
+            "spread {}{}: GO {:?} {:?} opens {opens}; touch view {} ({} clickables)",
             i + 1,
-            s.go.page,
-            s.go.bounds(),
+            s.magnets.map_or(String::new(), |p| format!(" (magnets {p:03X})")),
+            s.go.as_ref().map(|g| g.page),
+            s.go.as_ref().map(|g| g.bounds()),
             v.map_or("none", |v| v.name.as_str()),
             v.map_or(0, |v| v.hotspots.len())
         );

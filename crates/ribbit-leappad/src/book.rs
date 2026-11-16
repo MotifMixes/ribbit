@@ -119,6 +119,10 @@ pub struct Spread {
     /// spread is open.
     #[serde(default)]
     pub go: Option<Spot>,
+    /// Little Touch LeapPad: the magnets in the spread's pages, which tell
+    /// the pad which is open (`Bus::magnets`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magnets: Option<u16>,
     #[serde(default, rename = "region")]
     pub regions: Vec<Region>,
 }
@@ -133,6 +137,9 @@ pub struct Book {
     /// Or its SHA-1, to tell versions apart.
     #[serde(default)]
     pub cartridge_sha1: Option<String>,
+    /// The pad the book is for (page size and how a spread is opened).
+    #[serde(default)]
+    pub model: crate::Model,
     #[serde(default, rename = "spread")]
     pub spreads: Vec<Spread>,
     /// The directory the file was in (page pictures are relative to it).
@@ -250,8 +257,18 @@ impl Book {
     /// for each GO spot, with every spot its Touch-and-Tell view answers as
     /// a region. It has no pictures; Ribbit draws the outlines.
     pub fn from_cartridge(cart: &[u8], title: &str, part: Option<&str>) -> Result<Book, String> {
-        let layout = crate::layout::read(cart)?;
-        let clamp = |(x, y): (f32, f32)| [x.clamp(0.0, PAGE_W), y.clamp(0.0, PAGE_H)];
+        Self::from_layout(crate::layout::read(cart)?, title, part)
+    }
+
+    /// The book built into a base ROM (layout::read_base), drawn the same way.
+    pub fn from_base(bios: &[u8], title: &str) -> Result<Book, String> {
+        Self::from_layout(crate::layout::read_base(bios)?, title, None)
+    }
+
+    fn from_layout(layout: crate::layout::Layout, title: &str, part: Option<&str>) -> Result<Book, String> {
+        let model = layout.family.model();
+        let (page_w, page_h) = model.page_size();
+        let clamp = |(x, y): (f32, f32)| [x.clamp(0.0, page_w), y.clamp(0.0, page_h)];
         let spreads = layout
             .spreads
             .iter()
@@ -284,7 +301,7 @@ impl Book {
                         .collect()
                 });
                 let name = view.map_or_else(|| format!("Spread {}", i + 1), |v| v.name.clone());
-                Spread { name, left: None, right: None, go: s.go.inside_point(), regions }
+                Spread { name, left: None, right: None, go: s.go.as_ref().and_then(|g| g.inside_point()), magnets: s.magnets, regions }
             })
             .collect::<Vec<_>>();
         if spreads.is_empty() {
@@ -295,6 +312,7 @@ impl Book {
             title: title.to_string(),
             cartridge: part.map(str::to_string),
             cartridge_sha1: None,
+            model,
             spreads,
             dir: PathBuf::new(),
             from_cartridge: true,
@@ -364,6 +382,33 @@ pub fn pen_ratios(s: Spot) -> (f32, f32) {
     crate::calibration::ratios(s.page.index(), s.x * 8.0, s.y * 8.0)
 }
 
+/// The pen readings on a spot for a given model: My First LeapPad has one
+/// page in its own units (calibration::my_first); the others are the
+/// LeapPad's.
+pub fn pen_ratios_for(model: crate::Model, s: Spot) -> (f32, f32) {
+    match model {
+        crate::Model::MyFirst => crate::calibration::my_first::ratios(s.x * 8.0, s.y * 8.0),
+        _ => pen_ratios(s),
+    }
+}
+
+/// Little Touch LeapPad: the switch under a spot, as (row, column) of the
+/// matrix. VERIFIED by pressing keys (lpboot KEY, Pooh Loves You! 500-11375
+/// on base 152-11244): key (r, c) reaches the app as x = 50 + 100c,
+/// y = 50 + 100r on the left page for columns 0-5, and x = 76 + 100(c - 6)
+/// on the right page (y + 8192) for columns 6-11: each page is a grid of 6
+/// by 5 switches about 100 units square. A spot belongs to the nearest
+/// switch; none outside the grid.
+pub fn key_at(s: Spot) -> Option<(u8, u8)> {
+    let x0 = if s.page == Side::Left { 0.0 } else { 26.0 };
+    let (c, r) = ((s.x - x0) / 100.0, s.y / 100.0);
+    if !(0.0..6.0).contains(&c) || !(0.0..5.0).contains(&r) {
+        return None;
+    }
+    let c = c as u8 + if s.page == Side::Left { 0 } else { 6 };
+    Some((r as u8, c))
+}
+
 /// Where a point of the shown spread falls, given as fractions of the shown
 /// spread's width and height (0..1 each; the left page is the left half).
 pub fn spot_at(fx: f32, fy: f32) -> Option<Spot> {
@@ -374,7 +419,8 @@ pub fn spot_at(fx: f32, fy: f32) -> Option<Spot> {
     Some(Spot { page, x: px * PAGE_W, y: fy * PAGE_H })
 }
 
-/// The touch the cartridge's app logs on its debug port, e.g.
+/// The touch the cartridge's app logs on its debug port (the Little Touch:
+/// `{DT}v_ ( 550, 250)`), e.g.
 /// `DT:v_  X 8 Z 5(0: 495, 623)[Touch]` (right page: y + 8192).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TouchReport {
@@ -390,7 +436,8 @@ pub fn touch_reports(log: &str) -> Vec<TouchReport> {
         let Some(open) = line[dt..].find('(').map(|o| dt + o) else { continue };
         let Some(end) = line[open..].find(')').map(|e| open + e) else { continue };
         let inner = &line[open + 1..end];
-        let Some((_, xy)) = inner.split_once(':') else { continue };
+        // The Little Touch's app logs only the point: `{DT}v_ ( 550, 250)`.
+        let xy = inner.split_once(':').map_or(inner, |(_, xy)| xy);
         let Some((x, y)) = xy.split_once(',') else { continue };
         let (Ok(x), Ok(y)) = (x.trim().parse::<i32>(), y.trim().parse::<i32>()) else { continue };
         let (page, y) = if y >= 8192 { (Side::Right, y - 8192) } else { (Side::Left, y) };

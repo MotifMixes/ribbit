@@ -44,6 +44,13 @@ const DST_NOINC: u32 = 1 << 12;
 /// Request IDs (dma.h).
 pub const PCMOUT: u32 = 24;
 
+/// Whether a command waits for its peripheral to move the data (the SD
+/// controllers, `sd.rs`, when the machine has them: `Dma::serve_sd`): it
+/// stays busy until the bus serves it.
+fn sd_request(cmd: &Command) -> bool {
+    cmd[3] & (DST_IO | SRC_IO) != 0 && crate::sd::DMA_REQUESTS.contains(&reqid(cmd))
+}
+
 /// A command: source, destination, length - 1 | request ID << 16, mode.
 type Command = [u32; 4];
 
@@ -75,11 +82,15 @@ pub struct Dma {
     /// The physical address of SDRAM (the bus's `ram_base`).
     #[serde(default)]
     pub ram_base: u32,
+    /// The SD controllers are modelled (the LeapPad Explorer): their DMA
+    /// commands wait for the bus (`waiting`, `served_done`).
+    #[serde(default)]
+    pub serve_sd: bool,
 }
 
 impl Default for Dma {
     fn default() -> Self {
-        Self { ch: Default::default(), pcm_rate: 32000, pcm: Default::default(), ram_base: 0 }
+        Self { ch: Default::default(), pcm_rate: 32000, pcm: Default::default(), ram_base: 0, serve_sd: false }
     }
 }
 
@@ -163,9 +174,24 @@ impl Dma {
         ch.busy = true;
         ch.left = len(&cmd);
         ch.acc = 0;
-        if !Self::paced(&cmd) {
+        if !Self::paced(&cmd) && !(self.serve_sd && sd_request(&cmd)) {
             self.finish(c, sdram);
         }
+    }
+
+    /// The first channel running a command for peripheral request `req`
+    /// that the bus must serve: (channel, source, destination, length,
+    /// from the peripheral).
+    pub fn waiting(&self, req: u32) -> Option<(usize, u32, u32, usize, bool)> {
+        self.ch.iter().position(|ch| self.serve_sd && ch.busy && sd_request(&ch.current) && reqid(&ch.current) == req).map(|c| {
+            let cmd = &self.ch[c].current;
+            (c, cmd[0], cmd[1], len(cmd) as usize, cmd[3] & SRC_IO != 0)
+        })
+    }
+
+    /// The bus moved a served command's data: it is done.
+    pub fn served_done(&mut self, c: usize, sdram: &[u8]) {
+        self.finish(c, sdram);
     }
 
     /// PCM out has played the running command's bytes up to `to`: they are
@@ -206,8 +232,9 @@ impl Dma {
     pub fn tick(&mut self, cycles: u64, cpu_hz: u64, sdram: &[u8]) {
         let rate = self.pcm_rate * 4;
         for c in 0..CHANNELS {
+            let serve_sd = self.serve_sd;
             let ch = &mut self.ch[c];
-            if !ch.busy {
+            if !ch.busy || serve_sd && sd_request(&ch.current) {
                 continue;
             }
             ch.acc += cycles * rate;
@@ -231,7 +258,7 @@ impl Dma {
             return u64::MAX;
         }
         // `tick` adds cycles * rate to acc and counts acc / cpu_hz.
-        self.ch.iter().filter(|c| c.busy).map(|c| (c.left * cpu_hz).saturating_sub(c.acc).div_ceil(rate)).min().unwrap_or(u64::MAX)
+        self.ch.iter().filter(|c| c.busy && !(self.serve_sd && sd_request(&c.current))).map(|c| (c.left * cpu_hz).saturating_sub(c.acc).div_ceil(rate)).min().unwrap_or(u64::MAX)
     }
 
     /// Bytes of sound handed to PCM out and not yet played: the running

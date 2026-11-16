@@ -360,6 +360,9 @@ pub struct ArmJit {
     /// Starts before a block is compiled.
     pub hot: u8,
     pub enabled: bool,
+    /// Compile for an ARMv7 processor (`Arm::v7`): MOVW natively, the
+    /// other ARMv7 instructions interpreted inside the block.
+    pub v7: bool,
     /// Fill `stats.classes` (slow).
     pub profile: bool,
     pub stats: Stats,
@@ -387,6 +390,7 @@ impl ArmJit {
             fast_for: 0,
             hot: 2,
             enabled: SUPPORTED,
+            v7: false,
             profile: false,
             stats: Stats::default(),
             stops: [u32::MAX; 8],
@@ -585,7 +589,7 @@ impl ArmJit {
             if i > 0 && at & ((1 << CodeWatch::PAGE_SHIFT) - 1) == 0 {
                 break;
             }
-            let ins = decode::decode(bus.read32(pa + 4 * i), at);
+            let ins = decode::decode_for(bus.read32(pa + 4 * i), at, self.v7);
             instrs.push(ins);
             if ins.ends_block() {
                 break;

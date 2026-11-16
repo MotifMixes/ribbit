@@ -34,6 +34,15 @@ pub const OFFSET: u16 = 0x2000;
 pub const SIGNAL: i32 = 0x3000;
 /// Machine cycles per conversion: HYPOTHESIS (2 ms at the stand-in clock;
 /// the patents give about 4 ms per state for the older design).
+/// What the sensor's test signal (FC30 bit 0) adds to every reading.
+/// EVIDENCE for the signal: the 2003 kernels of My First LeapPad (cart
+/// kernel 0x3D89, Jul 2003) turn it on at power-on, measure, and set the
+/// sensor's gain from the change against a nominal 4000 counts ("DC 8192
+/// Raw AFE FS 3999 Gain 16384"); without it the gain came out negative and
+/// no touch was ever felt. The size is ASSUMED: 4134 gives a gain of about
+/// 16384 (1.0) once the kernel's own averaging takes its share.
+pub const TEST_SIGNAL: i32 = 4134;
+
 pub const CONVERSION_CYCLES: u32 = crate::MACHINE_HZ / 500;
 
 /// Where the pen is, as the two signed axis ratios the kernel computes
@@ -52,6 +61,9 @@ pub struct PenSensor {
     busy: u32,
     /// Set when a conversion finished: the machine pulses INT0.
     pub irq: bool,
+    /// FC30 bit 0: the sensor's test signal is on (`TEST_SIGNAL`).
+    #[serde(default)]
+    pub test: bool,
     /// Every drive code queued (for research tools; off unless set).
     #[serde(skip)]
     pub log: Option<Vec<u8>>,
@@ -112,7 +124,8 @@ impl PenSensor {
 
     /// The count for drive code `code` with the pen where it is.
     fn reading(&self, code: u8) -> u16 {
-        let Some((u, v)) = self.input.position else { return OFFSET };
+        let test = if self.test { TEST_SIGNAL } else { 0 };
+        let Some((u, v)) = self.input.position else { return (OFFSET as i32 + test) as u16 };
         let s = match code {
             0x01 | 0x11 | 0x09 => SIGNAL,
             0x69 => (SIGNAL as f32 * v.clamp(-1.0, 1.0)) as i32,

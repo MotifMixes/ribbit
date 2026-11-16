@@ -48,6 +48,9 @@ struct Shared {
     quit: AtomicBool,
     /// The console turned itself off.
     off: AtomicBool,
+    /// Keep it on however long it is left alone ("Turn off when idle" off):
+    /// `ClickStart::keep_awake`.
+    keep_awake: AtomicBool,
     gain: AtomicU32,
     speed: AtomicU32,
     sink: Mutex<Option<AudioSink>>,
@@ -92,6 +95,7 @@ impl CsSession {
             running: AtomicBool::new(true),
             quit: AtomicBool::new(false),
             off: AtomicBool::new(false),
+            keep_awake: AtomicBool::new(true),
             gain: AtomicU32::new(1f32.to_bits()),
             speed: AtomicU32::new(100f32.to_bits()),
             sink: Mutex::new(sink),
@@ -124,6 +128,13 @@ impl CsSession {
     /// Whether the console turned itself off (closed as a Leapster that did).
     pub fn powered_off(&self) -> bool {
         self.shared.off.load(Ordering::Relaxed)
+    }
+
+    /// "Turn off when idle": on, the home screen left alone for 150 s waves
+    /// goodbye and turns the console off, as a real one; off, it stays on
+    /// (the developer mode's shutdown still turns it off).
+    pub fn set_turn_off_when_idle(&self, on: bool) {
+        self.shared.keep_awake.store(!on, Ordering::Relaxed);
     }
 
     pub fn speed_percent(&self) -> f64 {
@@ -335,6 +346,7 @@ fn run(s: &Shared) {
         let audio = {
             let mut cs = s.cs.lock().unwrap();
             feed_input(&mut cs, &s.input);
+            cs.keep_awake = s.keep_awake.load(Ordering::Relaxed);
             cs.run_frame();
             cs.render(&mut img);
             if cs.powered_off() {

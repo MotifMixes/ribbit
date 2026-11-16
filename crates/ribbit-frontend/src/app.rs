@@ -112,6 +112,8 @@ pub struct App {
     zippity: Option<crate::zippity::ZipSession>,
     /// A ClickStart being played.
     clickstart: Option<crate::clickstart::CsSession>,
+    /// An iQuest or Turbo Twist Extreme being played.
+    iquest: Option<crate::iquest::IqSession>,
     /// A Didj being played.
     didj: Option<crate::didj::DidjSession>,
     /// Its latest picture.
@@ -308,8 +310,13 @@ impl App {
         crate::zippity::set_bindings(&settings.zippity_keys);
         if let Some(f) = &opts.firmware {
             // A LeapPad base ROM is the LeapPad's; the Leapster's BIOS stays.
-            if std::fs::read(f).is_ok_and(|d| ribbit_leappad::identify(&d) == Some(ribbit_leappad::Image::BaseRom)) {
-                settings.leappad_bios = Some(f.clone());
+            if let Some(d) = std::fs::read(f).ok().filter(|d| ribbit_leappad::identify(d) == Some(ribbit_leappad::Image::BaseRom)) {
+                match ribbit_leappad::Model::of_base(&d) {
+                    ribbit_leappad::Model::LeapPad => settings.leappad_bios = Some(f.clone()),
+                    m => {
+                        settings.leappad_bases.insert(m.name().to_string(), f.clone());
+                    }
+                }
             } else {
                 settings.bios = Some(f.clone());
             }
@@ -321,6 +328,7 @@ impl App {
             session: None,
             zippity: None,
             clickstart: None,
+            iquest: None,
             didj: None,
             tv_frame: Vec::new(),
             zippity_cleaning: None,
@@ -681,6 +689,10 @@ impl App {
             c.stop();
             self.fit_window = FIT_TRIES;
         }
+        if let Some(q) = self.iquest.take() {
+            q.stop();
+            self.fit_window = FIT_TRIES;
+        }
         if let Some(d) = self.didj.take() {
             d.stop();
             self.fit_window = FIT_TRIES;
@@ -716,10 +728,18 @@ impl App {
 
     fn set_bios(&mut self, path: PathBuf) {
         // A LeapPad base ROM: kept as the LeapPad's; the Leapster's BIOS stays.
-        if std::fs::read(&path).is_ok_and(|d| ribbit_leappad::identify(&d) == Some(ribbit_leappad::Image::BaseRom)) {
-            self.settings.leappad_bios = Some(path);
+        // My First LeapPad, Little Touch and Plus Microphone bases are kept
+        // by model, beside it.
+        if let Some(d) = std::fs::read(&path).ok().filter(|d| ribbit_leappad::identify(d) == Some(ribbit_leappad::Image::BaseRom)) {
+            let model = ribbit_leappad::Model::of_base(&d);
+            match model {
+                ribbit_leappad::Model::LeapPad => self.settings.leappad_bios = Some(path),
+                m => {
+                    self.settings.leappad_bases.insert(m.name().to_string(), path);
+                }
+            }
             self.save_settings();
-            self.ui.toast("BIOS: LeapPad base ROM");
+            self.ui.toast(format!("BIOS: {} base ROM", model.name()));
             return;
         }
         // A Zippity's system NAND (as dropping it on the window takes it):
@@ -826,6 +846,9 @@ impl App {
         if hw == Hardware::ClickStart {
             return self.start_clickstart(bios, None);
         }
+        if matches!(hw, Hardware::IQuest | Hardware::TurboTwist) {
+            return self.start_iquest(bios, None);
+        }
         self.next_bios = Some(bios);
         if let Err(e) = self.boot(None) {
             let (title, explain) = explain_load_error(&e);
@@ -838,6 +861,10 @@ impl App {
     fn open_cart(&mut self, path: PathBuf) {
         // A Didj cartridge: the Didj from the library, with it in the slot.
         if let Some(cart) = crate::didj::read_cart(&path) {
+            // A LeapPad cartridge: a LeapPad (`play_on_explorer`).
+            if crate::didj::describe_cart(&path, &cart).is_some_and(|g| g.is_leappad_cart()) {
+                return self.play_on_explorer(&path);
+            }
             // Before the library is scanned: the system package beside the
             // cartridge (not just any package: a reward add-on isn't a Didj).
             let beside = || crate::didj::find_package(path.parent()?, 0);
@@ -869,14 +896,15 @@ impl App {
         match std::fs::read(&path).ok().and_then(|d| ribbit_leappad::identify(&d)) {
             Some(ribbit_leappad::Image::Cartridge) => return self.start_leappad(Some(path)),
             Some(ribbit_leappad::Image::BaseRom) => {
+                let model = std::fs::read(&path).map_or(ribbit_leappad::Model::LeapPad, |d| ribbit_leappad::Model::of_base(&d));
                 self.set_bios(path);
-                return self.start_leappad(None);
+                return self.start_leappad_model(Some(model), None);
             }
             None => {}
         }
         // The Leapster Explorer's firmware: the Explorer, built from the
         // packages beside it.
-        if crate::didj::describe_explorer(&path).is_some() {
+        if crate::didj::describe_explorer(&path).is_some() || crate::didj::describe_leappad2(&path).is_some() {
             return self.start_explorer(path);
         }
         // A game installed on the Explorer, or a game package for it: the
@@ -915,6 +943,28 @@ impl App {
                 self.ui.problem(title, explain, format!("{e:#}"));
             }
             return;
+        }
+        // The iQuest and the Turbo Twist Extreme: the base ROM alone, or a
+        // cartridge on its model's base ROM from the library.
+        if let Some(family @ (crate::library::Family::IQuest | crate::library::Family::TurboTwist)) =
+            internal.map(|g| g.family).or_else(|| crate::library::family_of(&path))
+        {
+            if internal.is_some() || crate::library::is_internal(&path) {
+                return self.start_iquest(path, None);
+            }
+            let hw = family.console();
+            return match self.library.bios_for(hw).map(Path::to_path_buf) {
+                Some(bios) => self.start_iquest(bios, Some(path)),
+                None => self.ui.problem(
+                    "No base ROM found",
+                    format!(
+                        "{} cartridges need the handheld's base ROM (a 4 MB dump) in one of your games folders. \
+                         Add the folder that holds it with \"Add games folder\".",
+                        hw.name()
+                    ),
+                    "",
+                ),
+            };
         }
         // The ClickStart: its system ROM's activities, or a cartridge on the
         // system ROM from the library.
@@ -1102,6 +1152,42 @@ impl App {
         }
     }
 
+    /// Plays an iQuest or Turbo Twist Extreme: its base ROM `bios`, with
+    /// `cart` in the slot (none: the base alone).
+    fn start_iquest(&mut self, bios: PathBuf, cart: Option<PathBuf>) {
+        self.end_session();
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::iquest::IqSession::start(&bios, cart.as_deref(), &self.save_dir(), sink, !self.settings.turn_off_when_idle) {
+            Ok(mut q) => {
+                self.fit_window = FIT_TRIES;
+                if let Some(p) = &cart {
+                    q.title = self.library.games.iter().find(|g| &g.path == p).map_or_else(
+                        || p.file_stem().map_or_else(|| q.title.clone(), |s| s.to_string_lossy().into_owned()),
+                        |g| g.title.clone(),
+                    );
+                }
+                self.iquest = Some(q);
+                self.paused = false;
+                if let Some(a) = &mut self.audio {
+                    a.clear();
+                }
+                self.update_title();
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't start the handheld",
+                format!(
+                    "Ribbit couldn't load the base ROM \"{}\"{}. It may be damaged or not a full dump.",
+                    file_name(&bios),
+                    match &cart {
+                        Some(c) => format!(" with the cartridge \"{}\"", file_name(c)),
+                        None => String::new(),
+                    }
+                ),
+                format!("{e:#}"),
+            ),
+        }
+    }
+
     /// Plays a ClickStart: its system ROM `bios`, with `cart` in the slot
     /// (none: the console's own activities).
     fn start_clickstart(&mut self, bios: PathBuf, cart: Option<PathBuf>) {
@@ -1110,6 +1196,7 @@ impl App {
         match crate::clickstart::CsSession::start(&bios, cart.as_deref(), &self.save_dir(), sink) {
             Ok(mut c) => {
                 self.fit_window = FIT_TRIES;
+                c.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 c.title = match &cart {
                     Some(p) => self.library.games.iter().find(|g| &g.path == p).map_or_else(
                         || p.file_stem().map_or_else(|| "ClickStart".to_string(), |s| s.to_string_lossy().into_owned()),
@@ -1226,11 +1313,28 @@ impl App {
 
     /// A Didj cartridge on the Explorer: into the slot of the Explorer that
     /// is running (its menu then shows the game), or an Explorer turned on
-    /// with it in.
+    /// with it in. A LeapPad cartridge goes to a LeapPad first: the LeapPad 2
+    /// or LeapPad Explorer that is on, or else one turned on with it in
+    /// (the LeapPad 2 first); an Explorer only when the library has neither.
     fn play_on_explorer(&mut self, path: &Path) {
         let Some(cart) = crate::didj::read_cart(path) else {
             return self.ui.problem("Not a cartridge", "This file isn't a Didj or Leapster Explorer cartridge dump.", path.display().to_string());
         };
+        if crate::didj::describe_cart(path, &cart).is_some_and(|g| g.is_leappad_cart()) {
+            if let Some(d) = self.didj.as_ref().filter(|d| d.explorer && d.leappad) {
+                match d.set_cart(Some(cart)) {
+                    Ok(()) => self.ui.toast("Cartridge in: tap it in the LeapPad's menu"),
+                    Err(e) => self.ui.problem("Couldn't put the cartridge in", "The dump may be damaged.", e),
+                }
+                return;
+            }
+            let system = |f: crate::library::Family| self.library.games.iter().find(|g| g.family == f && g.has_tag("System")).map(|g| g.path.clone());
+            if let Some(firmware) = system(crate::library::Family::LeapPad2).or_else(|| system(crate::library::Family::LeapPadExplorer)) {
+                self.start_explorer(firmware);
+                self.explorer_cart = Some(cart);
+                return;
+            }
+        }
         if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
             match d.set_cart(Some(cart)) {
                 Ok(()) => self.ui.toast("Cartridge in: pick it in the Explorer's menu"),
@@ -1264,6 +1368,8 @@ impl App {
                 d.set_dither(self.settings.didj_dither);
                 // As a change of settings sets it (it was off until one).
                 d.set_frame_skip(self.settings.didj_frame_skip);
+                d.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                d.set_upright(self.settings.leappad_upright);
                 // In the slot from power on (the kernel checks it at start).
                 if let Some(cart) = self.explorer_cart.take()
                     && let Err(e) = d.set_cart(Some(cart))
@@ -1303,12 +1409,53 @@ impl App {
     /// Plays the original LeapPad: its base ROM (`leappad_bios`) with a
     /// cartridge, or none.
     fn start_leappad(&mut self, cart: Option<PathBuf>) {
-        let Some(bios) = self.settings.leappad_bios.clone() else {
+        // The pad the cartridge is made for: My First LeapPad and Little
+        // Touch books play only on their own pads.
+        let model = cart.as_ref().and_then(|c| std::fs::read(c).ok()).map(|mut d| {
+            ribbit_leappad::unwrap_lbk(&mut d);
+            ribbit_leappad::Model::of_cartridge(&d)
+        });
+        self.start_leappad_model(model, cart)
+    }
+
+    /// The base ROM kept for a model (the LeapPad's books also play on the
+    /// Plus Microphone, and its on the LeapPad).
+    fn leappad_base(&self, model: ribbit_leappad::Model) -> Option<PathBuf> {
+        use ribbit_leappad::Model;
+        let of = |m: Model| match m {
+            Model::LeapPad => self.settings.leappad_bios.clone(),
+            m => self.settings.leappad_bases.get(m.name()).cloned(),
+        };
+        match model {
+            Model::LeapPad => of(Model::LeapPad).or_else(|| of(Model::PlusMic)),
+            Model::PlusMic => of(Model::PlusMic).or_else(|| of(Model::LeapPad)),
+            m => of(m),
+        }
+        .filter(|p| p.is_file())
+    }
+
+    /// Starts a LeapPad model (None: the LeapPad, or the first model with a
+    /// base ROM) with a cartridge or none.
+    fn start_leappad_model(&mut self, model: Option<ribbit_leappad::Model>, cart: Option<PathBuf>) {
+        use ribbit_leappad::Model;
+        let bios = match model {
+            Some(m) => self.leappad_base(m),
+            None => Model::ALL.into_iter().find_map(|m| self.leappad_base(m)),
+        };
+        let Some(bios) = bios else {
+            let name = model.unwrap_or(Model::LeapPad).name();
             return self.ui.problem(
-                "No LeapPad base ROM",
-                "The LeapPad needs the system software from your own pad (a dump of its base ROM). The 2 MB \
-                 \"Canada Full Base ROM\" plays every book; the 1 MB \"ILA2 Universal Base ROM\" lacks sounds some \
-                 older books use. Open it with File > Open BIOS…, then the cartridge again.",
+                &format!("No {name} base ROM"),
+                &match model.unwrap_or(Model::LeapPad) {
+                    Model::LeapPad | Model::PlusMic => "The LeapPad needs the system software from your own pad (a dump of its base ROM). The 2 MB \
+                         \"Canada Full Base ROM\" plays every book; the 1 MB \"ILA2 Universal Base ROM\" lacks sounds some \
+                         older books use. Open it with File > Open BIOS…, then the cartridge again."
+                        .to_string(),
+                    _ => format!(
+                        "This cartridge is a {name} book, which plays only on a {name}: open the {name}'s own base ROM \
+                         (a dump of the pad's system software) with File > Open BIOS…, then the cartridge again."
+                    ),
+                },
                 "",
             );
         };
@@ -1334,6 +1481,7 @@ impl App {
                 if lp.book.is_none() {
                     lp.open_cartridge_book();
                 }
+                lp.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 lp.auto_go = self.settings.leappad_auto_go;
                 if lp.auto_go {
                     lp.go_first_page();
@@ -1619,6 +1767,7 @@ impl App {
         let busy = self.session.is_some()
             || self.zippity.is_some()
             || self.clickstart.is_some()
+            || self.iquest.is_some()
             || self.didj.is_some()
             || self.twist.is_some()
             || self.leappad.is_some()
@@ -1644,7 +1793,7 @@ impl App {
         if span < STATUS_EVERY {
             return;
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
         tracing::info!(target: "ribbit::perf",
             fps = (self.status.1 as f64 / span.as_secs_f64()).round(),
             running,
@@ -1664,8 +1813,21 @@ impl App {
             Some(Hardware::Zippity)
         } else if self.clickstart.is_some() {
             Some(Hardware::ClickStart)
+        } else if let Some(q) = &self.iquest {
+            Some(match q.model {
+                ribbit_iquest::Model::IQuest => Hardware::IQuest,
+                ribbit_iquest::Model::TurboTwistExtreme => Hardware::TurboTwist,
+            })
         } else if let Some(d) = &self.didj {
-            Some(if d.explorer { Hardware::Explorer } else { Hardware::Didj })
+            Some(if d.leappad2 {
+                Hardware::LeapPad2
+            } else if d.leappad {
+                Hardware::LeapPadExplorer
+            } else if d.explorer {
+                Hardware::Explorer
+            } else {
+                Hardware::Didj
+            })
         } else {
             self.session.as_ref().map(|s| s.hardware)
         }
@@ -2001,6 +2163,8 @@ impl App {
                 "Zippity"
             } else if self.clickstart.is_some() {
                 "ClickStart"
+            } else if let Some(q) = &self.iquest {
+                q.model.name()
             } else if let Some(d) = &self.didj {
                 if d.explorer { "Leapster Explorer" } else { "Didj" }
             } else if self.twist.is_some() { "RockIt Twist" } else { "no game" };
@@ -2085,6 +2249,7 @@ impl App {
                 .map(|s| &s.title)
                 .or(self.zippity.as_ref().map(|z| &z.title))
                 .or(self.clickstart.as_ref().map(|c| &c.title))
+                .or(self.iquest.as_ref().map(|q| &q.title))
                 .or(self.didj.as_ref().map(|d| &d.title))
                 .or(self.leappad.as_ref().map(|l| &l.title))
                 .or(self.twist.as_ref().map(|t| &t.title));
@@ -2160,7 +2325,7 @@ impl App {
                 self.save_settings();
             }
             Action::OpenTwist => self.start_twist(None),
-            Action::StartLeapPad => self.start_leappad(None),
+            Action::StartLeapPad(model) => self.start_leappad_model(model, None),
             Action::OpenLeapPadBook(path) => self.open_leappad_book(Some(path)),
             Action::SetTwistContent(path) => self.set_twist_content(path),
             Action::SetTwistUsb(on) => {
@@ -2274,11 +2439,18 @@ impl App {
                 if let Some(s) = &self.session {
                     s.emu.lock().keep_awake = !self.settings.turn_off_when_idle;
                 }
+                if let Some(lp) = &self.leappad {
+                    lp.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                }
+                if let Some(c) = &self.clickstart {
+                    c.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                }
                 if let Some(d) = &self.didj {
                     d.set_frame_skip(self.settings.didj_frame_skip);
                     d.set_hd(self.settings.didj_hd.clamp(1, 4));
                     d.set_dither(self.settings.didj_dither);
                     d.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                    d.set_upright(self.settings.leappad_upright);
                     // In-between frames off for now (see didj_mode); ignore the setting.
                     d.set_smooth(false);
                 }
@@ -2855,6 +3027,10 @@ impl App {
             c.reset();
             self.ui.toast("Reset");
         }
+        if let Some(q) = &self.iquest {
+            q.reset();
+            self.ui.toast("Reset");
+        }
         if let Some(d) = &self.didj {
             // The Explorer has its own Enhanced (new) setting.
             let mode = crate::didj::Mode { hle: if d.explorer { self.settings.explorer_hle } else { self.didj_mode().hle }, ..self.didj_mode() };
@@ -2873,7 +3049,7 @@ impl App {
     }
 
     fn toggle_pause(&mut self) {
-        if self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() {
+        if self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() {
             self.paused = !self.paused;
             if let Some(a) = &mut self.audio {
                 a.clear();
@@ -3360,6 +3536,9 @@ impl App {
             // view is shown (the screen at the picture's own size).
             let picture = if self.session.is_some() {
                 crate::record::LEAPSTER_SIZE
+            } else if let Some(d) = self.didj.as_ref().filter(|d| d.leappad || d.leappad2) {
+                let (w, h) = (ribbit_didj::leappad::WIDTH as usize, ribbit_didj::leappad::HEIGHT as usize);
+                if d.upright() { (h, w) } else { (w, h) }
             } else if self.didj.is_some() {
                 (crate::didj::SCREEN_W, crate::didj::SCREEN_H)
             } else if self.twist.is_some() {
@@ -3368,6 +3547,8 @@ impl App {
                 (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H)
             } else if self.clickstart.is_some() {
                 (ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H)
+            } else if let Some(q) = &self.iquest {
+                q.size()
             } else {
                 if self.leappad.is_some() {
                     self.ui.toast("The LeapPad has no screen to record");
@@ -3481,6 +3662,12 @@ impl App {
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
+        // It turned itself off for idling: closed, as a Leapster that did
+        // (the ON/OFF switch leaves it open, off).
+        if self.leappad.as_ref().is_some_and(|lp| lp.idle_powered_off()) && self.settings.turn_off_when_idle {
+            self.end_session();
+            return;
+        }
         if let Some(lp) = &self.leappad {
             lp.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
             self.speed_percent = lp.speed() as f64;
@@ -3488,8 +3675,16 @@ impl App {
             return;
         }
         // It turned itself off: closed, as a Leapster that did.
-        if self.clickstart.as_ref().is_some_and(|c| c.powered_off()) {
+        if self.clickstart.as_ref().is_some_and(|c| c.powered_off()) || self.iquest.as_ref().is_some_and(|q| q.powered_off()) {
             self.end_session();
+            return;
+        }
+        if let Some(q) = &self.iquest {
+            q.set_running(!halted);
+            q.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
+            q.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+            self.speed_percent = q.speed_percent();
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
         if let Some(c) = &self.clickstart {
@@ -3660,9 +3855,24 @@ impl App {
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
     fn set_stylus(&mut self, pos: Option<(f64, f64)>) {
         // The Leapster Explorer's touch screen: the stylus in its pixels.
+        // The LeapPad Explorer's: its picture shown upright (272x480), the
+        // stylus in the panel's pixels (480x272).
+        if let Some(d) = self.didj.as_ref().filter(|d| (d.leappad || d.leappad2) && d.upright()) {
+            let (x, y, w, h) = self.lcd_px;
+            let (sw, sh) = (ribbit_didj::leappad::HEIGHT as f32, ribbit_didj::leappad::WIDTH as f32);
+            d.set_touch(pos.and_then(|(cx, cy)| {
+                let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
+                ((0.0..sw).contains(&px) && (0.0..sh).contains(&py)).then(|| crate::didj::leappad_panel_point(px, py))
+            }));
+            return;
+        }
         if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
             let (x, y, w, h) = self.lcd_px;
-            let (sw, sh) = (crate::didj::SCREEN_W as f32, crate::didj::SCREEN_H as f32);
+            let (sw, sh) = if d.leappad || d.leappad2 {
+                (ribbit_didj::leappad::WIDTH as f32, ribbit_didj::leappad::HEIGHT as f32)
+            } else {
+                (crate::didj::SCREEN_W as f32, crate::didj::SCREEN_H as f32)
+            };
             d.set_touch(pos.and_then(|(cx, cy)| {
                 let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
                 ((0.0..sw).contains(&px) && (0.0..sh).contains(&py)).then_some((px, py))
@@ -3759,6 +3969,13 @@ impl App {
         {
             return;
         }
+        // The iQuest's keyboard and the Turbo Twist Extreme's buttons
+        // (iquest::key_name).
+        if let Some(q) = &self.iquest
+            && q.key(code, pressed)
+        {
+            return;
+        }
         // The RockIt Twist has its own keys (twist::KEYS), Tab and Shift
         // included, while its session is open.
         if let Some(t) = &mut self.twist {
@@ -3816,7 +4033,7 @@ impl App {
         let open = self.ui.side_menu_open();
         let (was_open, paused_by_menu) = self.side_menu;
         if open && !was_open {
-            let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some();
+            let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
             let pause = running && !self.paused;
             if pause {
                 self.toggle_pause();
@@ -3837,7 +4054,7 @@ impl App {
         let Some(set) = self.opts.keep_screen_on else {
             return;
         };
-        let playing = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
+        let playing = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
         if playing != self.screen_on {
             set(playing);
             self.screen_on = playing;
@@ -3951,7 +4168,7 @@ impl App {
                 PadEvent::Button(b, pressed) => self.press(Source::Gamepad, b, pressed),
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
-                    if (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
+                    if (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
                         self.toggle_pause();
                     }
                 }
@@ -4053,6 +4270,9 @@ impl App {
         if let Some(c) = &self.clickstart {
             c.frame(&mut self.tv_frame);
         }
+        if let Some(q) = &self.iquest {
+            q.frame(&mut self.tv_frame);
+        }
         let didj_size = self.didj.as_ref().map(|d| d.frame(&mut self.tv_frame));
         if let Some(t) = &self.twist {
             t.frame(&mut self.tv_frame);
@@ -4073,6 +4293,8 @@ impl App {
             Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
         } else if self.clickstart.is_some() {
             Some((ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H))
+        } else if let Some(q) = &self.iquest {
+            Some(q.size())
         } else if let Some(size) = didj_size {
             Some(size)
         } else if lmax_dual {
@@ -4108,7 +4330,7 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
+                running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 explorer_cart: self.didj.as_ref().filter(|d| d.explorer).map(|d| d.has_cart()),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 leappad: self.leappad.is_some(),
@@ -4131,6 +4353,7 @@ impl App {
                     .map(|s| s.title.clone())
                     .or(self.zippity.as_ref().map(|z| z.title.clone()))
                     .or(self.clickstart.as_ref().map(|c| c.title.clone()))
+                    .or(self.iquest.as_ref().map(|q| q.title.clone()))
                     .or(self.didj.as_ref().map(|d| d.title.clone()))
                     .or(self.twist.as_ref().map(|t| t.title.clone()))
                     .or(self.leappad.as_ref().map(|l| l.title.clone()))
@@ -4204,6 +4427,10 @@ impl App {
                     let c = self.clickstart.as_ref().unwrap();
                     crate::discord::Presence::playing(&c.title, "ClickStart", c.started)
                 }
+                (None, _, _) if self.iquest.is_some() => {
+                    let q = self.iquest.as_ref().unwrap();
+                    crate::discord::Presence::playing(&q.title, q.model.name(), q.started)
+                }
                 (None, Some(t), _) => crate::discord::Presence::playing(&t.title, "RockIt Twist", t.started),
                 (None, None, Some(l)) => crate::discord::Presence::playing(&l.title, "LeapPad", l.started).with_series(l.series.as_deref()),
                 (None, None, None) => match &self.didj {
@@ -4266,6 +4493,7 @@ impl App {
             if let Some(lp) = leappad.as_mut() {
                 lp.set_paused(info.paused);
                 lp.auto_go = settings.leappad_auto_go;
+                lp.set_template(settings.leappad_template);
                 leappad_events = crate::leappad::show(ui, area, lp, info.paused, &mut settings.leappad_book_only, &mut settings.leappad_debug);
             }
         });
@@ -4297,7 +4525,7 @@ impl App {
             None => Gpu::lcd_rect(px_area, display),
         };
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some())
+        let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some())
             .then_some((self.lcd_px, display, self.settings.ai));
         // The handheld LCD inset in the bottom-right corner of the TV picture.
         let inset = lmax_dual.then(|| {
@@ -4400,7 +4628,7 @@ impl App {
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.didj.is_some() || self.twist.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
         self.frame_diag.frame(frame_start, took, running && !self.halted());
         match picture {
             Some(hash) => self.details.frame(frame_start, hash, took),
@@ -4418,6 +4646,8 @@ impl App {
                 Hardware::Didj if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
                 Hardware::Explorer if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
                 Hardware::Explorer => " (Original)",
+                Hardware::LeapPadExplorer if self.didj.as_ref().is_some_and(|d| d.is_hle()) => " (Enhanced (new))",
+                Hardware::LeapPadExplorer => " (Original)",
                 Hardware::Didj if self.settings.didj_enhanced => " (Original+)",
                 Hardware::Didj => " (Original)",
                 _ => "",

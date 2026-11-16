@@ -32,10 +32,26 @@ pub enum Hardware {
     /// LeapFrog Leapster Explorer (2010): the Didj's LF1000 with 64 MB, its
     /// NAND built from its firmware packages (ribbit_didj::explorer).
     Explorer,
+    /// LeapFrog LeapPad Explorer (2011, the first LeapPad tablet): the
+    /// Explorer's LF1000 with a 480x272 screen and its storage on an SD
+    /// card, built from its firmware packages (ribbit_didj::leappad).
+    LeapPadExplorer,
+    /// LeapFrog LeapPad 2 (2012): an LF2000 (Nexell NXP3200, ARMv7) tablet,
+    /// 480x272; Enhanced (new) only, its programs on the HLE from its
+    /// firmware packages (ribbit_didj::hle::leappad2, docs/leappad2.md).
+    LeapPad2,
     /// LeapFrog ClickStart: My First Computer (2007 TV console with keyboard
     /// and mouse): a Sunplus SPG28x (16-bit unSP), an 8 MB system ROM and
     /// 4 MB ROM cartridges (crates/ribbit-clickstart). EXPERIMENTAL.
     ClickStart,
+    /// LeapFrog iQuest (2002-2004 handheld with a keyboard): the LeapPad's
+    /// 8051 chip, a 90 x 64 LCD, flash for the user's data and 8 MB data
+    /// cartridges (crates/ribbit-iquest). EXPERIMENTAL.
+    IQuest,
+    /// LeapFrog Turbo Twist Extreme (2004 handheld with a twist handle): the
+    /// iQuest's chip, a 96 x 32 LCD and an EEPROM (crates/ribbit-iquest).
+    /// EXPERIMENTAL.
+    TurboTwist,
 }
 
 impl Hardware {
@@ -51,7 +67,11 @@ impl Hardware {
             Hardware::LeapPad => "LeapPad",
             Hardware::Didj => "Didj",
             Hardware::Explorer => "Leapster Explorer",
+            Hardware::LeapPadExplorer => "LeapPad Explorer",
+            Hardware::LeapPad2 => "LeapPad 2",
             Hardware::ClickStart => "ClickStart",
+            Hardware::IQuest => "iQuest",
+            Hardware::TurboTwist => "Turbo Twist Extreme",
         }
     }
 }
@@ -240,6 +260,13 @@ pub const CLICKSTART_SYSTEM: &[KnownImage] = &[fw(
     "2e9ef38e1a7582705920339e6b9944f6404fcf9b",
     false,
 )];
+
+/// The iQuest's base ROM and the Turbo Twist Extreme's (MAME's `iquest` and
+/// `turboex`).
+pub const IQUEST_SYSTEM: &[KnownImage] = &[
+    fw("iQuest base ROM 152-10663 (v3.21)", Hardware::IQuest, 0x40_0000, 0xf785_dc4e, "ec002c18df536737334fe6b7db0e7342bad7b66b", false),
+    fw("Turbo Twist Extreme base ROM 152-10696 (v1.2)", Hardware::TurboTwist, 0x40_0000, 0xd7ca_bcff, "7813811c0518aba017f7a79fd477be5ed9fa7529", false),
+];
 
 /// ClickStart cartridges (MAME's clickstart_cart software list).
 pub const CLICKSTART_CARTRIDGES: &[KnownImage] = &[

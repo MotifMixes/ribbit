@@ -12,6 +12,9 @@ mod dev;
 mod mlc;
 pub mod elf;
 pub mod explorer;
+pub mod leappad2;
+pub mod gles;
+pub mod leappad;
 pub mod mem;
 mod state;
 mod signal;
@@ -280,6 +283,9 @@ pub struct Process {
     /// (explorer.rs).
     #[serde(default)]
     pub(super) x: explorer::Explorer,
+    /// OpenGL ES and EGL for the programs (gles.rs), made at the first call.
+    #[serde(skip)]
+    pub(super) gles: Option<Box<gles::Host>>,
 }
 
 /// The JIT stops where Ribbit answers instead of the kernel: system calls,
@@ -376,6 +382,7 @@ impl Process {
             tlb_for: 0,
             tlb_generation: 0,
             x: Default::default(),
+            gles: None,
         };
         p.mlc_init();
         p.hz = p.m.hle_cpu_hz();
@@ -454,7 +461,8 @@ impl Process {
             top
         };
         let mut s = Space { mem: &mut self.g.mem, bus: &mut self.m.bus, frames: &mut self.frames };
-        let platform = push_str(&mut s, "v5l");
+        let leappad2 = self.x.leappad2;
+        let platform = push_str(&mut s, if leappad2 { leappad2::UNAME[3] } else { "v5l" });
         let args: Vec<u32> = argv.iter().map(|a| push_str(&mut s, a)).collect();
         let envs: Vec<u32> = envp.iter().map(|e| push_str(&mut s, e)).collect();
         let auxv: [(u32, u32); 15] = [
@@ -469,7 +477,7 @@ impl Process {
             (12, 0),
             (13, 0),
             (14, 0),
-            (16, HWCAP),
+            (16, if leappad2 { leappad2::HWCAP } else { HWCAP }),
             (17, 100),
             (15, platform),
             (0, 0),
@@ -662,6 +670,12 @@ impl Process {
                 self.g.mem.dirty = false;
                 self.tlb_for = self.tid;
             }
+            // ARMv7 (the LeapPad 2): every thread's processor has it (save
+            // states don't keep it), and TPIDRURO holds the thread's TLS.
+            if self.x.leappad2 {
+                let tls = self.tls;
+                self.cpu.v7.get_or_insert_with(Default::default).tpidruro = tls;
+            }
             let pc = self.cpu.r[15];
             if pc >= VECTORS {
                 match pc {
@@ -776,6 +790,11 @@ impl Process {
             self.cpu.r[7]
         } else {
             let swi = self.mem().get32(ret.wrapping_sub(4)).unwrap_or(0) & 0xFF_FFFF;
+            // A GL/EGL function replaced by a hook (gles.rs).
+            if swi & 0xFF_0000 == gles::SWI_BASE {
+                self.gles_call(swi & 0xFFFF);
+                return;
+            }
             if swi == 0 { self.cpu.r[7] } else { swi.wrapping_sub(0x90_0000) }
         };
         self.call_eabi = user & psr::T != 0 || self.mem().get32(ret.wrapping_sub(4)).unwrap_or(0) & 0xFF_FFFF == 0;

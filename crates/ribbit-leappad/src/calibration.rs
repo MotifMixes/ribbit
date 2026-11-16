@@ -132,6 +132,71 @@ pub fn is_calibrated(d: &[u8]) -> bool {
     u16::from_be_bytes([d[0x7E], d[0x7F]]) == 0xFFFF - sum
 }
 
+/// My First LeapPad's pen: one page, landscape, and a shorter EEPROM
+/// (VERIFIED-FW on The Foot Book 500-10523, cart kernel Jul 28 2003 and app
+/// Aug 08 2003; the same point tables are in all 8 dumped MFLP cartridges and
+/// both MFLP bases):
+///
+/// * The kernel sums bytes 0x00-0x4D and wants the ones' complement of the
+///   sum, big-endian, at 0x4E-0x4F (kernel 0x3D12-0x3D24: "CS bad No CAL
+///   table" otherwise). Byte 0 is 0; anything else prints "Recal EE" (kernel
+///   0x3D66).
+/// * Two regions of 28 bytes: axis B (across) at 0x08, axis A (down) at 0x24
+///   (app 0xB12A/0xB13A, routine 0xB48A). Each is a byte, 13 big-endian
+///   words at +1 (the reading just off the page, then at calibration points
+///   0-11) and a byte at +0x1B. The two bytes are read times 32 into F0A1 and
+///   F09B (meaning UNKNOWN; 0 here). The app builds its tables F5C0 (B) and
+///   F5D6 (A) from the words as the LeapPad's app does: entry i from word
+///   i + 1 (black-box test with patterned images, lpboot XDUMP).
+/// * The cartridge's point tables (The Foot Book app 0xB83F, 0xB883; 17 words
+///   each: three off-page points, then 14): the page runs from -180 to 8580
+///   across and -180 to 5976 down, in units of 1/8 of the app's coordinates.
+pub mod my_first {
+    pub const POINTS_X: [i32; 14] = [-180, 240, 720, 1710, 2700, 4200, 5700, 6690, 7680, 8160, 8580, 9480, 10380, 11280];
+    pub const POINTS_Y: [i32; 14] = [-180, 240, 720, 1446, 2172, 2898, 3624, 4350, 5076, 5556, 5976, 6876, 7776, 8676];
+    pub const OFF_PAGE: i32 = -1080;
+    pub const REGIONS: [usize; 2] = [0x08, 0x24];
+    /// The bytes the checksum covers; it follows them.
+    pub const SUMMED: usize = 0x4E;
+
+    /// The pen's readings at a point of the page (page units): an ideal
+    /// sensor, as for the LeapPad (HYPOTHESIS), with axis B from -14000 to
+    /// +14000 across and axis A the same down.
+    pub fn ratios(x: f32, y: f32) -> (f32, f32) {
+        let t = |v: f32, p: &[i32; 14]| (v - p[0] as f32) / (p[10] - p[0]) as f32;
+        let r = |t: f32| (-14000.0 + 28000.0 * t) / 16384.0;
+        (r(t(x, &POINTS_X)), r(t(y, &POINTS_Y)))
+    }
+
+    pub fn factory_eeprom() -> Vec<u8> {
+        let mut d = vec![0u8; crate::eeprom::SIZE];
+        for (axis, &base) in REGIONS.iter().enumerate() {
+            let points = if axis == 0 { &POINTS_X } else { &POINTS_Y };
+            let at = |v: i32| {
+                let (b, a) = if axis == 0 { ratios(v as f32, 0.0) } else { ratios(0.0, v as f32) };
+                ((if axis == 0 { b } else { a }) * 16384.0).round().clamp(-16000.0, 16000.0) as i16
+            };
+            for (k, v) in std::iter::once(OFF_PAGE).chain(points[..12].iter().copied()).enumerate() {
+                d[base + 1 + 2 * k..base + 3 + 2 * k].copy_from_slice(&at(v).to_be_bytes());
+            }
+        }
+        seal(&mut d);
+        d
+    }
+
+    pub fn seal(d: &mut [u8]) {
+        let sum = d[..SUMMED].iter().map(|&b| b as u32).sum::<u32>() as u16;
+        d[SUMMED..SUMMED + 2].copy_from_slice(&(0xFFFF - sum).to_be_bytes());
+    }
+
+    pub fn is_calibrated(d: &[u8]) -> bool {
+        d.len() >= SUMMED + 2 && d[0] == 0 && {
+            let sum = d[..SUMMED].iter().map(|&b| b as u32).sum::<u32>() as u16;
+            u16::from_be_bytes([d[SUMMED], d[SUMMED + 1]]) == 0xFFFF - sum
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

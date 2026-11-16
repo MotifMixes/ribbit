@@ -6,12 +6,14 @@ members = [
     "crates/ribbit-jit",
     "crates/ribbit-arm",
     "crates/ribbit-armjit",
+    "crates/ribbit-gles",
     "crates/ribbit-zippity",
     "crates/ribbit-clickstart",
     "crates/ribbit-lfandroid",
     "crates/ribbit-twist",
     "crates/ribbit-didj",
     "crates/ribbit-leappad",
+    "crates/ribbit-iquest",
     "crates/ribbit-speech",
     "crates/ribbit-memory",
     "crates/ribbit-video",
@@ -28,11 +30,13 @@ default-members = [
     "crates/ribbit-jit",
     "crates/ribbit-arm",
     "crates/ribbit-armjit",
+    "crates/ribbit-gles",
     "crates/ribbit-zippity",
     "crates/ribbit-clickstart",
     "crates/ribbit-twist",
     "crates/ribbit-didj",
     "crates/ribbit-leappad",
+    "crates/ribbit-iquest",
     "crates/ribbit-memory",
     "crates/ribbit-video",
     "crates/ribbit-audio",
@@ -43,7 +47,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "1.9.2"
+version = "1.9.3"
 edition = "2024"
 rust-version = "1.88"
 publish = false
@@ -57,11 +61,13 @@ ribbit-cpu = { path = "crates/ribbit-cpu" }
 ribbit-jit = { path = "crates/ribbit-jit" }
 ribbit-arm = { path = "crates/ribbit-arm" }
 ribbit-armjit = { path = "crates/ribbit-armjit" }
+ribbit-gles = { path = "crates/ribbit-gles" }
 ribbit-zippity = { path = "crates/ribbit-zippity" }
 ribbit-clickstart = { path = "crates/ribbit-clickstart" }
 ribbit-twist = { path = "crates/ribbit-twist" }
 ribbit-didj = { path = "crates/ribbit-didj" }
 ribbit-leappad = { path = "crates/ribbit-leappad" }
+ribbit-iquest = { path = "crates/ribbit-iquest" }
 ribbit-speech = { path = "crates/ribbit-speech" }
 ribbit-memory = { path = "crates/ribbit-memory" }
 ribbit-video = { path = "crates/ribbit-video" }
@@ -102,4 +108,8 @@ opt-level = 2
 opt-level = 3
 
 [profile.dev.package.ribbit-twist]
+opt-level = 3
+
+# The iQuest's 8051 runs its debug-log printf a lot; research runs need speed.
+[profile.dev.package.ribbit-iquest]
 opt-level = 3

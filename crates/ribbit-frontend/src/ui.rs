@@ -64,7 +64,9 @@ pub enum Action {
     /// Open the RockIt Twist research preview (no package).
     OpenTwist,
     /// Turn on the original LeapPad with no cartridge.
-    StartLeapPad,
+    /// Turns on a LeapPad without a cartridge (None: the LeapPad, or the
+    /// first model whose base ROM is known).
+    StartLeapPad(Option<ribbit_leappad::Model>),
     /// Open this virtual book on the running LeapPad.
     OpenLeapPadBook(PathBuf),
     /// Use this folder as the RockIt Twist's storage content (None: none).
@@ -411,7 +413,7 @@ pub fn draw(
         }
         // The library once any console's system files are known (a player
         // with only a LeapPad, Zippity or RockIt Twist has no Leapster BIOS).
-        let have_system = info.bios_name.is_some() || settings.leappad_bios.is_some() || library.has_system_files();
+        let have_system = info.bios_name.is_some() || settings.leappad_bios.is_some() || !settings.leappad_bases.is_empty() || library.has_system_files();
         if !info.running && have_system {
             if was_running || st.library_since.is_none() {
                 st.library_since = Some(Instant::now());
@@ -804,7 +806,7 @@ fn console_tabs(
     actions: &mut Vec<Action>,
 ) {
     let side = |g: &crate::library::Game| g.family.is_book() == books;
-    let count = |f: Option<Family>| library.games.iter().filter(|g| side(g) && f.map_or(!g.is_explorer_cart(), |f| f.lists(g.family))).count();
+    let count = |f: Option<Family>| library.games.iter().filter(|g| side(g) && f.map_or(!g.is_explorer_cart(), |f| g.listed_on(f))).count();
     // A page for each console that is here and has games.
     let families: Vec<Family> = Family::ALL
         .into_iter()
@@ -1015,7 +1017,7 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         // Power.
         if ui
             .checkbox(&mut settings.turn_off_when_idle, "Turn off when idle")
-            .on_hover_text("Like the real console, turn off after a while with nothing pressed (Leapster about 15 minutes, Leapster TV 5, Didj 7). Ribbit then closes the game. Off: Ribbit keeps it on.")
+            .on_hover_text("Like the real console, turn off after a while with nothing pressed (Leapster about 15 minutes, Leapster TV 5, Didj 7, Leapster Explorer 4, LeapPad 3, ClickStart 2.5 on its home screen; the Zippity and RockIt Twist never do). Ribbit then closes the game. Off: Ribbit keeps it on.")
             .changed()
         {
             actions.push(Action::SettingsChanged);
@@ -1195,8 +1197,15 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
                 .on_hover_text("The pad with no cartridge. Needs its base ROM: open it with Open BIOS…")
                 .clicked()
             {
-                actions.push(Action::StartLeapPad);
+                actions.push(Action::StartLeapPad(None));
                 ui.close();
+            }
+            // The other models whose base ROMs are known.
+            for model in ribbit_leappad::Model::ALL.into_iter().filter(|&m| m != ribbit_leappad::Model::LeapPad) {
+                if settings.leappad_bases.contains_key(model.name()) && ui.button(format!("Turn on the {} (no cartridge)", model.name())).clicked() {
+                    actions.push(Action::StartLeapPad(Some(model)));
+                    ui.close();
+                }
             }
             if ui
                 .add_enabled(info.leappad, egui::Button::new("Open book…"))
@@ -1211,6 +1220,9 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             );
             ui.checkbox(&mut settings.leappad_auto_go, "Touch GO automatically").on_hover_text(
                 "On a real LeapPad the child touches the green GO circle after opening the book and after each page turn, so the pad knows the page. With this on, Ribbit's pen does it: on the first page once the pad has started, and whenever the page arrows turn the page.",
+            );
+            ui.checkbox(&mut settings.leappad_template, "My First LeapPad: ABC Phonics Bus template on the pad").on_hover_text(
+                "The My First LeapPad came with a printed template, the ABC Phonics Bus activity, that lies on the pad instead of a book; a switch under it tells the pad. On: the template is in and the pad plays its own ABC activity (\"Template In\"). Off: no template, the cartridge's book plays. Only the My First LeapPad has the switch.",
             );
             if ui
                 .checkbox(&mut settings.leappad_classic, "Play LeapPad Classic cartridges")
@@ -1398,6 +1410,30 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             if changed {
                 settings.didj_enhanced = mode != 2;
                 settings.didj_hle = mode == 1;
+                actions.push(Action::SettingsChanged);
+            }
+        });
+        sub_menu(ui, "LeapPad Explorer", |ui| {
+            // The Leapster Explorer's setting (the same firmware and modes).
+            let mut mode = if settings.explorer_hle { 0 } else { 1 };
+            let mut changed = ui
+                .radio_value(&mut mode, 0, "Enhanced (new, experimental)")
+                .on_hover_text("Runs the LeapPad's menu and games without its Linux system. Saves are shared with Original. The same setting as the Leapster Explorer's. From the next power-on.")
+                .changed();
+            changed |= ui
+                .radio_value(&mut mode, 1, "Original")
+                .on_hover_text("The LeapPad's own Linux system, as LeapFrog shipped it. The same setting as the Leapster Explorer's. From the next power-on.")
+                .changed();
+            if changed {
+                settings.explorer_hle = mode == 0;
+                actions.push(Action::SettingsChanged);
+            }
+            ui.separator();
+            if ui
+                .checkbox(&mut settings.leappad_upright, "Screen upright")
+                .on_hover_text("Its menus are drawn for the LeapPad held upright; its own games and the keyboard for it held sideways. Off shows the screen sideways. At once.")
+                .changed()
+            {
                 actions.push(Action::SettingsChanged);
             }
         });
@@ -2308,7 +2344,7 @@ fn library_screen(
             let shown_games: Vec<&crate::library::Game> = library.games.iter().filter(|g| {
                 if let Some(hw) = filter && !plays_on(g, hw) { return false; }
                 if g.family.is_book() != *books { return false; }
-                if !tab.is_none_or(|f| f.lists(g.family)) { return false; }
+                if !tab.is_none_or(|f| g.listed_on(f)) { return false; }
                 if tab.is_none() && g.is_explorer_cart() { return false; }
                 if !matches(g) { return false; }
                 if *favorites_only && !settings.favorites.contains(&g.path) { return false; }
@@ -2663,7 +2699,7 @@ fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, ta
         turn_on_button(ui, settings, library, tab, actions);
         // Zippity and RockIt Twist games play on their own console: no
         // choice to make on their pages.
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2)) {
             // (Right to left: the BIOS button shows to the right of the
             // console menu.)
             bios_picker(ui, settings, library, actions);
@@ -2729,7 +2765,7 @@ fn phone_library_header(
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2)) {
             console_picker(ui, settings, library, tab, actions);
             bios_picker(ui, settings, library, actions);
         }
@@ -2850,8 +2886,8 @@ fn games_folder_button(ui: &mut egui::Ui, settings: &Settings, actions: &mut Vec
 fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab: Option<Family>, actions: &mut Vec<Action>) {
     // The LeapPad's page: the pad can be turned on without a cartridge.
     if tab == Some(Family::LeapPad) {
-        if settings.leappad_bios.is_some() && power_button(ui, "Turn on the LeapPad without a cartridge") {
-            actions.push(Action::StartLeapPad);
+        if (settings.leappad_bios.is_some() || !settings.leappad_bases.is_empty()) && power_button(ui, "Turn on the LeapPad without a cartridge") {
+            actions.push(Action::StartLeapPad(None));
         }
         return;
     }
@@ -2888,6 +2924,24 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
                 .clicked()
         {
             actions.push(Action::Pick(Pick::ExplorerInstall));
+        }
+        return;
+    }
+    // The LeapPad Explorer's page: its FW Base package is the console.
+    if tab == Some(Family::LeapPadExplorer) {
+        if let Some(g) = library.games.iter().find(|g| g.family == Family::LeapPadExplorer && g.has_tag("System"))
+            && power_button(ui, "Turn on the LeapPad Explorer (its setup and menu)")
+        {
+            actions.push(Action::PlayFromLibrary(g.path.clone()));
+        }
+        return;
+    }
+    // The LeapPad 2's page: its Firmware-Base package is the console.
+    if tab == Some(Family::LeapPad2) {
+        if let Some(g) = library.games.iter().find(|g| g.family == Family::LeapPad2 && g.has_tag("System"))
+            && power_button(ui, "Turn on the LeapPad 2 (Enhanced (new): its setup and menu; a LeapPad cartridge picked goes in its slot)")
+        {
+            actions.push(Action::PlayFromLibrary(g.path.clone()));
         }
         return;
     }
@@ -3114,7 +3168,19 @@ fn paint_art(ui: &egui::Ui, game: &crate::library::Game, rect: egui::Rect, radiu
         Art::Texture(t) => {
             egui::Image::new((t.id(), rect.size())).corner_radius(radius).paint_at(ui, rect);
         }
-        _ if game.family == crate::library::Family::LeapPad => paint_book_cover(p, rect, radius, &game.title),
+        _ if game.family == crate::library::Family::LeapPad => {
+            paint_book_cover(p, rect, radius, &game.title);
+            // A My First LeapPad or Little Touch book: its pad in the corner.
+            let model = ribbit_leappad::Model::ALL
+                .into_iter()
+                .find(|m| *m != ribbit_leappad::Model::LeapPad && game.details.iter().any(|(k, v)| *k == "System" && v == m.name()));
+            if let Some(m) = model {
+                let s = rect.width().min(rect.height()) * 0.34;
+                let corner = egui::Rect::from_min_size(rect.max - egui::vec2(s + 6.0, s + 6.0), egui::vec2(s, s));
+                p.rect_filled(corner, s * 0.2, egui::Color32::from_black_alpha(110));
+                crate::console_icons::paint_leappad_model(p, corner.shrink(s * 0.06), m);
+            }
+        }
         _ if game.family == crate::library::Family::RockItTwist => paint_twist_card(p, rect, radius, &game.title),
         other => {
             p.rect_filled(rect, radius, egui::Color32::from_rgb(24, 30, 27));
@@ -3609,7 +3675,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a
         // Zippity's or RockIt Twist's belongs to the whole console.
-        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer);
+        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2);
         let delete = ui
             .add_enabled(
                 own_save,

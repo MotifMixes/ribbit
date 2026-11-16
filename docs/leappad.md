@@ -679,6 +679,19 @@ are withdrawn.
   * The firmware's unit (count >> 3) is then 8 s, and the longest timeout 256 units (34 minutes).
   * Tried first: at 8 kHz the app powered itself off 0.8 s after starting, and at 8 Hz after 22 s.
   * Unverified against a real unit: a video of one left alone for 3 minutes would confirm it.
+* **Every cartridge has it (VERIFIED by execution, 2026-11-15, `lpidle`):** left alone, all 15 cartridges that start
+  print "Auto Power Down" and power down (PCON) at 175 s (the newer kernels: 00406, 00652, 00730, 01148, 11374) or
+  180.6 s (the Classic ones). 00104 and 01022-B, damaged dumps, are refused by the base, which powers off 11.6 s
+  later; the app repairs 01022-B's checksum.
+* **The activity bit (VERIFIED-FW, `src/idle.rs`):** a touch sets a bit in the bit-addressable RAM; the main loop
+  then moves the deadline on and clears it. Classic kernels: `JNB bit; MOV DPTR,#FC01h ... MOV DPTR,#F0xxh; MOV A,R7;
+  MOVX @DPTR,A; CLR bit` (500-00367 kernel 0x6BBC: bit 23h.6, deadline F0F0, (count + 180) >> 2). Newer kernels
+  and the Full Base: `JBC bit,+2; SJMP ...` then the same store (500-00406 app 0xA2E8: bit 23h.7, deadline F088).
+* **"Turn off when idle" (`Machine::keep_awake`, the setting off):** once a second Ribbit finds that routine in the
+  code the processor sees and sets its bit, as a touch would; the pad stays on (all 15 for 10 minutes, `lpidle`
+  with KEEP_AWAKE=1). On: it powers down as above, and the app closes the game when the firmware said
+  "Auto Power Down" (the ON/OFF switch still leaves it open, off). Test `idle_power_off_and_keep_awake` in
+  `tests/books.rs` (needs the dumps).
 * **Before this counter was modelled,** the app's main loop spun forever in the `>> 3` helper (app 0x8D7C),
   waiting for time to pass.
 
@@ -687,7 +700,7 @@ are withdrawn.
 **Base ROM:** `leappadbios.bin`, 1 MB, CRC32 c886cddc, SHA1 f8a83b156feb28315d2321758678e141600a0d4e. It is
 MAME's `leappad` "ila2_universal" BIOS (found in the user's "LeapFrog ROM Dumps Collection.zip" as
 `leappadbios (1).bin`). The same zip holds My First LeapPad and Little Touch LeapPad BIOSes (4 MB each, also in
-MAME), which are not the subject here.
+MAME): those pads, and the LeapPad Plus Microphone, are in `docs/leappad-family.md`.
 
 **Full Base ROM:** `leappadbioscanada.bin`, 2 MB, SHA1 adf52232adcfd4de5d8e31c0e0c09be61718a9d4, beside the
 ILA2 one in a MAME-style `leappad.zip`. It prints "2MB Canada Full Base ROM: US Library: Cart start app:", part
@@ -701,11 +714,11 @@ use**; the ILA2 base remains supported.
 same dump. Two are Quantum LeapPad cartridges (read, above, but not run; said to use the same cartridges as the
 original, UNTESTED) and one is Mind Station.
 
-**Other bases (reported by a player, 2026-10, not in the user's set):** an 8 MB "Plus Microphone" base boots
-cartridges in Ribbit (a checksum sits at its end; it may not be trimmed). The My First LeapPad base boots but
-says "Whoops! That's not a My First LeapPad cartridge" to standard cartridges. None of the dumped bases holds a
-book of its own: the ILA2 base's sound tables hold only the start-up jingle, so Ribbit calls a session without a
-cartridge "no cartridge".
+**Other bases:** the 8 MB Plus Microphone base, both My First LeapPad bases and both Little Touch bases are
+in the user's set since 2026-11-15; see `docs/leappad-family.md`. My First LeapPad's "Whoops! That's not a My
+First LeapPad cartridge" to LeapPad books is its product ID check (13 against the books' 14). The ILA2 and
+Canada bases hold no book of their own (the ILA2 base's sound tables hold only the start-up jingle), so Ribbit
+calls a session without a cartridge "no cartridge"; the Little Touch's US base holds one.
 
 **LBK files:** what the Mind Station software writes when it dumps a cartridge (`ms2002 <file>.lbk /save`): the
 ROM after a 0x13C-byte header. Ribbit drops the header when the boot stub sits at 0x13C (`unwrap_lbk`) and keeps

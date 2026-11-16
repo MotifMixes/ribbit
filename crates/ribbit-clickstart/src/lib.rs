@@ -17,6 +17,7 @@
 mod bus;
 pub mod cpu;
 mod eeprom;
+pub mod idle;
 mod sio_audio;
 mod sound;
 mod video;
@@ -120,6 +121,14 @@ pub struct ClickStart {
     held: u8,
     #[serde(skip, default = "no_key")]
     held_key: u8,
+    /// Keep the console on however long it is left alone: the home
+    /// screen's idle count (`idle`, 150 s) is set back to 0 once a second.
+    /// Off (the default), the console turns itself off as a real one does.
+    #[serde(skip)]
+    pub keep_awake: bool,
+    /// Where the system ROM keeps that count (None: not found).
+    #[serde(skip)]
+    idle: Option<idle::IdleCount>,
 }
 
 fn no_key() -> u8 {
@@ -136,12 +145,16 @@ fn words_le(data: &[u8]) -> Vec<u16> {
 impl ClickStart {
     /// A ClickStart with the system ROM `bios` (the 8 MB dump), switched on.
     pub fn new(bios: &[u8]) -> Self {
+        let rom = words_le(bios);
+        let idle = idle::IdleCount::find(&rom);
         let mut cs = ClickStart {
             cpu: Cpu::new(),
-            bus: Bus::new(words_le(bios)),
+            bus: Bus::new(rom),
             instructions: 0,
             held: 0,
             held_key: 0x3f,
+            keep_awake: false,
+            idle,
         };
         cs.reset();
         cs
@@ -207,6 +220,31 @@ impl ClickStart {
                 break;
             }
         }
+        if self.keep_awake && self.bus.frames % 60 == 0 {
+            self.reset_idle_count();
+        }
+    }
+
+    /// Sets the home screen's idle count back to 0, as a key would (idle.rs).
+    pub fn reset_idle_count(&mut self) {
+        if let Some(at) = self.idle.and_then(|c| c.address(&self.bus.ram)) {
+            self.bus.ram[at as usize] = 0;
+        }
+    }
+
+    /// Research and tests: the home screen's idle count, and the count it
+    /// turns the console off past (None: not on the home screen).
+    pub fn idle_count(&self) -> Option<(u16, u16)> {
+        let c = self.idle?;
+        c.address(&self.bus.ram).map(|at| (self.bus.ram[at as usize], c.limit))
+    }
+
+    /// Research and tests: sets the home screen's idle count (to try the
+    /// power-off without waiting).
+    pub fn set_idle_count(&mut self, count: u16) {
+        if let Some(at) = self.idle.and_then(|c| c.address(&self.bus.ram)) {
+            self.bus.ram[at as usize] = count;
+        }
     }
 
     /// Runs `cycles` CPU cycles.
@@ -248,6 +286,8 @@ impl ClickStart {
         // The keyboard holds what it holds.
         cs.held = self.held;
         cs.held_key = self.held_key;
+        cs.keep_awake = self.keep_awake;
+        cs.idle = self.idle;
         *self = cs;
         Ok(())
     }

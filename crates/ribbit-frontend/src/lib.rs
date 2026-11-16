@@ -46,6 +46,7 @@ mod updates;
 pub mod upscale;
 mod zippity;
 mod clickstart;
+mod iquest;
 
 pub use app::{StartOptions, run, run_with};
 pub use settings::default_data_dir;

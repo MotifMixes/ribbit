@@ -1,11 +1,15 @@
 //! Leaves the pad alone and reports when the firmware's idle power-off
 //! happens and whether the processor then stops: `lpidle <bios> <cart> [seconds]`.
+//! KEEP_AWAKE=1: with `Machine::keep_awake` (the app's "Turn off when idle" off);
+//! CLASSIC=1: LeapPad Classic cartridges played (`Bus::classic`).
 use ribbit_leappad::{MACHINE_HZ, Machine};
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut m = Machine::new(std::fs::read(&a[1]).expect("BIOS"));
     m.insert_cartridge(std::fs::read(&a[2]).expect("cartridge"));
+    m.keep_awake = std::env::var_os("KEEP_AWAKE").is_some();
+    m.bus.classic = std::env::var_os("CLASSIC").is_some();
     let secs: u32 = a.get(3).map_or(400, |s| s.parse().expect("seconds"));
     let mut said = String::new();
     for t in 0..secs * 10 {

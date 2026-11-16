@@ -53,7 +53,7 @@ On a touchscreen (and always on Android), touching the screen shows an on-screen
 - **Emulation › Pause** (`Esc`) stops the game; the same again goes on. **Pause in background** pauses it while another window is active.
 - **Emulation › Reset** (`Ctrl+R`) restarts the console.
 - **File › Close Cartridge** goes back to the library.
-- **Turn off when idle** turns the console off after a while with nothing pressed, as the real one does (about 15 minutes; 5 on the Leapster TV). Before it does, a notice counts down the last minute.
+- **Turn off when idle** turns the console off after a while with nothing pressed, as the real one does, and closes the game: about 15 minutes on a Leapster, 5 on the Leapster TV, 7 on the Didj, 4 on the Leapster Explorer, 3 on the LeapPad and 2.5 on the ClickStart's home screen. On a Leapster a notice counts down the last minute first. The Zippity and the RockIt Twist have no such timer. Off (the default), every console stays on however long it is left.
 
 ## A game's own settings
 

@@ -16,6 +16,9 @@
 //! CSRUN_WAV=file.wav saves the sound. CSRUN_EEPROM=file loads the 24C08
 //! from the file (if there) and writes it back at the end.
 //! CSRUN_TRACE=n prints the first n instructions' addresses and opcodes.
+//! CSRUN_WATCH=addr[:from] prints where the word at addr (hex) is written
+//! with a smaller value (from frame `from` on; runs instruction by
+//! instruction).
 
 use ribbit_clickstart::{CLOCK, ClickStart, SCREEN_H, SCREEN_W};
 use std::io::Write;
@@ -94,11 +97,16 @@ fn main() {
     let breaks: Vec<u32> = std::env::var("CSRUN_BREAK")
         .map(|v| v.split(',').map(|a| u32::from_str_radix(a, 16).unwrap()).collect())
         .unwrap_or_default();
+    let watch: Option<(u32, u64)> = std::env::var("CSRUN_WATCH").ok().map(|v| {
+        let p: Vec<&str> = v.split(':').collect();
+        (u32::from_str_radix(p[0], 16).unwrap(), p.get(1).map_or(0, |f| f.parse().unwrap()))
+    });
     let mut wav: Vec<i16> = Vec::new();
     let spu_log = std::env::var_os("CSRUN_SPU").is_some();
     if spu_log {
         cs.trace_sound();
     }
+    let mut off_seen = false;
     let start = Instant::now();
     for f in 0..frames {
         for &(at, dx, dy, b) in &mouse {
@@ -125,7 +133,22 @@ fn main() {
                 }
             }
         }
-        if breaks.is_empty() {
+        if let Some((addr, from)) = watch.filter(|&(_, from)| f >= from) {
+            let _ = from;
+            let end = cs.frames() + 1;
+            while cs.frames() < end {
+                let (pc, old) = (cs.cpu.lpc(), cs.peek(addr));
+                cs.step_one();
+                let new = cs.peek(addr);
+                if new < old {
+                    let sp = cs.cpu.r[0] as u32;
+                    println!(
+                        "f{f} {pc:06x}: [{addr:04x}] {old:04x} -> {new:04x} (stack {:04x?})",
+                        (1..13).map(|o| cs.peek(sp + o)).collect::<Vec<_>>()
+                    );
+                }
+            }
+        } else if breaks.is_empty() {
             cs.run_frame();
         } else {
             let end = cs.frames() + 1;
@@ -135,6 +158,10 @@ fn main() {
                 }
                 cs.step_one();
             }
+        }
+        if cs.powered_off() && !off_seen {
+            off_seen = true;
+            println!("powered off at frame {f} ({:.1} s)", cs.cycles() as f64 / CLOCK as f64);
         }
         if ram_at.contains(&f) {
             let ram: Vec<u8> = (0..0x2800).flat_map(|a| cs.peek(a).to_le_bytes()).collect();

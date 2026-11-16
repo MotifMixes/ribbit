@@ -171,6 +171,10 @@ pub struct Settings {
     pub zippity_keys: BTreeMap<String, String>,
     /// The original LeapPad's base ROM (kept apart from the Leapster's BIOS).
     pub leappad_bios: Option<PathBuf>,
+    /// The base ROMs of the other LeapPad models (My First LeapPad, Little
+    /// Touch LeapPad, LeapPad Plus Microphone), by `Model::name`.
+    #[serde(default)]
+    pub leappad_bases: BTreeMap<String, PathBuf>,
     /// The virtual book opened last with each LeapPad cartridge (cartridge
     /// file -> book file; "" is the pad with no cartridge).
     pub leappad_books: BTreeMap<String, PathBuf>,
@@ -184,6 +188,8 @@ pub struct Settings {
     /// LeapPad: the pen touches GO by itself on the first page once the pad
     /// has started, and on each page turned to with the arrows.
     pub leappad_auto_go: bool,
+    /// My First LeapPad: its ABC Phonics Bus template lies on the pad.
+    pub leappad_template: bool,
     /// LeapPad: show the books' words, transcribed on this PC.
     pub leappad_words: bool,
     /// Ask GitHub for a newer release when Ribbit starts.
@@ -239,6 +245,11 @@ pub struct Settings {
     /// (`ribbit_didj::hle::explorer`; experimental). From the next power-on.
     #[serde(default)]
     pub explorer_hle: bool,
+    /// LeapPad Explorer: its screen shown upright, as its menus are drawn
+    /// (turned a quarter from the panel; `didj::rotate_upright`). Off: as
+    /// the panel, as its own games and the keyboard draw. At once.
+    #[serde(default = "default_true")]
+    pub leappad_upright: bool,
     /// Didj, Enhanced (new): in-between frames, smooth motion whatever the
     /// game's frame rate. At once.
     #[serde(default = "default_true")]
@@ -321,11 +332,13 @@ impl Default for Settings {
             twist_keys: BTreeMap::new(),
             zippity_keys: BTreeMap::new(),
             leappad_bios: None,
+            leappad_bases: BTreeMap::new(),
             leappad_books: BTreeMap::new(),
             leappad_book_only: false,
             leappad_debug: false,
             leappad_classic: true,
             leappad_auto_go: true,
+            leappad_template: false,
             leappad_words: true,
             check_for_updates: true,
             bios_picked: BTreeMap::new(),
@@ -342,6 +355,7 @@ impl Default for Settings {
             didj_enhanced: true,
             didj_hle: false,
             explorer_hle: false,
+            leappad_upright: true,
             didj_smooth: true,
             didj_dither: false,
             didj_cpu_scale: default_didj_cpu_scale(),

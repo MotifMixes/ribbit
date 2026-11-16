@@ -67,7 +67,8 @@ fn booted(with_cart: bool) -> Option<(Machine, String)> {
 
 /// Whether the app said it waits for the pen.
 fn idle(log: &str) -> bool {
-    log.contains("[Idle]") || log.contains("State: Idle")
+    // The Little Touch's app: "[STATE_Idle]".
+    log.contains("[Idle]") || log.contains("State: Idle") || log.contains("[STATE_Idle]")
 }
 
 /// Runs until the log after a touch holds `what` and the `words` words after
@@ -269,12 +270,33 @@ fn the_cartridge_answers_every_spot_its_layout_lists() {
         }
         // Touches GO and waits for the app to announce the spread and take
         // touches again.
+        // The Little Touch's spreads are opened by their magnets instead: the
+        // book is lifted off (no magnet) and laid down open at the spread.
         let open = |m: &mut Machine| {
-            let mut log = touch(m, spread.go.inside_point().unwrap());
-            wait_for(m, &mut log, "PPTouch", 1);
-            assert!(log.contains("PPTouch"), "spread {}: GO is a page-pointer touch:\n{log}", n + 1);
+            let (mut log, event) = match spread.magnets {
+                Some(p) => {
+                    // The kernel takes a pattern after 100 equal reads (about
+                    // a second); the same spread again needs the book off first.
+                    if m.bus.magnets == p {
+                        m.set_magnets(0);
+                        m.run_cycles(secs(2.0));
+                    }
+                    m.take_log();
+                    m.set_magnets(p);
+                    m.run_cycles(secs(0.5));
+                    (m.take_log(), "MagnetSwitch: pData")
+                }
+                // The Little Touch's page keys answer as a VSwitch or a
+                // GlobalPP (a new view), not a page-pointer touch.
+                None if layout.family == ribbit_leappad::layout::Family::LittleTouch => {
+                    (touch(m, spread.go.as_ref().and_then(|g| g.inside_point()).unwrap()), "{DT}")
+                }
+                None => (touch(m, spread.go.as_ref().and_then(|g| g.inside_point()).unwrap()), "PPTouch"),
+            };
+            wait_for(m, &mut log, event, 1);
+            assert!(log.contains(event), "spread {}: the app takes the spread ({event}):\n{log}", n + 1);
             for _ in 0..80 {
-                if idle(&log[log.find("PPTouch").unwrap()..]) {
+                if idle(&log[log.find(event).unwrap()..]) {
                     break;
                 }
                 m.run_cycles(secs(0.25));
@@ -323,7 +345,9 @@ fn the_cartridge_answers_every_spot_its_layout_lists() {
                 None => continue,
             };
             mode = mode_of(&out).unwrap_or(mode);
-            if !out.contains(&want) {
+            // Volume spots (My First LeapPad's Las Princesas Disney) answer
+            // with the new volume ("LVol:", "Vol:119") instead of their name.
+            if !out.contains(&want) && !out.contains("LVol:") {
                 wrong.push(format!("spread {} {want} at ({:.0}, {:.0}) {:?}:\n{out}", n + 1, felt.x, felt.y, felt.page));
             }
             // A view switch ("NewV:" in the Classic app) leaves the spread's Touch-and-Tell view.
@@ -356,4 +380,40 @@ fn a_drawn_book_saves_as_a_book_file() {
     let book = Book::from_cartridge(&cart, "Test", Some("500-00406")).expect("drawn");
     let (back, _) = Book::parse(&book.to_toml(), Path::new(".")).expect("the saved file reads back");
     assert_eq!(back.spreads, book.spreads);
+}
+
+/// "Turn off when idle": left alone, the firmware powers the pad down after
+/// about 3 minutes ("Auto Power Down"); with `keep_awake` it is still on
+/// after 10 (idle.rs). Also checked by hand with `lpidle` on all 17
+/// cartridges (the Classic ones with RIBBIT_LEAPPAD_CLASSIC_CART too).
+#[test]
+#[ignore]
+fn idle_power_off_and_keep_awake() {
+    for cart in ["RIBBIT_LEAPPAD_CART", "RIBBIT_LEAPPAD_CLASSIC_CART"] {
+        let Some(cart) = std::env::var(cart).ok().and_then(|c| std::fs::read(c).ok()) else {
+            continue;
+        };
+        for keep_awake in [false, true] {
+            let mut m = Machine::new(std::fs::read(std::env::var("RIBBIT_LEAPPAD_BIOS").expect("set RIBBIT_LEAPPAD_BIOS")).unwrap());
+            m.bus.classic = true;
+            m.keep_awake = keep_awake;
+            m.insert_cartridge(cart.clone());
+            let mut off_at = None;
+            let mut log = String::new();
+            for t in 0..600 {
+                m.run_cycles(secs(1.0));
+                log += &m.take_log();
+                if m.is_off() {
+                    off_at = Some(t);
+                    break;
+                }
+            }
+            if keep_awake {
+                assert_eq!(off_at, None, "kept awake for 10 minutes");
+            } else {
+                let t = off_at.expect("powered down when left alone");
+                assert!((170..=185).contains(&t) && log.contains("Auto Power Down"), "off at {t} s");
+            }
+        }
+    }
 }

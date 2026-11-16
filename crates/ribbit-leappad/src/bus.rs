@@ -48,6 +48,11 @@ pub const PHYS_SIZE: u32 = 1 << 25;
 /// EVIDENCE: the kernel reads the cartridge info block at 0x1410102.
 pub const CART_BASE: u32 = 0x0140_0000;
 
+/// Physical address of the on-chip RAM (chip select 7) and its size: XDATA
+/// C000-FFFF through window 4 at bank 0x700 (see `Bus::sram`).
+pub const CS7_BASE: u32 = 0x01C0_0000;
+pub const CS7_RAM: u32 = 0x4000;
+
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
     /// The base ROM (chip select 0, physical 0).
@@ -62,8 +67,13 @@ pub struct Bus {
     pub io: Vec<u8>,
     /// On-chip XDATA RAM, 0xF000-0xFFFF less the register page.
     pub xram: Vec<u8>,
-    /// External RAM, if the physical map has any (UNKNOWN; sized and
-    /// placed when the RAM check finds it).
+    /// On-chip RAM below the register page, physical 0x1C00000-0x1C02FFF
+    /// (chip select 7). The kernel points window 4 at bank 0x700, so XDATA
+    /// C000-EFFF reach it and F000-FFFF (`xram`) is its top 4 KB
+    /// (0x1C03000). EVIDENCE: the 2003 kernels of My First LeapPad and
+    /// Little Touch LeapPad keep their app's globals at XDATA C100-C5FF
+    /// ("Clear RAM:View:x:C2C8 to x:C5FF") and assert when it reads back
+    /// FF. Mirrored every 16 KB in CS7 (HYPOTHESIS).
     pub sram: Vec<u8>,
     /// The CPU's PC at the current instruction (for logs).
     pub pc: u16,
@@ -138,6 +148,23 @@ pub struct Bus {
     /// allows none (`classic_list`). On by default; off is the ILA2 base's
     /// own behaviour ("LeapPad Classic not supported on this base").
     pub classic: bool,
+    /// My First LeapPad: the built-in activity's template (a printed sheet)
+    /// lies on the pad instead of a book. Read in FC20 bit 3 (clear while
+    /// it is in). EVIDENCE: kernel 0x00F3 of the MFLP base and cartridges
+    /// returns that bit, debounced over 5 reads into F0C3 bit 6, and the app
+    /// logs "Template In"/"Template Out" from it ("Template changed while
+    /// powered off to:").
+    #[serde(default)]
+    pub template_in: bool,
+    /// Little Touch LeapPad: the key under the child's hand, as (row 0-4,
+    /// column 0-11) of the switch matrix under the page (`matrix_columns`).
+    #[serde(skip)]
+    pub key: Option<(u8, u8)>,
+    /// Little Touch LeapPad: the magnets of the open page, one bit per reed
+    /// switch (10 of them; `magnet_inputs`). A page's pattern names it.
+    #[serde(default)]
+    pub magnets: u16,
+
     /// Where the base ROM keeps its empty list of the Classic cartridges it
     /// plays (see `empty_classic_list`).
     #[serde(skip)]
@@ -166,12 +193,16 @@ impl Bus {
         Bus {
             classic: true,
             classic_list: empty_classic_list(&bios),
+            template_in: false,
+            key: None,
+            magnets: 0,
+
             bios,
             cart: None,
             banks: [[0; 2]; 5],
             io: vec![0; 0x100],
             xram: vec![0; 0x1000],
-            sram: vec![0; 0x2_0000],
+            sram: vec![0; CS7_RAM as usize - 0x1000],
             pc: 0,
             uart: Vec::new(),
             unknown: Vec::new(),
@@ -261,8 +292,18 @@ impl Bus {
                 _ => 0xFF,
             };
         }
+        if addr >= CS7_BASE {
+            return self.cs7(addr).map_or(0xFF, |r| *r);
+        }
         self.note(format!("read phys {addr:07X}"));
         0xFF
+    }
+
+    /// The on-chip RAM byte at a CS7 physical address.
+    fn cs7(&mut self, addr: u32) -> Option<&mut u8> {
+        let o = ((addr - CS7_BASE) % CS7_RAM) as usize;
+        let split = self.sram.len();
+        if o < split { self.sram.get_mut(o) } else { self.xram.get_mut(o - split) }
     }
 
     /// A byte of physical memory as the debugger shows it: the ROMs, without
@@ -284,6 +325,12 @@ impl Bus {
     }
 
     pub fn phys_write(&mut self, addr: u32, v: u8) {
+        if addr % PHYS_SIZE >= CS7_BASE {
+            if let Some(r) = self.cs7(addr % PHYS_SIZE) {
+                *r = v;
+            }
+            return;
+        }
         self.note(format!("write phys {:07X} = {v:02X}", addr % PHYS_SIZE));
     }
 
@@ -293,6 +340,43 @@ impl Bus {
         let (dir, latch) = (self.io[0x33], self.io[0x1F]);
         let line = |bit: u8| dir & bit == 0 || latch & bit != 0;
         (line(0x04), line(0x08))
+    }
+
+    /// What pulls the input pins of the ports FC20, FC48 and FC49 low; the
+    /// rest are pulled up. EVIDENCE: each port has a direction register
+    /// (FC34, FC4A, FC4B: a set bit drives the latch), as the Plus
+    /// Microphone base sets FC4A = 03 and then toggles FC48 bit 0 as its
+    /// request line to the recorder, and the Little Touch base clears all
+    /// three before reading its switches through them.
+    ///
+    /// * FC20 bits 0-7, FC1F bit 5 and FC48 bit 2: the Little Touch's 10
+    ///   magnet switches, low where the page has a magnet (base kernel 0x335E,
+    ///   152-11244; debounced over 100 reads).
+    /// * FC20 bit 3: My First LeapPad's template switch (`template_in`).
+    /// * FC48 bits 0, 1, 3, 4 and FC49: the Little Touch's key columns, low
+    ///   for the pressed key while its row is driven (`matrix_columns`).
+    fn port_inputs(&self, reg: u8) -> u8 {
+        let (hi, lo) = self.matrix_columns();
+        match reg {
+            0x20 => !(self.magnets as u8) & if self.template_in { !0x08 } else { 0xFF },
+            0x48 => !hi & if self.magnets & 0x200 != 0 { !0x04 } else { 0xFF },
+            _ => !lo,
+        }
+    }
+
+    /// The Little Touch's switch matrix (VERIFIED-FW, base kernel 0x4906,
+    /// 152-11244): five rows are driven one at a time by setting bit r of
+    /// FC33 (the direction of port FC1F, whose latch holds 0), and the twelve
+    /// columns read back low in FC48 and FC49. The kernel's column table at
+    /// 0x5627 gives, for columns 0-11, FC49 bits 0-5, FC48 bit 4, FC49 bits
+    /// 6-7, FC48 bits 0, 1 and 3. Returns the (FC48, FC49) bits pulled low.
+    pub fn matrix_columns(&self) -> (u8, u8) {
+        const COLUMNS: [(u8, u8); 12] =
+            [(0, 1), (0, 2), (0, 4), (0, 8), (0, 0x10), (0, 0x20), (0x10, 0), (0, 0x40), (0, 0x80), (1, 0), (2, 0), (8, 0)];
+        match self.key {
+            Some((r, c)) if r < 5 && (c as usize) < 12 && self.io[0x33] & (1 << r) != 0 && self.io[0x1F] & (1 << r) == 0 => COLUMNS[c as usize],
+            _ => (0, 0),
+        }
     }
 
     fn io_read(&mut self, reg: u8) -> u8 {
@@ -310,11 +394,19 @@ impl Bus {
             // latch is FC3F. The 2003 Canada Full Base's probe (kernel 0x6020)
             // reports none without it; the ILA2 base only uses FC2A. EVIDENCE.
             0x2F => (self.io[0x2F] & !1) | self.cart.is_some() as u8,
+            0x20 | 0x48 | 0x49 => {
+                let dir = self.io[match reg { 0x20 => 0x34, 0x48 => 0x4A, _ => 0x4B }];
+                (self.io[reg as usize] & dir) | (self.port_inputs(reg) & !dir)
+            }
             0x18 => self.pen.result_high(),
             // Bits 2 and 3: the EEPROM bus clock and data line levels.
             0x1F => {
                 let (scl, sda) = self.eeprom_lines();
-                (self.io[0x1F] & !0x0C) | (scl as u8) << 2 | ((sda && self.eeprom.sda_released()) as u8) << 3
+                let v = (self.io[0x1F] & !0x0C) | (scl as u8) << 2 | ((sda && self.eeprom.sda_released()) as u8) << 3;
+                // Bit 5, an input unless FC33 drives it: the Little Touch's
+                // ninth magnet switch (`port_inputs`), else pulled up.
+                let pin = if self.io[0x33] & 0x20 != 0 { self.io[0x1F] & 0x20 } else if self.magnets & 0x100 != 0 { 0 } else { 0x20 };
+                (v & !0x20) | pin
             }
             0x19 => self.pen.result_low(),
             0x1E => crate::sound::busy(&self.sound),
@@ -362,6 +454,9 @@ impl Bus {
                 b[reg as usize - 1] = v;
                 self.counter = u32::from_be_bytes(b);
             }
+            // The ports' latches and direction registers (`port_inputs`).
+            0x20 | 0x34 | 0x48 | 0x49 | 0x4A | 0x4B => {}
+            0x30 => self.pen.test = v & 1 != 0,
             0x17 => self.pen.queue_code(v),
             0x16 => self.pen.control(v),
             0x1F | 0x33 => {

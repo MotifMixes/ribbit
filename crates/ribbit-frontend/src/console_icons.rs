@@ -20,7 +20,11 @@ pub fn color(hw: Hardware) -> C {
         Hardware::LeapPad => C::from_rgb(30, 165, 160),
         Hardware::Didj => C::from_rgb(160, 168, 182),
         Hardware::Explorer => C::from_rgb(160, 205, 40),
+        Hardware::LeapPadExplorer => C::from_rgb(95, 185, 60),
+        Hardware::LeapPad2 => C::from_rgb(150, 200, 30),
         Hardware::ClickStart => C::from_rgb(70, 185, 110),
+        Hardware::IQuest => C::from_rgb(110, 125, 200),
+        Hardware::TurboTwist => C::from_rgb(240, 120, 40),
     }
 }
 
@@ -36,7 +40,11 @@ pub fn name(hw: Hardware) -> &'static str {
         Hardware::LeapPad => "LeapPad",
         Hardware::Didj => "Didj",
         Hardware::Explorer => "Explorer",
+        Hardware::LeapPadExplorer => "LeapPad Explorer",
+        Hardware::LeapPad2 => "LeapPad 2",
         Hardware::ClickStart => "ClickStart",
+        Hardware::IQuest => "iQuest",
+        Hardware::TurboTwist => "Turbo Twist",
     }
 }
 
@@ -297,6 +305,47 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
             p.line_segment([at(-40.0, -18.0), at(-20.0, -4.0)], stroke(3.5, C::from_gray(200)));
             p.circle_filled(at(-40.0, -18.0), 2.6 * u, lime);
         }
+        // LeapPad Explorer (2011): a tablet held upright, a white face in a
+        // green shell (the green and white model; its stylus orange), the
+        // camera above a tall screen, the big silver D-pad low on the left
+        // and the green Home button low on the right; the stylus on its
+        // cord at the side.
+        Hardware::LeapPadExplorer => {
+            let green = C::from_rgb(95, 185, 60);
+            let white = C::from_rgb(244, 246, 242);
+            shell(p, &[Part::Round(rr(-4.0, 0.0, 52.0, 58.0), 12.0 * u)], green, u);
+            p.rect_filled(rr(-4.0, 0.0, 44.0, 50.0), 9.0 * u, white);
+            p.circle_filled(at(-4.0, -21.5), 1.6 * u, C::from_gray(40));
+            screen(p, rr(-4.0, -5.0, 30.0, 27.0));
+            cross(p, at(-14.0, 16.0), 10.0 * u, C::from_gray(175));
+            button(p, at(7.0, 16.0), 3.6 * u, C::from_rgb(70, 170, 50));
+            // The stylus, on its cord at the right.
+            p.line_segment([at(22.0, -10.0), at(30.0, -4.0)], stroke(0.8, C::from_gray(90)));
+            p.line_segment([at(30.0, -16.0), at(34.0, 22.0)], stroke(3.0, C::from_rgb(245, 140, 40)));
+            p.circle_filled(at(30.0, -16.0), 1.8 * u, C::from_rgb(245, 140, 40));
+        }
+        // LeapPad 2 (2012), held sideways as its own Connect pictures show
+        // it: a lime green shell with rounded ends, a white face, the dark
+        // 5-inch screen in the middle, the silver D-pad at the left under
+        // the speaker holes, the green Home button at the right, the
+        // camera above the screen, the stylus on its cord at the top.
+        Hardware::LeapPad2 => {
+            let lime = C::from_rgb(150, 200, 30);
+            let white = C::from_rgb(244, 246, 242);
+            shell(p, &[Part::Round(rr(0.0, 2.0, 76.0, 50.0), 14.0 * u)], lime, u);
+            p.rect_filled(rr(0.0, 2.0, 68.0, 42.0), 10.0 * u, white);
+            screen(p, rr(0.0, 2.0, 38.0, 28.0));
+            p.circle_filled(at(0.0, -15.5), 1.4 * u, C::from_gray(40));
+            for k in 0..3 {
+                p.circle_filled(at(-27.0 + 3.0 * k as f32, -9.0), 0.9 * u, C::from_gray(110));
+            }
+            cross(p, at(-26.0, 6.0), 9.0 * u, C::from_gray(175));
+            button(p, at(26.0, 6.0), 4.0 * u, C::from_rgb(120, 185, 40));
+            // The stylus on its cord, along the top.
+            p.line_segment([at(20.0, -21.0), at(30.0, -26.0)], stroke(0.8, C::from_gray(90)));
+            p.line_segment([at(-8.0, -26.0), at(30.0, -26.0)], stroke(3.0, lime));
+            p.circle_filled(at(-8.0, -26.0), 1.8 * u, lime);
+        }
         // ClickStart: a green and white keyboard shaped as a dog, two dark
         // green ears and a face with eyes and a nose above the keys, a red
         // space bar and a blue arrow pad, its paw-shaped mouse pad at the
@@ -329,6 +378,55 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
                 p.circle_filled(at(x, y), 3.2 * u, mix(green, C::BLACK, 0.3));
                 p.circle_filled(at(x, y - 0.4), 2.7 * u, green);
             }
+        }
+        // iQuest (from its box photo): a blue-grey case, rounded and wider
+        // at the bottom, the square screen at the top in a dark bezel, the
+        // purple D-pad at the left under it, the round Enter button at the
+        // right, and the silver keyboard below: four rows of small keys
+        // with the space bar in the middle of the last.
+        Hardware::IQuest => {
+            let body = C::from_rgb(120, 135, 190);
+            let purple = C::from_rgb(110, 70, 175);
+            shell(p, &[Part::Round(rr(0.0, -12.0, 60.0, 58.0), 16.0 * u), Part::Oval(at(0.0, 20.0), v(36.0, 26.0))], body, u);
+            p.rect_filled(rr(0.0, -18.0, 44.0, 36.0), 5.0 * u, mix(body, C::BLACK, 0.45));
+            screen(p, rr(0.0, -18.0, 36.0, 28.0));
+            // The D-pad: a purple diamond.
+            let d = at(-22.0, 8.0);
+            p.add(egui::Shape::convex_polygon(vec![d + v(0.0, -6.0), d + v(6.0, 0.0), d + v(0.0, 6.0), d + v(-6.0, 0.0)], purple, egui::Stroke::NONE));
+            p.circle_filled(d, 1.6 * u, mix(purple, C::WHITE, 0.4));
+            button(p, at(22.0, 8.0), 5.0 * u, purple);
+            // The keyboard.
+            oval(p, at(0.0, 27.0), v(28.0, 13.0), C::from_rgb(200, 205, 215));
+            for (row, y, n) in [(0, 18.5, 8), (1, 23.5, 9), (2, 28.5, 8), (3, 33.5, 3)] {
+                for k in 0..n {
+                    let w = if row == 3 && k == 1 { 12.0 } else { 4.2 };
+                    let x = if row == 3 { [-11.0, 0.0, 11.0][k] } else { (k as f32 - (n - 1) as f32 / 2.0) * 5.4 };
+                    p.rect_filled(rr(x, y, w, 3.6), 1.0 * u, C::from_rgb(70, 78, 100));
+                }
+            }
+        }
+        // Turbo Twist Extreme (drawn from its controls, no photo found): a
+        // long orange body, the D-pad end at the left, the wide LCD in the
+        // middle with Menu and Repeat under it, the big Slam button on top,
+        // and the ribbed blue handle that twists at the right.
+        Hardware::TurboTwist => {
+            let orange = C::from_rgb(245, 125, 40);
+            let blue = C::from_rgb(45, 110, 220);
+            // The twist handle.
+            shell(p, &[Part::Round(rr(33.0, 4.0, 26.0, 34.0), 9.0 * u)], blue, u);
+            for i in 0..5 {
+                let x = 24.0 + 4.5 * i as f32;
+                p.line_segment([at(x, -9.0), at(x, 17.0)], stroke(1.4, mix(blue, C::BLACK, 0.35)));
+            }
+            shell(p, &[Part::Round(rr(-10.0, 4.0, 68.0, 40.0), 14.0 * u)], orange, u);
+            p.rect_filled(rr(-6.0, -1.0, 40.0, 18.0), 4.0 * u, mix(orange, C::BLACK, 0.5));
+            screen(p, rr(-6.0, -1.0, 34.0, 12.0));
+            cross(p, at(-35.0, 4.0), 13.0 * u, C::from_rgb(255, 215, 50));
+            button(p, at(-12.0, 15.0), 2.6 * u, C::from_rgb(90, 195, 60));
+            button(p, at(0.0, 15.0), 2.6 * u, C::from_rgb(230, 50, 45));
+            // Slam, on top.
+            oval(p, at(-6.0, -17.0), v(11.0, 4.5), mix(blue, C::BLACK, 0.3));
+            oval(p, at(-6.0, -18.5), v(10.0, 4.0), C::from_rgb(70, 140, 240));
         }
         // RockIt Twist (its purple edition): a square handheld, a black
         // face, the 4:3 screen in the middle and a control on each side: the
@@ -413,6 +511,88 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
             p.add(egui::Shape::line(vec![at(34.0, 30.0), at(42.0, 34.0), at(46.0, 26.0), at(44.0, 18.0)], stroke(1.2, C::from_gray(60))));
             p.line_segment([at(44.0, 18.0), at(38.0, -18.0)], stroke(5.0, C::from_rgb(40, 90, 200)));
             p.line_segment([at(38.0, -18.0), at(37.3, -22.0)], stroke(2.0, C::from_gray(70)));
+        }
+    }
+}
+
+/// The LeapPad models other than the LeapPad itself, in the same style
+/// (original art, from the pads' general look: no logos or box art). They
+/// are LeapPad books in the library, so they share its colour; the device
+/// tells them apart.
+///
+/// * My First LeapPad: a rounder, chunkier pad for preschoolers, its handle
+///   a big arch on top, one landscape page, the pen fat and short on a
+///   coiled cord.
+/// * Little Touch LeapPad: a soft pad for babies with no pen at all, two
+///   thick board pages with finger tabs down the edge and a big round
+///   button.
+/// * LeapPad Plus Microphone: the LeapPad with the microphone on its stalk
+///   at the top right.
+pub fn paint_leappad_model(p: &egui::Painter, rect: egui::Rect, model: ribbit_leappad::Model) {
+    use ribbit_leappad::Model;
+    let u = rect.width().min(rect.height()) / 100.0;
+    let c = rect.center();
+    let v = |x: f32, y: f32| egui::vec2(x * u, y * u);
+    let at = |x: f32, y: f32| c + v(x, y);
+    let stroke = |w: f32, col: C| egui::Stroke::new(w * u, col);
+    let rr = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_center_size(at(x, y), v(w, h));
+    let paper = C::from_rgb(255, 250, 236);
+    match model {
+        Model::LeapPad => paint_device(p, rect, Hardware::LeapPad),
+        Model::PlusMic => {
+            paint_device(p, rect, Hardware::LeapPad);
+            p.line_segment([at(30.0, -26.0), at(38.0, -40.0)], stroke(2.5, C::from_gray(70)));
+            oval(p, at(39.0, -42.0), v(5.0, 6.0), C::from_gray(50));
+            grille(p, at(39.0, -42.0), 5.0 * u, 3, 2.0 * u, stroke(0.8, C::from_gray(120)));
+        }
+        Model::MyFirst => {
+            let blue = C::from_rgb(40, 110, 200);
+            let yellow = C::from_rgb(250, 200, 40);
+            p.add(egui::Shape::line(
+                (0..=14).map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 14.0);
+                    at(-6.0 + 22.0 * a.cos(), -26.0 + 14.0 * a.sin())
+                }).collect(),
+                stroke(8.0, yellow),
+            ));
+            shell(p, &[Part::Round(rr(-4.0, 6.0, 84.0, 60.0), 16.0 * u)], blue, u);
+            p.rect_filled(rr(-6.0, 4.0, 66.0, 42.0), 6.0 * u, mix(blue, C::WHITE, 0.55));
+            p.rect_filled(rr(-6.0, 4.0, 58.0, 36.0), 3.0 * u, paper);
+            // A picture and a word on the page.
+            p.circle_filled(at(-20.0, 0.0), 8.0 * u, C::from_rgb(240, 120, 60));
+            for y in [-4.0, 4.0] {
+                p.line_segment([at(-6.0, y), at(16.0, y)], stroke(1.6, C::from_gray(170)));
+            }
+            // GO along the top edge of the page.
+            p.circle_filled(at(10.0, -11.0), 3.0 * u, C::from_rgb(40, 170, 70));
+            // The fat pen on its coiled cord.
+            p.add(egui::Shape::line((0..=16).map(|i| at(34.0 + (i as f32 * 1.4).sin() * 2.0, 30.0 - i as f32 * 2.6)).collect(), stroke(1.2, C::from_gray(60))));
+            p.line_segment([at(36.0, -12.0), at(30.0, -30.0)], stroke(8.0, C::from_rgb(220, 50, 50)));
+            p.circle_filled(at(30.0, -31.0), 3.5 * u, C::from_rgb(250, 200, 40));
+        }
+        Model::LittleTouch => {
+            let green = C::from_rgb(120, 190, 60);
+            let soft = C::from_rgb(245, 245, 235);
+            p.add(egui::Shape::line(
+                (0..=14).map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 14.0);
+                    at(0.0 + 20.0 * a.cos(), -28.0 + 12.0 * a.sin())
+                }).collect(),
+                stroke(9.0, C::from_rgb(250, 160, 40)),
+            ));
+            shell(p, &[Part::Round(rr(0.0, 6.0, 90.0, 62.0), 22.0 * u)], green, u);
+            p.rect_filled(rr(0.0, 4.0, 74.0, 46.0), 10.0 * u, soft);
+            for x in [-1.0, 1.0] {
+                p.rect_filled(rr(x * 18.0, 4.0, 33.0, 40.0), 6.0 * u, paper);
+            }
+            // Thick board pages: finger tabs down the right edge.
+            for (i, col) in [C::from_rgb(230, 80, 80), C::from_rgb(70, 140, 230), C::from_rgb(250, 200, 40), C::from_rgb(160, 90, 200)].iter().enumerate() {
+                p.rect_filled(rr(37.0, -10.0 + i as f32 * 9.0, 6.0, 7.0), 2.0 * u, *col);
+            }
+            // A big friendly picture on each page, and the round button.
+            p.circle_filled(at(-18.0, 2.0), 9.0 * u, C::from_rgb(250, 170, 60));
+            p.circle_filled(at(18.0, 2.0), 9.0 * u, C::from_rgb(90, 170, 230));
+            button(p, at(0.0, 31.0), 5.0 * u, C::from_rgb(230, 70, 90));
         }
     }
 }
