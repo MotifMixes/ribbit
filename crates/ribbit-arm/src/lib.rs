@@ -13,6 +13,7 @@
 mod arm;
 mod cp15;
 mod thumb;
+mod thumb2;
 mod v7;
 
 pub use cp15::Cp15;
@@ -447,6 +448,10 @@ impl Arm {
                 Ok(pa) => bus.read16(pa),
                 Err(f) => return self.prefetch_abort(f),
             };
+            if self.v7.is_some() {
+                thumb2::step_thumb(self, bus, pc, word as u32);
+                return true;
+            }
             self.r[15] = pc.wrapping_add(2);
             thumb::execute(self, bus, word);
         } else {

@@ -13,6 +13,10 @@
 
 pub mod apk;
 pub mod elf;
+pub mod imports;
+pub mod jni;
+pub mod runtime;
+pub mod sles;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +25,13 @@ use std::path::{Path, PathBuf};
 pub const GAME_BASE: u32 = 0x4000_0000;
 /// Each import gets its own 8-byte slot here; an HLE traps execution in this range.
 pub const THUNK_BASE: u32 = 0xF000_0000;
+/// Data imports (`is_data_import`) get 1 KB each here instead (arrays such as `_ctype_`).
+pub const DATA_BASE: u32 = 0xF400_0000;
+
+/// The imports that are data, not functions: the code reads them where they are bound.
+pub fn is_data_import(name: &str) -> bool {
+    matches!(name, "__sF" | "_ctype_" | "__stack_chk_guard" | "_tolower_tab_" | "_toupper_tab_") || name.starts_with("SL_IID_") || name.starts_with("XA_IID_")
+}
 
 /// The Android library an import would come from, by name. This is the HLE's work list.
 pub fn api_area(name: &str) -> &'static str {
@@ -118,10 +129,11 @@ pub fn open_title(apk_path: &Path, system_lib: Option<&Path>) -> Result<Title, S
     let mut natives: Vec<String> = Vec::new();
     let library = match &lib_bytes {
         Some(bytes) => {
-            let mut next = THUNK_BASE;
-            let l = elf::load(bytes, GAME_BASE, |_| {
-                let a = next;
-                next += 8;
+            let (mut next, mut data) = (THUNK_BASE, DATA_BASE);
+            let l = elf::load(bytes, GAME_BASE, |name| {
+                let slot = if is_data_import(name) { &mut data } else { &mut next };
+                let a = *slot;
+                *slot += if is_data_import(name) { 0x400 } else { 8 };
                 Some(a)
             })?;
             natives = jni_natives(bytes);

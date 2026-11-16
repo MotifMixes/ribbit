@@ -150,8 +150,41 @@ pub(crate) fn unconditional(a: &mut Arm, w: u32) -> bool {
         }
         return true;
     }
+    if neon(a, w) {
+        return true;
+    }
     // PLI/PLD (immediate and register forms): 1111 01xx x1x1 Rn 1111 ...
     w & 0x0C10_F000 == 0x0410_F000 && (w & 0x0200_0000 == 0 || w & 0x10 == 0)
+}
+
+/// The Advanced SIMD (NEON) instructions met so far: VADD/VSUB (integer, A7.4.1, three
+/// registers of the same length, A = 1000, B = 0), which GCC uses for 64-bit integer
+/// arithmetic in NEON registers. False for the rest (still undefined).
+fn neon(a: &mut Arm, w: u32) -> bool {
+    if w & 0xFE80_0F10 != 0xF200_0800 {
+        return false;
+    }
+    let sub = w & (1 << 24) != 0;
+    let size = (w >> 20) & 3;
+    let q = w & (1 << 6) != 0;
+    let d = (((w >> 22) & 1) << 4 | (w >> 12) & 0xF) as usize;
+    let n = (((w >> 7) & 1) << 4 | (w >> 16) & 0xF) as usize;
+    let m = (((w >> 5) & 1) << 4 | w & 0xF) as usize;
+    let st = v7(a);
+    let lane_bits = 8u32 << size;
+    for r in 0..if q { 2 } else { 1 } {
+        let (x, y) = (st.d(n + r), st.d(m + r));
+        let mut out = 0u64;
+        for lane in 0..64 / lane_bits {
+            let sh = lane * lane_bits;
+            let mask = if lane_bits == 64 { u64::MAX } else { (1u64 << lane_bits) - 1 };
+            let (xa, ya) = ((x >> sh) & mask, (y >> sh) & mask);
+            let v = if sub { xa.wrapping_sub(ya) } else { xa.wrapping_add(ya) } & mask;
+            out |= v << sh;
+        }
+        st.set_d(d + r, out);
+    }
+    true
 }
 
 fn sat_signed(v: i64, bits: u32) -> (u32, bool) {

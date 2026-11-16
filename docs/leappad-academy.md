@@ -1,7 +1,7 @@
 # LeapPad Academy and LeapFrog Epic
 
 Research notes and plan for the Android-based LeapFrog tablets. Written 2026-11-15 from the
-stock firmware (inventoried, nothing executed) and public sources. The first code is in
+stock firmware and public sources; the titles' own code runs since 2026-11-16 (see "First code"). The first code is in
 `crates/ribbit-lfandroid`.
 
 ## Summary
@@ -220,11 +220,42 @@ Unity KidLauncher could be replaced by Ribbit's own library screen.
 Checked on 3 Academy built-ins and 3 store APKs (Epic AP_SM2 and AP_DINO, Academy AP_DINO).
 All loaded with 0 unbound relocations. The import union is 401-404.
 
+- `runtime.rs`: a user-mode runner. Ribbit's ARM core with ARMv7 on runs over a flat 32-bit
+  memory (allocated by page). An import's thunk slot, when reached, is answered in Rust by name;
+  calls into the game can nest (pthread_once, qsort). Layout: library at 0x4000_0000, heap
+  0x1000_0000-0x3000_0000, stack below 0xE000_0000, thunks 0xF000_0000, data imports
+  0xF400_0000 (1 KB each: `_ctype_`, `__sF`, `SL_IID_*`...), JNI tables 0xF800_0000/0xF900_0000,
+  host functions 0xFA00_0000.
+- `imports.rs`: about 250 of the libc/libm/pthread/liblog/libdl imports, a printf formatter,
+  setjmp/longjmp, gmtime. One thread: locks succeed, `pthread_create` is recorded but not run.
+  Files don't open yet (ENOENT).
+- `jni.rs`: a JavaVM and JNIEnv (all 233 slots of the JNI 1.6 table). Objects are handles,
+  method calls are logged and answer 0 or an empty object, and `RegisterNatives` records
+  the natives.
+- `sles.rs`: OpenSL ES and OpenMAX AL objects. Every interface is a table of host functions;
+  buffer-queue callbacks and enqueued buffers are kept for sound later.
+- `examples/lfa_run.rs`:
+  `cargo run --release -p ribbit-lfandroid --example lfa_run -- [--lib <system/lib>] <apk>`
+  (LFA_LOG=1 prints the game's log and missing files).
+
+CPU work this needed in `ribbit-arm` (on only with `Arm::v7`): Thumb-2 (`thumb2.rs`: the 32-bit
+encodings, IT blocks, CBZ/CBNZ, the v6/v7 16-bit additions; the libraries' static libstdc++ is
+Thumb-2), and NEON VADD/VSUB integer. GCC uses NEON for 64-bit integer arithmetic; ARM code
+has only those three NEON words.
+
+Status (2026-11-16): all six titles tried (Academy NUTL, AP_DINO, AP_SM2, AP_SM2_NoSO, PPAD2;
+Epic AP_DINO, AP_SM2) run all their constructors (216-318) and `JNI_OnLoad`, which returns JNI
+1.6 and registers 47-48 natives.
+
 Next steps, in order:
-1. VFPv3 and the ARMv7 additions in `ribbit-arm` (with tests).
-2. Run `JNI_OnLoad` with a fake JavaVM/JNIEnv until it has registered its 40 natives.
-3. Run the constructors and `naInitMainActivity`, stubbing libc as it is reached.
-4. A GLES 1.1 software path and a headless frame dump of `naDrawFrame`.
+1. `naInitMainActivity` and the adapter inits, with an AAssetManager over the APK's assets and
+   `/sdcard/LF/Bulk` (the log says "Android AssetManager is not yet initialized" for
+   `/LF/Bulk/settings.cfg`).
+2. Threads: the two the audio player starts (`pthread_create`) need a scheduler. The Didj HLE's
+   task model is the one to reuse.
+3. `naLFGLSurfaceViewSurfaceCreated/Changed` and `naDrawFrame` into ribbit-gles, with a headless
+   frame dump.
+4. Sound from the OpenSL ES buffer queue.
 
 ## Questions for the user
 
