@@ -242,6 +242,17 @@ impl Runtime {
         }
     }
 
+    /// Instructions left in the running thread's time slice.
+    pub(crate) fn slice_left(&self) -> u64 {
+        self.threads.slice_left
+    }
+
+    /// `n` instructions ran as one (compiled code), at most `slice_left`: what `n` ticks count.
+    pub(crate) fn ran(&mut self, n: u64) {
+        self.threads.frame_left = self.threads.frame_left.saturating_sub(n);
+        self.threads.slice_left = self.threads.slice_left.saturating_sub(n);
+    }
+
     /// The running thread's time slice: another ready thread gets the CPU when it ends.
     pub(crate) fn tick(&mut self) -> Result<(), Stop> {
         self.threads.frame_left = self.threads.frame_left.saturating_sub(1);

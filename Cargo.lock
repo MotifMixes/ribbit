@@ -3641,6 +3641,7 @@ dependencies = [
  "lewton",
  "miniz_oxide 0.8.9",
  "ribbit-arm",
+ "ribbit-armjit",
  "ribbit-gles",
 ]
 

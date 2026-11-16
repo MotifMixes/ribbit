@@ -1306,13 +1306,6 @@ impl Gl {
         Some(Vertex { clip: transform(mvp, p), color: color.map(|c| c.clamp(0., 1.)), tex, point_size })
     }
 
-    fn texture_for_draw(&self) -> Option<&Texture> {
-        if !self.caps.contains(&gl::TEXTURE_2D) {
-            return None;
-        }
-        self.textures.get(&self.bound_texture).filter(|t| t.width > 0 && t.height > 0)
-    }
-
     /// glDrawArrays.
     pub fn draw_arrays(&mut self, mem: &mut dyn Memory, mode: u32, first: i32, count: i32) {
         if first < 0 || count < 0 {
@@ -1367,33 +1360,31 @@ impl Gl {
                 None => return self.set_error(gl::INVALID_OPERATION),
             }
         }
-        let tex = self.texture_for_draw().cloned();
-        let raster = self.raster.clone();
+        if !matches!(mode, gl::TRIANGLES | gl::TRIANGLE_STRIP | gl::TRIANGLE_FAN | gl::POINTS | gl::LINES | gl::LINE_STRIP | gl::LINE_LOOP) {
+            return self.set_error(gl::INVALID_ENUM);
+        }
+        // Borrowed, not copied: a frame-sized texture is megabytes.
+        let tex = if self.caps.contains(&gl::TEXTURE_2D) {
+            self.textures.get(&self.bound_texture).filter(|t| t.width > 0 && t.height > 0)
+        } else {
+            None
+        };
+        let raster = &self.raster;
+        let line_width = self.line_width;
         let surface = &mut self.surface;
-        let tri = |s: &mut Surface, a: &Vertex, b: &Vertex, c: &Vertex| raster::triangle(s, &raster, tex.as_ref(), [a, b, c]);
         match mode {
-            gl::TRIANGLES => {
-                for t in verts.chunks_exact(3) {
-                    tri(surface, &t[0], &t[1], &t[2]);
-                }
-            }
-            gl::TRIANGLE_STRIP => {
-                for i in 2..verts.len() {
-                    if i % 2 == 0 {
-                        tri(surface, &verts[i - 2], &verts[i - 1], &verts[i]);
-                    } else {
-                        tri(surface, &verts[i - 1], &verts[i - 2], &verts[i]);
-                    }
-                }
-            }
-            gl::TRIANGLE_FAN => {
-                for i in 2..verts.len() {
-                    tri(surface, &verts[0], &verts[i - 1], &verts[i]);
-                }
+            gl::TRIANGLES | gl::TRIANGLE_STRIP | gl::TRIANGLE_FAN => {
+                let n = verts.len();
+                let tris: Vec<[usize; 3]> = match mode {
+                    gl::TRIANGLES => (0..n / 3).map(|t| [3 * t, 3 * t + 1, 3 * t + 2]).collect(),
+                    gl::TRIANGLE_STRIP => (2..n).map(|i| if i % 2 == 0 { [i - 2, i - 1, i] } else { [i - 1, i - 2, i] }).collect(),
+                    _ => (2..n).map(|i| [0, i - 1, i]).collect(),
+                };
+                raster::triangles(surface, raster, tex, &verts, &tris);
             }
             gl::POINTS => {
                 for v in &verts {
-                    raster::point(surface, &raster, tex.as_ref(), v);
+                    raster::point(surface, raster, tex, v);
                 }
             }
             gl::LINES | gl::LINE_STRIP | gl::LINE_LOOP => {
@@ -1408,10 +1399,10 @@ impl Gl {
                     }
                 }
                 for (a, b) in pairs {
-                    raster::line(surface, &raster, tex.as_ref(), &verts[a], &verts[b], self.line_width);
+                    raster::line(surface, raster, tex, &verts[a], &verts[b], line_width);
                 }
             }
-            _ => self.set_error(gl::INVALID_ENUM),
+            _ => {}
         }
     }
 

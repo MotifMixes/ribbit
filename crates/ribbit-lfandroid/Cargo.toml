@@ -10,4 +10,5 @@ publish.workspace = true
 lewton = "0.10"
 miniz_oxide = "0.8"
 ribbit-arm.workspace = true
+ribbit-armjit.workspace = true
 ribbit-gles.workspace = true

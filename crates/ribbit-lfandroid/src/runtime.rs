@@ -5,19 +5,25 @@
 
 use crate::elf::Loaded;
 use crate::{DATA_BASE, GAME_BASE, THUNK_BASE};
-use ribbit_arm::{Arm, ArmBus, V7};
+use ribbit_arm::{Arm, ArmBus, CodeWatch, V7};
+use ribbit_armjit::ArmJit;
 use std::collections::BTreeMap;
 
 const PAGE: usize = 0x1000;
 
 /// Where `call` returns to: reaching it ends the call.
 pub const RETURN: u32 = 0xEFFF_F000;
+/// Plain RAM in one piece, which compiled code reads and writes directly (`ArmBus::ram`): the
+/// library (16 MB from GAME_BASE), the heap, then the main thread's stack. The rest of the
+/// address space is allocated by page as it is written.
+pub const RAM_BASE: u32 = GAME_BASE;
+pub const RAM_SIZE: u32 = 0x2200_0000;
+/// The heap (`malloc`; threads' stacks come from it too).
+pub const HEAP: u32 = GAME_BASE + 0x0100_0000;
+pub const HEAP_END: u32 = HEAP + 0x2000_0000;
 /// The main thread's stack (grows down from here).
-pub const STACK_TOP: u32 = 0xE000_0000;
+pub const STACK_TOP: u32 = RAM_BASE + RAM_SIZE;
 pub const STACK_SIZE: u32 = 0x0100_0000;
-/// The heap (`malloc`).
-pub const HEAP: u32 = 0x1000_0000;
-pub const HEAP_END: u32 = 0x3000_0000;
 /// The JNI function tables' slots (`jni.rs`): JNIEnv's, then JavaVM's.
 pub const JNI_ENV_FUNCS: u32 = 0xF800_0000;
 pub const JNI_VM_FUNCS: u32 = 0xF900_0000;
@@ -26,6 +32,10 @@ pub const HOST_FUNCS: u32 = 0xFA00_0000;
 
 /// Flat memory, allocated by page as it is written.
 pub struct Mem {
+    /// RAM_BASE..RAM_BASE + RAM_SIZE (the host gives the pages as they are first touched).
+    ram: Vec<u8>,
+    /// The pages compiled code came from (`ribbit-armjit`).
+    code: CodeWatch,
     pages: Vec<Option<Box<[u8; PAGE]>>>,
     /// Reads of memory never written, the first few addresses (diagnostics).
     pub unmapped: Vec<u32>,
@@ -35,15 +45,28 @@ pub struct Mem {
 
 impl Default for Mem {
     fn default() -> Self {
-        Self { pages: (0..1usize << 20).map(|_| None).collect(), unmapped: Vec::new(), last_unmapped: None }
+        Self { ram: vec![0; RAM_SIZE as usize], code: CodeWatch::default(), pages: (0..1usize << 20).map(|_| None).collect(), unmapped: Vec::new(), last_unmapped: None }
     }
 }
 
 impl Mem {
+    /// The offset of `a` in RAM, if it is there.
+    #[inline]
+    fn in_ram(a: u32) -> Option<usize> {
+        let o = a.wrapping_sub(RAM_BASE);
+        (o < RAM_SIZE).then_some(o as usize)
+    }
+    /// Whether `a` reads memory (RAM, or a page written before).
+    pub fn mapped(&self, a: u32) -> bool {
+        Self::in_ram(a).is_some() || self.pages[(a >> 12) as usize].is_some()
+    }
     fn page(&mut self, a: u32) -> &mut [u8; PAGE] {
         self.pages[(a >> 12) as usize].get_or_insert_with(|| Box::new([0; PAGE]))
     }
     pub fn r8(&mut self, a: u32) -> u8 {
+        if let Some(o) = Self::in_ram(a) {
+            return self.ram[o];
+        }
         match &self.pages[(a >> 12) as usize] {
             Some(p) => p[a as usize & (PAGE - 1)],
             None => {
@@ -56,12 +79,27 @@ impl Mem {
         }
     }
     pub fn w8(&mut self, a: u32, v: u8) {
+        if let Some(o) = Self::in_ram(a) {
+            self.code.wrote(a as usize);
+            self.ram[o] = v;
+            return;
+        }
         self.page(a)[a as usize & (PAGE - 1)] = v;
     }
     pub fn r16(&mut self, a: u32) -> u16 {
+        if let Some(o) = Self::in_ram(a)
+            && o + 2 <= RAM_SIZE as usize
+        {
+            return u16::from_le_bytes([self.ram[o], self.ram[o + 1]]);
+        }
         self.r8(a) as u16 | (self.r8(a.wrapping_add(1)) as u16) << 8
     }
     pub fn r32(&mut self, a: u32) -> u32 {
+        if let Some(o) = Self::in_ram(a)
+            && o + 4 <= RAM_SIZE as usize
+        {
+            return u32::from_le_bytes(self.ram[o..o + 4].try_into().unwrap());
+        }
         if a & 3 == 0 && let Some(p) = &self.pages[(a >> 12) as usize] {
             let o = a as usize & (PAGE - 1);
             return u32::from_le_bytes(p[o..o + 4].try_into().unwrap());
@@ -69,10 +107,26 @@ impl Mem {
         self.r16(a) as u32 | (self.r16(a.wrapping_add(2)) as u32) << 16
     }
     pub fn w16(&mut self, a: u32, v: u16) {
+        if let Some(o) = Self::in_ram(a)
+            && o + 2 <= RAM_SIZE as usize
+        {
+            self.code.wrote(a as usize);
+            self.code.wrote(a as usize + 1);
+            self.ram[o..o + 2].copy_from_slice(&v.to_le_bytes());
+            return;
+        }
         self.w8(a, v as u8);
         self.w8(a.wrapping_add(1), (v >> 8) as u8);
     }
     pub fn w32(&mut self, a: u32, v: u32) {
+        if let Some(o) = Self::in_ram(a)
+            && o + 4 <= RAM_SIZE as usize
+        {
+            self.code.wrote(a as usize);
+            self.code.wrote(a as usize + 3);
+            self.ram[o..o + 4].copy_from_slice(&v.to_le_bytes());
+            return;
+        }
         if a & 3 == 0 {
             let o = a as usize & (PAGE - 1);
             self.page(a)[o..o + 4].copy_from_slice(&v.to_le_bytes());
@@ -122,6 +176,15 @@ impl ArmBus for Mem {
     fn write32(&mut self, a: u32, v: u32) {
         self.w32(a, v)
     }
+    fn code_watch(&mut self) -> Option<&mut CodeWatch> {
+        Some(&mut self.code)
+    }
+    fn ram(&mut self) -> Option<(*mut u8, usize)> {
+        Some((self.ram.as_mut_ptr(), self.ram.len()))
+    }
+    fn ram_base(&self) -> u32 {
+        RAM_BASE
+    }
 }
 
 /// Why a run stopped short.
@@ -159,6 +222,9 @@ pub struct Native {
 pub struct Runtime {
     pub cpu: Arm,
     pub mem: Mem,
+    /// Compiles the library's ARM code (off with LFA_NO_JIT, or while a diagnostic watches
+    /// each instruction).
+    pub jit: ArmJit,
     /// Import names by thunk slot.
     pub thunks: Vec<String>,
     pub exports: BTreeMap<String, u32>,
@@ -234,9 +300,13 @@ impl Runtime {
         cpu.v7 = Some(Box::<V7>::default());
         cpu.set_mode(ribbit_arm::mode::USR);
         cpu.r[13] = STACK_TOP;
+        let mut jit = ArmJit::new(RAM_BASE + RAM_SIZE);
+        jit.v7 = true;
+        jit.enabled &= std::env::var_os("LFA_NO_JIT").is_none();
         let mut rt = Runtime {
             cpu,
             mem,
+            jit,
             thunks,
             exports: lib.exports.clone(),
             init: lib.init.clone(),
@@ -425,14 +495,32 @@ impl Runtime {
                 let bt = self.backtrace();
                 return Err(Stop::Halt(format!("jumped out of the library to {pc:#010x} (lr {:#010x}; r0-r7 {:08x?}); backtrace {bt:08x?}", r[14], &r[..8])));
             }
+            // Compiled code, up to the end of the time slice (diagnostics that watch each
+            // instruction use the interpreter below).
+            if self.jit.enabled && self.slice_left() > 0 && self.breaks.is_empty() && self.trace.is_none() && self.unmapped_stop.is_none() {
+                let n = self.budget.min(self.slice_left());
+                let before = self.cpu.cycles;
+                self.jit.step(&mut self.cpu, &mut self.mem, n, n);
+                let ran = (self.cpu.cycles - before).min(n);
+                self.budget -= ran;
+                self.ran(ran);
+                if let Some(&(at, w)) = self.cpu.undefined_log.last() {
+                    self.cpu.undefined_log.clear();
+                    return Err(Stop::Halt(format!("undefined instruction {w:#010x} at {at:#010x}")));
+                }
+                if self.cpu.mode() != ribbit_arm::mode::USR {
+                    return Err(Stop::Halt(format!("exception into mode {:#x} from {:#010x}", self.cpu.mode(), self.cpu.current)));
+                }
+                continue;
+            }
             self.budget -= 1;
             if self.breaks.contains(&pc) {
                 let r = self.cpu.r;
                 eprintln!("break {:#x}: r0-r12 {:08x?} sp {:08x} lr {:08x}", pc - GAME_BASE, &r[..13], r[13], r[14]);
                 // Arguments that point at text, or at a pointer to text (a std::string).
                 for (i, &a) in r[..4].iter().enumerate() {
-                    for (deref, a) in [(false, a), (true, if self.mem.pages[(a >> 12) as usize].is_some() { self.mem.r32(a) } else { 0 })] {
-                        if self.mem.pages[(a >> 12) as usize].is_some() {
+                    for (deref, a) in [(false, a), (true, if self.mem.mapped(a) { self.mem.r32(a) } else { 0 })] {
+                        if self.mem.mapped(a) {
                             let s = self.mem.cstr(a);
                             if s.len() >= 3 && s.len() < 200 && s.bytes().all(|b| (0x20..0x7F).contains(&b)) {
                                 eprintln!("  {}r{i} = {s:?}", if deref { "*" } else { "" });

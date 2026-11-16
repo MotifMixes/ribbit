@@ -411,8 +411,31 @@ Next steps, in order:
    ends before the first conversion. `statfs`/`fstatfs` (2026-11-16): a fixed 8 GB ext4
    volume with 4 GB free (GUESS; no title seen so far calls it). Left: what the real
    `/tmp/ts_driver` holds.
-4. Speed: this CPU runs about 15-20 million instructions a second here, so a frame with
-   drawing takes 30-60 ms on the host.
+4. Speed (2026-11-16). Timing each import showed drawing, not the CPU, took 93% of the time
+   (T-Rex Rush: 38 of 41 s for 900 frames; one full-screen glDrawArrays a frame, 27 ms: the game
+   draws at 480x272 into a framebuffer texture and stretches it to 1024x600, bilinear).
+   - ribbit-gles: a draw no longer copies its texture (a frame-sized one is megabytes); a row
+     tests only the pixels near its span (edges solved per row, widened by 2, every pixel still
+     takes the exact edge test, so coverage is unchanged); colours and texture coordinates are
+     planes with one reciprocal a pixel; bilinear filtering is 8-bit integer (as GPUs do); an
+     RGBA texture with REPLACE and nothing else writes the texel, and texture x colour with the
+     "over" blend (and an alpha test) is done in 8-bit integers. Colours are within a step or
+     two of the old float path; nearest sampling can pick the neighbouring texel exactly on a
+     texel edge. A draw whose triangles' boxes cover 32K+ pixels is split into row bands, one
+     thread each (at most 16, GLES_BANDS=<n> sets it) drawing every triangle in its rows, so
+     each pixel still sees the triangles in order: one band and many give the same picture.
+   - The CPU: 99.7% of the instructions are ARM, not Thumb, so `ribbit-armjit` (with `v7`, as the
+     LeapPad 2's HLE uses it) runs them, up to the end of each thread's time slice; Thumb code
+     and the instructions it doesn't compile go to the interpreter. It needs RAM in one piece:
+     the library, the heap and the main stack moved into RAM_BASE..+RAM_SIZE (0x4000_0000,
+     544 MB: library 16 MB, heap 512 MB at 0x4100_0000, main stack below 0x6200_0000); the host
+     gives its pages as they are first touched (AP_SM2: 264 MB working set; the commit charge
+     counts all of it). LFA_NO_JIT=1 turns it off; LFA_BREAK, LFA_TRACE and LFA_UNMAPPED use
+     the interpreter (LFA_UNMAPPED no longer sees reads inside RAM, which is all zeros at first).
+     AP_SM2: the same picture with and without it; 586 M instructions in under 1 s (8 s before).
+   - Headless, lfa_tablet: T-Rex Rush (tap PLAY at 600) 900 frames 41 s -> 5.6 s (160 frames a
+     second), AP_SM2 300 frames 22 s -> 2.6 s (116). Left: the heap never gives memory back
+     (bump allocator, 512 MB).
 
 ## Questions for the user
 
