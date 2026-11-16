@@ -258,6 +258,32 @@ All loaded with 0 unbound relocations. The import union is 401-404.
   LFA_LOG=1 prints the game's log and missing files and assets; LFA_CALLS=1 the imports and
   Java methods called; LFA_TRACE=1 keeps the last jumps and imports for a stop and logs thread
   switches; LFA_STOP=<text> stops at the first missing asset with that text, with a backtrace.
+  LFA_INPUT=<frame>:<what>;... changes the input before those frames: `x,y` puts the finger
+  there (window pixels; down, or a move if it is down), `lift` lifts it, button names (a b back
+  hint pause home up down left right, joined with `+`) hold those, `none` lets go of them.
+  LFA_SHOTS=<frame>,... also writes the screen before those frames (<LFA_PPM>-<frame>.ppm).
+- `input.rs`: touch and buttons (2026-11-16), sent as the Java shell does, through the
+  natives, between frames. `Runtime::touch(Some((x, y)) | None)` sends `naTouchDown`,
+  `naTouchMove` or `naTouchUp(FF)V` as the finger changes; `Runtime::set_buttons(mask)` sends
+  `naPress*`/`naRelease*` for each button that changed. The touch floats come in r2/r3
+  (softfp). They are window pixels in the window's orientation (`Runtime::screen`); the
+  library turns them into Brio screen pixels itself
+  (`LFAppManager::transformHostScreenPositionToEmulatedDeviceScreenPosition`: T-Rex Rush
+  1024x600 -> 480x272, Big City Hijinks 580 of 600 wide x 1024 -> 544x960) and posts a Brio
+  `CTouchMessage` to its event queue. The buttons are Brio's `tButtonData` bits, read from
+  the natives: A 0x10, B 0x20, Back 0x100 (Brio's menu button), Hint 0x200, Pause 0x400; each
+  native sets or clears its bit (`SetButtonState`) and posts a `CButtonMessage`.
+  `naPressJoystick(I)V`/`naReleaseJoystick(I)V` take the direction bits themselves: up 1,
+  down 2, right 4, left 8 (GUESS: Brio's usual order; `RotateDpad` turns 1->8->2->4->1, which
+  fits either way round). `naPressHome` sets no Brio bit and only logs here; `button::HOME`
+  is Ribbit's own bit for it. `naPressPause` returns a boolean, not used.
+- Players end (2026-11-16, in `sles.rs`): T-Rex Rush waits for a voice clip's
+  `SL_PLAYEVENT_HEADATEND` before it leaves the menu. An audio player made from an asset
+  descriptor gets its clip's length (WAV: data over byte rate; Ogg Vorbis: the last granule
+  over the sample rate; unknown: 1 s, GUESS). When it plays, `Runtime::end_players` (called
+  between frames) ends it after that long: the play state goes to paused and the play
+  callback gets HEADATEND if its mask asks for it. No sound is made yet; a paused clip starts
+  again from the beginning (GUESS: no position kept).
 
 CPU work this needed in `ribbit-arm` (on only with `Arm::v7`): Thumb-2 (`thumb2.rs`: the 32-bit
 encodings, IT blocks, CBZ/CBNZ, the v6/v7 16-bit additions; the libraries' static libstdc++ is
@@ -289,6 +315,13 @@ picture now sits at the left of the 600-wide window; whether the Java side centr
 (`naGetHostDeviceWidth`) is a GUESS still open. `LFA_BREAK=<offset,...>` (hex, library
 offsets) prints the registers when an address runs.
 
+Input check (2026-11-16): Epic T-Rex Rush,
+`LFA_FRAMES=1100 LFA_INPUT="600:520,225;606:lift" LFA_SHOTS=600,700,800,900`. The tap on PLAY
+plays the menu click and the PLAY voice; when the voice ends, the screen fades to black (700),
+the intro story starts (the dinosaurs at the campfire, 800-900) and goes on to the Dinosaur
+Valley map (1100). Without the tap, or with only buttons (a, right+b, back), the menu stays.
+Big City Hijinks (portrait) takes touches too: window (300, 512) is its screen (281, 480).
+
 Bugs found on the way: the stand-in `sprintf` took itself for `snprintf` (its name has an
 "n"), so the format came from the wrong argument; the scene loader read nothing because
 `funopen` wasn't there.
@@ -296,7 +329,9 @@ Bugs found on the way: the stand-in `sprintf` took itself for `snprintf` (its na
 Next steps, in order:
 1. Epic AP_SM2 reads through pointers made of spaces (unmapped 0x2020xxxx): find where.
 2. Academy T-Rex Rush's black screen, PPAD2's jump to 0.
-3. Touch and buttons (`naTouchDown/Move/Up`, `naPress*`), then the GUI: a console in the app.
+3. Touch and buttons are done (`input.rs`); next the GUI: a console in the app. Open: the
+   direction bits (check in a game that uses the d-pad), what `naPressHome` should do, and
+   whether the Java side uses `naGetHostDeviceWidth/Height` to place a portrait view.
 4. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
 5. Saves: `/Local/0/<product id>/MySave7.sav` and `/sdcard/LF/Bulk/settings.cfg` on a host
    folder (plain files and descriptors).
