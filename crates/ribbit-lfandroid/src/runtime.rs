@@ -417,6 +417,17 @@ impl Runtime {
             if self.breaks.contains(&pc) {
                 let r = self.cpu.r;
                 eprintln!("break {:#x}: r0-r12 {:08x?} sp {:08x} lr {:08x}", pc - GAME_BASE, &r[..13], r[13], r[14]);
+                // Arguments that point at text, or at a pointer to text (a std::string).
+                for (i, &a) in r[..4].iter().enumerate() {
+                    for (deref, a) in [(false, a), (true, if self.mem.pages[(a >> 12) as usize].is_some() { self.mem.r32(a) } else { 0 })] {
+                        if self.mem.pages[(a >> 12) as usize].is_some() {
+                            let s = self.mem.cstr(a);
+                            if s.len() >= 3 && s.len() < 200 && s.bytes().all(|b| (0x20..0x7F).contains(&b)) {
+                                eprintln!("  {}r{i} = {s:?}", if deref { "*" } else { "" });
+                            }
+                        }
+                    }
+                }
             }
             self.tick()?;
             if std::mem::take(&mut self.threads.switched) {

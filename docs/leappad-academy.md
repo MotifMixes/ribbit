@@ -227,14 +227,19 @@ All loaded with 0 unbound relocations. The import union is 401-404.
   0xF400_0000 (1 KB each: `_ctype_`, `__sF`, `SL_IID_*`...), JNI tables 0xF800_0000/0xF900_0000,
   host functions 0xFA00_0000.
 - `imports.rs`: about 270 of the libc/libm/liblog/libdl/libz imports, a printf formatter,
-  setjmp/longjmp, gmtime, strftime, zlib's `uncompress` and `crc32`. Plain files, folders and
-  file descriptors don't open yet (ENOENT): everything the titles read so far is an asset.
+  setjmp/longjmp, gmtime, strftime, zlib's `uncompress`, `crc32` and the inflate stream
+  (`inflateInit_`, `inflate`, `inflateReset`, `inflateEnd`, through miniz_oxide). `mmap` of an
+  asset's descriptor copies the asset's bytes. Plain files, folders and file descriptors don't
+  open yet (ENOENT): everything the titles read so far is an asset.
 - `threads.rs`: pthreads on the one CPU, switched when a thread waits and every 200,000
   instructions. Each keeps its registers, VFP state and pthread keys. Mutexes (all treated as
   recursive), condition variables (timed ones too), join and sleeps really wait; a waiting
   call stays at its import slot and runs again when woken. Threads switch only at the outer
   call level (no call from Rust into the game in progress). When every thread waits, the
-  clocks skip to the next deadline instead of sleeping.
+  clocks skip to the next deadline instead of sleeping. `wait_vsync` is what GLSurfaceView
+  does between frames: the main thread waits for the next vertical blank while the other
+  threads run, up to 16,000,000 instructions (about one of the tablet's cores for a frame;
+  GUESS) or until they all wait.
 - `assets.rs`: libandroid's AAssetManager over the APK's `assets/`. The titles' own file layer
   tries the path as a file, then as an asset (`/sdcard/AP_DINO/x` -> `AP_DINO/x`).
   `AAsset_openFileDescriptor` hands out a descriptor (100 and up) holding the asset's bytes,
@@ -254,10 +259,13 @@ All loaded with 0 unbound relocations. The import union is 401-404.
   `cargo run --release -p ribbit-lfandroid --example lfa_run -- [--lib <system/lib>] <apk>`
   runs the constructors, `JNI_OnLoad`, `naInitMainActivity(activity, "/data/data/<package>")`,
   the other `naInit*Adapter`s, `naLFGLSurfaceViewSurfaceCreated/Changed`, `naResume`, then
-  LFA_FRAMES (60) `naDrawFrame`s, and writes the last frame to LFA_PPM (`lfa_frame.ppm`).
+  LFA_FRAMES (60) `naDrawFrame`s, each followed by `wait_vsync`, and writes the last frame to
+  LFA_PPM (`lfa_frame.ppm`).
   LFA_LOG=1 prints the game's log and missing files and assets; LFA_CALLS=1 the imports and
   Java methods called; LFA_TRACE=1 keeps the last jumps and imports for a stop and logs thread
-  switches; LFA_STOP=<text> stops at the first missing asset with that text, with a backtrace.
+  switches; LFA_STOP=<text> stops at the first missing asset with that text, with a backtrace;
+  LFA_LOG_BT=<text> prints a backtrace for each log line with that text; LFA_GL=<n> prints the
+  first n calls of each GL function (4 for a value that isn't a number).
 
 CPU work this needed in `ribbit-arm` (on only with `Arm::v7`): Thumb-2 (`thumb2.rs`: the 32-bit
 encodings, IT blocks, CBZ/CBNZ, the v6/v7 16-bit additions; the libraries' static libstdc++ is
@@ -274,8 +282,29 @@ Status (2026-11-16): all six titles run their constructors (216-318) and `JNI_On
 - Epic AP_SM2 and Academy AP_SM2_NoSO (Big City Hijinks): the whole title picture, in
   portrait (below).
 - Academy NUTL 0x00280010 (voice recorder, portrait): its screen, drawn right.
-- Academy T-Rex Rush (AND4 build): black after 600 frames.
-- Academy PPAD2 (with `--lib`): jumps to address 0 in the first frame.
+- Academy T-Rex Rush (AND4 build): its main menu, the same as the Epic build's (from frame
+  about 160, the Epic build about 150).
+- Academy NUTL 0x00280012 (calculator): its screen, drawn right.
+- Academy PPAD2 (with `--lib`): starts, then quits itself in the first frames (black): it
+  can't make its save file (below).
+
+Academy T-Rex Rush, 2026-11-16: not a CPU or GL fault. It decodes its images on a worker
+thread, and between frames no other thread ran; during a frame the main thread slept a few ms
+in `usleep`, and on the host's clock that passed within one 200,000-instruction slice, so the
+loader got one slice a frame. The AND4 build's decoder (library 0x34a440) is unoptimised code,
+about 2.5 times the instructions of the Epic build's, so its menu came after about 900 frames
+instead of about 400. Now `wait_vsync` lets the other threads run between frames.
+
+Academy PPAD2, 2026-11-16: the jump to 0 was a virtual call on a null font (library
+0x214d3c, the font factory 0x214b94). `/fonts/smallui.fnt` is in `PPAD2/assets/fs.arc` (56
+files: a count, then hash, offset, size (negative: zlib-compressed) and full size per file;
+the hash is the CRC-32 of the path). The resource providers didn't find it because
+game-rio.rdt is `mmap`ed from its asset descriptor and `mmap` gave zeros, and fs.arc's files
+need zlib's inflate stream, which wasn't there. With both, it gets to the picker
+(`[EgPickerState] PICKER STARTED`), then quits (`LFAppManager::popApp()`): library 0x1ecfac
+needs `/Local/0/0x00370009/SAVE.DAT`, and makes a 1 KB one with `fopen`/`fwrite` when it
+isn't there; with no writable files that fails and the title exits. Faking that check only
+moves the exit to its save reader (0x1ed154). So PPAD2 needs next step 4.
 
 Portrait titles (2026-11-16): Big City Hijinks and the NUTL titles declare
 `android:screenOrientation="portrait"` (1) on `.LFMainActivity`; T-Rex Rush and PPAD2 are
@@ -291,15 +320,17 @@ offsets) prints the registers when an address runs.
 
 Bugs found on the way: the stand-in `sprintf` took itself for `snprintf` (its name has an
 "n"), so the format came from the wrong argument; the scene loader read nothing because
-`funopen` wasn't there.
+`funopen` wasn't there; `mmap` ignored its file descriptor.
 
 Next steps, in order:
 1. Epic AP_SM2 reads through pointers made of spaces (unmapped 0x2020xxxx): find where.
-2. Academy T-Rex Rush's black screen, PPAD2's jump to 0.
-3. Touch and buttons (`naTouchDown/Move/Up`, `naPress*`), then the GUI: a console in the app.
-4. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
-5. Saves: `/Local/0/<product id>/MySave7.sav` and `/sdcard/LF/Bulk/settings.cfg` on a host
-   folder (plain files and descriptors).
+2. Touch and buttons (`naTouchDown/Move/Up`, `naPress*`), then the GUI: a console in the app.
+3. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
+4. Saves: `/Local/0/<product id>/MySave7.sav`, PPAD2's `/Local/0/0x00370009/SAVE.DAT` and
+   `/sdcard/LF/Bulk/settings.cfg` on a host folder (plain files and descriptors, `stat`,
+   `mkdir`, writing). PPAD2 can't start without it.
+5. Speed: this CPU runs about 15-20 million instructions a second here, so a frame with
+   drawing takes 30-60 ms on the host.
 
 ## Questions for the user
 

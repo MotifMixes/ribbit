@@ -16,6 +16,8 @@ pub struct State {
     pub errno_at: u32,
     /// lrand48's state.
     pub rand: u64,
+    /// zlib's inflate streams, by `z_stream` address.
+    pub inflate: std::collections::BTreeMap<u32, Box<miniz_oxide::inflate::stream::InflateState>>,
 }
 
 /// Fills the slot of a data import with what the code reads there.
@@ -244,6 +246,10 @@ pub(crate) fn log_line(rt: &mut Runtime, s: String) {
     let s = s.trim_end_matches('\n').to_string();
     if std::env::var_os("LFA_LOG").is_some() {
         eprintln!("[game] {s}");
+    }
+    // LFA_LOG_BT=<text>: a backtrace for each logged line that has it.
+    if std::env::var("LFA_LOG_BT").is_ok_and(|t| s.contains(&t)) {
+        eprintln!("  backtrace {:08x?}", rt.backtrace());
     }
     rt.log.push(s);
 }
@@ -976,7 +982,74 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret(c)
         }
 
-        // ---- zlib: whole buffers (the streaming inflate isn't here yet)
+        // ---- zlib: whole buffers, and inflate streams (PPAD2's fs.arc). A 32-bit z_stream:
+        // next_in 0, avail_in 4, total_in 8, next_out 12, avail_out 16, total_out 20, msg 24,
+        // state 28 ... adler 48.
+        // inflateInit_(strm, version, stream_size)
+        "inflateInit_" => {
+            let z = rt.arg(0);
+            for o in [8, 20, 24, 28] {
+                rt.mem.w32(z + o, 0);
+            }
+            rt.mem.w32(z + 48, 1);
+            rt.state.inflate.insert(z, miniz_oxide::inflate::stream::InflateState::new_boxed(miniz_oxide::DataFormat::Zlib));
+            rt.ret(0)
+        }
+        // inflate(strm, flush): Z_OK, Z_STREAM_END, Z_NEED_DICT or an error (Z_STREAM_ERROR,
+        // Z_DATA_ERROR, Z_BUF_ERROR)
+        "inflate" => {
+            let (z, flush) = (rt.arg(0), rt.arg(1));
+            let (next_in, avail_in, next_out, avail_out) = (rt.mem.r32(z), rt.mem.r32(z + 4), rt.mem.r32(z + 12), rt.mem.r32(z + 16));
+            let input = rt.mem.read(next_in, avail_in as usize);
+            let mut output = vec![0; avail_out as usize];
+            let (Some(state), Ok(flush)) = (rt.state.inflate.get_mut(&z), miniz_oxide::MZFlush::new(flush as i32)) else {
+                rt.ret(-2i32 as u32);
+                return Ok(());
+            };
+            let r = miniz_oxide::inflate::stream::inflate(state, &input, &mut output, flush);
+            let adler = state.decompressor().adler32();
+            let (used, made) = (r.bytes_consumed as u32, r.bytes_written as u32);
+            rt.mem.write(next_out, &output[..made as usize]);
+            rt.mem.w32(z, next_in + used);
+            rt.mem.w32(z + 4, avail_in - used);
+            let total_in = rt.mem.r32(z + 8);
+            rt.mem.w32(z + 8, total_in + used);
+            rt.mem.w32(z + 12, next_out + made);
+            rt.mem.w32(z + 16, avail_out - made);
+            let total_out = rt.mem.r32(z + 20);
+            rt.mem.w32(z + 20, total_out + made);
+            if let Some(a) = adler {
+                rt.mem.w32(z + 48, a);
+            }
+            use miniz_oxide::{MZError, MZStatus};
+            rt.ret(match r.status {
+                Ok(MZStatus::Ok) => 0,
+                Ok(MZStatus::StreamEnd) => 1,
+                Ok(MZStatus::NeedDict) => 2,
+                Err(MZError::Data) => -3i32 as u32,
+                Err(MZError::Buf) => -5i32 as u32,
+                Err(_) => -2i32 as u32,
+            })
+        }
+        // inflateReset(strm), inflateEnd(strm)
+        "inflateReset" => {
+            let z = rt.arg(0);
+            let r = match rt.state.inflate.get_mut(&z) {
+                Some(state) => {
+                    state.reset(miniz_oxide::DataFormat::Zlib);
+                    rt.mem.w32(z + 8, 0);
+                    rt.mem.w32(z + 20, 0);
+                    0
+                }
+                None => -2i32 as u32,
+            };
+            rt.ret(r)
+        }
+        "inflateEnd" => {
+            let z = rt.arg(0);
+            let r = if rt.state.inflate.remove(&z).is_some() { 0 } else { -2i32 as u32 };
+            rt.ret(r)
+        }
         // uncompress(dest, uLongf* destLen, src, srcLen): Z_OK, Z_BUF_ERROR or Z_DATA_ERROR
         "uncompress" => {
             let (dest, len_at, src, n) = (rt.arg(0), rt.arg(1), rt.arg(2), rt.arg(3));
@@ -1101,10 +1174,18 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret64(((a - b) as f64).to_bits())
         }
 
-        // ---- memory maps: anonymous ones come from the heap
+        // ---- memory maps: anonymous ones come from the heap. One of an asset's descriptor
+        // (`AAsset_openFileDescriptor`) is a copy of its bytes from `offset`: PPAD2 maps its
+        // game-rio.rdt (30 MB) this way, and read zeros before, so found no fonts.
+        // mmap(addr, length, prot, flags, fd, offset)
         "mmap" => {
-            let n = rt.arg(1);
+            let (n, fd, offset) = (rt.arg(1), rt.arg(4), rt.arg(5));
             let a = rt.malloc(n.next_multiple_of(0x1000) + 0x1000).next_multiple_of(0x1000);
+            if let Some(data) = rt.assets.fds.get(&fd) {
+                let from = (offset as usize).min(data.len());
+                let bytes = data[from..(from + n as usize).min(data.len())].to_vec();
+                rt.mem.write(a, &bytes);
+            }
             rt.ret(a)
         }
         "munmap" => rt.ret(0),
@@ -1227,6 +1308,9 @@ fn math(rt: &mut Runtime, n: &str) -> bool {
 pub fn host_call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
     if name.starts_with("sl:") || name.starts_with("xa:") {
         return crate::sles::call(rt, name);
+    }
+    if name == "vsync" {
+        return crate::threads::call(rt, name);
     }
     Err(Stop::Import(format!("host:{name}"), rt.cpu.r[14]))
 }
