@@ -29,11 +29,13 @@ pub struct Mem {
     pages: Vec<Option<Box<[u8; PAGE]>>>,
     /// Reads of memory never written, the first few addresses (diagnostics).
     pub unmapped: Vec<u32>,
+    /// The latest such read (LFA_UNMAPPED).
+    pub last_unmapped: Option<u32>,
 }
 
 impl Default for Mem {
     fn default() -> Self {
-        Self { pages: (0..1usize << 20).map(|_| None).collect(), unmapped: Vec::new() }
+        Self { pages: (0..1usize << 20).map(|_| None).collect(), unmapped: Vec::new(), last_unmapped: None }
     }
 }
 
@@ -45,6 +47,7 @@ impl Mem {
         match &self.pages[(a >> 12) as usize] {
             Some(p) => p[a as usize & (PAGE - 1)],
             None => {
+                self.last_unmapped = Some(a);
                 if self.unmapped.len() < 16 {
                     self.unmapped.push(a);
                 }
@@ -188,6 +191,8 @@ pub struct Runtime {
     pub screen: (u32, u32),
     /// LFA_BREAK: library offsets (hex, comma-separated) where the registers are printed.
     pub breaks: Vec<u32>,
+    /// LFA_UNMAPPED=<hex prefix>: stop at the first read of unwritten memory starting with it.
+    pub unmapped_stop: Option<String>,
     /// What the game logged (`__android_log_print`, stdio).
     pub log: Vec<String>,
     /// Instructions left before `Stop::Budget`.
@@ -245,6 +250,7 @@ impl Runtime {
             trace: std::env::var_os("LFA_TRACE").map(|_| Default::default()),
             import_trace: Default::default(),
             screen: crate::gles::SCREEN,
+            unmapped_stop: std::env::var("LFA_UNMAPPED").ok().map(|v| v.to_lowercase()),
             breaks: std::env::var("LFA_BREAK").map_or(Vec::new(), |v| {
                 v.split(',').filter_map(|a| u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()).map(|a| a + GAME_BASE).collect()
             }),
@@ -434,7 +440,16 @@ impl Runtime {
                     b.0 = pc;
                 }
             }
+            self.mem.last_unmapped = None;
             self.cpu.step(&mut self.mem);
+            if let Some(p) = &self.unmapped_stop
+                && let Some(a) = self.mem.last_unmapped.take()
+                && format!("{a:08x}").starts_with(p.as_str())
+            {
+                let r = self.cpu.r;
+                let bt = self.backtrace();
+                return Err(Stop::Halt(format!("LFA_UNMAPPED: read {a:#010x} at {pc:#010x} (lib {:#x}); r0-r12 {:08x?} sp {:08x} lr {:08x}; backtrace {bt:08x?}", pc.wrapping_sub(GAME_BASE), &r[..13], r[13], r[14])));
+            }
             if let Some(&(at, w)) = self.cpu.undefined_log.last() {
                 self.cpu.undefined_log.clear();
                 return Err(Stop::Halt(format!("undefined instruction {w:#010x} at {at:#010x}")));

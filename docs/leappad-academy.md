@@ -293,12 +293,25 @@ Bugs found on the way: the stand-in `sprintf` took itself for `snprintf` (its na
 "n"), so the format came from the wrong argument; the scene loader read nothing because
 `funopen` wasn't there.
 
+Pointers made of spaces (2026-11-16): Epic AP_SM2 read 0x20202031 in its first `naDrawFrame`,
+in libstdc++'s istream sentry skipping white space (`ctype<char>::is`, `_M_table[c] & _S`),
+called from `LFAppManager::setAppPaths` -> `CSystemData::SetCurrentTitlePath`. The ctype
+facet's table is `classic_table()`, which on bionic is `_ctype_ + 1`. bionic's `_ctype_`
+(OpenBSD's) is a `const char *` that points to the table, but our data slot held the table
+itself, so its first four bytes (EOF 0, then the 0x20 control bit of characters 0-2) were taken
+as the pointer: 0x20202000 + 1. The slot now holds a pointer to the table that follows it;
+`_tolower_tab_` and `_toupper_tab_` (`const short *`, also unfilled until now) the same.
+Every stream read that skips white space read 0 before, so no white space was ever skipped.
+`LFA_UNMAPPED=<hex prefix>` stops at the first read of unwritten memory whose address starts
+with it, with the registers and a backtrace. After the fix AP_SM2 has no unmapped reads in 600
+frames. The title picture is the same and the sound calls differ only in timing; the one change seen is that the game
+now splits the GL extension string into words (it logged it as one before).
+
 Next steps, in order:
-1. Epic AP_SM2 reads through pointers made of spaces (unmapped 0x2020xxxx): find where.
-2. Academy T-Rex Rush's black screen, PPAD2's jump to 0.
-3. Touch and buttons (`naTouchDown/Move/Up`, `naPress*`), then the GUI: a console in the app.
-4. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
-5. Saves: `/Local/0/<product id>/MySave7.sav` and `/sdcard/LF/Bulk/settings.cfg` on a host
+1. Academy T-Rex Rush's black screen, PPAD2's jump to 0.
+2. Touch and buttons (`naTouchDown/Move/Up`, `naPress*`), then the GUI: a console in the app.
+3. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
+4. Saves: `/Local/0/<product id>/MySave7.sav` and `/sdcard/LF/Bulk/settings.cfg` on a host
    folder (plain files and descriptors).
 
 ## Questions for the user

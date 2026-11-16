@@ -25,8 +25,11 @@ pub fn init_data(rt: &mut Runtime, name: &str, slot: u32) {
         // stdin, stdout and stderr are slot, slot + 84 and slot + 168, only ever handed back
         // to stdio here.
         "__sF" => rt.state.sf = slot,
-        // bionic's ctype table: _ctype_[1 + c] holds c's class bits (EOF at 0).
+        // bionic's `const char *_ctype_` (OpenBSD's) points to the table: [1 + c] holds c's
+        // class bits (EOF at 0). The slot holds the pointer, the table follows it.
+        // libstdc++'s ctype<char>::classic_table() is `_ctype_ + 1`.
         "_ctype_" => {
+            rt.mem.w32(slot, slot + 4);
             for c in 0..=255u8 {
                 let ch = c as char;
                 let bits = [
@@ -40,7 +43,16 @@ pub fn init_data(rt: &mut Runtime, name: &str, slot: u32) {
                     (c == b' ', 0x80),
                 ];
                 let f = bits.iter().filter(|b| b.0).fold(0u8, |f, b| f | b.1);
-                rt.mem.w8(slot + 1 + c as u32, f);
+                rt.mem.w8(slot + 5 + c as u32, f);
+            }
+        }
+        // `const short *_tolower_tab_` / `_toupper_tab_`: [1 + c] is c mapped (EOF -1 at 0).
+        "_tolower_tab_" | "_toupper_tab_" => {
+            rt.mem.w32(slot, slot + 4);
+            rt.mem.w16(slot + 4, 0xFFFF);
+            for c in 0..=255u8 {
+                let m = if name == "_tolower_tab_" { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() };
+                rt.mem.w16(slot + 6 + 2 * c as u32, m as u16);
             }
         }
         // OpenSL ES / OpenMAX AL interface IDs: pointers to 16-byte IDs, each unique.

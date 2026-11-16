@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 pub const GAME_BASE: u32 = 0x4000_0000;
 /// Each import gets its own 8-byte slot here; an HLE traps execution in this range.
 pub const THUNK_BASE: u32 = 0xF000_0000;
-/// Data imports (`is_data_import`) get 1 KB each here instead (arrays such as `_ctype_`).
+/// Data imports (`is_data_import`) get 1 KB each here instead (`__sF`, the pointer and table of `_ctype_`).
 pub const DATA_BASE: u32 = 0xF400_0000;
 
 /// The imports that are data, not functions: the code reads them where they are bound.
