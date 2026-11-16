@@ -112,6 +112,8 @@ pub struct App {
     zippity: Option<crate::zippity::ZipSession>,
     /// A ClickStart being played.
     clickstart: Option<crate::clickstart::CsSession>,
+    /// A LeapPad Academy / LeapFrog Epic title (an APK) being played.
+    lfa: Option<crate::lfa::LfaSession>,
     /// An iQuest or Turbo Twist Extreme being played.
     iquest: Option<crate::iquest::IqSession>,
     /// A Didj being played.
@@ -328,6 +330,7 @@ impl App {
             session: None,
             zippity: None,
             clickstart: None,
+            lfa: None,
             iquest: None,
             didj: None,
             tv_frame: Vec::new(),
@@ -689,6 +692,10 @@ impl App {
             c.stop();
             self.fit_window = FIT_TRIES;
         }
+        if let Some(t) = self.lfa.take() {
+            t.stop();
+            self.fit_window = FIT_TRIES;
+        }
         if let Some(q) = self.iquest.take() {
             q.stop();
             self.fit_window = FIT_TRIES;
@@ -859,6 +866,10 @@ impl App {
     /// Plays a game on the console chosen in the library's console menu
     /// (unless a BIOS was given on the command line).
     fn open_cart(&mut self, path: PathBuf) {
+        // A LeapPad Academy / LeapFrog Epic title.
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("apk")) {
+            return self.start_lfa(path);
+        }
         // A Didj cartridge: the Didj from the library, with it in the slot.
         if let Some(cart) = crate::didj::read_cart(&path) {
             // A LeapPad cartridge: a LeapPad (`play_on_explorer`).
@@ -1183,6 +1194,24 @@ impl App {
                         None => String::new(),
                     }
                 ),
+                format!("{e:#}"),
+            ),
+        }
+    }
+
+    /// Plays a LeapPad Academy / LeapFrog Epic title from its APK.
+    fn start_lfa(&mut self, apk: PathBuf) {
+        self.end_session();
+        match crate::lfa::LfaSession::start(&apk) {
+            Ok(t) => {
+                self.fit_window = FIT_TRIES;
+                self.lfa = Some(t);
+                self.paused = false;
+                self.update_title();
+            }
+            Err(e) => self.ui.problem(
+                "Couldn't start the LeapPad Academy title",
+                format!("Ribbit couldn't start \"{}\". LeapPad Academy and LeapFrog Epic titles are experimental: many don't start yet.", file_name(&apk)),
                 format!("{e:#}"),
             ),
         }
@@ -1767,6 +1796,7 @@ impl App {
         let busy = self.session.is_some()
             || self.zippity.is_some()
             || self.clickstart.is_some()
+            || self.lfa.is_some()
             || self.iquest.is_some()
             || self.didj.is_some()
             || self.twist.is_some()
@@ -1793,7 +1823,7 @@ impl App {
         if span < STATUS_EVERY {
             return;
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some();
         tracing::info!(target: "ribbit::perf",
             fps = (self.status.1 as f64 / span.as_secs_f64()).round(),
             running,
@@ -2163,6 +2193,8 @@ impl App {
                 "Zippity"
             } else if self.clickstart.is_some() {
                 "ClickStart"
+            } else if self.lfa.is_some() {
+                "LeapPad Academy"
             } else if let Some(q) = &self.iquest {
                 q.model.name()
             } else if let Some(d) = &self.didj {
@@ -2249,6 +2281,7 @@ impl App {
                 .map(|s| &s.title)
                 .or(self.zippity.as_ref().map(|z| &z.title))
                 .or(self.clickstart.as_ref().map(|c| &c.title))
+                .or(self.lfa.as_ref().map(|t| &t.title))
                 .or(self.iquest.as_ref().map(|q| &q.title))
                 .or(self.didj.as_ref().map(|d| &d.title))
                 .or(self.leappad.as_ref().map(|l| &l.title))
@@ -3027,6 +3060,15 @@ impl App {
             c.reset();
             self.ui.toast("Reset");
         }
+        if let Some(t) = self.lfa.take() {
+            match t.restart() {
+                Ok(t) => {
+                    self.lfa = Some(t);
+                    self.ui.toast("Reset");
+                }
+                Err(e) => self.ui.problem("Couldn't start the LeapPad Academy title again", "", format!("{e:#}")),
+            }
+        }
         if let Some(q) = &self.iquest {
             q.reset();
             self.ui.toast("Reset");
@@ -3049,7 +3091,7 @@ impl App {
     }
 
     fn toggle_pause(&mut self) {
-        if self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() {
+        if self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() {
             self.paused = !self.paused;
             if let Some(a) = &mut self.audio {
                 a.clear();
@@ -3463,7 +3505,7 @@ impl App {
 
     fn record_test(&mut self) {
         let Some((secs, seen)) = &mut self.record_test else { return };
-        let running = self.session.is_some() || self.didj.is_some() || self.twist.is_some() || self.zippity.is_some() || self.clickstart.is_some();
+        let running = self.session.is_some() || self.didj.is_some() || self.twist.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some();
         if !running {
             return;
         }
@@ -3547,6 +3589,8 @@ impl App {
                 (ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H)
             } else if self.clickstart.is_some() {
                 (ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H)
+            } else if let Some(t) = &self.lfa {
+                t.size()
             } else if let Some(q) = &self.iquest {
                 q.size()
             } else {
@@ -3685,6 +3729,20 @@ impl App {
             q.set_turn_off_when_idle(self.settings.turn_off_when_idle);
             self.speed_percent = q.speed_percent();
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
+        if let Some(stop) = self.lfa.as_ref().and_then(|t| t.stopped()) {
+            self.end_session();
+            self.ui.problem(
+                "The LeapPad Academy title stopped",
+                "It quit, or used something Ribbit doesn't stand in for yet (sound and saves aren't there yet). LeapPad Academy titles are experimental.",
+                stop,
+            );
+            return;
+        }
+        if let Some(t) = &self.lfa {
+            t.set_running(!halted);
+            self.speed_percent = t.speed_percent();
             return;
         }
         if let Some(c) = &self.clickstart {
@@ -3854,6 +3912,16 @@ impl App {
 
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
     fn set_stylus(&mut self, pos: Option<(f64, f64)>) {
+        // The LeapPad Academy's touch screen: the finger in its window's pixels.
+        if let Some(t) = &self.lfa {
+            let (x, y, w, h) = self.lcd_px;
+            let (sw, sh) = (t.size().0 as f32, t.size().1 as f32);
+            t.set_touch(pos.and_then(|(cx, cy)| {
+                let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
+                ((0.0..sw).contains(&px) && (0.0..sh).contains(&py)).then_some((px, py))
+            }));
+            return;
+        }
         // The Leapster Explorer's touch screen: the stylus in its pixels.
         // The LeapPad Explorer's: its picture shown upright (272x480), the
         // stylus in the panel's pixels (480x272).
@@ -3969,6 +4037,12 @@ impl App {
         {
             return;
         }
+        // The LeapPad Academy's buttons (lfa: arrows, Z, X, Backspace, H, P, Home).
+        if let Some(t) = &self.lfa
+            && t.key(code, pressed)
+        {
+            return;
+        }
         // The iQuest's keyboard and the Turbo Twist Extreme's buttons
         // (iquest::key_name).
         if let Some(q) = &self.iquest
@@ -4033,7 +4107,7 @@ impl App {
         let open = self.ui.side_menu_open();
         let (was_open, paused_by_menu) = self.side_menu;
         if open && !was_open {
-            let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
+            let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
             let pause = running && !self.paused;
             if pause {
                 self.toggle_pause();
@@ -4054,7 +4128,7 @@ impl App {
         let Some(set) = self.opts.keep_screen_on else {
             return;
         };
-        let playing = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
+        let playing = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused;
         if playing != self.screen_on {
             set(playing);
             self.screen_on = playing;
@@ -4168,7 +4242,7 @@ impl App {
                 PadEvent::Button(b, pressed) => self.press(Source::Gamepad, b, pressed),
                 PadEvent::Menu => {
                     self.ui.menu_visible = true;
-                    if (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
+                    if (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some()) && !self.paused {
                         self.toggle_pause();
                     }
                 }
@@ -4270,6 +4344,9 @@ impl App {
         if let Some(c) = &self.clickstart {
             c.frame(&mut self.tv_frame);
         }
+        if let Some(t) = &self.lfa {
+            t.frame(&mut self.tv_frame);
+        }
         if let Some(q) = &self.iquest {
             q.frame(&mut self.tv_frame);
         }
@@ -4293,6 +4370,8 @@ impl App {
             Some((ribbit_zippity::SCREEN_W, ribbit_zippity::SCREEN_H))
         } else if self.clickstart.is_some() {
             Some((ribbit_clickstart::SCREEN_W, ribbit_clickstart::SCREEN_H))
+        } else if let Some(t) = &self.lfa {
+            Some(t.size())
         } else if let Some(q) = &self.iquest {
             Some(q.size())
         } else if let Some(size) = didj_size {
@@ -4330,7 +4409,7 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
-                running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
+                running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 explorer_cart: self.didj.as_ref().filter(|d| d.explorer).map(|d| d.has_cart()),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
                 leappad: self.leappad.is_some(),
@@ -4353,6 +4432,7 @@ impl App {
                     .map(|s| s.title.clone())
                     .or(self.zippity.as_ref().map(|z| z.title.clone()))
                     .or(self.clickstart.as_ref().map(|c| c.title.clone()))
+                    .or(self.lfa.as_ref().map(|t| t.title.clone()))
                     .or(self.iquest.as_ref().map(|q| q.title.clone()))
                     .or(self.didj.as_ref().map(|d| d.title.clone()))
                     .or(self.twist.as_ref().map(|t| t.title.clone()))
@@ -4426,6 +4506,10 @@ impl App {
                 (None, _, _) if self.clickstart.is_some() => {
                     let c = self.clickstart.as_ref().unwrap();
                     crate::discord::Presence::playing(&c.title, "ClickStart", c.started)
+                }
+                (None, _, _) if self.lfa.is_some() => {
+                    let t = self.lfa.as_ref().unwrap();
+                    crate::discord::Presence::playing(&t.title, "LeapPad Academy", t.started)
                 }
                 (None, _, _) if self.iquest.is_some() => {
                     let q = self.iquest.as_ref().unwrap();
@@ -4525,7 +4609,7 @@ impl App {
             None => Gpu::lcd_rect(px_area, display),
         };
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
-        let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some())
+        let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some())
             .then_some((self.lcd_px, display, self.settings.ai));
         // The handheld LCD inset in the bottom-right corner of the TV picture.
         let inset = lmax_dual.then(|| {
@@ -4628,7 +4712,7 @@ impl App {
         if took.as_millis() >= 12 {
             tracing::debug!(target: "ribbit::frame", ms = took.as_secs_f64() * 1e3, "slow frame (excluding vsync wait)");
         }
-        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
+        let running = self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some();
         self.frame_diag.frame(frame_start, took, running && !self.halted());
         match picture {
             Some(hash) => self.details.frame(frame_start, hash, took),

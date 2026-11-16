@@ -370,8 +370,13 @@ frames. The title picture is the same and the sound calls differ only in timing;
 now splits the GL extension string into words (it logged it as one before).
 
 Next steps, in order:
-1. Touch and buttons are done (`input.rs`); next the GUI: a console in the app. Open: the
-   direction bits (check in a game that uses the d-pad), what `naPressHome` should do, and
+1. Touch and buttons are done (`input.rs`). In the app (2026-11-16, EXPERIMENTAL): File > Open
+   an `.apk` plays it (`ribbit-frontend/src/lfa.rs` on `tablet::Tablet`, its own thread, 60
+   frames a second at most); the mouse is the finger, arrows the d-pad, Z/X A/B, Backspace
+   Back, H Hint, P Pause, Home home (GUESS). Reset starts it again; a title that stops shows
+   why. No library entry, console view, states or recording yet. `lfa_tablet` runs the same
+   path headless (T-Rex Rush: tap PLAY at 600 -> the Dinosaur Valley map by 800, ~20 frames a
+   second). Open: the direction bits (check in a game that uses the d-pad), what `naPressHome` should do, and
    whether the Java side uses `naGetHostDeviceWidth/Height` to place a portrait view.
 2. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
 3. Saves: `/Local/0/<product id>/MySave7.sav`, PPAD2's `/Local/0/0x00370009/SAVE.DAT` and

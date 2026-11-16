@@ -64,6 +64,7 @@ ribbit-armjit = { path = "crates/ribbit-armjit" }
 ribbit-gles = { path = "crates/ribbit-gles" }
 ribbit-zippity = { path = "crates/ribbit-zippity" }
 ribbit-clickstart = { path = "crates/ribbit-clickstart" }
+ribbit-lfandroid = { path = "crates/ribbit-lfandroid" }
 ribbit-twist = { path = "crates/ribbit-twist" }
 ribbit-didj = { path = "crates/ribbit-didj" }
 ribbit-leappad = { path = "crates/ribbit-leappad" }

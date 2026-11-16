@@ -3553,6 +3553,7 @@ dependencies = [
  "ribbit-input",
  "ribbit-iquest",
  "ribbit-leappad",
+ "ribbit-lfandroid",
  "ribbit-memory",
  "ribbit-speech",
  "ribbit-twist",

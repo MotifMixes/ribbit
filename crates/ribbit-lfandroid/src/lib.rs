@@ -22,6 +22,7 @@ pub mod jni;
 pub mod runtime;
 pub mod sles;
 pub mod stdio;
+pub mod tablet;
 pub mod threads;
 
 use std::collections::BTreeMap;
