@@ -271,18 +271,30 @@ Status (2026-11-16): all six titles run their constructors (216-318) and `JNI_On
 (JNI 1.6, 47-48 natives). After 600 `naDrawFrame`s (about 5 s each title, headless):
 - Epic T-Rex Rush (AP_DINO): its main menu (PLAY, BADGES), drawn right.
 - Academy NUTL (built-in clock, with `--lib`): its clock screen, drawn right.
-- Epic AP_SM2 and Academy AP_SM2_NoSO (Big City Hijinks): the title picture, but only in the
-  left 57% of the screen. The log says `configureViewFrame(): emulated -1x-1 -> 480x272,
-  host -1x-1`: the host size isn't given yet (it should come from the Java side).
+- Epic AP_SM2 and Academy AP_SM2_NoSO (Big City Hijinks): the whole title picture, in
+  portrait (below).
+- Academy NUTL 0x00280010 (voice recorder, portrait): its screen, drawn right.
 - Academy T-Rex Rush (AND4 build): black after 600 frames.
 - Academy PPAD2 (with `--lib`): jumps to address 0 in the first frame.
+
+Portrait titles (2026-11-16): Big City Hijinks and the NUTL titles declare
+`android:screenOrientation="portrait"` (1) on `.LFMainActivity`; T-Rex Rush and PPAD2 are
+landscape (0). The tablet turns a portrait activity, so its window is 600x1024
+(`Title::portrait`, `Runtime::screen`; EGL, `ANativeWindow_getWidth/Height`). Big City Hijinks
+was squeezed because `LFAppManager::configureViewFrame` reads `PHRS/GameInfo.json.PHRS` ->
+`PHRS/buttonMap.json`: `ViewFrameConfigs.Default` = `ow 544, oh 960, tw 580, th 1024` (its
+Brio screen is 544x960, drawn 580x1024), and `initializeDisplay` takes the host size from
+`eglQuerySurface`. With a 1024x600 window that came out 580 wide and 600 tall. The 580-wide
+picture now sits at the left of the 600-wide window; whether the Java side centres the view
+(`naGetHostDeviceWidth`) is a GUESS still open. `LFA_BREAK=<offset,...>` (hex, library
+offsets) prints the registers when an address runs.
 
 Bugs found on the way: the stand-in `sprintf` took itself for `snprintf` (its name has an
 "n"), so the format came from the wrong argument; the scene loader read nothing because
 `funopen` wasn't there.
 
 Next steps, in order:
-1. The host view size (`configureViewFrame` -1x-1): find where the library takes it from.
+1. Epic AP_SM2 reads through pointers made of spaces (unmapped 0x2020xxxx): find where.
 2. Academy T-Rex Rush's black screen, PPAD2's jump to 0.
 3. Touch and buttons (`naTouchDown/Move/Up`, `naPress*`), then the GUI: a console in the app.
 4. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.

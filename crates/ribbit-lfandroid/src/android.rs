@@ -27,8 +27,8 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         "ALooper_pollAll" | "ALooper_pollOnce" => rt.ret(POLL_TIMEOUT),
         "ANativeWindow_fromSurface" => rt.ret(WINDOW),
         "ANativeWindow_release" | "ANativeWindow_acquire" => rt.ret(0),
-        "ANativeWindow_getWidth" => rt.ret(crate::gles::SCREEN.0),
-        "ANativeWindow_getHeight" => rt.ret(crate::gles::SCREEN.1),
+        "ANativeWindow_getWidth" => rt.ret(rt.screen.0),
+        "ANativeWindow_getHeight" => rt.ret(rt.screen.1),
         _ => return Err(Stop::Import(name.to_string(), rt.cpu.r[14])),
     }
     Ok(())

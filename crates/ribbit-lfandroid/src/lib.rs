@@ -78,6 +78,9 @@ pub struct Title {
     pub library: Option<elf::Loaded>,
     /// JNI natives registered on LFMainActivity and friends (names like `naDrawFrame`).
     pub natives: Vec<String>,
+    /// LFMainActivity is portrait (Big City Hijinks, the Academy clock): the tablet turns it,
+    /// so its window is 600x1024.
+    pub portrait: bool,
 }
 
 fn after<'a>(strings: &'a [String], key: &str) -> Option<&'a String> {
@@ -89,7 +92,10 @@ fn after<'a>(strings: &'a [String], key: &str) -> Option<&'a String> {
 pub fn open_title(apk_path: &Path, system_lib: Option<&Path>) -> Result<Title, String> {
     let data = std::fs::read(apk_path).map_err(|e| format!("{}: {e}", apk_path.display()))?;
     let apk = apk::Apk::open(data)?;
-    let man = apk::manifest_strings(&apk.read("AndroidManifest.xml")?);
+    let axml = apk.read("AndroidManifest.xml")?;
+    let man = apk::manifest_strings(&axml);
+    // portrait, reversePortrait, sensorPortrait, userPortrait
+    let portrait = matches!(apk::activity_orientation(&axml, ".LFMainActivity"), Some(1 | 7 | 9 | 12));
     let package = man.iter().find(|s| s.starts_with("com.") && s.matches('.').count() >= 2 && !s.contains("permission")).cloned().unwrap_or_default();
     let version = man.iter().find(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.') && s.contains('.')).cloned().unwrap_or_default();
     let lib_name = after(&man, "android.app.lib_name").cloned();
@@ -147,7 +153,7 @@ pub fn open_title(apk_path: &Path, system_lib: Option<&Path>) -> Result<Title, S
         None => None,
     };
 
-    Ok(Title { apk_path: apk_path.to_path_buf(), package, version, lib_name, content_type, sdk_version, asset_dirs, library_source, library, natives })
+    Ok(Title { apk_path: apk_path.to_path_buf(), package, version, lib_name, content_type, sdk_version, asset_dirs, library_source, library, natives, portrait })
 }
 
 /// The JNI method names in the library's RegisterNatives tables: Brio-on-Android names them

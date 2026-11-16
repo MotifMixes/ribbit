@@ -184,6 +184,10 @@ pub struct Runtime {
     pub trace: Option<std::collections::VecDeque<(u32, u32)>>,
     /// LFA_TRACE: the last imports called (name, r0-r2, lr).
     pub import_trace: std::collections::VecDeque<(String, [u32; 3], u32)>,
+    /// The window's size: the screen, turned for a portrait title.
+    pub screen: (u32, u32),
+    /// LFA_BREAK: library offsets (hex, comma-separated) where the registers are printed.
+    pub breaks: Vec<u32>,
     /// What the game logged (`__android_log_print`, stdio).
     pub log: Vec<String>,
     /// Instructions left before `Stop::Budget`.
@@ -240,6 +244,10 @@ impl Runtime {
             depth: 0,
             trace: std::env::var_os("LFA_TRACE").map(|_| Default::default()),
             import_trace: Default::default(),
+            screen: crate::gles::SCREEN,
+            breaks: std::env::var("LFA_BREAK").map_or(Vec::new(), |v| {
+                v.split(',').filter_map(|a| u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()).map(|a| a + GAME_BASE).collect()
+            }),
             log: Vec::new(),
             budget: 2_000_000_000,
             calls: BTreeMap::new(),
@@ -406,6 +414,10 @@ impl Runtime {
                 return Err(Stop::Halt(format!("jumped out of the library to {pc:#010x} (lr {:#010x}; r0-r7 {:08x?}); backtrace {bt:08x?}", r[14], &r[..8])));
             }
             self.budget -= 1;
+            if self.breaks.contains(&pc) {
+                let r = self.cpu.r;
+                eprintln!("break {:#x}: r0-r12 {:08x?} sp {:08x} lr {:08x}", pc - GAME_BASE, &r[..13], r[13], r[14]);
+            }
             self.tick()?;
             if std::mem::take(&mut self.threads.switched) {
                 continue;

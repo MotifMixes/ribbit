@@ -110,3 +110,34 @@ pub fn manifest_strings(axml: &[u8]) -> Vec<String> {
     }
     out
 }
+
+/// The `android:screenOrientation` value of the activity named `activity` (its name as
+/// written, e.g. `.LFMainActivity`), from the binary manifest's start-element chunks.
+pub fn activity_orientation(axml: &[u8], activity: &str) -> Option<u32> {
+    let strings = manifest_strings(axml);
+    let mut off = 8;
+    while let (Some(kind), Some(size)) = (u16_at(axml, off), u32_at(axml, off + 4)) {
+        if size < 8 {
+            break;
+        }
+        // 0x0102: start element; attributes (20 bytes each) follow its 36-byte header.
+        if kind == 0x0102 && strings.get(u32_at(axml, off + 20)? as usize).is_some_and(|s| s == "activity") {
+            let (mut name, mut orientation) = (None, None);
+            for k in 0..u16_at(axml, off + 28)? as usize {
+                let a = off + 36 + k * 20;
+                let attr = strings.get(u32_at(axml, a + 4)? as usize).map(String::as_str);
+                let raw = u32_at(axml, a + 8)?;
+                match attr {
+                    Some("name") => name = strings.get(raw as usize).cloned(),
+                    Some("screenOrientation") => orientation = u32_at(axml, a + 16),
+                    _ => {}
+                }
+            }
+            if name.as_deref() == Some(activity) {
+                return orientation;
+            }
+        }
+        off += size as usize;
+    }
+    None
+}

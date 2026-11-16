@@ -5,7 +5,8 @@
 use crate::runtime::{Runtime, Stop};
 use ribbit_gles::abi::{self, Outcome};
 
-/// The tablet's screen (Epic, LeapPad Academy: 1024x600).
+/// The tablet's screen (Epic, LeapPad Academy: 1024x600); `Runtime::screen` is the window,
+/// turned for a portrait title.
 pub const SCREEN: (u32, u32) = (1024, 600);
 
 pub struct Gles {
@@ -40,27 +41,28 @@ impl abi::Guest for Guest<'_> {
         a
     }
     fn window_size(&mut self, _native: u32) -> (u32, u32) {
-        SCREEN
+        self.0.screen
     }
 }
 
 /// What GLSurfaceView sets up before the game draws: a window surface the screen's size
 /// with a context current on it (handles of its own, above any EGL hands out).
-fn new_context() -> Box<Gles> {
+fn new_context(screen: (u32, u32)) -> Box<Gles> {
     let mut egl = ribbit_gles::Egl::default();
     let (surface, context) = (0x5F00_0001, 0x5F00_0002);
     egl.initialized = true;
-    egl.surfaces.insert(surface, SCREEN);
+    egl.surfaces.insert(surface, screen);
     egl.contexts.insert(context);
     egl.current = Some((surface, context));
-    let mut gl = ribbit_gles::Gl::new(SCREEN.0, SCREEN.1);
-    gl.viewport(0, 0, SCREEN.0 as i32, SCREEN.1 as i32);
-    gl.scissor(0, 0, SCREEN.0 as i32, SCREEN.1 as i32);
+    let mut gl = ribbit_gles::Gl::new(screen.0, screen.1);
+    gl.viewport(0, 0, screen.0 as i32, screen.1 as i32);
+    gl.scissor(0, 0, screen.0 as i32, screen.1 as i32);
     Box::new(Gles { gl, egl, logged: std::env::var_os("LFA_GL").map(|_| Default::default()) })
 }
 
 pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
-    let mut g = rt.gles.take().unwrap_or_else(new_context);
+    let screen = rt.screen;
+    let mut g = rt.gles.take().unwrap_or_else(|| new_context(screen));
     if let Some(n) = g.logged.as_mut().map(|l| l.entry(name.to_string()).or_default()) {
         *n += 1;
         if *n <= 4 {
