@@ -311,8 +311,9 @@ Status (2026-11-16): all six titles run their constructors (216-318) and `JNI_On
 - Academy T-Rex Rush (AND4 build): its main menu, the same as the Epic build's (from frame
   about 160, the Epic build about 150).
 - Academy NUTL 0x00280012 (calculator): its screen, drawn right.
-- Academy PPAD2 (with `--lib`): starts, then quits itself in the first frames (black): it
-  can't make its save file (below).
+- Academy PPAD2 (with `--lib`, and a storage folder): its room with the pet picker (eight
+  pets, a tick). The lower half of the room is black at frame 600 (not looked into yet).
+  Without a storage folder it quits in the first frames: it can't make its save file (below).
 
 Academy T-Rex Rush, 2026-11-16: not a CPU or GL fault. It decodes its images on a worker
 thread, and between frames no other thread ran; during a frame the main thread slept a few ms
@@ -330,7 +331,8 @@ need zlib's inflate stream, which wasn't there. With both, it gets to the picker
 (`[EgPickerState] PICKER STARTED`), then quits (`LFAppManager::popApp()`): library 0x1ecfac
 needs `/Local/0/0x00370009/SAVE.DAT`, and makes a 1 KB one with `fopen`/`fwrite` when it
 isn't there; with no writable files that fails and the title exits. Faking that check only
-moves the exit to its save reader (0x1ed154). So PPAD2 needs next step 4.
+moves the exit to its save reader (0x1ed154). With writable files (next step 3) it makes
+SAVE.DAT (7328 bytes) and `/sdcard/LF/Bulk/settings.cfg` and stays.
 
 Portrait titles (2026-11-16): Big City Hijinks and the NUTL titles declare
 `android:screenOrientation="portrait"` (1) on `.LFMainActivity`; T-Rex Rush and PPAD2 are
@@ -388,9 +390,19 @@ Next steps, in order:
    Stereo position is ignored (mono out). Mixing clips at full level, as Android's mixer does
    (T-Rex Rush: a few dozen samples in 2 s, where voice and music meet). Left: buffer queues
    (no title seen uses them), MP3 (AP_SM2 has one).
-3. Saves: `/Local/0/<product id>/MySave7.sav`, PPAD2's `/Local/0/0x00370009/SAVE.DAT` and
-   `/sdcard/LF/Bulk/settings.cfg` on a host folder (plain files and descriptors, `stat`,
-   `mkdir`, writing). PPAD2 can't start without it.
+3. Saves (2026-11-16, `files.rs`): the tablet's storage is a host folder, LFA_DATA=<folder>
+   for the examples, `<saves>/LeapPad Academy` in the app (one for all titles, as on the
+   tablet). A guest path is that folder plus its parts (relative paths count from `/`, the
+   app's working folder; `..` can't leave it). `open`/`read`/`write`/`lseek`/`close`/`fstat`/
+   `ftruncate`, `fopen`/`fdopen` FILEs (stdio streams with a host descriptor; `fprintf`,
+   `fputs`, `fputc` write to them), `stat`/`lstat`/`access`, `mkdir`/`rmdir`/`unlink`/
+   `remove`/`rename`, `opendir`/`readdir` ("." and ".." first). Only `sdcard`, `Local` and
+   `data` take writes (EROFS elsewhere: PPAD2 writes its touchscreen rate to
+   `/error_no_tssample_rate_in_hz` when `/tmp/ts_driver` isn't there, then reads it back with
+   `fscanf`, which still reads nothing). Checked: PPAD2 starts (above); Epic T-Rex Rush writes
+   `/Local/0/0x0020001D/MySave7.sav` (896 bytes) after PLAY, and a second start reads it and goes
+   on from the next part of the intro; without a folder its pictures are the same as before.
+   Left: `fscanf` on files, `statfs` (free space), what the real `/tmp/ts_driver` holds.
 4. Speed: this CPU runs about 15-20 million instructions a second here, so a frame with
    drawing takes 30-60 ms on the host.
 

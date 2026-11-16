@@ -1,6 +1,7 @@
 //! stdio streams made by `funopen`: the titles' own file layer opens an asset and wraps it in
-//! a FILE with its read, seek and close functions, which are called back here. Other FILEs
-//! (stdin, stdout, stderr) only take writes, which go to the log.
+//! a FILE with its read, seek and close functions, which are called back here. `fopen` and
+//! `fdopen` make FILEs over host files (`files.rs`, `Stream::fd`). Other FILEs (stdin,
+//! stdout, stderr) only take writes, which go to the log.
 //!
 //! bionic's `getc` and `feof` can be macros that read the FILE: `_p`/`_r` (offsets 0 and 4)
 //! are left 0 so `getc` always calls `__srget`, and `_flags` (offset 12) carries __SEOF and
@@ -24,6 +25,8 @@ pub struct Stream {
     err: bool,
     /// Bytes pushed back by `ungetc`, the next to read last.
     unget: Vec<u8>,
+    /// A host file's descriptor (`files.rs`) in place of the functions.
+    fd: Option<u32>,
 }
 
 pub fn handles(name: &str) -> bool {
@@ -53,6 +56,31 @@ pub fn handles(name: &str) -> bool {
 }
 
 impl Runtime {
+    /// A FILE over a host file's descriptor.
+    pub(crate) fn host_stream(&mut self, fd: u32) -> u32 {
+        let fp = self.malloc(FILE_SIZE);
+        self.mem.write(fp, &[0; FILE_SIZE as usize]);
+        self.mem.w16(fp + 14, fd as u16);
+        self.streams.insert(fp, Stream { cookie: 0, read: 0, write: 0, seek: 0, close: 0, eof: false, err: false, unget: Vec::new(), fd: Some(fd) });
+        fp
+    }
+
+    pub(crate) fn stream_fd(&self, fp: u32) -> Option<u32> {
+        self.streams.get(&fp)?.fd
+    }
+
+    /// Writes to a host FILE; false when `fp` isn't one (the caller logs it).
+    pub(crate) fn stream_put(&mut self, fp: u32, data: &[u8]) -> bool {
+        let Some(fd) = self.stream_fd(fp) else { return false };
+        if self.files.write(fd, data).is_none() {
+            if let Some(s) = self.streams.get_mut(&fp) {
+                s.err = true;
+            }
+            self.set_flags(fp);
+        }
+        true
+    }
+
     fn set_flags(&mut self, fp: u32) {
         let Some(s) = self.streams.get(&fp) else { return };
         let flags = if s.eof { SEOF } else { 0 } | if s.err { SERR } else { 0 };
@@ -67,6 +95,19 @@ impl Runtime {
             if let Some(b) = s.unget.pop() {
                 self.mem.w8(buf + done, b);
                 done += 1;
+                continue;
+            }
+            if let Some(fd) = s.fd {
+                let Some(data) = self.files.read(fd, (n - done) as usize) else {
+                    s.err = true;
+                    break;
+                };
+                if data.is_empty() {
+                    s.eof = true;
+                    break;
+                }
+                self.mem.write(buf + done, &data);
+                done += data.len() as u32;
                 continue;
             }
             let (cookie, read) = (s.cookie, s.read);
@@ -97,10 +138,13 @@ impl Runtime {
         // A relative seek counts from where the reader is, before the pushed-back bytes.
         let off = if whence == 1 { off.wrapping_sub(s.unget.len() as u32) } else { off };
         s.unget.clear();
-        if seek == 0 {
+        let r = if let Some(fd) = s.fd {
+            self.files.seek(fd, off, whence).unwrap_or(EOF)
+        } else if seek == 0 {
             return Ok(EOF);
-        }
-        let r = self.call(seek, &[cookie, off, whence])?;
+        } else {
+            self.call(seek, &[cookie, off, whence])?
+        };
         if r != EOF {
             if let Some(s) = self.streams.get_mut(&fp) {
                 s.eof = false;
@@ -113,10 +157,13 @@ impl Runtime {
     fn stream_tell(&mut self, fp: u32) -> Result<u32, Stop> {
         let Some(s) = self.streams.get(&fp) else { return Ok(EOF) };
         let (cookie, seek, back) = (s.cookie, s.seek, s.unget.len() as u32);
-        if seek == 0 {
+        let r = if let Some(fd) = s.fd {
+            self.files.seek(fd, 0, 1).unwrap_or(EOF)
+        } else if seek == 0 {
             return Ok(EOF);
-        }
-        let r = self.call(seek, &[cookie, 0, 1])?;
+        } else {
+            self.call(seek, &[cookie, 0, 1])?
+        };
         Ok(if r == EOF { EOF } else { r - back })
     }
 
@@ -136,7 +183,7 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             let (cookie, read, write, seek, close) = (rt.arg(0), rt.arg(1), rt.arg(2), rt.arg(3), rt.arg(4));
             let fp = rt.malloc(FILE_SIZE);
             rt.mem.write(fp, &[0; FILE_SIZE as usize]);
-            rt.streams.insert(fp, Stream { cookie, read, write, seek, close, eof: false, err: false, unget: Vec::new() });
+            rt.streams.insert(fp, Stream { cookie, read, write, seek, close, eof: false, err: false, unget: Vec::new(), fd: None });
             rt.ret(fp)
         }
         // fread(ptr, size, nmemb, fp): whole items read
@@ -154,8 +201,17 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         "fwrite" => {
             let (buf, size, n, fp) = (rt.arg(0), rt.arg(1), rt.arg(2), rt.arg(3));
             let total = size.saturating_mul(n);
-            match rt.streams.get(&fp).map(|s| (s.cookie, s.write)) {
-                Some((cookie, write)) if write != 0 => {
+            match rt.streams.get(&fp).map(|s| (s.cookie, s.write, s.fd)) {
+                Some((_, _, Some(fd))) => {
+                    let data = rt.mem.read(buf, total as usize);
+                    let ok = rt.files.write(fd, &data).is_some();
+                    if !ok {
+                        rt.streams.get_mut(&fp).unwrap().err = true;
+                        rt.set_flags(fp);
+                    }
+                    rt.ret(if ok { n } else { 0 })
+                }
+                Some((cookie, write, None)) if write != 0 => {
                     let r = rt.call(write, &[cookie, buf, total])? as i32;
                     rt.ret(if r > 0 && size != 0 { r as u32 / size } else { 0 })
                 }
@@ -207,7 +263,11 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             let fp = rt.arg(0);
             match rt.streams.remove(&fp) {
                 Some(s) => {
-                    let r = if s.close != 0 { rt.call(s.close, &[s.cookie])? } else { 0 };
+                    let r = match s.fd {
+                        Some(fd) => !rt.files.close(fd) as u32,
+                        None if s.close != 0 => rt.call(s.close, &[s.cookie])?,
+                        None => 0,
+                    };
                     rt.free(fp);
                     rt.ret(if r == 0 { 0 } else { EOF })
                 }

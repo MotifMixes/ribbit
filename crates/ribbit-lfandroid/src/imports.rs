@@ -524,6 +524,7 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         // ---- pthread (threads.rs has the threads, mutexes and condition variables)
         n if crate::threads::handles(n) => return crate::threads::call(rt, n),
         n if crate::stdio::handles(n) => return crate::stdio::call(rt, n),
+        n if crate::files::handles(n) => return crate::files::call(rt, n),
         "pthread_mutex_init" | "pthread_mutexattr_init"
         | "pthread_mutexattr_settype" | "pthread_mutexattr_destroy" | "pthread_cond_init" | "pthread_cond_destroy"
         | "pthread_condattr_init" | "pthread_condattr_destroy" | "pthread_attr_init" | "pthread_attr_destroy" | "pthread_attr_setdetachstate" | "pthread_attr_setstacksize"
@@ -614,7 +615,10 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             let args = if name == "vfprintf" { Args::Va(rt.arg(2)) } else { Args::Call(2) };
             let s = format(rt, &f, args);
             let n = s.len() as u32;
-            log_line(rt, s);
+            let fp = rt.arg(0);
+            if !rt.stream_put(fp, s.as_bytes()) {
+                log_line(rt, s);
+            }
             rt.ret(n)
         }
         "puts" => {
@@ -624,9 +628,11 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret(1)
         }
         "fputs" => {
-            let a = rt.arg(0);
+            let (a, fp) = (rt.arg(0), rt.arg(1));
             let s = rt.mem.cstr(a);
-            log_line(rt, s);
+            if !rt.stream_put(fp, s.as_bytes()) {
+                log_line(rt, s);
+            }
             rt.ret(1)
         }
         "putchar" => rt.ret(0),
@@ -950,48 +956,25 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret(0)
         }
 
-        // ---- files and sockets: none yet (ENOENT)
-        "open" | "fopen" | "fdopen" | "opendir" | "socket" | "popen" | "access" | "stat" | "lstat" | "fstat" | "statfs" | "readlink" | "syscall" | "getaddrinfo"
-        | "inet_aton" | "gethostname" | "mkdir" | "remove" | "rename" | "rmdir" | "unlink" => {
-            if rt.state.errno_at == 0 {
-                rt.state.errno_at = rt.malloc(4);
-            }
-            let e = rt.state.errno_at;
-            rt.mem.w32(e, 2);
-            if std::env::var_os("LFA_LOG").is_some() && matches!(name, "open" | "fopen" | "opendir" | "stat" | "access") {
-                let a = rt.arg(0);
-                let p = rt.mem.cstr(a);
-                eprintln!("[file] {name} {p}: not found (from {:#x})", rt.cpu.r[14]);
-            }
-            rt.ret(if matches!(name, "fopen" | "fdopen" | "opendir" | "popen") { 0 } else { u32::MAX })
+        // ---- sockets and the rest: none (ENOENT). Files are in files.rs.
+        "socket" | "popen" | "statfs" | "readlink" | "syscall" | "getaddrinfo" | "inet_aton" | "gethostname" => {
+            rt.set_errno(2);
+            rt.ret(if name == "popen" { 0 } else { u32::MAX })
         }
-
-        // File descriptors, folders and pipes that can't be open yet (none opens): end of
-        // file, errors. (FILE streams are in stdio.rs.)
-        "close" => {
-            let fd = rt.arg(0);
-            rt.assets.fds.remove(&fd);
-            rt.ret(0)
-        }
-        "pclose" | "closedir" | "ftruncate" => rt.ret(0),
-        "readdir" | "fscanf" => rt.ret(0),
-        "lseek" | "read" | "getwc" | "ungetwc" | "ioctl" | "poll" | "select" => rt.ret(u32::MAX),
-        "write" => {
-            let (fd, buf, n) = (rt.arg(0), rt.arg(1), rt.arg(2));
-            if fd == 1 || fd == 2 {
-                let text = String::from_utf8_lossy(&rt.mem.read(buf, n as usize)).into_owned();
-                log_line(rt, text);
-            }
-            rt.ret(n)
-        }
+        "pclose" => rt.ret(0),
+        "fscanf" => rt.ret(0),
+        "getwc" | "ungetwc" | "ioctl" | "poll" | "select" => rt.ret(u32::MAX),
         "writev" => {
             let (iov, cnt) = (rt.arg(1), rt.arg(2));
             let total = (0..cnt).map(|i| rt.mem.r32(iov + 8 * i + 4)).sum::<u32>();
             rt.ret(total)
         }
         "fputc" | "putc" | "putwc" | "__swbuf" => {
-            let c = rt.arg(0);
-            rt.ret(c)
+            let (c, fp) = (rt.arg(0), rt.arg(1));
+            if name != "putwc" {
+                rt.stream_put(fp, &[c as u8]);
+            }
+            rt.ret(if name == "putwc" { c } else { c & 0xFF })
         }
 
         // ---- zlib: whole buffers, and inflate streams (PPAD2's fs.arc). A 32-bit z_stream:

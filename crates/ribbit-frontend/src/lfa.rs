@@ -45,12 +45,13 @@ pub struct LfaSession {
     pub started: u64,
     size: (usize, usize),
     apk: PathBuf,
+    data: PathBuf,
 }
 
 impl LfaSession {
     /// Opens the APK and starts the title up to its first frame (on the title's thread, which
-    /// it then stays on).
-    pub fn start(apk: &Path, sink: Option<AudioSink>) -> anyhow::Result<Self> {
+    /// it then stays on). `data` is the tablet's storage, where saves go.
+    pub fn start(apk: &Path, data: &Path, sink: Option<AudioSink>) -> anyhow::Result<Self> {
         let shared = Arc::new(Shared {
             frame: Mutex::new(Vec::new()),
             input: Mutex::new(Input::default()),
@@ -62,10 +63,10 @@ impl LfaSession {
             sink: Mutex::new(sink),
         });
         let (tx, rx) = std::sync::mpsc::channel();
-        let (s, path) = (shared.clone(), apk.to_path_buf());
+        let (s, path, dir) = (shared.clone(), apk.to_path_buf(), data.to_path_buf());
         let thread = std::thread::Builder::new().name("ribbit-lfa".into()).stack_size(16 << 20).spawn(move || {
             crate::perf::raise_thread_priority();
-            match Tablet::open(&path, None) {
+            match Tablet::open(&path, None, Some(&dir)) {
                 Ok(t) => {
                     let (w, h) = t.screen();
                     *s.frame.lock().unwrap() = vec![0; (w * h) as usize];
@@ -90,7 +91,7 @@ impl LfaSession {
         };
         let title = apk.file_stem().map_or(package, |s| s.to_string_lossy().into_owned());
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        Ok(Self { shared, thread: Some(thread), title, started, size, apk: apk.to_path_buf() })
+        Ok(Self { shared, thread: Some(thread), title, started, size, apk: apk.to_path_buf(), data: data.to_path_buf() })
     }
 
     /// The picture's size.
@@ -152,10 +153,10 @@ impl LfaSession {
 
     /// Starts the title again from its APK.
     pub fn restart(self) -> anyhow::Result<Self> {
-        let apk = self.apk.clone();
+        let (apk, data) = (self.apk.clone(), self.data.clone());
         let sink = self.shared.sink.lock().unwrap().take();
         self.stop();
-        Self::start(&apk, sink)
+        Self::start(&apk, &data, sink)
     }
 
     pub fn stop(mut self) {

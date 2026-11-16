@@ -14,11 +14,15 @@ pub struct Tablet {
 
 impl Tablet {
     /// Opens the APK (with `system_lib`, a firmware's /system/lib, for titles that need it),
-    /// loads its library and starts it up to its first frame.
-    pub fn open(apk: &Path, system_lib: Option<&Path>) -> Result<Self, String> {
+    /// loads its library and starts it up to its first frame. `data` is the tablet's storage
+    /// (saves, `files.rs`); None leaves LFA_DATA's.
+    pub fn open(apk: &Path, system_lib: Option<&Path>, data: Option<&Path>) -> Result<Self, String> {
         let title = crate::open_title(apk, system_lib)?;
         let Some(loaded) = &title.library else { return Err(format!("{}: no native library found", title.package)) };
         let mut rt = Runtime::new(loaded);
+        if let Some(d) = data {
+            rt.files.root = Some(d.to_path_buf());
+        }
         if title.portrait {
             rt.screen = (rt.screen.1, rt.screen.0);
         }

@@ -1203,7 +1203,12 @@ impl App {
     fn start_lfa(&mut self, apk: PathBuf) {
         self.end_session();
         let sink = self.audio.as_ref().map(|a| a.sink());
-        match crate::lfa::LfaSession::start(&apk, sink) {
+        // One storage for every title, as on the tablet (/Local/0/<product id>/, /sdcard/LF/Bulk/).
+        let data = self.save_dir().join("LeapPad Academy");
+        if let Err(e) = std::fs::create_dir_all(&data) {
+            tracing::warn!(target: "ribbit::lfa", "{}: {e}", data.display());
+        }
+        match crate::lfa::LfaSession::start(&apk, &data, sink) {
             Ok(t) => {
                 self.fit_window = FIT_TRIES;
                 self.lfa = Some(t);

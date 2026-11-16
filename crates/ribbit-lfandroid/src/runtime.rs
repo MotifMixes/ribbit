@@ -172,6 +172,8 @@ pub struct Runtime {
     pub sles: crate::sles::Sles,
     /// The APK's assets (`assets.rs`).
     pub assets: crate::assets::Assets,
+    /// The writable files (`files.rs`): LFA_DATA, or the folder the host gives.
+    pub files: crate::files::Files,
     /// The GL context (`gles.rs`), made on the first GL call.
     pub gles: Option<Box<crate::gles::Gles>>,
     /// glGetString's answers, by contents.
@@ -244,6 +246,7 @@ impl Runtime {
             natives: BTreeMap::new(),
             sles: Default::default(),
             assets: Default::default(),
+            files: crate::files::Files::new(std::env::var_os("LFA_DATA").map(Into::into)),
             gles: None,
             gl_strings: BTreeMap::new(),
             threads: Default::default(),

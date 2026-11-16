@@ -15,6 +15,7 @@ pub mod android;
 pub mod apk;
 pub mod assets;
 pub mod elf;
+pub mod files;
 pub mod gles;
 pub mod imports;
 pub mod input;
