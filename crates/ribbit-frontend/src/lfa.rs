@@ -5,9 +5,11 @@
 //! A and B, Backspace Back, H Hint, P Pause and Home the home button (GUESS: what the Academy's
 //! own buttons are; see docs/leappad-academy.md).
 //!
-//! No sound and no saves yet: a title that needs a writable file (PPAD2's SAVE.DAT) quits.
+//! Its OpenSL ES players' sound (`ribbit_lfandroid::mixer`, mono 32 kHz) goes to the output as
+//! it is made. No saves yet: a title that needs a writable file (PPAD2's SAVE.DAT) quits.
 //! EXPERIMENTAL.
 
+use crate::audio_out::AudioSink;
 use ribbit_lfandroid::input::button;
 use ribbit_lfandroid::tablet::Tablet;
 use std::path::{Path, PathBuf};
@@ -31,6 +33,8 @@ struct Shared {
     /// Why the title stopped, if it did.
     stopped: Mutex<Option<String>>,
     speed: AtomicU32,
+    gain: AtomicU32,
+    sink: Mutex<Option<AudioSink>>,
 }
 
 pub struct LfaSession {
@@ -46,7 +50,7 @@ pub struct LfaSession {
 impl LfaSession {
     /// Opens the APK and starts the title up to its first frame (on the title's thread, which
     /// it then stays on).
-    pub fn start(apk: &Path) -> anyhow::Result<Self> {
+    pub fn start(apk: &Path, sink: Option<AudioSink>) -> anyhow::Result<Self> {
         let shared = Arc::new(Shared {
             frame: Mutex::new(Vec::new()),
             input: Mutex::new(Input::default()),
@@ -54,6 +58,8 @@ impl LfaSession {
             quit: AtomicBool::new(false),
             stopped: Mutex::new(None),
             speed: AtomicU32::new(100f32.to_bits()),
+            gain: AtomicU32::new(1f32.to_bits()),
+            sink: Mutex::new(sink),
         });
         let (tx, rx) = std::sync::mpsc::channel();
         let (s, path) = (shared.clone(), apk.to_path_buf());
@@ -106,6 +112,10 @@ impl LfaSession {
         f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64
     }
 
+    pub fn set_gain(&self, gain: f32) {
+        self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
     pub fn set_running(&self, running: bool) {
         self.shared.running.store(running, Ordering::Relaxed);
     }
@@ -143,8 +153,9 @@ impl LfaSession {
     /// Starts the title again from its APK.
     pub fn restart(self) -> anyhow::Result<Self> {
         let apk = self.apk.clone();
+        let sink = self.shared.sink.lock().unwrap().take();
         self.stop();
-        Self::start(&apk)
+        Self::start(&apk, sink)
     }
 
     pub fn stop(mut self) {
@@ -160,6 +171,7 @@ fn run(mut t: Tablet, s: &Shared) {
     let mut next = Instant::now();
     let (mut count, mut since) = (0u32, Instant::now());
     let (mut touch, mut buttons) = (None, 0);
+    let mut audio = Vec::new();
     while !s.quit.load(Ordering::Relaxed) {
         if !s.running.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
@@ -187,6 +199,11 @@ fn run(mut t: Tablet, s: &Shared) {
             *s.stopped.lock().unwrap() = Some(e);
             return;
         }
+        t.take_audio(&mut audio);
+        if let Some(sink) = s.sink.lock().unwrap().as_mut() {
+            sink.push_32k(&audio, f32::from_bits(s.gain.load(Ordering::Relaxed)));
+        }
+        audio.clear();
         if let Some((w, h, px)) = t.picture() {
             let mut f = s.frame.lock().unwrap();
             if f.len() == (w * h) as usize && (w, h) == t.screen() {

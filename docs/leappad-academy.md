@@ -378,7 +378,16 @@ Next steps, in order:
    path headless (T-Rex Rush: tap PLAY at 600 -> the Dinosaur Valley map by 800, ~20 frames a
    second). Open: the direction bits (check in a game that uses the d-pad), what `naPressHome` should do, and
    whether the Java side uses `naGetHostDeviceWidth/Height` to place a portrait view.
-2. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
+2. Sound (2026-11-16): T-Rex Rush (both builds) and AP_SM2 play only through audio players
+   made from asset descriptors (no buffer queues). `mixer.rs` decodes each clip once (WAV 8/16-bit
+   PCM; Ogg Vorbis with `lewton`) to mono 32 kHz (31-tap windowed-sinc low-pass when the clip is
+   faster), a voice per player: SetPlayState (stopped rewinds, paused keeps the place),
+   GetDuration/GetPosition, SLSeekItf SetPosition/SetLoop, SLVolumeItf level (millibels) and mute,
+   Destroy. The voices are mixed on the game's clock, and a player ends (HEADATEND) when its voice
+   runs out, not after a timer. A clip that can't be decoded is a second of silence (GUESS).
+   Stereo position is ignored (mono out). Mixing clips at full level, as Android's mixer does
+   (T-Rex Rush: a few dozen samples in 2 s, where voice and music meet). Left: buffer queues
+   (no title seen uses them), MP3 (AP_SM2 has one).
 3. Saves: `/Local/0/<product id>/MySave7.sav`, PPAD2's `/Local/0/0x00370009/SAVE.DAT` and
    `/sdcard/LF/Bulk/settings.cfg` on a host folder (plain files and descriptors, `stat`,
    `mkdir`, writing). PPAD2 can't start without it.

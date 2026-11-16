@@ -19,6 +19,7 @@ pub mod gles;
 pub mod imports;
 pub mod input;
 pub mod jni;
+pub mod mixer;
 pub mod runtime;
 pub mod sles;
 pub mod stdio;

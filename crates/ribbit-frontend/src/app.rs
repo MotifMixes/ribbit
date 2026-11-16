@@ -1202,7 +1202,8 @@ impl App {
     /// Plays a LeapPad Academy / LeapFrog Epic title from its APK.
     fn start_lfa(&mut self, apk: PathBuf) {
         self.end_session();
-        match crate::lfa::LfaSession::start(&apk) {
+        let sink = self.audio.as_ref().map(|a| a.sink());
+        match crate::lfa::LfaSession::start(&apk, sink) {
             Ok(t) => {
                 self.fit_window = FIT_TRIES;
                 self.lfa = Some(t);
@@ -3742,7 +3743,9 @@ impl App {
         }
         if let Some(t) = &self.lfa {
             t.set_running(!halted);
+            t.set_gain(if self.settings.muted { 0.0 } else { self.settings.volume });
             self.speed_percent = t.speed_percent();
+            Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
             return;
         }
         if let Some(c) = &self.clickstart {

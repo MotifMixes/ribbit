@@ -1,8 +1,9 @@
 //! OpenSL ES (sound) and OpenMAX AL (video) stand-ins: their objects and interfaces as the API
 //! shapes them, an `SLObjectItf` being a pointer to a pointer to a table of functions. Each
 //! table entry is a host function (`Runtime::host_fn`) named `sl:<interface>:<index>`, so one
-//! dispatcher answers them all. Everything succeeds; what matters for sound later (the buffer
-//! queue's callback and the buffers enqueued) is kept in `Sles`.
+//! dispatcher answers them all. Everything succeeds. Audio players from an asset descriptor play
+//! through `mixer` (WAV and Ogg Vorbis clips); buffer queues are only kept track of (no title
+//! seen uses them).
 
 use crate::runtime::{Runtime, Stop};
 
@@ -22,12 +23,18 @@ pub struct Sles {
     pub play_state: Vec<(u32, u32)>,
     /// The object each interface came from (GetInterface).
     pub object_of: std::collections::BTreeMap<u32, u32>,
-    /// Audio players made from an asset descriptor: the clip's length (`clip_length`).
-    pub length: std::collections::BTreeMap<u32, Option<std::time::Duration>>,
+    /// Audio players made from an asset descriptor: their voices, mixed.
+    pub mixer: crate::mixer::Mixer,
     /// SLPlayItf callbacks (play interface -> callback, context, event mask).
     pub play_callbacks: std::collections::BTreeMap<u32, (u32, u32, u32)>,
-    /// When each playing clip ends (play interface, clock time), for `end_players`.
-    pub ends: Vec<(u32, std::time::Duration)>,
+}
+
+impl Sles {
+    /// The voice of the player an interface belongs to.
+    fn voice(&mut self, itf: u32) -> Option<&mut crate::mixer::Voice> {
+        let obj = self.object_of.get(&itf)?;
+        self.mixer.voices.get_mut(obj)
+    }
 }
 
 /// SL_DATALOCATOR_ANDROIDFD
@@ -81,6 +88,10 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             let out = rt.arg(1);
             rt.mem.w32(out, REALIZED);
         }
+        // Destroy: a player's voice goes.
+        ("object", 6) => {
+            rt.sles.mixer.voices.remove(&this);
+        }
         ("object", 3) => {
             let (iid, out) = (rt.arg(1), rt.arg(2));
             let k = kind_of(rt, iid);
@@ -99,14 +110,14 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.mem.w32(out, obj);
             // CreateAudioPlayer(self, *player, source, sink, ...) from an asset descriptor
             // ({type, fd, offset (64-bit), length (64-bit)}): the clip's length, so the player
-            // can end (no sound is made yet).
+            // gets a voice.
             let src = rt.arg(2);
             if api == "sl" && i == 2 && src != 0 {
                 let loc = rt.mem.r32(src);
                 if loc != 0 && rt.mem.r32(loc) == ANDROID_FD {
                     let (fd, off, len) = (rt.mem.r32(loc + 4), rt.mem.r32(loc + 8) as usize, rt.mem.r32(loc + 16) as usize);
-                    let length = rt.assets.fds.get(&fd).and_then(|d| d.get(off..off.saturating_add(len).min(d.len()))).and_then(clip_length);
-                    rt.sles.length.insert(obj, length);
+                    let clip = rt.assets.fds.get(&fd).and_then(|d| d.get(off..off.saturating_add(len).min(d.len()))).map(<[u8]>::to_vec).unwrap_or_default();
+                    rt.sles.mixer.add(obj, &clip);
                 }
             }
         }
@@ -114,20 +125,29 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         ("play", 0) => {
             let s = rt.arg(1);
             rt.sles.play_state.push((this, s));
-            // Playing starts the clip from where it is; it ends after its length (a clip of
-            // unknown length after 1 s, GUESS). Stopped or paused, it doesn't end. Paused
-            // clips start again from the beginning (GUESS: no position kept yet).
-            rt.sles.ends.retain(|e| e.0 != this);
-            let obj = rt.sles.object_of.get(&this).copied().unwrap_or(0);
-            if let (3, Some(length)) = (s, rt.sles.length.get(&obj)) {
-                let at = rt.state_elapsed() + length.unwrap_or(std::time::Duration::from_secs(1));
-                rt.sles.ends.push((this, at));
+            // Playing goes on from where the clip is, paused keeps the place, stopped goes
+            // back to the start. A clip played to its end is there until stopped or moved.
+            let now = rt.state_elapsed();
+            rt.sles.mixer.mix(now);
+            if let Some(v) = rt.sles.voice(this) {
+                v.playing = s == 3;
+                if s == 1 {
+                    v.pos = 0;
+                } else if s == 3 && v.pos >= v.pcm.len() && v.looping.is_none() {
+                    v.pos = 0;
+                }
             }
         }
         ("play", 1) => {
             let out = rt.arg(1);
             let s = rt.sles.play_state.iter().rev().find(|p| p.0 == this).map_or(1, |p| p.1);
             rt.mem.w32(out, s);
+        }
+        // GetDuration(self, *ms), GetPosition(self, *ms)
+        ("play", 2 | 3) => {
+            let out = rt.arg(1);
+            let ms = rt.sles.voice(this).map_or(0, |v| if index == 2 { v.length() } else { v.position() }.as_millis() as u32);
+            rt.mem.w32(out, ms);
         }
         // SLPlayItf: RegisterCallback(self, callback, context), SetCallbackEventsMask(self,
         // mask)
@@ -158,49 +178,64 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.sles.callbacks.retain(|c| c.0 != this);
             rt.sles.callbacks.push((this, cb, ctx));
         }
-        // Getters elsewhere (volume levels, durations...): zero.
+        // SLSeekItf: SetPosition(self, ms, mode), SetLoop(self, on, start ms, end ms; end
+        // SL_TIME_UNKNOWN = the clip's end)
+        ("seek", 0) => {
+            let at = crate::mixer::sample_at(rt.arg(1));
+            if let Some(v) = rt.sles.voice(this) {
+                v.pos = at;
+            }
+        }
+        ("seek", 1) => {
+            let (on, start, end) = (rt.arg(1), rt.arg(2), rt.arg(3));
+            if let Some(v) = rt.sles.voice(this) {
+                v.looping = (on != 0).then(|| (crate::mixer::sample_at(start), if end == u32::MAX { usize::MAX } else { crate::mixer::sample_at(end) }));
+            }
+        }
+        // SLVolumeItf: SetVolumeLevel(self, millibels), GetVolumeLevel, GetMaxVolumeLevel,
+        // SetMute(self, on)
+        ("volume", 0) => {
+            let mb = rt.arg(1) as i16;
+            if let Some(v) = rt.sles.voice(this) {
+                v.gain = 10f32.powf(mb as f32 / 2000.0);
+            }
+        }
+        ("volume", 1) => {
+            let out = rt.arg(1);
+            let mb = rt.sles.voice(this).map_or(0, |v| (2000.0 * v.gain.max(1e-5).log10()) as i16);
+            rt.mem.w16(out, mb as u16);
+        }
+        ("volume", 3) => {
+            let on = rt.arg(1);
+            if let Some(v) = rt.sles.voice(this) {
+                v.muted = on != 0;
+            }
+        }
+        // Getters elsewhere (max volume level, stereo position...): zero.
         _ => {}
     }
     rt.ret(SUCCESS);
     Ok(())
 }
 
-/// A WAV or Ogg Vorbis clip's length: the data chunk over the byte rate, or the last page's
-/// granule position over the sample rate.
-pub fn clip_length(d: &[u8]) -> Option<std::time::Duration> {
-    let u32_at = |i: usize| d.get(i..i + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
-    let secs = if d.starts_with(b"RIFF") {
-        let (mut i, mut rate, mut bytes) = (12, None, None);
-        while let (Some(id), Some(n)) = (d.get(i..i + 4), u32_at(i + 4)) {
-            match id {
-                b"fmt " => rate = u32_at(i + 16),
-                b"data" => bytes = Some(n.min((d.len() - i - 8) as u32)),
-                _ => {}
-            }
-            i += 8 + n as usize + (n as usize & 1);
-        }
-        bytes? as f64 / rate.filter(|&r| r != 0)? as f64
-    } else if d.starts_with(b"OggS") {
-        let id = d.windows(7).position(|w| w == b"vorbis")?;
-        let rate = u32_at(id + 12).filter(|&r| r != 0)?;
-        let last = d.windows(4).rposition(|w| w == b"OggS")?;
-        let granule = u64::from_le_bytes(d.get(last + 6..last + 14)?.try_into().unwrap());
-        granule as f64 / rate as f64
-    } else {
-        return None;
-    };
-    Some(std::time::Duration::from_secs_f64(secs.min(3600.0)))
-}
-
 impl Runtime {
-    /// Ends the clips whose time is up, as the player's thread would: the play state goes to
+    /// Mixes the players' sound up to now; `sles.mixer.out` has it.
+    pub fn mix(&mut self) {
+        let now = self.state_elapsed();
+        self.sles.mixer.mix(now);
+    }
+
+    /// Ends the clips that ran out, as the player's thread would: the play state goes to
     /// paused (Android does that at the end) and the SLPlayItf callback gets HEADATEND if its
     /// mask asks for it. Called between frames, at the outer call level.
     pub fn end_players(&mut self) -> Result<(), Stop> {
-        let now = self.state_elapsed();
-        let due: Vec<u32> = self.sles.ends.iter().filter(|e| e.1 <= now).map(|e| e.0).collect();
-        self.sles.ends.retain(|e| e.1 > now);
-        for itf in due {
+        self.mix();
+        let ended = std::mem::take(&mut self.sles.mixer.ended);
+        // The players' SLPlayItfs: those that set a state or a callback.
+        let sl = &self.sles;
+        let is_play = |itf: u32| sl.play_callbacks.contains_key(&itf) || sl.play_state.iter().any(|p| p.0 == itf);
+        let play_itfs: Vec<u32> = sl.object_of.iter().filter(|&(&itf, obj)| ended.contains(obj) && is_play(itf)).map(|(&itf, _)| itf).collect();
+        for itf in play_itfs {
             self.sles.play_state.push((itf, 2));
             if let Some(&(cb, ctx, mask)) = self.sles.play_callbacks.get(&itf)
                 && cb != 0

@@ -70,6 +70,12 @@ impl Tablet {
         Some((s.width, s.height, s.to_xrgb()))
     }
 
+    /// Moves the sound made since the last call (mono, `mixer::RATE`) to the end of `out`.
+    pub fn take_audio(&mut self, out: &mut Vec<i16>) {
+        self.rt.mix();
+        out.append(&mut self.rt.sles.mixer.out);
+    }
+
     /// The finger at a window position, or lifted.
     pub fn touch(&mut self, at: Option<(f32, f32)>) -> Result<(), String> {
         self.rt.touch(at).map_err(|e| format!("touch: {e}"))
