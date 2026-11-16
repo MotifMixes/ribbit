@@ -119,7 +119,8 @@ pub struct Bus {
     /// Frames finished (the start of each vertical blank).
     pub frames: u64,
     /// The CPU's data segment (I/O register 0x2f reads and writes it): the
-    /// machine copies it in before each instruction and out after.
+    /// machine copies it in before each instruction; a write goes back to
+    /// the CPU as soon as the instruction ends (`take_ds_write`).
     pub ds: u16,
     pub ds_written: bool,
     /// The video interrupt goes to the FIQ when FIQ_SEL picks the PPU (0).
@@ -889,5 +890,10 @@ impl cpu::Bus for Bus {
     #[inline]
     fn lines(&self) -> u16 {
         Bus::lines(self)
+    }
+
+    #[inline]
+    fn take_ds_write(&mut self) -> Option<u16> {
+        std::mem::take(&mut self.ds_written).then_some(self.ds)
     }
 }

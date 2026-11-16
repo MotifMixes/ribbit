@@ -24,8 +24,18 @@ use std::sync::OnceLock;
 /// (the "Click" jingle and the built-in activities' speech match its
 /// spectra at 0.768 x 16 kHz, within 0.2%).
 pub const A1600_RATE: f64 = 12288.0;
-/// The S480/S720 rate: the codec's own 8 kHz (see the doc).
-pub const S4872_RATE: f64 = 8000.0;
+/// The S480/S720 rate: the same 12288 Hz, the chip's output rate, not the
+/// codec's own 8 kHz. GUESS (no real console's S720 sound has been heard):
+/// at 8 kHz the system's 431 S720 speech sounds ran at a median 2.2
+/// syllables a second ("To play 123Click, go to the desktop and click on
+/// the 123Click icon." 8.8 s) and their voices at a median 177 Hz, and
+/// Player Profile's two lines (4.4 s and 6.9 s) didn't fit the 10.3 s
+/// after which it plays the first again, cutting the second off. At 12288
+/// Hz: 3.4 syllables a second, 272 Hz (the A1600 children's voices, at
+/// their measured rate: 337), and the two lines end 3 s before the repeat.
+/// Players heard the 8 kHz voices as "at least half as fast as they should
+/// be" (2026-11-16). See the doc.
+pub const S4872_RATE: f64 = 12288.0;
 /// The chip's level in the mix: the "Click" jingle's loudness against the
 /// system music's in the recording.
 const LEVEL: i32 = 16; // /32
