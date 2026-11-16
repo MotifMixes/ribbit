@@ -17,6 +17,7 @@ pub mod assets;
 pub mod elf;
 pub mod gles;
 pub mod imports;
+pub mod input;
 pub mod jni;
 pub mod runtime;
 pub mod sles;

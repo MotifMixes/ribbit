@@ -208,6 +208,8 @@ pub struct Runtime {
     pub(crate) host: Vec<String>,
     /// Things the import layer keeps between calls.
     pub(crate) state: crate::imports::State,
+    /// Touch and buttons sent so far (`input.rs`).
+    pub input: crate::input::Input,
 }
 
 impl Runtime {
@@ -262,6 +264,7 @@ impl Runtime {
             next_key: 1,
             host: Vec::new(),
             state: Default::default(),
+            input: Default::default(),
         };
         // Data imports (__stack_chk_guard, __sF, _ctype_, SL_IID_*): the code reads them
         // where they were bound.
