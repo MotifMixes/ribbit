@@ -11,12 +11,17 @@
 //! APK, finds and loads its native library, and reports exactly what an HLE has to stand in
 //! for (the Android NDK imports and the JNI natives the Java shell calls).
 
+pub mod android;
 pub mod apk;
+pub mod assets;
 pub mod elf;
+pub mod gles;
 pub mod imports;
 pub mod jni;
 pub mod runtime;
 pub mod sles;
+pub mod stdio;
+pub mod threads;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -16,8 +16,6 @@ pub struct State {
     pub errno_at: u32,
     /// lrand48's state.
     pub rand: u64,
-    /// Threads the game started (entry, argument), not run yet.
-    pub threads: Vec<(u32, u32)>,
 }
 
 /// Fills the slot of a data import with what the code reads there.
@@ -242,7 +240,7 @@ fn put_str(rt: &mut Runtime, buf: u32, n: Option<u32>, s: &str) -> u32 {
     bytes.len() as u32
 }
 
-fn log_line(rt: &mut Runtime, s: String) {
+pub(crate) fn log_line(rt: &mut Runtime, s: String) {
     let s = s.trim_end_matches('\n').to_string();
     if std::env::var_os("LFA_LOG").is_some() {
         eprintln!("[game] {s}");
@@ -482,7 +480,7 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
 
         // ---- time
         "time" => {
-            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
+            let t = rt.wall_clock().as_secs() as u32;
             let out = rt.arg(0);
             if out != 0 {
                 rt.mem.w32(out, t);
@@ -490,27 +488,29 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret(t)
         }
         "gettimeofday" => {
-            let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let d = rt.wall_clock();
             let tv = rt.arg(0);
             rt.mem.w32(tv, d.as_secs() as u32);
             rt.mem.w32(tv + 4, d.subsec_micros());
             rt.ret(0)
         }
         "clock_gettime" => {
+            // CLOCK_REALTIME (0) since 1970, the others since the first reading.
             let ts = rt.arg(1);
-            let d = rt.state_elapsed();
+            let d = if rt.arg(0) == 0 { rt.wall_clock() } else { rt.state_elapsed() };
             rt.mem.w32(ts, d.as_secs() as u32);
             rt.mem.w32(ts + 4, d.subsec_nanos());
             rt.ret(0)
         }
 
-        // ---- pthread (one thread)
-        "pthread_mutex_init" | "pthread_mutex_lock" | "pthread_mutex_unlock" | "pthread_mutex_destroy" | "pthread_mutex_trylock" | "pthread_mutexattr_init"
-        | "pthread_mutexattr_settype" | "pthread_mutexattr_destroy" | "pthread_cond_init" | "pthread_cond_destroy" | "pthread_cond_signal" | "pthread_cond_broadcast"
+        // ---- pthread (threads.rs has the threads, mutexes and condition variables)
+        n if crate::threads::handles(n) => return crate::threads::call(rt, n),
+        n if crate::stdio::handles(n) => return crate::stdio::call(rt, n),
+        "pthread_mutex_init" | "pthread_mutexattr_init"
+        | "pthread_mutexattr_settype" | "pthread_mutexattr_destroy" | "pthread_cond_init" | "pthread_cond_destroy"
         | "pthread_condattr_init" | "pthread_condattr_destroy" | "pthread_attr_init" | "pthread_attr_destroy" | "pthread_attr_setdetachstate" | "pthread_attr_setstacksize"
         | "pthread_attr_setschedparam" | "pthread_attr_getschedparam" | "pthread_attr_setschedpolicy" | "pthread_setschedparam" | "pthread_rwlock_init"
-        | "pthread_rwlock_rdlock" | "pthread_rwlock_wrlock" | "pthread_rwlock_unlock" | "pthread_rwlock_destroy" | "pthread_detach" | "sched_yield" => rt.ret(0),
-        "pthread_self" => rt.ret(1),
+        | "pthread_rwlock_rdlock" | "pthread_rwlock_wrlock" | "pthread_rwlock_unlock" | "pthread_rwlock_destroy" | "pthread_detach" => rt.ret(0),
         "pthread_equal" => {
             let eq = rt.arg(0) == rt.arg(1);
             rt.ret(eq as u32)
@@ -533,16 +533,6 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret(0)
         }
         "pthread_key_delete" => rt.ret(0),
-        "pthread_getspecific" => {
-            let k = rt.arg(0);
-            let v = rt.tls.get(&k).copied().unwrap_or(0);
-            rt.ret(v)
-        }
-        "pthread_setspecific" => {
-            let (k, v) = (rt.arg(0), rt.arg(1));
-            rt.tls.insert(k, v);
-            rt.ret(0)
-        }
 
         // ---- logging and stdio
         "__android_log_print" | "__android_log_vprint" => {
@@ -561,7 +551,7 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         }
         "sprintf" | "snprintf" | "vsprintf" | "vsnprintf" | "__sprintf_chk" | "__snprintf_chk" | "__vsprintf_chk" | "__vsnprintf_chk" => {
             let buf = rt.arg(0);
-            let sized = name.contains('n');
+            let sized = name.contains("snprintf");
             let chk = name.ends_with("_chk");
             // (buf, [n], [flag, size], fmt, ...)
             let mut i = 1;
@@ -580,6 +570,16 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             let s = format(rt, &f, args);
             let r = put_str(rt, buf, n, &s);
             rt.ret(r)
+        }
+        // asprintf(char** out, fmt, ...), vasprintf(out, fmt, va): a new string
+        "asprintf" | "vasprintf" => {
+            let (out, f) = (rt.arg(0), rt.arg(1));
+            let f = rt.mem.cstr(f);
+            let args = if name == "vasprintf" { Args::Va(rt.arg(2)) } else { Args::Call(2) };
+            let s = format(rt, &f, args);
+            let a = rt.alloc_str(&s);
+            rt.mem.w32(out, a);
+            rt.ret(s.len() as u32)
         }
         "printf" | "vprintf" => {
             let f = rt.arg(0);
@@ -611,47 +611,10 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             log_line(rt, s);
             rt.ret(1)
         }
-        "putchar" | "fflush" => rt.ret(0),
+        "putchar" => rt.ret(0),
 
-        // ---- OpenGL ES queries, until the renderer is connected: a GLES 1.1 context of
-        // ribbit-gles's limits
-        "glGetIntegerv" => {
-            let (pname, out) = (rt.arg(0), rt.arg(1));
-            let v = match pname {
-                // GL_MAX_TEXTURE_SIZE
-                0x0D33 => 2048,
-                // GL_MAX_TEXTURE_UNITS, GL_MAX_LIGHTS, GL_MAX_CLIP_PLANES
-                0x84E2 => 2,
-                0x0D31 => 8,
-                0x0D32 => 6,
-                // GL_MAX_MODELVIEW/PROJECTION/TEXTURE_STACK_DEPTH
-                0x0D36 | 0x0D38 | 0x0D39 => 16,
-                // GL_MAX_VIEWPORT_DIMS
-                0x0D3A => {
-                    rt.mem.w32(out + 4, 2048);
-                    2048
-                }
-                // GL_RED/GREEN/BLUE/ALPHA/DEPTH/STENCIL_BITS
-                0x0D52..=0x0D54 => 8,
-                0x0D55 => 8,
-                0x0D56 => 16,
-                0x0D57 => 8,
-                _ => 0,
-            };
-            rt.mem.w32(out, v);
-            rt.ret(0)
-        }
-        "glGetString" => {
-            let s = match rt.arg(0) {
-                0x1F00 => "Ribbit",
-                0x1F01 => "Ribbit GLES 1.1",
-                0x1F02 => "OpenGL ES-CM 1.1",
-                _ => "GL_OES_framebuffer_object GL_OES_matrix_palette GL_OES_point_sprite",
-            };
-            let a = rt.alloc_str(s);
-            rt.ret(a)
-        }
-        "glGetError" => rt.ret(0),
+        // ---- OpenGL ES 1.1 and EGL (gles.rs)
+        n if n.starts_with("gl") || n.starts_with("egl") => return crate::gles::call(rt, n),
 
         // ---- OpenSL ES, OpenMAX AL (sles.rs)
         "slCreateEngine" => crate::sles::create_engine(rt, "sl"),
@@ -793,6 +756,55 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             let n = (0..).find(|&i| rt.mem.r32(a + 4 * i) == 0).unwrap();
             rt.ret(n)
         }
+        "wcsncpy" => {
+            // Copies up to n characters and pads with zeros to n.
+            let (d, src, n) = (rt.arg(0), rt.arg(1), rt.arg(2));
+            let mut end = false;
+            for i in 0..n {
+                let c = if end { 0 } else { rt.mem.r32(src + 4 * i) };
+                end |= c == 0;
+                rt.mem.w32(d + 4 * i, c);
+            }
+            rt.ret(d)
+        }
+        "wcscat" => {
+            let (d, src) = (rt.arg(0), rt.arg(1));
+            let at = d + 4 * (0..).find(|&i| rt.mem.r32(d + 4 * i) == 0).unwrap();
+            for i in 0.. {
+                let c = rt.mem.r32(src + 4 * i);
+                rt.mem.w32(at + 4 * i, c);
+                if c == 0 {
+                    break;
+                }
+            }
+            rt.ret(d)
+        }
+        "wcschr" | "wcsrchr" => {
+            let (a, c) = (rt.arg(0), rt.arg(1));
+            let mut found = 0;
+            for i in 0.. {
+                let x = rt.mem.r32(a + 4 * i);
+                if x == c {
+                    found = a + 4 * i;
+                    if name == "wcschr" {
+                        break;
+                    }
+                }
+                if x == 0 {
+                    break;
+                }
+            }
+            rt.ret(found)
+        }
+        "wcsstr" => {
+            let (h, n) = (rt.arg(0), rt.arg(1));
+            let wide = |rt: &mut Runtime, a: u32| -> Vec<u32> { (0..).map(|i| rt.mem.r32(a + 4 * i)).take_while(|&c| c != 0).collect() };
+            let (hay, needle) = (wide(rt, h), wide(rt, n));
+            let r = if needle.is_empty() { Some(0) } else { hay.windows(needle.len()).position(|w| w == needle.as_slice()) };
+            rt.ret(r.map_or(0, |i| h + 4 * i as u32))
+        }
+        // Formatting dates as wide text: nothing written (the locale's names aren't kept).
+        "wcsftime" => rt.ret(0),
         "wmemcpy" | "wmemmove" => {
             let (d, src, n) = (rt.arg(0), rt.arg(1), rt.arg(2));
             let data = rt.mem.read(src, 4 * n as usize);
@@ -904,10 +916,10 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         }
 
         // ---- signals, scheduling, sleeping: nothing to do with one thread
-        "sigaction" | "bsd_signal" | "raise" | "kill" | "pthread_sigmask" | "sigwait" | "nanosleep" | "usleep" | "pthread_attr_setscope"
+        "sigaction" | "bsd_signal" | "raise" | "kill" | "pthread_sigmask" | "sigwait" | "pthread_attr_setscope"
         | "pthread_attr_setstackaddr" | "pthread_condattr_setpshared" | "pthread_kill" | "openlog" | "syslog" | "setvbuf" | "settimeofday" | "timer_delete"
         | "timer_settime" | "timer_gettime" | "flock" | "fsync" | "utime" | "chmod" | "chown" | "chdir" => rt.ret(0),
-        "pthread_condattr_getpshared" | "pthread_getschedparam" => {
+        "pthread_condattr_getpshared" | "pthread_getschedparam" | "sched_getparam" => {
             let out = rt.arg(1);
             rt.mem.w32(out, 0);
             rt.ret(0)
@@ -919,9 +931,6 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.mem.w32(out, 1);
             rt.ret(0)
         }
-        // One thread: nothing else can signal; a timed wait times out (ETIMEDOUT).
-        "pthread_cond_wait" => rt.ret(0),
-        "pthread_cond_timedwait" => rt.ret(110),
 
         // ---- files and sockets: none yet (ENOENT)
         "open" | "fopen" | "fdopen" | "opendir" | "socket" | "popen" | "access" | "stat" | "lstat" | "fstat" | "statfs" | "readlink" | "syscall" | "getaddrinfo"
@@ -934,20 +943,21 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             if std::env::var_os("LFA_LOG").is_some() && matches!(name, "open" | "fopen" | "opendir" | "stat" | "access") {
                 let a = rt.arg(0);
                 let p = rt.mem.cstr(a);
-                eprintln!("[file] {name} {p}: not found");
+                eprintln!("[file] {name} {p}: not found (from {:#x})", rt.cpu.r[14]);
             }
             rt.ret(if matches!(name, "fopen" | "fdopen" | "opendir" | "popen") { 0 } else { u32::MAX })
         }
 
-        // Operations on files that can't be open yet (nothing opens): end of file, errors.
-        "fclose" | "pclose" | "close" | "closedir" | "ferror" | "rewind" | "fsetpos" | "ftruncate" => rt.ret(0),
-        "feof" => rt.ret(1),
-        "fread" | "fgets" | "readdir" | "fgetpos" | "fscanf" | "funopen" => rt.ret(0),
-        "fseek" | "fseeko" | "ftell" | "ftello" | "lseek" | "read" | "getc" | "getwc" | "ungetc" | "ungetwc" | "__srget" | "ioctl" | "poll" | "select" => rt.ret(u32::MAX),
-        "fwrite" => {
-            let n = rt.arg(2);
-            rt.ret(n)
+        // File descriptors, folders and pipes that can't be open yet (none opens): end of
+        // file, errors. (FILE streams are in stdio.rs.)
+        "close" => {
+            let fd = rt.arg(0);
+            rt.assets.fds.remove(&fd);
+            rt.ret(0)
         }
+        "pclose" | "closedir" | "ftruncate" => rt.ret(0),
+        "readdir" | "fscanf" => rt.ret(0),
+        "lseek" | "read" | "getwc" | "ungetwc" | "ioctl" | "poll" | "select" => rt.ret(u32::MAX),
         "write" => {
             let (fd, buf, n) = (rt.arg(0), rt.arg(1), rt.arg(2));
             if fd == 1 || fd == 2 {
@@ -966,7 +976,101 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret(c)
         }
 
+        // ---- zlib: whole buffers (the streaming inflate isn't here yet)
+        // uncompress(dest, uLongf* destLen, src, srcLen): Z_OK, Z_BUF_ERROR or Z_DATA_ERROR
+        "uncompress" => {
+            let (dest, len_at, src, n) = (rt.arg(0), rt.arg(1), rt.arg(2), rt.arg(3));
+            let cap = rt.mem.r32(len_at) as usize;
+            let input = rt.mem.read(src, n as usize);
+            let r = match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&input, cap) {
+                Ok(out) => {
+                    rt.mem.write(dest, &out);
+                    rt.mem.w32(len_at, out.len() as u32);
+                    0
+                }
+                Err(e) if e.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput => -5i32 as u32,
+                Err(_) => -3i32 as u32,
+            };
+            rt.ret(r)
+        }
+        // crc32(crc, buf, len)
+        "crc32" => {
+            let (crc, buf, n) = (rt.arg(0), rt.arg(1), rt.arg(2));
+            let mut c = !crc;
+            if buf != 0 {
+                for b in rt.mem.read(buf, n as usize) {
+                    c ^= b as u32;
+                    for _ in 0..8 {
+                        c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+                    }
+                }
+            }
+            rt.ret(if buf == 0 { 0 } else { !c })
+        }
+
         // ---- time of day (UTC)
+        // strftime(buf, max, fmt, const struct tm*): the C locale's names, UTC
+        "strftime" => {
+            let (buf, max, f, tm) = (rt.arg(0), rt.arg(1), rt.arg(2), rt.arg(3));
+            let f = rt.mem.cstr(f);
+            let t: Vec<i32> = (0..8).map(|i| rt.mem.r32(tm + 4 * i) as i32).collect();
+            let (sec, min, hour, mday, mon, year, wday, yday) = (t[0], t[1], t[2], t[3], t[4], t[5] + 1900, t[6], t[7]);
+            const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            let day = DAYS[wday.rem_euclid(7) as usize];
+            let month = MONTHS[mon.rem_euclid(12) as usize];
+            let h12 = if hour % 12 == 0 { 12 } else { hour % 12 };
+            let mut out = String::new();
+            let mut it = f.chars();
+            while let Some(c) = it.next() {
+                if c != '%' {
+                    out.push(c);
+                    continue;
+                }
+                let s = match it.next() {
+                    Some('Y') => year.to_string(),
+                    Some('y') => format!("{:02}", year % 100),
+                    Some('m') => format!("{:02}", mon + 1),
+                    Some('d') => format!("{mday:02}"),
+                    Some('e') => format!("{mday:2}"),
+                    Some('H') => format!("{hour:02}"),
+                    Some('I') => format!("{h12:02}"),
+                    Some('M') => format!("{min:02}"),
+                    Some('S') => format!("{sec:02}"),
+                    Some('j') => format!("{:03}", yday + 1),
+                    Some('p') => if hour < 12 { "AM" } else { "PM" }.into(),
+                    Some('a') => day[..3].into(),
+                    Some('A') => day.into(),
+                    Some('b' | 'h') => month[..3].into(),
+                    Some('B') => month.into(),
+                    Some('w') => wday.to_string(),
+                    Some('D') => format!("{:02}/{mday:02}/{:02}", mon + 1, year % 100),
+                    Some('F') => format!("{year}-{:02}-{mday:02}", mon + 1),
+                    Some('T') => format!("{hour:02}:{min:02}:{sec:02}"),
+                    Some('R') => format!("{hour:02}:{min:02}"),
+                    Some('c') => format!("{} {} {mday:2} {hour:02}:{min:02}:{sec:02} {year}", &day[..3], &month[..3]),
+                    Some('x') => format!("{:02}/{mday:02}/{:02}", mon + 1, year % 100),
+                    Some('X') => format!("{hour:02}:{min:02}:{sec:02}"),
+                    Some('Z') => "UTC".into(),
+                    Some('z') => "+0000".into(),
+                    Some('n') => "
+".into(),
+                    Some('t') => "	".into(),
+                    Some('%') => "%".into(),
+                    Some(o) => format!("%{o}"),
+                    None => String::new(),
+                };
+                out.push_str(&s);
+            }
+            // 0 when it doesn't fit (with its NUL).
+            if out.len() < max as usize {
+                rt.mem.write(buf, out.as_bytes());
+                rt.mem.w8(buf + out.len() as u32, 0);
+                rt.ret(out.len() as u32)
+            } else {
+                rt.ret(0)
+            }
+        }
         "gmtime_r" | "localtime" | "localtime_r" => {
             let t = rt.arg(0);
             let secs = rt.mem.r32(t) as i32 as i64;
@@ -1005,19 +1109,12 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
         }
         "munmap" => rt.ret(0),
 
-        // ---- threads: kept, not run yet (no scheduler)
-        "pthread_create" => {
-            let (out, f, arg) = (rt.arg(0), rt.arg(2), rt.arg(3));
-            let id = 2 + rt.state.threads.len() as u32;
-            rt.state.threads.push((f, arg));
-            rt.mem.w32(out, id);
-            log_line(rt, format!("ribbit: pthread_create {f:#x}({arg:#x}) kept as thread {id}, not run"));
-            rt.ret(0)
-        }
-        "pthread_join" | "pthread_exit" => rt.ret(0),
-
         // ---- libm (soft-float ABI: doubles in r0/r1, floats in r0)
         n if math(rt, n) => {}
+
+        // ---- libandroid's asset manager
+        n if n.starts_with("AAsset") => return crate::assets::call(rt, n),
+        n if n.starts_with("ASensor") || n.starts_with("ALooper") || n.starts_with("ANativeWindow") => return crate::android::call(rt, n),
 
         _ => return Err(Stop::Import(name.to_string(), lr)),
     }
@@ -1136,8 +1233,20 @@ pub fn host_call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
 
 impl Runtime {
     /// Time since the runtime started (CLOCK_MONOTONIC).
+    /// The monotonic clock: time since the first reading, plus time skipped while every
+    /// thread waited.
     pub(crate) fn state_elapsed(&self) -> std::time::Duration {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START.get_or_init(std::time::Instant::now).elapsed()
+        START.get_or_init(start).0.elapsed() + self.threads.skew
     }
+
+    /// The real-time clock (since 1970), on the same time base.
+    pub(crate) fn wall_clock(&self) -> std::time::Duration {
+        START.get_or_init(start).1 + self.state_elapsed()
+    }
+}
+
+static START: std::sync::OnceLock<(std::time::Instant, std::time::Duration)> = std::sync::OnceLock::new();
+
+fn start() -> (std::time::Instant, std::time::Duration) {
+    (std::time::Instant::now(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default())
 }

@@ -167,6 +167,23 @@ pub struct Runtime {
     pub natives: BTreeMap<String, Native>,
     /// OpenSL ES / OpenMAX AL state (`sles.rs`).
     pub sles: crate::sles::Sles,
+    /// The APK's assets (`assets.rs`).
+    pub assets: crate::assets::Assets,
+    /// The GL context (`gles.rs`), made on the first GL call.
+    pub gles: Option<Box<crate::gles::Gles>>,
+    /// glGetString's answers, by contents.
+    pub(crate) gl_strings: BTreeMap<String, u32>,
+    /// FILEs made by funopen (`stdio.rs`), by FILE*.
+    pub(crate) streams: BTreeMap<u32, crate::stdio::Stream>,
+    /// The game's threads (`threads.rs`).
+    pub threads: crate::threads::Threads,
+    /// Calls from Rust into the game in progress (`call` nests).
+    pub(crate) depth: u32,
+    /// LFA_TRACE: where the last jumps went (and the thread), newest last; each entry's address
+    /// moves on with the instructions run after it.
+    pub trace: Option<std::collections::VecDeque<(u32, u32)>>,
+    /// LFA_TRACE: the last imports called (name, r0-r2, lr).
+    pub import_trace: std::collections::VecDeque<(String, [u32; 3], u32)>,
     /// What the game logged (`__android_log_print`, stdio).
     pub log: Vec<String>,
     /// Instructions left before `Stop::Budget`.
@@ -215,6 +232,14 @@ impl Runtime {
             jni: Default::default(),
             natives: BTreeMap::new(),
             sles: Default::default(),
+            assets: Default::default(),
+            gles: None,
+            gl_strings: BTreeMap::new(),
+            threads: Default::default(),
+            streams: BTreeMap::new(),
+            depth: 0,
+            trace: std::env::var_os("LFA_TRACE").map(|_| Default::default()),
+            import_trace: Default::default(),
             log: Vec::new(),
             budget: 2_000_000_000,
             calls: BTreeMap::new(),
@@ -291,7 +316,9 @@ impl Runtime {
         self.cpu.r[13] = sp;
         self.cpu.r[14] = RETURN;
         self.jump(addr);
+        self.depth += 1;
         let out = self.run();
+        self.depth -= 1;
         let r0 = self.cpu.r[0];
         self.cpu.r = saved.0;
         self.cpu.cpsr = saved.1;
@@ -327,6 +354,11 @@ impl Runtime {
             if pc == RETURN {
                 return Ok(());
             }
+            if pc == crate::threads::THREAD_EXIT {
+                let v = self.cpu.r[0];
+                self.thread_exit(v)?;
+                continue;
+            }
             if pc >= THUNK_BASE && !(DATA_BASE..JNI_ENV_FUNCS).contains(&pc) {
                 let lr = self.cpu.r[14];
                 let r = if pc >= HOST_FUNCS {
@@ -341,12 +373,22 @@ impl Runtime {
                     let i = ((pc - THUNK_BASE) / 8) as usize;
                     let name = self.thunks.get(i).cloned().unwrap_or_default();
                     *self.calls.entry(name.clone()).or_default() += 1;
+                    if self.trace.is_some() {
+                        if self.import_trace.len() == 100 {
+                            self.import_trace.pop_front();
+                        }
+                        self.import_trace.push_back((name.clone(), [self.cpu.r[0], self.cpu.r[1], self.cpu.r[2]], lr));
+                    }
                     crate::imports::call(self, &name)
                 };
                 if let Some(e) = self.pending.take() {
                     return Err(e);
                 }
                 r?;
+                // Another thread runs now (this one waits at the slot, or returned).
+                if std::mem::take(&mut self.threads.switched) {
+                    continue;
+                }
                 // Still at the slot: the answer forgot to return.
                 if self.cpu.r[15] == pc {
                     let _ = lr;
@@ -357,7 +399,29 @@ impl Runtime {
             if self.budget == 0 {
                 return Err(Stop::Budget(pc));
             }
+            // The games have no code outside their library.
+            if !in_library(pc) {
+                let r = self.cpu.r;
+                let bt = self.backtrace();
+                return Err(Stop::Halt(format!("jumped out of the library to {pc:#010x} (lr {:#010x}; r0-r7 {:08x?}); backtrace {bt:08x?}", r[14], &r[..8])));
+            }
             self.budget -= 1;
+            self.tick()?;
+            if std::mem::take(&mut self.threads.switched) {
+                continue;
+            }
+            if let Some(t) = self.trace.as_mut() {
+                // Jumps only: where this isn't the instruction after the last one.
+                let tid = self.threads.current_id();
+                if t.back().is_none_or(|&(last, lt)| pc.wrapping_sub(last) > 4 || lt != tid) {
+                    if t.len() == 256 {
+                        t.pop_front();
+                    }
+                    t.push_back((pc, tid));
+                } else if let Some(b) = t.back_mut() {
+                    b.0 = pc;
+                }
+            }
             self.cpu.step(&mut self.mem);
             if let Some(&(at, w)) = self.cpu.undefined_log.last() {
                 self.cpu.undefined_log.clear();
@@ -386,6 +450,48 @@ impl Runtime {
         let f = *self.exports.get("JNI_OnLoad").ok_or_else(|| Stop::Halt("no JNI_OnLoad".into()))?;
         let vm = self.jni.vm;
         self.call(f, &[vm, 0])
+    }
+}
+
+impl Runtime {
+    /// Return addresses found on the stack (words just after a BL/BLX in the library), the
+    /// innermost first: a rough backtrace for reports.
+    pub fn backtrace(&mut self) -> Vec<u32> {
+        let sp = self.cpu.r[13];
+        let mut out = Vec::new();
+        for i in 0..2048 {
+            let w = self.mem.r32(sp.wrapping_add(4 * i));
+            if !in_library(w) {
+                continue;
+            }
+            let call = if w & 1 == 0 {
+                let insn = self.mem.r32(w - 4);
+                insn & 0x0F00_0000 == 0x0B00_0000 || insn & 0xFE00_0000 == 0xFA00_0000 || insn & 0x0FFF_FFF0 == 0x012F_FF30
+            } else {
+                // Thumb: a 32-bit BL/BLX (F000 xxxx, D000/C000 suffix) or BLX register.
+                let a = w & !1;
+                let (h1, h2) = (self.mem.r16(a - 4), self.mem.r16(a - 2));
+                (h1 & 0xF800 == 0xF000 && h2 & 0xC000 == 0xC000) || h2 & 0xFF87 == 0x4780
+            };
+            if call {
+                out.push(w);
+                if out.len() == 24 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Calls a registered native as the Java shell would: `(env, this, args...)`, with `this`
+    /// an object of the native's class.
+    pub fn call_native(&mut self, name: &str, args: &[u32]) -> Result<u32, Stop> {
+        let n = self.natives.get(name).ok_or_else(|| Stop::Halt(format!("no native {name}")))?;
+        let (addr, class) = (n.addr, n.class.clone());
+        let this = self.jni.new_handle(crate::jni::Obj::Object(class));
+        let mut all = vec![self.jni.env, this];
+        all.extend_from_slice(args);
+        self.call(addr, &all)
     }
 }
 

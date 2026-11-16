@@ -226,36 +226,68 @@ All loaded with 0 unbound relocations. The import union is 401-404.
   0x1000_0000-0x3000_0000, stack below 0xE000_0000, thunks 0xF000_0000, data imports
   0xF400_0000 (1 KB each: `_ctype_`, `__sF`, `SL_IID_*`...), JNI tables 0xF800_0000/0xF900_0000,
   host functions 0xFA00_0000.
-- `imports.rs`: about 250 of the libc/libm/pthread/liblog/libdl imports, a printf formatter,
-  setjmp/longjmp, gmtime. One thread: locks succeed, `pthread_create` is recorded but not run.
-  Files don't open yet (ENOENT).
+- `imports.rs`: about 270 of the libc/libm/liblog/libdl/libz imports, a printf formatter,
+  setjmp/longjmp, gmtime, strftime, zlib's `uncompress` and `crc32`. Plain files, folders and
+  file descriptors don't open yet (ENOENT): everything the titles read so far is an asset.
+- `threads.rs`: pthreads on the one CPU, switched when a thread waits and every 200,000
+  instructions. Each keeps its registers, VFP state and pthread keys. Mutexes (all treated as
+  recursive), condition variables (timed ones too), join and sleeps really wait; a waiting
+  call stays at its import slot and runs again when woken. Threads switch only at the outer
+  call level (no call from Rust into the game in progress). When every thread waits, the
+  clocks skip to the next deadline instead of sleeping.
+- `assets.rs`: libandroid's AAssetManager over the APK's `assets/`. The titles' own file layer
+  tries the path as a file, then as an asset (`/sdcard/AP_DINO/x` -> `AP_DINO/x`).
+  `AAsset_openFileDescriptor` hands out a descriptor (100 and up) holding the asset's bytes,
+  for OpenSL ES players made from a file.
+- `stdio.rs`: FILEs made by `funopen` (the file layer wraps each asset in one with its own
+  read/seek/close functions, which are called back), with fread, fseek, fgets, ungetc...
+- `gles.rs`: GLES 1.1 and EGL through ribbit-gles, in software. A 1024x600 window surface and
+  context are current before the first GL call, as GLSurfaceView makes them.
+- `android.rs`: sensors (an accelerometer that sends no events), the looper, native windows.
 - `jni.rs`: a JavaVM and JNIEnv (all 233 slots of the JNI 1.6 table). Objects are handles,
-  method calls are logged and answer 0 or an empty object, and `RegisterNatives` records
-  the natives.
+  method calls are logged and answer 0 or an empty object (`File.getAbsolutePath` answers
+  `/sdcard`, `LFProfileManager.getSystemLocale` "en-us" (GUESS)), and `RegisterNatives`
+  records the natives.
 - `sles.rs`: OpenSL ES and OpenMAX AL objects. Every interface is a table of host functions;
   buffer-queue callbacks and enqueued buffers are kept for sound later.
 - `examples/lfa_run.rs`:
   `cargo run --release -p ribbit-lfandroid --example lfa_run -- [--lib <system/lib>] <apk>`
-  (LFA_LOG=1 prints the game's log and missing files).
+  runs the constructors, `JNI_OnLoad`, `naInitMainActivity(activity, "/data/data/<package>")`,
+  the other `naInit*Adapter`s, `naLFGLSurfaceViewSurfaceCreated/Changed`, `naResume`, then
+  LFA_FRAMES (60) `naDrawFrame`s, and writes the last frame to LFA_PPM (`lfa_frame.ppm`).
+  LFA_LOG=1 prints the game's log and missing files and assets; LFA_CALLS=1 the imports and
+  Java methods called; LFA_TRACE=1 keeps the last jumps and imports for a stop and logs thread
+  switches; LFA_STOP=<text> stops at the first missing asset with that text, with a backtrace.
 
 CPU work this needed in `ribbit-arm` (on only with `Arm::v7`): Thumb-2 (`thumb2.rs`: the 32-bit
 encodings, IT blocks, CBZ/CBNZ, the v6/v7 16-bit additions; the libraries' static libstdc++ is
 Thumb-2), and NEON VADD/VSUB integer. GCC uses NEON for 64-bit integer arithmetic; ARM code
 has only those three NEON words.
 
-Status (2026-11-16): all six titles tried (Academy NUTL, AP_DINO, AP_SM2, AP_SM2_NoSO, PPAD2;
-Epic AP_DINO, AP_SM2) run all their constructors (216-318) and `JNI_OnLoad`, which returns JNI
-1.6 and registers 47-48 natives.
+ribbit-gles got GL_OES_framebuffer_object for this (the titles draw the Brio screen into a
+texture through a framebuffer, then scale it to the window) and glGetTexEnv.
+
+Status (2026-11-16): all six titles run their constructors (216-318) and `JNI_OnLoad`
+(JNI 1.6, 47-48 natives). After 600 `naDrawFrame`s (about 5 s each title, headless):
+- Epic T-Rex Rush (AP_DINO): its main menu (PLAY, BADGES), drawn right.
+- Academy NUTL (built-in clock, with `--lib`): its clock screen, drawn right.
+- Epic AP_SM2 and Academy AP_SM2_NoSO (Big City Hijinks): the title picture, but only in the
+  left 57% of the screen. The log says `configureViewFrame(): emulated -1x-1 -> 480x272,
+  host -1x-1`: the host size isn't given yet (it should come from the Java side).
+- Academy T-Rex Rush (AND4 build): black after 600 frames.
+- Academy PPAD2 (with `--lib`): jumps to address 0 in the first frame.
+
+Bugs found on the way: the stand-in `sprintf` took itself for `snprintf` (its name has an
+"n"), so the format came from the wrong argument; the scene loader read nothing because
+`funopen` wasn't there.
 
 Next steps, in order:
-1. `naInitMainActivity` and the adapter inits, with an AAssetManager over the APK's assets and
-   `/sdcard/LF/Bulk` (the log says "Android AssetManager is not yet initialized" for
-   `/LF/Bulk/settings.cfg`).
-2. Threads: the two the audio player starts (`pthread_create`) need a scheduler. The Didj HLE's
-   task model is the one to reuse.
-3. `naLFGLSurfaceViewSurfaceCreated/Changed` and `naDrawFrame` into ribbit-gles, with a headless
-   frame dump.
-4. Sound from the OpenSL ES buffer queue.
+1. The host view size (`configureViewFrame` -1x-1): find where the library takes it from.
+2. Academy T-Rex Rush's black screen, PPAD2's jump to 0.
+3. Touch and buttons (`naTouchDown/Move/Up`, `naPress*`), then the GUI: a console in the app.
+4. Sound from the OpenSL ES players (ogg/wav from the asset descriptors) and buffer queues.
+5. Saves: `/Local/0/<product id>/MySave7.sav` and `/sdcard/LF/Bulk/settings.cfg` on a host
+   folder (plain files and descriptors).
 
 ## Questions for the user
 

@@ -80,11 +80,28 @@ pub fn vm_call(rt: &mut Runtime, i: usize) -> Result<(), Stop> {
     Ok(())
 }
 
+/// The answers the Java shell's methods give that matter, by class (its last part) and name.
+fn known_string(class: &str, name: &str) -> Option<&'static str> {
+    let class = class.rsplit('/').next().unwrap_or(class);
+    Some(match (class, name) {
+        // The external storage folder (Environment.getExternalStorageDirectory()).
+        ("File", "getAbsolutePath") => "/sdcard",
+        // GUESS: the form the LeapFrog shell gives; the library's own default is "en-us".
+        ("LFProfileManager", "getSystemLocale") => "en-us",
+        _ => return None,
+    })
+}
+
 /// What a method of this signature returns, as an answer: 0, or a new empty object.
 fn answer_for(rt: &mut Runtime, sig: &str) -> u32 {
+    answer_for_method(rt, "", "", sig)
+}
+
+fn answer_for_method(rt: &mut Runtime, class: &str, name: &str, sig: &str) -> u32 {
     let ret = sig.rsplit(')').next().unwrap_or("V");
     if ret == "Ljava/lang/String;" {
-        rt.jni.new_handle(Obj::Str(String::new()))
+        let s = known_string(class, name).unwrap_or_default().to_string();
+        rt.jni.new_handle(Obj::Str(s))
     } else if let Some(c) = ret.strip_prefix('L').and_then(|r| r.strip_suffix(';')) {
         rt.jni.new_handle(Obj::Object(c.to_string()))
     } else {
@@ -168,12 +185,12 @@ pub fn env_call(rt: &mut Runtime, i: usize) -> Result<(), Stop> {
         // Call<T>Method/V/A, CallNonvirtual<T>Method/V/A, CallStatic<T>Method/V/A
         34..=93 | 114..=143 => {
             let mid = if (64..=93).contains(&i) { rt.arg(3) } else { rt.arg(2) };
-            let (desc, sig) = match rt.jni.get(mid) {
-                Some(Obj::Method { class, name, sig }) => (format!("{class}.{name}{sig}"), sig.clone()),
-                _ => (format!("method {mid:#x}"), "()V".into()),
+            let (class, name, sig) = match rt.jni.get(mid) {
+                Some(Obj::Method { class, name, sig }) => (class.clone(), name.clone(), sig.clone()),
+                _ => (String::new(), format!("method {mid:#x}"), "()V".into()),
             };
-            rt.log.push(format!("JNI call {desc}"));
-            let v = answer_for(rt, &sig);
+            rt.log.push(format!("JNI call {class}.{name}{sig}"));
+            let v = answer_for_method(rt, &class, &name, &sig);
             // Long and Double return in r0/r1.
             rt.cpu.r[1] = 0;
             rt.ret(v)

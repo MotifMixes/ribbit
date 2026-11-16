@@ -3619,6 +3619,7 @@ version = "1.9.3"
 dependencies = [
  "miniz_oxide 0.8.9",
  "ribbit-arm",
+ "ribbit-gles",
 ]
 
 [[package]]

@@ -177,6 +177,12 @@ pub mod gl {
     pub const VIEWPORT: u32 = 0x0BA2;
     pub const MATRIX_MODE: u32 = 0x0BA0;
     pub const TEXTURE_BINDING_2D: u32 = 0x8069;
+    pub const FRAMEBUFFER_OES: u32 = 0x8D40;
+    pub const FRAMEBUFFER_BINDING_OES: u32 = 0x8CA6;
+    pub const RENDERBUFFER_BINDING_OES: u32 = 0x8CA7;
+    pub const COLOR_ATTACHMENT0_OES: u32 = 0x8CE0;
+    pub const FRAMEBUFFER_COMPLETE_OES: u32 = 0x8CD5;
+    pub const FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT_OES: u32 = 0x8CD7;
     pub const RED_BITS: u32 = 0x0D52;
     pub const GREEN_BITS: u32 = 0x0D53;
     pub const BLUE_BITS: u32 = 0x0D54;
@@ -326,6 +332,23 @@ pub struct Gl {
     pub unsupported: std::collections::BTreeSet<String>,
     /// Draw calls since the last `take_draws` (diagnostics).
     pub draws: u64,
+    /// GL_OES_framebuffer_object: framebuffers and renderbuffers by name, the bound ones, and
+    /// the window's surface while a framebuffer is drawn into instead.
+    framebuffers: std::collections::HashMap<u32, Framebuffer>,
+    renderbuffers: std::collections::HashMap<u32, (u32, u32)>,
+    bound_framebuffer: u32,
+    bound_renderbuffer: u32,
+    window: Option<Surface>,
+}
+
+/// A framebuffer object. Its colour attachment (a texture, or a renderbuffer of a size) is
+/// drawn as a surface of its own; a texture gets the pixels when the framebuffer is left.
+/// Depth attachments aren't kept apart: the surface's own depth buffer stands for them.
+#[derive(Default)]
+struct Framebuffer {
+    texture: u32,
+    renderbuffer: u32,
+    surface: Option<Surface>,
 }
 
 impl Gl {
@@ -385,14 +408,142 @@ impl Gl {
             client_active_texture: gl::TEXTURE0,
             unsupported: Default::default(),
             draws: 0,
+            framebuffers: Default::default(),
+            renderbuffers: Default::default(),
+            bound_framebuffer: 0,
+            bound_renderbuffer: 0,
+            window: None,
         }
     }
 
     /// Gives the surface a new size (EGL's window changed); the contents go.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if (self.surface.width, self.surface.height) != (width, height) {
-            self.surface = Surface::new(width, height);
+        let window = self.window.as_mut().unwrap_or(&mut self.surface);
+        if (window.width, window.height) != (width, height) {
+            *window = Surface::new(width, height);
         }
+    }
+
+    // ---- framebuffer objects (GL_OES_framebuffer_object) ------------------
+
+    pub fn bind_framebuffer(&mut self, target: u32, name: u32) {
+        if target != gl::FRAMEBUFFER_OES {
+            return self.set_error(gl::INVALID_ENUM);
+        }
+        self.leave_framebuffer();
+        if name != 0 {
+            self.framebuffers.entry(name).or_default();
+            self.enter_framebuffer(name);
+        }
+    }
+
+    /// Back to the window's surface: the drawn pixels go to the attached texture.
+    fn leave_framebuffer(&mut self) {
+        let name = std::mem::take(&mut self.bound_framebuffer);
+        let Some(window) = self.window.take() else { return };
+        let drawn = std::mem::replace(&mut self.surface, window);
+        let Some(fb) = self.framebuffers.get_mut(&name) else { return };
+        if let Some(t) = self.textures.get_mut(&fb.texture) {
+            if (t.width, t.height) == (drawn.width, drawn.height) {
+                t.pixels.clone_from(&drawn.color);
+            }
+        }
+        fb.surface = Some(drawn);
+    }
+
+    /// Draws into framebuffer `name` from now on, its texture's pixels to start with.
+    fn enter_framebuffer(&mut self, name: u32) {
+        let Some(fb) = self.framebuffers.get_mut(&name) else { return };
+        let texture = self.textures.get(&fb.texture);
+        let size = match (texture, self.renderbuffers.get(&fb.renderbuffer)) {
+            (Some(t), _) => (t.width, t.height),
+            (None, Some(&size)) => size,
+            (None, None) => (1, 1),
+        };
+        let size = (size.0.max(1), size.1.max(1));
+        let mut s = fb.surface.take().filter(|s| (s.width, s.height) == size).unwrap_or_else(|| Surface::new(size.0, size.1));
+        if let Some(t) = texture {
+            if t.pixels.len() == s.color.len() {
+                s.color.clone_from(&t.pixels);
+            }
+        }
+        self.window = Some(std::mem::replace(&mut self.surface, s));
+        self.bound_framebuffer = name;
+    }
+
+    /// Attaches a texture (or with `renderbuffer`, a renderbuffer) to the bound framebuffer.
+    pub fn framebuffer_attach(&mut self, attachment: u32, name: u32, renderbuffer: bool) {
+        let bound = self.bound_framebuffer;
+        if bound == 0 {
+            return self.set_error(gl::INVALID_OPERATION);
+        }
+        if attachment != gl::COLOR_ATTACHMENT0_OES {
+            return;
+        }
+        self.leave_framebuffer();
+        if let Some(fb) = self.framebuffers.get_mut(&bound) {
+            (fb.texture, fb.renderbuffer) = if renderbuffer { (0, name) } else { (name, 0) };
+        }
+        self.enter_framebuffer(bound);
+    }
+
+    pub fn check_framebuffer_status(&self) -> u32 {
+        match self.framebuffers.get(&self.bound_framebuffer) {
+            None => gl::FRAMEBUFFER_COMPLETE_OES,
+            Some(fb) if self.textures.contains_key(&fb.texture) || self.renderbuffers.contains_key(&fb.renderbuffer) => gl::FRAMEBUFFER_COMPLETE_OES,
+            Some(_) => gl::FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT_OES,
+        }
+    }
+
+    pub fn delete_framebuffers(&mut self, names: &[u32]) {
+        for n in names {
+            if *n != 0 && self.bound_framebuffer == *n {
+                self.leave_framebuffer();
+            }
+            self.framebuffers.remove(n);
+        }
+    }
+
+    pub fn is_framebuffer(&self, name: u32) -> bool {
+        self.framebuffers.contains_key(&name)
+    }
+
+    pub fn bind_renderbuffer(&mut self, name: u32) {
+        self.bound_renderbuffer = name;
+        if name != 0 {
+            self.renderbuffers.entry(name).or_insert((0, 0));
+        }
+    }
+
+    pub fn renderbuffer_storage(&mut self, width: u32, height: u32) {
+        let name = self.bound_renderbuffer;
+        if name == 0 {
+            return self.set_error(gl::INVALID_OPERATION);
+        }
+        self.renderbuffers.insert(name, (width.min(4096), height.min(4096)));
+        // A framebuffer drawing into it now has the new size.
+        let bound = self.bound_framebuffer;
+        if self.framebuffers.get(&bound).is_some_and(|fb| fb.renderbuffer == name) {
+            self.leave_framebuffer();
+            self.enter_framebuffer(bound);
+        }
+    }
+
+    pub fn renderbuffer_size(&self) -> (u32, u32) {
+        self.renderbuffers.get(&self.bound_renderbuffer).copied().unwrap_or((0, 0))
+    }
+
+    pub fn delete_renderbuffers(&mut self, names: &[u32]) {
+        for n in names {
+            self.renderbuffers.remove(n);
+            if self.bound_renderbuffer == *n {
+                self.bound_renderbuffer = 0;
+            }
+        }
+    }
+
+    pub fn is_renderbuffer(&self, name: u32) -> bool {
+        self.renderbuffers.contains_key(&name)
     }
 
     fn set_error(&mut self, e: u32) {
@@ -571,6 +722,24 @@ impl Gl {
             }
             gl::TEXTURE_ENV_COLOR if params.len() >= 4 => self.raster.tex_env_color = [params[0], params[1], params[2], params[3]],
             _ => self.note(&format!("glTexEnv({pname:#x})")),
+        }
+    }
+
+    /// glGetTexEnv: the texture environment's value(s) for `pname`. Combiner state isn't
+    /// kept: its parameters read as their initial values (MODULATE, scale 1).
+    pub fn tex_env_get(&mut self, target: u32, pname: u32) -> Vec<f32> {
+        if target != gl::TEXTURE_ENV {
+            self.set_error(gl::INVALID_ENUM);
+            return vec![0.];
+        }
+        match pname {
+            gl::TEXTURE_ENV_MODE => vec![self.raster.tex_env as f32],
+            gl::TEXTURE_ENV_COLOR => self.raster.tex_env_color.to_vec(),
+            // GL_COMBINE_RGB, GL_COMBINE_ALPHA
+            0x8571 | 0x8572 => vec![gl::MODULATE as f32],
+            // GL_RGB_SCALE, GL_ALPHA_SCALE
+            0x8573 | 0x0D1C => vec![1.],
+            _ => vec![0.],
         }
     }
 
@@ -963,6 +1132,8 @@ impl Gl {
             0x0C10 /* SCISSOR_BOX */ => self.scissor_box.to_vec(),
             gl::MATRIX_MODE => vec![self.matrix_mode as i32],
             gl::TEXTURE_BINDING_2D => vec![self.bound_texture as i32],
+            gl::FRAMEBUFFER_BINDING_OES => vec![self.bound_framebuffer as i32],
+            gl::RENDERBUFFER_BINDING_OES => vec![self.bound_renderbuffer as i32],
             gl::ARRAY_BUFFER_BINDING => vec![self.array_buffer as i32],
             gl::ELEMENT_ARRAY_BUFFER_BINDING => vec![self.element_buffer as i32],
             gl::RED_BITS | gl::GREEN_BITS | gl::BLUE_BITS | gl::ALPHA_BITS => vec![8],
