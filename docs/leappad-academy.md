@@ -312,7 +312,11 @@ Status (2026-11-16): all six titles run their constructors (216-318) and `JNI_On
   about 160, the Epic build about 150).
 - Academy NUTL 0x00280012 (calculator): its screen, drawn right.
 - Academy PPAD2 (with `--lib`, and a storage folder): its room with the pet picker (eight
-  pets, a tick). The lower half of the room is black at frame 600 (not looked into yet).
+  pets, a tick), the whole room drawn (2026-11-16: its sprites are zlib streams it inflates in
+  one call; miniz_oxide's `inflate` stopped after emptying its 32 KB window, so each sprite
+  past 32 KB was cut short, "bytes remaining after sprite decompress", and the lower half of
+  the room was black. `inflate` now goes on as zlib does: until the input runs out, the output
+  is full or the stream ends).
   Without a storage folder it quits in the first frames: it can't make its save file (below).
 
 Academy T-Rex Rush, 2026-11-16: not a CPU or GL fault. It decodes its images on a worker
@@ -399,10 +403,13 @@ Next steps, in order:
    `remove`/`rename`, `opendir`/`readdir` ("." and ".." first). Only `sdcard`, `Local` and
    `data` take writes (EROFS elsewhere: PPAD2 writes its touchscreen rate to
    `/error_no_tssample_rate_in_hz` when `/tmp/ts_driver` isn't there, then reads it back with
-   `fscanf`, which still reads nothing). Checked: PPAD2 starts (above); Epic T-Rex Rush writes
+   `fscanf`). Checked: PPAD2 starts (above); Epic T-Rex Rush writes
    `/Local/0/0x0020001D/MySave7.sav` (896 bytes) after PLAY, and a second start reads it and goes
    on from the next part of the intro; without a folder its pictures are the same as before.
-   Left: `fscanf` on files, `statfs` (free space), what the real `/tmp/ts_driver` holds.
+   `fscanf`/`vfscanf`/`sscanf`/`vsscanf` (2026-11-16, `scan` in `imports.rs`): white space,
+   literals, `*`, widths, lengths, d i u o x p, f e g a, s c `[...]`, n; EOF when the input
+   ends before the first conversion. Left: `statfs` (free space), what the real
+   `/tmp/ts_driver` holds.
 4. Speed: this CPU runs about 15-20 million instructions a second here, so a frame with
    drawing takes 30-60 ms on the host.
 

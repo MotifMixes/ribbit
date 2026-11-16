@@ -167,7 +167,16 @@ impl Runtime {
         Ok(if r == EOF { EOF } else { r - back })
     }
 
-    fn stream_getc(&mut self, fp: u32) -> Result<u32, Stop> {
+    /// Puts a byte back, as `ungetc` does.
+    pub(crate) fn stream_ungetc(&mut self, fp: u32, c: u8) {
+        if let Some(s) = self.streams.get_mut(&fp) {
+            s.unget.push(c);
+            s.eof = false;
+        }
+        self.set_flags(fp);
+    }
+
+    pub(crate) fn stream_getc(&mut self, fp: u32) -> Result<u32, Stop> {
         let b = self.malloc(4);
         let n = self.stream_read(fp, b, 1)?;
         let c = self.mem.r8(b);

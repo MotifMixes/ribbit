@@ -269,6 +269,275 @@ pub(crate) fn log_line(rt: &mut Runtime, s: String) {
 const ANDROID_PRIO: [&str; 8] = ["?", "V", "V", "D", "I", "W", "E", "F"];
 
 /// Answers import `name` (the thunk was reached).
+/// Where scanf reads from: a FILE, or a string in guest memory (the address moves on).
+enum ScanSrc {
+    Stream(u32),
+    Str(u32),
+}
+
+struct Scanner {
+    src: ScanSrc,
+    /// Bytes taken so far (`%n`).
+    taken: u32,
+}
+
+impl Scanner {
+    fn getc(&mut self, rt: &mut Runtime) -> Result<Option<u8>, Stop> {
+        let c = match &mut self.src {
+            ScanSrc::Stream(fp) => {
+                let c = rt.stream_getc(*fp)?;
+                (c != u32::MAX).then_some(c as u8)
+            }
+            ScanSrc::Str(p) => {
+                let c = rt.mem.r8(*p);
+                if c != 0 {
+                    *p += 1;
+                }
+                (c != 0).then_some(c)
+            }
+        };
+        if c.is_some() {
+            self.taken += 1;
+        }
+        Ok(c)
+    }
+    fn ungetc(&mut self, rt: &mut Runtime, c: u8) {
+        self.taken -= 1;
+        match &mut self.src {
+            ScanSrc::Stream(fp) => rt.stream_ungetc(*fp, c),
+            ScanSrc::Str(p) => *p -= 1,
+        }
+    }
+    /// Skips white space; false at the end of the input.
+    fn skip_space(&mut self, rt: &mut Runtime) -> Result<bool, Stop> {
+        loop {
+            match self.getc(rt)? {
+                None => return Ok(false),
+                Some(c) if c.is_ascii_whitespace() => {}
+                Some(c) => {
+                    self.ungetc(rt, c);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    /// Takes bytes while `ok(the bytes so far, the next)` holds, at most `width`.
+    fn take(&mut self, rt: &mut Runtime, width: usize, ok: impl Fn(&[u8], u8) -> bool) -> Result<Vec<u8>, Stop> {
+        let mut v = Vec::new();
+        while v.len() < width {
+            match self.getc(rt)? {
+                None => break,
+                Some(c) if ok(&v, c) => v.push(c),
+                Some(c) => {
+                    self.ungetc(rt, c);
+                    break;
+                }
+            }
+        }
+        Ok(v)
+    }
+}
+
+/// Whether `c` is in a scanf `[...]` set (without its `^`): `]` first is a member, a-b a range.
+fn in_scan_set(set: &[u8], c: u8) -> bool {
+    let mut k = 0;
+    while k < set.len() {
+        if k + 2 < set.len() && set[k + 1] == b'-' {
+            if (set[k]..=set[k + 2]).contains(&c) {
+                return true;
+            }
+            k += 3;
+        } else {
+            if set[k] == c {
+                return true;
+            }
+            k += 1;
+        }
+    }
+    false
+}
+
+/// C's scanf: white space, literals, `*`, widths, the hh/h/l/ll/L/j/z/t lengths, and
+/// d i u o x X p f e g E G a s c [ n %. Returns the count assigned, or EOF when the input ends
+/// before the first conversion.
+fn scan(rt: &mut Runtime, src: ScanSrc, fmt: &[u8], mut args: Args) -> Result<u32, Stop> {
+    let mut sc = Scanner { src, taken: 0 };
+    let mut assigned = 0u32;
+    let mut converted = false;
+    let ended = |converted: bool, assigned: u32| if converted { assigned } else { u32::MAX };
+    let mut i = 0;
+    while i < fmt.len() {
+        let f = fmt[i];
+        i += 1;
+        if f.is_ascii_whitespace() {
+            sc.skip_space(rt)?;
+            continue;
+        }
+        if f != b'%' || fmt.get(i) == Some(&b'%') {
+            if f == b'%' {
+                i += 1;
+                sc.skip_space(rt)?;
+            }
+            match sc.getc(rt)? {
+                Some(c) if c == f => continue,
+                Some(c) => {
+                    sc.ungetc(rt, c);
+                    break;
+                }
+                None => return Ok(ended(converted, assigned)),
+            }
+        }
+        let skip = fmt.get(i) == Some(&b'*');
+        if skip {
+            i += 1;
+        }
+        let mut width = 0usize;
+        while let Some(d) = fmt.get(i).filter(|d| d.is_ascii_digit()) {
+            width = width * 10 + (d - b'0') as usize;
+            i += 1;
+        }
+        let mut len = String::new();
+        while let Some(&l) = fmt.get(i).filter(|l| b"hlLjztq".contains(l)) {
+            len.push(l as char);
+            i += 1;
+        }
+        let Some(&conv) = fmt.get(i) else { break };
+        i += 1;
+        if conv == b'n' {
+            if !skip {
+                let p = args.u32(rt);
+                rt.mem.w32(p, sc.taken);
+            }
+            continue;
+        }
+        if conv != b'c' && conv != b'[' && !sc.skip_space(rt)? {
+            return Ok(ended(converted, assigned));
+        }
+        let width = match width {
+            0 if conv == b'c' => 1,
+            0 => usize::MAX,
+            w => w,
+        };
+        match conv {
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' | b'p' => {
+                let base: u32 = match conv {
+                    b'o' => 8,
+                    b'x' | b'X' | b'p' => 16,
+                    b'i' => 0,
+                    _ => 10,
+                };
+                // a sign, then 0x (base 16 or 0), then digits; base 0 goes by the prefix
+                let t = sc.take(rt, width, |v, c| {
+                    let d = &v[usize::from(matches!(v.first(), Some(b'-' | b'+')))..];
+                    let b = match base {
+                        0 if d.len() >= 2 && (d[1] | 0x20) == b'x' => 16,
+                        0 if d.first() == Some(&b'0') => 8,
+                        0 => 10,
+                        b => b,
+                    };
+                    (v.is_empty() && (c == b'-' || c == b'+'))
+                        || ((base == 0 || base == 16) && d == b"0" && (c | 0x20) == b'x')
+                        || (c as char).is_digit(b)
+                })?;
+                let s = usize::from(matches!(t.first(), Some(b'-' | b'+')));
+                let mut d = &t[s..];
+                let mut b = if base == 0 { 10 } else { base };
+                if (base == 0 || base == 16) && d.len() >= 2 && (d[1] | 0x20) == b'x' {
+                    // "0x" with no digit after it: the 0 alone
+                    d = if d.len() == 2 { &d[..1] } else { &d[2..] };
+                    b = 16;
+                } else if base == 0 && d.first() == Some(&b'0') {
+                    b = 8;
+                }
+                if d.is_empty() {
+                    break;
+                }
+                let mut v: u64 = 0;
+                for &c in d {
+                    v = v.wrapping_mul(b as u64).wrapping_add((c as char).to_digit(b).unwrap_or(0) as u64);
+                }
+                if t.first() == Some(&b'-') {
+                    v = v.wrapping_neg();
+                }
+                if !skip {
+                    let p = args.u32(rt);
+                    match len.as_str() {
+                        "hh" => rt.mem.w8(p, v as u8),
+                        "h" => rt.mem.w16(p, v as u16),
+                        "ll" | "q" | "L" | "j" => {
+                            rt.mem.w32(p, v as u32);
+                            rt.mem.w32(p + 4, (v >> 32) as u32);
+                        }
+                        _ => rt.mem.w32(p, v as u32),
+                    }
+                }
+            }
+            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A' => {
+                // a sign, digits with one '.', an exponent with its own sign
+                let is_e = |x: &u8| *x | 0x20 == b'e';
+                let t = sc.take(rt, width, |v, c| match c {
+                    b'+' | b'-' => v.is_empty() || v.last().is_some_and(is_e),
+                    b'.' => !v.contains(&b'.') && !v.iter().any(is_e),
+                    b'e' | b'E' => v.iter().any(u8::is_ascii_digit) && !v.iter().any(is_e),
+                    _ => c.is_ascii_digit(),
+                })?;
+                let s = String::from_utf8_lossy(&t);
+                let Ok(v) = s.trim_end_matches(['e', 'E', '+', '-']).parse::<f64>() else { break };
+                if !skip {
+                    let p = args.u32(rt);
+                    if len.is_empty() {
+                        rt.mem.w32(p, (v as f32).to_bits());
+                    } else {
+                        rt.mem.w32(p, v.to_bits() as u32);
+                        rt.mem.w32(p + 4, (v.to_bits() >> 32) as u32);
+                    }
+                }
+            }
+            b's' | b'c' | b'[' => {
+                let t = match conv {
+                    b's' => sc.take(rt, width, |_, c| !c.is_ascii_whitespace())?,
+                    b'c' => sc.take(rt, width, |_, _| true)?,
+                    _ => {
+                        let neg = fmt.get(i) == Some(&b'^');
+                        if neg {
+                            i += 1;
+                        }
+                        let start = i;
+                        while i < fmt.len() && (fmt[i] != b']' || i == start) {
+                            i += 1;
+                        }
+                        let set = fmt[start..i.min(fmt.len())].to_vec();
+                        i += 1;
+                        sc.take(rt, width, |_, c| in_scan_set(&set, c) != neg)?
+                    }
+                };
+                if t.is_empty() || (conv == b'c' && t.len() < width) {
+                    if t.is_empty() && !converted {
+                        match sc.getc(rt)? {
+                            None => return Ok(u32::MAX),
+                            Some(c) => sc.ungetc(rt, c),
+                        }
+                    }
+                    break;
+                }
+                if !skip {
+                    let p = args.u32(rt);
+                    rt.mem.write(p, &t);
+                    if conv != b'c' {
+                        rt.mem.w8(p + t.len() as u32, 0);
+                    }
+                }
+            }
+            _ => break,
+        }
+        converted = true;
+        if !skip {
+            assigned += 1;
+        }
+    }
+    Ok(assigned)
+}
+
 pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
     let lr = rt.cpu.r[14];
     match name {
@@ -962,7 +1231,14 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             rt.ret(if name == "popen" { 0 } else { u32::MAX })
         }
         "pclose" => rt.ret(0),
-        "fscanf" => rt.ret(0),
+        "fscanf" | "vfscanf" | "sscanf" | "vsscanf" => {
+            let src = if name.contains("ss") { ScanSrc::Str(rt.arg(0)) } else { ScanSrc::Stream(rt.arg(0)) };
+            let f = rt.arg(1);
+            let f = rt.mem.cstr(f);
+            let args = if name.starts_with('v') { Args::Va(rt.arg(2)) } else { Args::Call(2) };
+            let n = scan(rt, src, f.as_bytes(), args)?;
+            rt.ret(n)
+        }
         "getwc" | "ungetwc" | "ioctl" | "poll" | "select" => rt.ret(u32::MAX),
         "writev" => {
             let (iov, cnt) = (rt.arg(1), rt.arg(2));
@@ -1001,9 +1277,25 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
                 rt.ret(-2i32 as u32);
                 return Ok(());
             };
-            let r = miniz_oxide::inflate::stream::inflate(state, &input, &mut output, flush);
+            // miniz returns after emptying its 32 KB window; zlib goes on until the input runs
+            // out, the output is full or the stream ends (PPAD2 inflates a sprite in one call).
+            let (mut used, mut made) = (0, 0);
+            let mut r = miniz_oxide::inflate::stream::inflate(state, &input, &mut output, flush);
+            loop {
+                used += r.bytes_consumed;
+                made += r.bytes_written;
+                let progress = r.bytes_consumed + r.bytes_written > 0;
+                if r.status != Ok(miniz_oxide::MZStatus::Ok) || !progress || made == output.len() {
+                    break;
+                }
+                let more = miniz_oxide::inflate::stream::inflate(state, &input[used..], &mut output[made..], flush);
+                if more.status == Err(miniz_oxide::MZError::Buf) {
+                    break;
+                }
+                r = more;
+            }
             let adler = state.decompressor().adler32();
-            let (used, made) = (r.bytes_consumed as u32, r.bytes_written as u32);
+            let (used, made) = (used as u32, made as u32);
             rt.mem.write(next_out, &output[..made as usize]);
             rt.mem.w32(z, next_in + used);
             rt.mem.w32(z + 4, avail_in - used);
@@ -1328,4 +1620,60 @@ static START: std::sync::OnceLock<(std::time::Instant, std::time::Duration)> = s
 
 fn start() -> (std::time::Instant, std::time::Duration) {
     (std::time::Instant::now(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime() -> Runtime {
+        Runtime::new(&crate::elf::Loaded {
+            base: 0x1000,
+            image: Vec::new(),
+            needed: Vec::new(),
+            soname: None,
+            symbols: Vec::new(),
+            imports: Default::default(),
+            exports: Default::default(),
+            init: Vec::new(),
+            relocs: Default::default(),
+            arm_attributes: None,
+        })
+    }
+
+    /// sscanf(input, fmt) into `slots` 8-byte outputs; the count and each slot's first word.
+    fn sscanf(input: &str, fmt: &str, slots: u32) -> (u32, Vec<u32>, Vec<u8>) {
+        let mut rt = runtime();
+        let s = rt.alloc_str(input);
+        let out = rt.malloc(64 * slots);
+        let va = rt.malloc(4 * slots);
+        for k in 0..slots {
+            rt.mem.write(out + 64 * k, &[0xAA; 64]);
+            rt.mem.w32(va + 4 * k, out + 64 * k);
+        }
+        let n = scan(&mut rt, ScanSrc::Str(s), fmt.as_bytes(), Args::Va(va)).unwrap();
+        let words = (0..slots).map(|k| rt.mem.r32(out + 64 * k)).collect();
+        let text = (0..8).map(|k| rt.mem.r8(out + k)).collect();
+        (n, words, text)
+    }
+
+    #[test]
+    fn scanf_numbers_and_text() {
+        assert_eq!(sscanf("  1000\n", "%d", 1).0, 1);
+        assert_eq!(sscanf("  1000\n", "%d", 1).1, [1000]);
+        assert_eq!(sscanf("-12 0x1f 017", "%d %i %i", 3).1, [(-12i32) as u32, 31, 15]);
+        assert_eq!(sscanf("rate=250Hz", "rate=%u", 1).1, [250]);
+        assert_eq!(sscanf("ff", "%x", 1).1, [255]);
+        assert_eq!(sscanf("2.5", "%f", 1).1, [2.5f32.to_bits()]);
+        let (n, _, text) = sscanf("abc def", "%s", 1);
+        assert_eq!((n, &text[..4]), (1, &b"abc\0"[..]));
+        let (n, _, text) = sscanf("key:val", "%[^:]", 1);
+        assert_eq!((n, &text[..4]), (1, &b"key\0"[..]));
+        assert_eq!(sscanf("12 34", "%*d %d", 1).1, [34]);
+        assert_eq!(sscanf("x", "%d", 1).0, 0);
+        assert_eq!(sscanf("", "%d", 1).0, u32::MAX);
+        assert_eq!(sscanf("   ", "%d", 1).0, u32::MAX);
+        assert_eq!(sscanf("7", "%d %d", 2).0, 1);
+        assert_eq!(sscanf("12345", "%3d%n", 2).1, [123, 3]);
+    }
 }
