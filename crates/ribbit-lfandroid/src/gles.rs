@@ -12,8 +12,10 @@ pub const SCREEN: (u32, u32) = (1024, 600);
 pub struct Gles {
     pub gl: ribbit_gles::Gl,
     pub egl: ribbit_gles::Egl,
-    /// LFA_GL=1: calls logged so far, by function (the first few of each are printed).
+    /// LFA_GL=<n>: calls logged so far, by function (the first n of each are printed; 4 for
+    /// a value that isn't a number).
     logged: Option<std::collections::BTreeMap<String, u32>>,
+    log_limit: u32,
 }
 
 struct Guest<'a>(&'a mut Runtime);
@@ -57,15 +59,18 @@ fn new_context(screen: (u32, u32)) -> Box<Gles> {
     let mut gl = ribbit_gles::Gl::new(screen.0, screen.1);
     gl.viewport(0, 0, screen.0 as i32, screen.1 as i32);
     gl.scissor(0, 0, screen.0 as i32, screen.1 as i32);
-    Box::new(Gles { gl, egl, logged: std::env::var_os("LFA_GL").map(|_| Default::default()) })
+    let gl_env = std::env::var("LFA_GL").ok();
+    let log_limit = gl_env.as_deref().and_then(|v| v.parse().ok()).unwrap_or(4);
+    Box::new(Gles { gl, egl, logged: gl_env.map(|_| Default::default()), log_limit })
 }
 
 pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
     let screen = rt.screen;
     let mut g = rt.gles.take().unwrap_or_else(|| new_context(screen));
+    let limit = g.log_limit;
     if let Some(n) = g.logged.as_mut().map(|l| l.entry(name.to_string()).or_default()) {
         *n += 1;
-        if *n <= 4 {
+        if *n <= limit {
             let args: Vec<u32> = (0..6).map(|i| rt.arg(i)).collect();
             eprintln!("[gl] {name}({args:x?})");
         }

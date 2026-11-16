@@ -18,6 +18,11 @@ pub const THREAD_EXIT: u32 = 0xEFFF_E000;
 /// Instructions a thread runs before another ready one gets the CPU.
 const SLICE: u64 = 200_000;
 const STACK: u32 = 0x0010_0000;
+/// A frame on the tablet's screen (60 Hz).
+pub const FRAME: Duration = Duration::from_nanos(16_666_667);
+/// Instructions the other threads may run while the main one waits for the vertical blank:
+/// about what one of the tablet's cores (Cortex-A7/A9, 1-1.3 GHz) runs in a frame (GUESS).
+const FRAME_INSNS: u64 = 16_000_000;
 const ETIMEDOUT: u32 = 110;
 const EBUSY: u32 = 16;
 
@@ -35,6 +40,8 @@ enum Wait {
     Cond(u32, Option<Duration>),
     Join(usize),
     Sleep(Duration),
+    /// The vertical blank at this time (`wait_vsync`).
+    Vsync(Duration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -71,12 +78,16 @@ pub struct Threads {
     pub(crate) switched: bool,
     /// Time skipped while every thread waited, added to the clocks.
     pub(crate) skew: Duration,
+    /// The last vertical blank (`wait_vsync`), on the monotonic clock.
+    vsync: Duration,
+    /// Instructions the other threads have left before the vertical blank ends the wait.
+    frame_left: u64,
 }
 
 impl Default for Threads {
     fn default() -> Self {
         let main = Thread { context: None, tls: BTreeMap::new(), state: State::Ready, resume: None, entry: 0 };
-        Self { list: vec![main], current: 0, mutexes: BTreeMap::new(), slice_left: SLICE, switched: false, skew: Duration::ZERO }
+        Self { list: vec![main], current: 0, mutexes: BTreeMap::new(), slice_left: SLICE, switched: false, skew: Duration::ZERO, vsync: Duration::ZERO, frame_left: 0 }
     }
 }
 
@@ -150,6 +161,20 @@ impl Runtime {
         self.threads.list.len() as u32
     }
 
+    /// What GLSurfaceView's thread does between `naDrawFrame`s: eglSwapBuffers waits for the
+    /// next vertical blank, while the game's other threads (loaders, sound) run on the other
+    /// cores. Here they get up to FRAME_INSNS instructions, or until they all wait. The clock
+    /// is the host's and this CPU is far slower than the tablet's, so a wait by time alone
+    /// gave a loading thread one 200,000-instruction slice a frame: Academy T-Rex Rush, whose
+    /// image decoder is unoptimised code, showed its menu after about 900 frames.
+    pub fn wait_vsync(&mut self) -> Result<(), Stop> {
+        let now = self.state_elapsed();
+        self.threads.vsync = (self.threads.vsync + FRAME).max(now);
+        self.threads.frame_left = FRAME_INSNS;
+        let f = self.host_fn("vsync");
+        self.call(f, &[]).map(|_| ())
+    }
+
     /// Whether the running thread may be switched now.
     fn can_switch(&self) -> bool {
         self.depth <= 1
@@ -173,6 +198,7 @@ impl Runtime {
             for t in &mut self.threads.list {
                 match t.state {
                     State::Waiting(Wait::Sleep(d)) if d <= now => t.state = State::Ready,
+                    State::Waiting(Wait::Vsync(_)) if self.threads.frame_left == 0 => t.state = State::Ready,
                     State::Waiting(Wait::Cond(_, Some(d))) if d <= now => {
                         t.state = State::Ready;
                         if let Some(r) = t.resume.as_mut() {
@@ -197,6 +223,18 @@ impl Runtime {
                     _ => None,
                 })
                 .min();
+            // Nothing else to run before it: the vertical blank comes (at its time, or now
+            // if that is past).
+            let vsync = self.threads.list.iter().position(|t| matches!(t.state, State::Waiting(Wait::Vsync(_))));
+            if let Some(i) = vsync
+                && let State::Waiting(Wait::Vsync(d)) = self.threads.list[i].state
+                && next_deadline.is_none_or(|n| n >= d)
+            {
+                self.threads.skew += d.saturating_sub(now);
+                self.threads.list[i].state = State::Ready;
+                self.switch_to(i);
+                return Ok(());
+            }
             match next_deadline {
                 Some(d) => self.threads.skew += d.saturating_sub(now) + Duration::from_micros(1),
                 None => return Err(Stop::Halt(format!("every thread waits: {}", self.threads.describe().join("; ")))),
@@ -206,6 +244,7 @@ impl Runtime {
 
     /// The running thread's time slice: another ready thread gets the CPU when it ends.
     pub(crate) fn tick(&mut self) -> Result<(), Stop> {
+        self.threads.frame_left = self.threads.frame_left.saturating_sub(1);
         if self.threads.slice_left > 0 {
             self.threads.slice_left -= 1;
             return Ok(());
@@ -438,6 +477,12 @@ pub fn call(rt: &mut Runtime, name: &str) -> Result<(), Stop> {
             if rt.can_switch() {
                 return rt.schedule();
             }
+        }
+        // The main thread waits for the vertical blank (`wait_vsync`).
+        "vsync" => {
+            let d = rt.threads.vsync;
+            rt.ret(0);
+            return rt.wait(Wait::Vsync(d));
         }
         "usleep" | "sleep" | "nanosleep" => {
             let d = match name {
