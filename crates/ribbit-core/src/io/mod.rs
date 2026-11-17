@@ -574,7 +574,8 @@ impl MachineBus<'_> {
             let ticks = clock.ticks(self.cycle - self.synced);
             self.synced = self.cycle;
             self.io.deferred += ticks;
-            self.io.voices.advance(ticks, clock.peripheral_hz, self.sys);
+            let io = &mut *self.io;
+            io.voices.advance(ticks, clock.peripheral_hz, &mut RamView { sys: &mut *self.sys, mem: &mut io.mem });
             self.io.deliver_pcm_irq();
         }
         self.io.catch_up();
@@ -633,6 +634,9 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn instruction(&mut self, pc: u32, len: u32) {
         self.io.mem.instruction(pc, len);
+        if self.io.mem.code_fills_pending() {
+            self.code_fills();
+        }
     }
 
     #[inline(always)]
@@ -660,14 +664,43 @@ impl Bus for MachineBus<'_> {
         if !is_mmio(addr) {
             // RAM code may be cached from now on: its writes are watched.
             self.sys.note_code(addr);
+            if self.io.mem.lines.contents && memtiming::writable(addr) {
+                return self.fetch_cached(addr);
+            }
             return self.sys.read16(addr);
         }
         self.read16_mmio(addr)
     }
 
     #[inline(always)]
+    fn set_uncached(&mut self, on: bool) {
+        self.io.mem.uncached = on;
+    }
+
+    fn prefetch(&mut self, addr: u32) {
+        if !is_mmio(addr)
+            && let Some(f) = self.io.mem.data(addr, false)
+        {
+            self.io.mem.fill_line(f, self.sys);
+        }
+    }
+
+    fn aux_read(&mut self, reg: u32) -> Option<u32> {
+        self.io.mem.aux_read(reg)
+    }
+
+    fn aux_write(&mut self, reg: u32, value: u32) -> bool {
+        let done = self.io.mem.aux_write(reg, value, self.sys);
+        self.io.sync_needed |= self.sys.code_written;
+        done
+    }
+
+    #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
         if !is_mmio(addr) {
+            if self.io.mem.lines.contents {
+                return self.read_cached(addr, 1) as u8;
+            }
             self.io.mem.data(addr, false);
             return self.sys.read8(addr);
         }
@@ -678,6 +711,9 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn read16(&mut self, addr: u32) -> u16 {
         if !is_mmio(addr) {
+            if self.io.mem.lines.contents {
+                return self.read_cached(addr, 2) as u16;
+            }
             self.io.mem.data(addr, false);
             return self.sys.read16(addr);
         }
@@ -688,6 +724,9 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
         if !is_mmio(addr) {
+            if self.io.mem.lines.contents {
+                return self.read_cached(addr, 4) as u32;
+            }
             self.io.mem.data(addr, false);
             return self.sys.read32(addr);
         }
@@ -701,6 +740,9 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn write8(&mut self, addr: u32, value: u8) {
         if !is_mmio(addr) {
+            if self.io.mem.lines.contents {
+                return self.write_cached(addr, 1, value as u32);
+            }
             self.io.mem.data(addr, true);
             self.sys.write8(addr, value);
             // Cached code was written: end the batch before it can run.
@@ -714,6 +756,9 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn write16(&mut self, addr: u32, value: u16) {
         if !is_mmio(addr) {
+            if self.io.mem.lines.contents {
+                return self.write_cached(addr, 2, value as u32);
+            }
             self.io.mem.data(addr, true);
             self.sys.write16(addr, value);
             self.io.sync_needed |= self.sys.code_written;
@@ -726,6 +771,9 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn write32(&mut self, addr: u32, value: u32) {
         if !is_mmio(addr) {
+            if self.io.mem.lines.contents {
+                return self.write_cached(addr, 4, value as u32);
+            }
             self.io.mem.data(addr, true);
             self.sys.write32(addr, value);
             self.io.sync_needed |= self.sys.code_written;
@@ -733,6 +781,138 @@ impl Bus for MachineBus<'_> {
         }
         self.io.mem.device();
         self.write32_mmio(addr, value)
+    }
+}
+
+/// Memory as whole lines for the cache contents (`MemTiming::contents`).
+impl memtiming::LineMem for SystemBus {
+    fn get(&mut self, line: u32) -> [u8; 16] {
+        std::array::from_fn(|k| self.peek8(line + k as u32).unwrap_or(0))
+    }
+    fn put(&mut self, line: u32, bytes: &[u8; 16]) {
+        for (k, &b) in bytes.iter().enumerate() {
+            let a = line + k as u32;
+            if self.peek8(a) != Some(b) {
+                self.poke8(a, b);
+            }
+        }
+    }
+}
+
+fn read_n(sys: &mut SystemBus, addr: u32, width: u32) -> u32 {
+    match width {
+        1 => sys.read8(addr) as u32,
+        2 => sys.read16(addr) as u32,
+        _ => sys.read32(addr),
+    }
+}
+
+fn write_n(sys: &mut SystemBus, addr: u32, width: u32, value: u32) {
+    match width {
+        1 => sys.write8(addr, value as u8),
+        2 => sys.write16(addr, value as u16),
+        _ => sys.write32(addr, value),
+    }
+}
+
+/// RAM as devices see it (DMA, the voice engine, USB, SD): with the cache
+/// contents on, a line in the data cache is RAM's copy of it, not the CPU's.
+pub struct RamView<'a> {
+    pub sys: &'a mut SystemBus,
+    pub mem: &'a mut memtiming::MemTiming,
+}
+
+impl RamView<'_> {
+    fn read(&mut self, addr: u32, width: u32) -> u32 {
+        let addr = addr & !(width - 1);
+        let sys = &mut *self.sys;
+        self.mem.ram_read(addr, width, &mut |a| read_n(sys, a, width))
+    }
+    fn write(&mut self, addr: u32, width: u32, value: u32) {
+        let addr = addr & !(width - 1);
+        if !self.mem.ram_write(addr, width, value) {
+            write_n(self.sys, addr, width, value);
+        }
+    }
+}
+
+impl Bus for RamView<'_> {
+    fn read8(&mut self, addr: u32) -> u8 {
+        self.read(addr, 1) as u8
+    }
+    fn read16(&mut self, addr: u32) -> u16 {
+        self.read(addr, 2) as u16
+    }
+    fn read32(&mut self, addr: u32) -> u32 {
+        self.read(addr, 4)
+    }
+    fn write8(&mut self, addr: u32, value: u8) {
+        self.write(addr, 1, value as u32)
+    }
+    fn write16(&mut self, addr: u32, value: u16) {
+        self.write(addr, 2, value as u32)
+    }
+    fn write32(&mut self, addr: u32, value: u32) {
+        self.write(addr, 4, value)
+    }
+}
+
+// Memory through the cache contents (`MemTiming::contents`), out of line.
+impl MachineBus<'_> {
+    #[inline(never)]
+    fn read_cached(&mut self, addr: u32, width: u32) -> u32 {
+        let addr = addr & !(width - 1);
+        if self.io.mem.bypass() {
+            self.io.mem.uncached_access(addr, false, self.cycle);
+            let sys = &mut *self.sys;
+            return self.io.mem.ram_read(addr, width, &mut |a| read_n(sys, a, width));
+        }
+        if let Some(f) = self.io.mem.data(addr, false) {
+            self.io.mem.fill_line(f, self.sys);
+        }
+        read_n(self.sys, addr, width)
+    }
+
+    #[inline(never)]
+    fn write_cached(&mut self, addr: u32, width: u32, value: u32) {
+        let addr = addr & !(width - 1);
+        if self.io.mem.bypass() {
+            self.io.mem.uncached_access(addr, true, self.cycle);
+            if self.io.mem.ram_write(addr, width, value) {
+                return;
+            }
+        } else if let Some(f) = self.io.mem.data(addr, true) {
+            self.io.mem.fill_line(f, self.sys);
+        }
+        write_n(self.sys, addr, width, value);
+        // Cached code was written: end the batch before it can run.
+        self.io.sync_needed |= self.sys.code_written;
+    }
+
+    /// An instruction fetch from memory that can change: from the code
+    /// cache's line.
+    #[inline(never)]
+    fn fetch_cached(&mut self, addr: u32) -> u16 {
+        let (line, changed) = self.io.mem.code_line(addr, self.sys);
+        if changed {
+            self.code_changed();
+        }
+        let o = (addr & 14) as usize;
+        u16::from_le_bytes([line[o], line[o + 1]])
+    }
+
+    #[cold]
+    fn code_fills(&mut self) {
+        if self.io.mem.code_fills(self.sys) {
+            self.code_changed();
+        }
+    }
+
+    /// The code cache took other bytes for a RAM line than it held before:
+    /// code compiled or decoded from the old ones is dropped.
+    fn code_changed(&mut self) {
+        self.sys.code_written = true;
+        self.io.sync_needed = true;
     }
 }
 
@@ -863,6 +1043,108 @@ impl MachineBus<'_> {
 mod tests {
     use super::*;
     use ribbit_memory::Firmware;
+
+    /// LeapLoader's LCD Timing v5 on the console (results-hw-v5-2026-11-17):
+    /// the cache contents give the same values through a machine bus.
+    #[test]
+    fn cache_contents_match_the_console_coherence_test() {
+        let mut sys = SystemBus::new(&Firmware::from_bytes(vec![0; 4]).unwrap(), None);
+        let mut io = Peripherals::default();
+        io.mem.set_contents(true);
+        let mut bus = MachineBus::new(&mut sys, &mut io, 0, 0x4000_0000);
+        // One instruction's access (`di`: .di).
+        fn access(bus: &mut MachineBus, addr: u32, store: Option<u32>, di: bool) -> u32 {
+            let t = bus.cycle + 100;
+            bus.at(t, 0x4000_0000);
+            bus.instruction(0x4000_0000, 2);
+            bus.set_uncached(di);
+            let v = match store {
+                Some(v) => {
+                    bus.write32(addr, v);
+                    0
+                }
+                None => bus.read32(addr),
+            };
+            bus.set_uncached(false);
+            bus.take_stall();
+            v
+        }
+        let ld = |bus: &mut MachineBus, a: u32| access(bus, a, None, false);
+        let ld_di = |bus: &mut MachineBus, a: u32| access(bus, a, None, true);
+        let st = |bus: &mut MachineBus, a: u32, v: u32| access(bus, a, Some(v), false);
+        let st_di = |bus: &mut MachineBus, a: u32, v: u32| access(bus, a, Some(v), true);
+        // Four other lines in the same set (8 KB apart) evict a line.
+        let evict = |bus: &mut MachineBus, a: u32| {
+            for k in 1..=4 {
+                access(bus, a + k * 0x2000, None, false);
+            }
+        };
+        let a = 0x3C10_0000;
+        // 1: dirty line, then st.di.
+        st(&mut bus, a, 0x11);
+        st_di(&mut bus, a, 0x22);
+        assert_eq!(ld(&mut bus, a), 0x11, "cached: the line's data");
+        assert_eq!(ld_di(&mut bus, a), 0x22, "RAM has the st.di");
+        evict(&mut bus, a);
+        assert_eq!(ld_di(&mut bus, a), 0x11, "the write-back overwrote it");
+        assert_eq!(ld(&mut bus, a), 0x11);
+        // 2: clean line, then st.di.
+        let b = a + 0x40;
+        st_di(&mut bus, b, 0x33);
+        assert_eq!(ld(&mut bus, b), 0x33);
+        st_di(&mut bus, b, 0x44);
+        assert_eq!(ld(&mut bus, b), 0x33, "cached reads stay stale");
+        assert_eq!(ld_di(&mut bus, b), 0x44);
+        evict(&mut bus, b);
+        assert_eq!(ld(&mut bus, b), 0x44, "after eviction");
+        // 3: line not cached.
+        let c = a + 0x80;
+        st_di(&mut bus, c, 0x55);
+        assert_eq!(ld(&mut bus, c), 0x55);
+        let d = a + 0xC0;
+        st(&mut bus, d, 0x66);
+        let t = bus.cycle;
+        // Devices see RAM: a dirty line's data isn't there yet.
+        drop(bus);
+        let mut ram = RamView { sys: &mut sys, mem: &mut io.mem };
+        assert_eq!(ram.read32(d), 0);
+        ram.write32(d + 4, 0x77);
+        assert_eq!(sys.read32(d + 4), 0, "a device write to a cached line: RAM's copy only");
+        // DC_FLDL does nothing (console); DC_FLSH writes dirty lines back.
+        let mut bus = MachineBus::new(&mut sys, &mut io, t, 0x4000_0000);
+        assert!(bus.aux_write(0x4C, d));
+        assert_eq!(RamView { sys: bus.sys, mem: &mut bus.io.mem }.read32(d), 0);
+        assert!(bus.aux_write(0x4B, 0));
+        assert_eq!(RamView { sys: bus.sys, mem: &mut bus.io.mem }.read32(d), 0x66);
+    }
+
+    /// Code written as data runs only after the data cache wrote it back and
+    /// the code cache let go of the old line.
+    #[test]
+    fn cache_contents_keep_stale_code_until_written_back_and_invalidated() {
+        let mut sys = SystemBus::new(&Firmware::from_bytes(vec![0; 4]).unwrap(), None);
+        let mut io = Peripherals::default();
+        io.mem.set_contents(true);
+        let code = 0x3C08_0000;
+        sys.write16(code, 0xAAAA);
+        let mut bus = MachineBus::new(&mut sys, &mut io, 0, code);
+        assert_eq!(bus.fetch16(code), 0xAAAA);
+        bus.instruction(code, 2);
+        bus.write16(code, 0xBBBB);
+        bus.take_stall();
+        assert_eq!(bus.fetch16(code), 0xAAAA, "the code cache's line");
+        assert!(bus.aux_write(0x10, 0));
+        assert_eq!(bus.fetch16(code), 0xAAAA, "IC_IVIC alone: RAM still has the old code");
+        for k in 1..=4 {
+            bus.instruction(code, 2);
+            bus.read32(code + k * 0x2000);
+            bus.take_stall();
+        }
+        assert_eq!(bus.fetch16(code), 0xAAAA, "written back, but the code line is still cached");
+        assert!(bus.aux_write(0x10, 0));
+        assert_eq!(bus.fetch16(code), 0xBBBB);
+        assert!(bus.sys.code_written, "code compiled from the old bytes is dropped");
+    }
 
     #[test]
     fn a_leapster_2_sd_card_is_never_locked() {

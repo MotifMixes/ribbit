@@ -129,8 +129,9 @@ const STATE_MAGIC: &[u8; 8] = b"RIBBITST";
 /// timing (pending load, config flag); 3 = memory timing (caches, register
 /// ready times, load latency); 4 = GPIO output latches, Leapster 2 flash;
 /// 5 = Leapster 2 on-chip RAM and SD slot; 6 = dual-MAC accumulators, PCM DMA;
-/// 7 = paused voices; 8 = Leapster 2 USB controller.
-pub const STATE_VERSION: u32 = 8;
+/// 7 = paused voices; 8 = Leapster 2 USB controller; 9 = cache contents
+/// (io/memtiming.rs `Lines`).
+pub const STATE_VERSION: u32 = 9;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -321,6 +322,9 @@ impl RawEvent {
 }
 
 pub struct Machine {
+    /// The Leapster 2's caches hold data (`set_cache_contents`); true unless
+    /// turned off. Kept across a power cycle and a state load.
+    cache_contents: bool,
     pub cpu: Cpu,
     pub bus: SystemBus,
     pub buttons: Buttons,
@@ -462,6 +466,8 @@ impl Machine {
             cpu.icache.set_ram_code_range(map::RAM_BASE, map::RAM_BASE + firmware.ram_size());
         }
         let mut m = Self {
+            // RIBBIT_CACHE_CONTENTS=0: off (tools, comparisons).
+            cache_contents: std::env::var("RIBBIT_CACHE_CONTENTS").as_deref() != Ok("0"),
             cpu,
             bus,
             buttons: Buttons::default(),
@@ -492,6 +498,7 @@ impl Machine {
         if m.firmware.is_leapster_tv() {
             m.enable_leapster_tv();
         }
+        m.apply_cache_contents();
         m
     }
 
@@ -764,6 +771,7 @@ impl Machine {
             self.io.lmax_tv.get_or_insert_with(Default::default);
         }
         self.clock = Clock::new(self.clock.cpu_hz, self.clock.peripheral_hz);
+        self.apply_cache_contents();
     }
 
     /// One CPU step through the machine bus, then peripheral time and
@@ -792,12 +800,12 @@ impl Machine {
         // Voice engine: needs memory (speech stream, samples), so it runs
         // here, after the instruction, like the framebuffer DMA.
         if self.io.voices.lfc_start_pending {
-            self.io.voices.start_lfc(&mut self.bus);
+            self.io.voices.start_lfc(&mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
         }
         // (Checked here too: `advance` is out of line and most steps at
         // 96:16 MHz have no tick.)
         if ticks > 0 {
-            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
             self.io.deliver_pcm_irq();
         }
         if self.cpu.halted() {
@@ -1077,10 +1085,10 @@ impl Machine {
         }
         let ticks = self.clock.ticks(self.cpu.cycles - synced);
         if self.io.voices.lfc_start_pending {
-            self.io.voices.start_lfc(&mut self.bus);
+            self.io.voices.start_lfc(&mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
         }
         if ticks > 0 {
-            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
             self.io.deliver_pcm_irq();
         }
         self.io.deferred += ticks;
@@ -1200,7 +1208,7 @@ impl Machine {
             self.cpu.skip_idle(skip_cycles, k * instructions);
             let ticks = self.clock.ticks(skip_cycles);
             self.io.deferred += ticks;
-            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+            self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
             self.io.deliver_pcm_irq();
             report.steps += skip_steps;
             report.instructions += k * instructions;
@@ -1258,7 +1266,7 @@ impl Machine {
         self.cpu.skip_sleep(k);
         let ticks = self.clock.ticks(k);
         self.io.deferred += ticks;
-        self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut self.bus);
+        self.io.voices.advance(ticks, self.clock.peripheral_hz, &mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
         self.io.deliver_pcm_irq();
         report.steps += k;
         self.idle.skipped_steps += k;
@@ -1349,15 +1357,18 @@ impl Machine {
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
         let body = bytes.strip_prefix(STATE_MAGIC.as_slice()).ok_or(StateError::NotAState)?;
         let version = u32::from_le_bytes(body.get(..4).ok_or(StateError::NotAState)?.try_into().unwrap());
-        // Version 7 (1.4.x-1.5.1) differs only in the USB controller.
-        if version != STATE_VERSION && version != 7 {
+        // Version 7 (1.4.x-1.5.1) differs only in the USB controller, 8 in
+        // the cache contents.
+        if !(7..=STATE_VERSION).contains(&version) {
             return Err(StateError::Version(version));
         }
         let payload =
             miniz_oxide::inflate::decompress_to_vec(&body[4..]).map_err(|e| StateError::Damaged(format!("{e:?}")))?;
         io::usb::READING_V7.with(|v| v.set(version == 7));
+        io::memtiming::READING_PRE9.with(|v| v.set(version < 9));
         let s = bincode::deserialize::<State>(&payload);
         io::usb::READING_V7.with(|v| v.set(false));
+        io::memtiming::READING_PRE9.with(|v| v.set(false));
         let s = s.map_err(|e| StateError::Damaged(e.to_string()))?;
         if s.bios_crc != self.firmware.id().crc32 || s.cart_crc != self.cartridge.as_ref().map(|c| c.id().crc32) {
             return Err(StateError::WrongImages);
@@ -1377,6 +1388,8 @@ impl Machine {
         self.buttons = s.buttons;
         self.io = s.io;
         self.io.sync_needed = true;
+        // A state keeps its caches only under the same model.
+        self.apply_cache_contents();
         self.clock = s.clock;
         self.interrupt_counts.copy_from_slice(&s.interrupt_counts);
         self.first_cart_pc = s.first_cart_pc;
@@ -1463,7 +1476,7 @@ impl Machine {
         if let Some(u) = self.io.usb.as_mut()
             && u.due
         {
-            u.service(&mut self.bus);
+            u.service(&mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
         }
     }
 
@@ -1472,7 +1485,7 @@ impl Machine {
         if let Some(slot) = self.io.sd.as_mut()
             && let Some(d) = slot.pending.take()
         {
-            slot.run(d, &mut self.bus);
+            slot.run(d, &mut io::RamView { sys: &mut self.bus, mem: &mut self.io.mem });
         }
     }
 
@@ -1482,9 +1495,11 @@ impl Machine {
     fn run_framebuffer_dma(&mut self, dma: io::lcd::DmaRequest) {
         use ribbit_memory::Bus as _;
         tracing::debug!(target: "ribbit::mmio", ?dma, "framebuffer dma");
+        // RAM to VRAM, past the CPU's data cache (`io::RamView`).
+        let mut ram = io::RamView { sys: &mut self.bus, mem: &mut self.io.mem };
         for i in 0..dma.words {
-            let v = self.bus.read32(dma.source.wrapping_add(4 * i));
-            self.bus.write32(dma.dest.wrapping_add(4 * i), v);
+            let v = ram.read32(dma.source.wrapping_add(4 * i));
+            ram.write32(dma.dest.wrapping_add(4 * i), v);
         }
         self.io.lcd.transfers += 1;
         if let Some(hd) = &mut self.hd {
@@ -1507,7 +1522,42 @@ impl Machine {
         {
             return status;
         }
-        decode_frame(self.bus.vram(), &self.io.lcd.regs, out)
+        decode_frame(&self.lcd_vram(), &self.io.lcd.regs, out)
+    }
+
+    /// VRAM as the LCD reads it: with the cache contents on, lines the CPU
+    /// has in its data cache show what VRAM holds, not the cache's data.
+    fn lcd_vram(&self) -> std::borrow::Cow<'_, [u8]> {
+        if !self.io.mem.lines.contents {
+            return std::borrow::Cow::Borrowed(self.bus.vram());
+        }
+        let mut v = self.bus.vram().to_vec();
+        self.io.mem.ram_view(ribbit_memory::map::VRAM_BASE, &mut v);
+        std::borrow::Cow::Owned(v)
+    }
+
+    /// The data and code caches hold data (io/memtiming.rs, "Line
+    /// contents"): `.di` accesses, devices and the LCD see RAM, which can
+    /// differ from what the CPU reads through its cache. On by default on
+    /// the Leapster 2 (measured there); off, memory is coherent (faster).
+    pub fn set_cache_contents(&mut self, on: bool) {
+        self.cache_contents = on;
+        self.apply_cache_contents();
+    }
+
+    /// Whether the cache contents are on (`set_cache_contents`, and a
+    /// Leapster 2).
+    pub fn cache_contents(&self) -> bool {
+        self.io.mem.lines.contents
+    }
+
+    fn apply_cache_contents(&mut self) {
+        let on = self.cache_contents && self.io.leapster2_power.is_some();
+        if self.io.mem.lines.contents != on {
+            self.io.mem.set_contents(on);
+            // Code decoded or compiled from RAM came through the old model.
+            self.bus.code_written = true;
+        }
     }
 
     /// EXPERIMENTAL: the TV chip's picture (the 160x160 game area), on a
@@ -1533,7 +1583,7 @@ impl Machine {
     /// Decodes the handheld LCD, also when a TV chip supplies the picture
     /// `render_frame` shows (the L-MAX can show a second picture there).
     pub fn render_lcd(&self, out: &mut [u32; WIDTH * HEIGHT]) -> FrameStatus {
-        decode_frame(self.bus.vram(), &self.io.lcd.regs, out)
+        decode_frame(&self.lcd_vram(), &self.io.lcd.regs, out)
     }
 
     /// FNV-1a digest of architectural state, for determinism tests and

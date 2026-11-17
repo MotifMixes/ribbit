@@ -1070,6 +1070,13 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         {
             actions.push(Action::SettingsChanged);
         }
+        if ui
+            .checkbox(&mut settings.leapster2_cache_contents, "Leapster 2: cache contents (accurate)")
+            .on_hover_text("The CPU's caches hold their own copy of memory, as on a real Leapster 2: .di loads and stores, DMA and the screen see RAM, which can differ from what the CPU reads through its cache until a line is written back. Catches homebrew that only works with coherent memory. Off: memory is always coherent (slightly faster). Applies at the next start.")
+            .changed()
+        {
+            actions.push(Action::SettingsChanged);
+        }
         let usb = settings.leapster2_usb;
         if ui
             .button(if usb {

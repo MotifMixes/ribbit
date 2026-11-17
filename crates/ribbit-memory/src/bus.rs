@@ -56,6 +56,27 @@ pub trait Bus {
         false
     }
 
+    /// The accesses until `set_uncached(false)` are `.di` ("direct", past
+    /// the data cache) loads or stores. A bus without caches ignores it.
+    #[inline(always)]
+    fn set_uncached(&mut self, _on: bool) {}
+
+    /// PREFETCH: the line of `addr` is brought into the data cache, nothing
+    /// is read into a register.
+    #[inline(always)]
+    fn prefetch(&mut self, _addr: u32) {}
+
+    /// Auxiliary registers the memory system implements (cache controls):
+    /// the value, or None if `reg` isn't one.
+    fn aux_read(&mut self, _reg: u32) -> Option<u32> {
+        None
+    }
+
+    /// As `aux_read`, for a write: false if `reg` isn't one.
+    fn aux_write(&mut self, _reg: u32, _value: u32) -> bool {
+        false
+    }
+
     /// What a JIT (ribbit-jit) may do itself instead of calling this bus,
     /// with exactly the same effects (`JitView`); None: it calls the bus.
     /// Valid until the bus is next used otherwise than through the view.

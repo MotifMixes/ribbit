@@ -13,6 +13,7 @@
 //!   save PATH / load PATH   save state
 //!   label TEXT          name the following part of the report
 //!   digest [NAME]       print the machine state digest (for comparing builds)
+//! RIBBIT_CACHE_CONTENTS=0 turns the Leapster 2's cache contents off.
 //!   lcdrate MS N        N times: run MS, print LCD frames/s and the idle-skipped share
 //!   auxlog              list accesses to unmodelled auxiliary registers so far
 //!   lcdregs             print the LCD registers and the last framebuffer DMA

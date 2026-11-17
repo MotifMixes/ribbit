@@ -221,6 +221,8 @@ pub(crate) fn generic_ok(i: &Instr) -> bool {
         Op::Max | Op::Min | Op::Normw => srcs,
         // A zero-overhead loop's set-up (`Gen::lp`).
         Op::Lp => true,
+        // `.di` accesses go to the interpreter (`Bus::set_uncached`).
+        Op::Ld | Op::St if i.mem.bypass_cache => false,
         Op::Ld | Op::St => {
             // The base's write-back must be a plain register too, and a load
             // writing back into its own destination is an error the executor

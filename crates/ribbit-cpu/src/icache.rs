@@ -443,6 +443,8 @@ pub fn fast_form(i: &Instr) -> Fast {
                 _ => None,
             }
         }
+        // `.di` accesses take the general executor (`Bus::set_uncached`).
+        Op::Ld | Op::St if i.mem.bypass_cache => None,
         Op::Ld if i.cc == COND_AL && i.mem.wb != WriteBack::None => {
             let kind = match (i.mem.size, i.mem.sign_extend) {
                 (Size::Word, false) => Some(LdKind::Word),

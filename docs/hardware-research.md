@@ -997,7 +997,8 @@ operations; it polls 0x48 bit 8 while a line operation is busy). Both:
 So each cache is **32 KB, 4-way set associative, 16-byte lines** (HYPOTHESIS only in that the full index range
 is populated). Tag bit 0 reads as valid and bit 1 as locked. The replacement policy and the data cache's write
 policy are UNKNOWN; the existence of flush operations (aux 0x4B) suggests write-back. Games (Cars, Sonic X) use
-the same aux registers through their own copies of the routines. Ribbit does not model the caches yet.
+the same aux registers through their own copies of the routines. Ribbit times them (io/memtiming.rs) and, on
+the Leapster 2, models their contents ("Cache contents" below).
 
 Tested on a Leapster 2 (LeapLoader's NES/GB apps, user's console, 2026-11-01; changes-from-leaploader.md):
 
@@ -1007,6 +1008,57 @@ Tested on a Leapster 2 (LeapLoader's NES/GB apps, user's console, 2026-11-01; ch
 * Some zero-overhead loops fail: GCC's and newlib's/libgcc's LP loops broke native code (copies stopped
   early, games crashed) that ran right in Ribbit; with none of them left, it works. The BIOS's own LP loops
   work. Which use of LP the hardware runs differently is UNKNOWN (`RIBBIT_WARN_LP=1` lists LPs in RAM code).
+
+### Cache contents (Leapster 2, measured 2026-11-16/17; modelled 2026-11-17)
+
+Measured on the user's Leapster 2 with LeapLoader's LCD Timing app (D:/leaploader-tmp/lcdtime, results-hw-v1..v5;
+method in D:/leaploader-tmp/snes-hw/NOTES.md and gen/NOTES.md, "Console measurement"):
+
+* Data cache 32 KB, 4-way, 16-byte lines, write-back, write-allocate. SDRAM line fill ~80-85 cycles, +~42 for a
+  dirty write-back. Instruction cache 32 KB, 4-way. CPU 96 MHz.
+* `.di` loads and stores go past the cache and are NOT coherent with it (v5): with a dirty cached line, `st.di`
+  writes RAM, cached loads still return the line's data, and the line's write-back later overwrites the `st.di`
+  data; with a clean cached line, cached loads stay stale until the line is evicted; with the line not cached,
+  it's fine. v5's line: `dirty+stdi: cached 17 ram 34 ram-after-wb 17 cached-after 17 | clean+stdi: cached 51
+  ram 68 cached-after-evict 68 | uncached line: cached 85`.
+* `sr addr,[0x4C]` (DC_FLDL) seemed to do nothing (2026-11-01, and LeapLoader's llcache.h); LeapLoader cleans
+  the cache by loading 512 KB of other memory.
+* `st.di` to VRAM is posted: a queue of at least 8 words, the bus takes a word per ~24.4 cycles, ~4.6 cycles to
+  issue back to back (~1 after 5-6 cycles of other work); cache misses are not held up by the queue. Uncached
+  `ld.di` from VRAM ~55 cycles; a cached VRAM line fill ~87.
+* The LCD DMA (0x0180_8800) works with the BIOS 0.6 sequence; a frame takes 4-7 ms in the background.
+
+Ribbit (io/memtiming.rs `Lines`, io/mod.rs `read_cached`/`write_cached`/`fetch_cached`/`RamView`; on by default
+on a Leapster 2, menu "Leapster 2: cache contents (accurate)", `RIBBIT_CACHE_CONTENTS=0` turns it off for any
+tool): memory itself is what the CPU sees through its data cache, so compiled code still reads and writes it in
+place; each cached data line keeps RAM's copy of itself, taken when it is filled. `.di` accesses (the CPU passes
+the flag on with `Bus::set_uncached`; the JIT leaves `.di` instructions to the interpreter), DC_CTRL bit 0
+(cache off), the devices (framebuffer DMA, voices, USB, SD: `RamView`) and the LCD's picture use RAM's copy. A
+dirty line leaving the cache is written back (RAM's copy is dropped, also over an `st.di`); a clean one gives
+memory RAM's copy back. Code lines keep the bytes they were filled with (from RAM, so a dirty data line's new
+code is not there yet); a code fill that brings other bytes than were last fetched for that RAM line drops code
+decoded or compiled from the old ones. PREFETCH fills a data line. Cache controls (only with the contents on;
+off they stay unmodelled as before): IC_IVIC 0x10, IC_CTRL 0x11, IC_IVIL 0x19, DC_IVDC 0x47, DC_CTRL 0x48 (bit
+8, flush busy, never reads set), DC_IVDL 0x4A, DC_FLSH 0x4B follow the ARC PRM: UNVERIFIED on the console, and
+DC_CTRL's IM bit (invalidate writes dirty lines back first) is taken as bit 6, a GUESS (the BIOS's 0x8A leaves
+it clear). DC_FLDL 0x4C does nothing, as on the console. Locking (IC_LIL 0x13, DC_LDL 0x49) and the cache-RAM
+registers stay unmodelled. Replacement stays round-robin per set (UNKNOWN on the console).
+
+Timing (`cost::UNCACHED_LOAD`, `POSTED_*`): `ld.di` 55 cycles and waits for queued stores (ASSUMED); `st.di`
+posted, VRAM 24.4 cycles a word, SDRAM ~31 (st.di of a frame to RAM cost the same as cached stores, 18.5% of a
+frame; GUESS for the rate), queue 8 deep, +4 cycles for an `st.di` within 6 cycles of the last.
+
+Checked: Ribbit's io tests replay v5 (`cache_contents_match_the_console_coherence_test`) and the stale-code case;
+LCD Timing v5 itself in Ribbit (LeapLoader's sdboot-emu, built against this code) prints the console's coherence
+line exactly with the contents on, and the coherent `34 34 34 34 | 68 68 68 | 85` with them off. Its `st.di`
+rows over the delay loop come close to the console's (gap0 114k cycles against 88k; off: 188k), but Ribbit runs
+the delay loop itself ~20% fast (388k against 496k cycles): a separate CPU-timing difference, open. The system
+menu, Cars Supercharged, Batman Strength in Numbers and Crayola Art Adventure show the same screens at 25 s and
+40 s with the contents on and off, at the same speed. Save states: version 9 (version 7-8 states load with
+empty caches).
+
+Questions for the console: whether DC_FLSH, DC_IVDL and DC_IVDC (with and without DC_CTRL bit 6) write dirty
+lines back; the replacement order; whether DC_FLDL needs something else first (a DC_CTRL mode, or polling bit 8).
 
 ### Clock control (VERIFIED-FW)
 

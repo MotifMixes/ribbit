@@ -213,6 +213,8 @@ pub(crate) fn generic_ok(i: &Instr) -> bool {
         Op::Sexb | Op::Sexw | Op::Extb | Op::Extw | Op::Not | Op::Neg | Op::Swap | Op::Abs | Op::Norm => srcs,
         Op::Max | Op::Min | Op::Normw => srcs,
         Op::Lp => true,
+        // `.di` accesses go to the interpreter (`Bus::set_uncached`).
+        Op::Ld | Op::St if i.mem.bypass_cache => false,
         Op::Ld | Op::St => {
             let wb = matches!(i.mem.wb, WriteBack::Pre | WriteBack::Post);
             let base_ok = !wb || match i.src1 {
