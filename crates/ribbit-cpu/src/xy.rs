@@ -34,6 +34,19 @@
 //!   (0.6 0x4003_E7A8, a 4x upsampler) is never called by any BIOS. Pipelines
 //!   that treat both halves alike (original Leapster 2.1, L-MAX) give the
 //!   same output either way.
+//! * VRAM is the exception (Ribbit HYPOTHESIS, 2026-11-17): a burst to or
+//!   from VRAM (0x0300_0000) moves 32-bit words unchanged. VERIFIED-BEHAVIOUR
+//!   evidence: the homebrew Super Mario 64 port LSTR-0x00130640, which
+//!   displays correctly on a real Leapster 2, bursts its 16 bpp picture
+//!   from VRAM 0x0300_9600 into X memory, reads it through 32-bit ports
+//!   taking the pixel at the lower address from the LOW half (GAME.BIN
+//!   0xD1CE0: `and r7,r4,0xff` is pixel 0's G/B byte), packs 12 bpp words
+//!   whose low byte is the first byte on screen, and bursts them out to the
+//!   framebuffer at 0x0300_0000. With the halfword swap on both bursts its
+//!   picture came out with every word's halves exchanged. A plausible cause
+//!   is the bus width (SDRAM is 16 bits wide, VRAM is on-chip), but the
+//!   rule is only known for these two regions: SDRAM bursts as the BIOS
+//!   PCM path implies, VRAM as the app implies.
 
 /// Aux register block: 0x80 + offset.
 pub const AUX_BASE: u32 = 0x80;
@@ -43,6 +56,9 @@ pub const BURST_SIZE: usize = 0x1B;
 const BURST_SYSTEM: usize = 0x19;
 const BURST_XY: usize = 0x1A;
 const WORDS: usize = 0x400;
+const VRAM_BASE: u32 = ribbit_memory::map::VRAM_BASE;
+/// VRAM and the window past it (`map::VRAM_OVERRUN_END`).
+const VRAM_WINDOW: u32 = ribbit_memory::map::VRAM_OVERRUN_END - VRAM_BASE;
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct XyExtension {
@@ -185,14 +201,16 @@ impl XyExtension {
         let size = (value & 0xFFFF) + 1;
         let bank = (self.aux[XYCONFIG] & 1) as usize;
         let memory = &mut self.mem[bank][((value >> 29) & 1) as usize];
+        // The halfword at the lower system address is the high half, except
+        // in VRAM (module notes, "Halfword order").
+        let in_vram = system.wrapping_sub(VRAM_BASE) < VRAM_WINDOW;
+        let rotate = if in_vram { 0 } else { 16 };
         for i in (0..size).step_by(4) {
             let word = &mut memory[(xy + i as usize / 4) % WORDS];
-            // The halfword at the lower system address is the high half
-            // (module notes, "Halfword order").
             if value & (1 << 30) != 0 {
-                *word = bus.read32(system.wrapping_add(i)).rotate_left(16);
+                *word = bus.read32(system.wrapping_add(i)).rotate_left(rotate);
             } else {
-                bus.write32(system.wrapping_add(i), word.rotate_left(16));
+                bus.write32(system.wrapping_add(i), word.rotate_left(rotate));
             }
         }
     }
@@ -263,27 +281,28 @@ mod tests {
     }
 
     /// System memory for burst tests: 64 KiB of words.
+    /// Word-addressed test memory, mirrored every 64 KiB.
     struct Ram(Vec<u32>);
     impl ribbit_memory::Bus for Ram {
         fn read8(&mut self, a: u32) -> u8 {
-            (self.0[a as usize / 4] >> ((a & 3) * 8)) as u8
+            (self.0[(a & 0xFFFF) as usize / 4] >> ((a & 3) * 8)) as u8
         }
         fn read16(&mut self, a: u32) -> u16 {
-            (self.0[a as usize / 4] >> ((a & 2) * 8)) as u16
+            (self.0[(a & 0xFFFF) as usize / 4] >> ((a & 2) * 8)) as u16
         }
         fn read32(&mut self, a: u32) -> u32 {
-            self.0[a as usize / 4]
+            self.0[(a & 0xFFFF) as usize / 4]
         }
         fn write8(&mut self, a: u32, v: u8) {
-            let w = &mut self.0[a as usize / 4];
+            let w = &mut self.0[(a & 0xFFFF) as usize / 4];
             *w = (*w & !(0xFF << ((a & 3) * 8))) | (v as u32) << ((a & 3) * 8);
         }
         fn write16(&mut self, a: u32, v: u16) {
-            let w = &mut self.0[a as usize / 4];
+            let w = &mut self.0[(a & 0xFFFF) as usize / 4];
             *w = (*w & !(0xFFFF << ((a & 2) * 8))) | (v as u32) << ((a & 2) * 8);
         }
         fn write32(&mut self, a: u32, v: u32) {
-            self.0[a as usize / 4] = v;
+            self.0[(a & 0xFFFF) as usize / 4] = v;
         }
     }
 
@@ -308,6 +327,23 @@ mod tests {
         xy.aux_write(0x99, 0x80, &mut ram);
         xy.aux_write(0x9B, 7, &mut ram); // and back out
         assert_eq!((ram.read16(0x80), ram.read16(0x82), ram.read16(0x86)), (10, 11, 13));
+    }
+
+    #[test]
+    fn vram_bursts_keep_words_unchanged() {
+        // LSTR-0x00130640's display path: burst in from VRAM, 32-bit port
+        // reads see the lower-addressed pixel in the low half, and words
+        // written through a port reach VRAM byte for byte.
+        let mut vram = Ram(vec![0; 0x100]);
+        vram.write32(VRAM_BASE + 0x10, 0x0BBB_0AAA); // pixel 0 = 0x0AAA, pixel 1 = 0x0BBB
+        let mut xy = XyExtension::default();
+        xy.aux_write(0x99, VRAM_BASE + 0x10, &mut vram);
+        xy.aux_write(0x9B, (1 << 30) | 3, &mut vram);
+        assert_eq!(xy.read(48), 0x0BBB_0AAA);
+        xy.write(48, 0x1234_5678);
+        xy.aux_write(0x99, VRAM_BASE + 0x20, &mut vram);
+        xy.aux_write(0x9B, 3, &mut vram);
+        assert_eq!(vram.read32(VRAM_BASE + 0x20), 0x1234_5678);
     }
 
     #[test]

@@ -21,6 +21,12 @@ pub const MMIO_SIZE: u32 = 0x0001_0000;
 /// Video RAM; also used as stack before the RTOS starts (MAME comment).
 pub const VRAM_BASE: u32 = 0x0300_0000;
 pub const VRAM_SIZE: u32 = 0x0001_0000;
+/// Leapster 2 VRAM. VERIFIED-BEHAVIOUR that it is larger than 64 KiB: the
+/// homebrew Super Mario 64 port LSTR-0x00130640 (displays correctly on a
+/// real Leapster 2) renders a 16 bpp picture at 0x0300_9600-0x0301_2BFF and
+/// keeps a 512-byte sound buffer at 0x0301_7E00 (programmed into 0x0180_300C),
+/// so at least 0x1_8000 bytes exist. The size (128 KiB) is a HYPOTHESIS.
+pub const VRAM_SIZE_LEAPSTER2: u32 = 0x0002_0000;
 /// The v1.5 BIOS clear-screen routine writes past VRAM; MAME discards
 /// these writes. HYPOTHESIS: real hardware behaviour unknown.
 pub const VRAM_OVERRUN_END: u32 = 0x0303_0000;

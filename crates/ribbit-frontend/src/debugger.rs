@@ -437,11 +437,11 @@ fn leapster_reg_name(r: usize) -> String {
 
 /// What the windows show for a Leapster (Leapster TV, L-MAX, Leapster 2).
 pub fn leapster_snapshot(m: &ribbit_core::Machine, dbg: &mut DebugUi, breakpoints: &[u32], paused: bool) -> Snapshot {
-    use ribbit_memory::map::{BIOS_MIRROR, CART_BASE, RAM_BASE, SRAM_BASE, VRAM_BASE, VRAM_SIZE};
+    use ribbit_memory::map::{BIOS_MIRROR, CART_BASE, RAM_BASE, SRAM_BASE, VRAM_BASE};
     let bus = &m.bus;
     let regions = vec![
         Region { name: "RAM", base: RAM_BASE, len: bus.ram().len() as u32, writable: true },
-        Region { name: "VRAM", base: VRAM_BASE, len: VRAM_SIZE, writable: true },
+        Region { name: "VRAM", base: VRAM_BASE, len: bus.vram().len() as u32, writable: true },
         Region { name: "On-chip SRAM", base: SRAM_BASE, len: bus.sram().len() as u32, writable: true },
         Region { name: "BIOS", base: BIOS_MIRROR, len: 0x0040_0000, writable: false },
         Region { name: "Cartridge", base: CART_BASE, len: 0x0100_0000, writable: false },
