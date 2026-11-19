@@ -1215,7 +1215,11 @@ impl App {
             tracing::warn!(target: "ribbit::lfa", "{}: {e}", data.display());
         }
         match crate::lfa::LfaSession::start(&apk, &data, sink) {
-            Ok(t) => {
+            Ok(mut t) => {
+                // The library's name for it, when it is listed.
+                if let Some(g) = self.library.games.iter().find(|g| g.path == apk) {
+                    t.title = g.title.clone();
+                }
                 self.fit_window = FIT_TRIES;
                 self.lfa = Some(t);
                 self.paused = false;
@@ -1855,6 +1859,8 @@ impl App {
             Some(Hardware::Zippity)
         } else if self.clickstart.is_some() {
             Some(Hardware::ClickStart)
+        } else if self.lfa.is_some() {
+            Some(Hardware::LeapPadAcademy)
         } else if let Some(q) = &self.iquest {
             Some(match q.model {
                 ribbit_iquest::Model::IQuest => Hardware::IQuest,
@@ -1902,6 +1908,10 @@ impl App {
         }
         if let Some(d) = &self.didj {
             d.set_button(b, state);
+        }
+        // The LeapPad Academy has the same buttons (controller, touch pads).
+        if let Some(t) = &self.lfa {
+            t.set_button(b, state);
         }
     }
 

@@ -25,6 +25,7 @@ pub fn color(hw: Hardware) -> C {
         Hardware::ClickStart => C::from_rgb(70, 185, 110),
         Hardware::IQuest => C::from_rgb(110, 125, 200),
         Hardware::TurboTwist => C::from_rgb(240, 120, 40),
+        Hardware::LeapPadAcademy => C::from_rgb(40, 150, 215),
     }
 }
 
@@ -45,6 +46,7 @@ pub fn name(hw: Hardware) -> &'static str {
         Hardware::ClickStart => "ClickStart",
         Hardware::IQuest => "iQuest",
         Hardware::TurboTwist => "Turbo Twist",
+        Hardware::LeapPadAcademy => "LeapPad Academy",
     }
 }
 
@@ -345,6 +347,21 @@ pub fn paint_device(p: &egui::Painter, rect: egui::Rect, hw: Hardware) {
             p.line_segment([at(20.0, -21.0), at(30.0, -26.0)], stroke(0.8, C::from_gray(90)));
             p.line_segment([at(-8.0, -26.0), at(30.0, -26.0)], stroke(3.0, lime));
             p.circle_filled(at(-8.0, -26.0), 1.8 * u, lime);
+        }
+        // LeapPad Academy (2019; drawn from LeapFrog's description, no
+        // photo checked): a 7-inch Android tablet held sideways in a thick
+        // blue bumper, a wide dark screen filling the face, the camera above
+        // it, no buttons on the front, and the stylus on its cord at the top.
+        Hardware::LeapPadAcademy => {
+            let blue = C::from_rgb(40, 150, 215);
+            shell(p, &[Part::Round(rr(0.0, 2.0, 84.0, 54.0), 12.0 * u)], blue, u);
+            p.rect_filled(rr(0.0, 2.0, 72.0, 44.0), 6.0 * u, C::from_gray(36));
+            screen(p, rr(0.0, 2.5, 64.0, 37.0));
+            p.circle_filled(at(0.0, -17.5), 1.2 * u, C::from_gray(90));
+            // The stylus on its cord, along the top.
+            p.line_segment([at(22.0, -23.0), at(32.0, -28.0)], stroke(0.8, C::from_gray(90)));
+            p.line_segment([at(-10.0, -28.0), at(32.0, -28.0)], stroke(3.0, mix(blue, C::WHITE, 0.3)));
+            p.circle_filled(at(-10.0, -28.0), 1.8 * u, mix(blue, C::WHITE, 0.3));
         }
         // ClickStart: a green and white keyboard shaped as a dog, two dark
         // green ears and a face with eyes and a nose above the keys, a red

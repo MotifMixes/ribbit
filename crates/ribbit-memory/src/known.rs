@@ -52,6 +52,10 @@ pub enum Hardware {
     /// iQuest's chip, a 96 x 32 LCD and an EEPROM (crates/ribbit-iquest).
     /// EXPERIMENTAL.
     TurboTwist,
+    /// LeapFrog LeapPad Academy (2019 Android tablet) and LeapFrog Epic: no
+    /// firmware is run; each title's APK native library plays on its own on
+    /// the Brio-on-Android HLE (crates/ribbit-lfandroid). EXPERIMENTAL.
+    LeapPadAcademy,
 }
 
 impl Hardware {
@@ -72,6 +76,7 @@ impl Hardware {
             Hardware::ClickStart => "ClickStart",
             Hardware::IQuest => "iQuest",
             Hardware::TurboTwist => "Turbo Twist Extreme",
+            Hardware::LeapPadAcademy => "LeapPad Academy",
         }
     }
 }

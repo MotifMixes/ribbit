@@ -140,6 +140,15 @@ The **Leapster Explorer** tab shows the console first. After it come its built-i
 - **Export the Explorer's files…** writes your profiles, progress and installed games as `LF/Bulk` in a real Explorer's layout. A real Explorer offers no drive to copy them back to, so keep the export as a backup.
 - **Import from a real Explorer…** takes a copy of a real Explorer's `/LF/Bulk`, or a folder holding its NAND dump as `explorer.nand`. Untested with a real Explorer.
 
+## LeapPad Academy and LeapFrog Epic (early emulation)
+
+The LeapPad Academy (2019) and LeapFrog Epic are Android tablets. Ribbit runs no Android: it plays a title's own game code from its `.apk` file, so no firmware is needed.
+
+- Put the `.apk` files in one of your games folders: they are on the library's **LeapPad Academy** tab. Click one to play it, or open one with **File › Open Cartridge…**. Only titles that carry their game code are listed; the Academy's built-in apps whose code lives in the tablet's firmware ("NoSO" APKs) and Android's own apps are not.
+- The mouse is your finger. The arrows are the D-pad, **Z** and **X** are A and B, **Backspace** is Back, **H**, **P** and **Home** are Hint, Pause and Home. A controller works too.
+- Every title shares one storage folder, as on the tablet: `LeapPad Academy` in your saves folder.
+- Many titles don't start yet. T-Rex Rush and Stretchy Monkey 2 do.
+
 ## LeapPad (early emulation)
 
 The original LeapPad (1999) is a book-and-pen pad: the child touches the printed page with the pen and the cartridge talks. Ribbit needs the pad's **base ROM** from your own LeapPad: open it with **File › Open BIOS…** (Ribbit keeps it as the LeapPad's; your Leapster BIOS stays). The 2 MB "Full Base" ROM works best.

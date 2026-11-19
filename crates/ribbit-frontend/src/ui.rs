@@ -2706,7 +2706,7 @@ fn header_controls(ui: &mut egui::Ui, settings: &Settings, library: &Library, ta
         turn_on_button(ui, settings, library, tab, actions);
         // Zippity and RockIt Twist games play on their own console: no
         // choice to make on their pages.
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2 | Family::LeapPadAcademy)) {
             // (Right to left: the BIOS button shows to the right of the
             // console menu.)
             bios_picker(ui, settings, library, actions);
@@ -2772,7 +2772,7 @@ fn phone_library_header(
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2)) {
+        if !matches!(tab, Some(Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2 | Family::LeapPadAcademy)) {
             console_picker(ui, settings, library, tab, actions);
             bios_picker(ui, settings, library, actions);
         }
@@ -2950,6 +2950,11 @@ fn turn_on_button(ui: &mut egui::Ui, settings: &Settings, library: &Library, tab
         {
             actions.push(Action::PlayFromLibrary(g.path.clone()));
         }
+        return;
+    }
+    // The LeapPad Academy's page: no firmware to turn on; each title plays
+    // on its own.
+    if tab == Some(Family::LeapPadAcademy) {
         return;
     }
     let console = match tab {
@@ -3682,7 +3687,7 @@ A".into(), title_font, egui::Color32::WHITE).size().y;
         ui.separator();
         // Leapster games keep their progress on their own cartridge chip; a
         // Zippity's or RockIt Twist's belongs to the whole console.
-        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2);
+        let own_save = !matches!(game.family, Family::Zippity | Family::RockItTwist | Family::LeapPad | Family::Didj | Family::Explorer | Family::LeapPadExplorer | Family::LeapPad2 | Family::LeapPadAcademy);
         let delete = ui
             .add_enabled(
                 own_save,
@@ -4061,6 +4066,21 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
                 ("Home", keys_for(TwistKey::Press(T::Home))),
                 ("Check mark", keys_for(TwistKey::Press(T::Check))),
                 ("Volume up / down", both(TwistKey::Press(T::VolumeUp), TwistKey::Press(T::VolumeDown))),
+            ] {
+                ui.label(what);
+                ui.label(keys);
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        ui.label(egui::RichText::new("On the LeapPad Academy (experimental)").strong());
+        egui::Grid::new("lfa").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+            for (what, keys) in [
+                ("Touch screen", "Left mouse button / touch"),
+                ("D-pad", "Arrows"),
+                ("A / B", "Z / X"),
+                ("Back", "Backspace"),
+                ("Hint / Pause / Home", "H / P / Home"),
             ] {
                 ui.label(what);
                 ui.label(keys);

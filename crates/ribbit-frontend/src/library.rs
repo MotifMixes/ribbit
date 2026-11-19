@@ -17,7 +17,7 @@ use ribbit_memory::known::Hardware;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-const EXTENSIONS: [&str; 11] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf2", "lf3", "img", "didj", "lbk"];
+const EXTENSIONS: [&str; 12] = ["bin", "rom", "u3", "lst", "zip", "lfp", "lf2", "lf3", "img", "didj", "lbk", "apk"];
 /// Folder depth scanned below each ROM folder.
 const MAX_DEPTH: usize = 3;
 /// Art: emulated time searched for the title card, and how often to look.
@@ -159,6 +159,9 @@ pub enum Family {
     IQuest,
     /// The Turbo Twist Extreme's base ROM (no cartridge dump known).
     TurboTwist,
+    /// A LeapPad Academy / LeapFrog Epic title (an .apk with its native
+    /// library); no firmware needed.
+    LeapPadAcademy,
 }
 
 /// Cartridges made for the Leapster 2 alone, by CRC32: the "Leapster 2
@@ -169,7 +172,7 @@ const LEAPSTER2_ONLY: &[u32] = &[0xc6fd_5c24];
 impl Family {
     /// The library tabs: the game consoles in alphabetical order, then the
     /// LeapPad (a book reader; Ribbit is a game emulator first).
-    pub const ALL: [Family; 12] = [
+    pub const ALL: [Family; 13] = [
         Family::ClickStart,
         Family::Didj,
         Family::IQuest,
@@ -178,6 +181,7 @@ impl Family {
         Family::Explorer,
         Family::LeapPadExplorer,
         Family::LeapPad2,
+        Family::LeapPadAcademy,
         Family::RockItTwist,
         Family::TurboTwist,
         Family::Zippity,
@@ -203,6 +207,7 @@ impl Family {
             Family::ClickStart => "ClickStart",
             Family::IQuest => "iQuest",
             Family::TurboTwist => "Turbo Twist Extreme",
+            Family::LeapPadAcademy => "LeapPad Academy",
         }
     }
 
@@ -211,7 +216,7 @@ impl Family {
         match self {
             Family::Leapster => !matches!(
                 hw,
-                Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart | Hardware::IQuest | Hardware::TurboTwist
+                Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart | Hardware::IQuest | Hardware::TurboTwist | Hardware::LeapPadAcademy
             ),
             Family::Leapster2 => hw == Hardware::Leapster2,
             Family::Zippity => hw == Hardware::Zippity,
@@ -224,6 +229,7 @@ impl Family {
             Family::ClickStart => hw == Hardware::ClickStart,
             Family::IQuest => hw == Hardware::IQuest,
             Family::TurboTwist => hw == Hardware::TurboTwist,
+            Family::LeapPadAcademy => hw == Hardware::LeapPadAcademy,
         }
     }
 
@@ -242,6 +248,7 @@ impl Family {
             Family::ClickStart => Hardware::ClickStart,
             Family::IQuest => Hardware::IQuest,
             Family::TurboTwist => Hardware::TurboTwist,
+            Family::LeapPadAcademy => Hardware::LeapPadAcademy,
         }
     }
 
@@ -754,6 +761,8 @@ impl Library {
             Hardware::LeapPad => true,
             // Started from its packages (it says which are missing).
             Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 => true,
+            // Each title plays on its own (its APK's native library).
+            Hardware::LeapPadAcademy => true,
             _ => self.bios_for(hw).is_some(),
         }
     }
@@ -768,7 +777,7 @@ impl Library {
             .filter(|&hw| {
                 !matches!(
                     hw,
-                    Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart | Hardware::IQuest | Hardware::TurboTwist
+                    Hardware::Zippity | Hardware::RockItTwist | Hardware::LeapPad | Hardware::Didj | Hardware::Explorer | Hardware::LeapPadExplorer | Hardware::LeapPad2 | Hardware::ClickStart | Hardware::IQuest | Hardware::TurboTwist | Hardware::LeapPadAcademy
                 )
             })
             .filter(|&hw| self.bios_for(hw).is_some())
@@ -797,6 +806,7 @@ impl Library {
             Hardware::ClickStart => Family::ClickStart,
             Hardware::IQuest => Family::IQuest,
             Hardware::TurboTwist => Family::TurboTwist,
+            Hardware::LeapPadAcademy => Family::LeapPadAcademy,
             _ => Family::Leapster,
         }
     }
@@ -967,7 +977,7 @@ fn worker(
                 }
                 continue;
             }
-            Some(Found::Twist(game) | Found::LeapPad(game) | Found::Didj(game)) => {
+            Some(Found::Twist(game) | Found::LeapPad(game) | Found::Didj(game) | Found::Academy(game)) => {
                 // A Didj cartridge is on the Explorer's page too.
                 let explorer = (game.family == Family::Didj && game.has_tag("Cartridge")).then(|| crate::didj::on_explorer(&game));
                 for game in std::iter::once(game).chain(explorer) {
@@ -1146,6 +1156,8 @@ enum Found {
     /// An iQuest or Turbo Twist Extreme base ROM: the handheld, playable
     /// alone.
     IQuestBios(Game),
+    /// A LeapPad Academy / LeapFrog Epic title (.apk).
+    Academy(Game),
 }
 
 /// Zippity images: the system NAND (with spare area) and cartridges.
@@ -1153,6 +1165,11 @@ const ZIPPITY_NAND_SIZE: usize = 0x1080_0000;
 const ZIPPITY_CART_SIZE: usize = 0x420_0000;
 
 fn classify(path: &Path) -> Option<Found> {
+    // LeapPad Academy / LeapFrog Epic titles: APKs with a Brio native
+    // library (system apps and "NoSO" built-ins are not listed).
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("apk")) {
+        return crate::lfa::describe_apk(path).map(Found::Academy);
+    }
     // Didj packages are named DIDJ-0x<product>-<version>.lfp; only some
     // are listed (the rest are found again beside them when one starts).
     if crate::didj::is_package(path) {
@@ -1270,6 +1287,7 @@ pub fn family_of(path: &Path) -> Option<Family> {
         Found::ClickStart(_) | Found::ClickStartBios(_) => Some(Family::ClickStart),
         Found::IQuest(_) => Some(Family::IQuest),
         Found::IQuestBios(g) => Some(g.family),
+        Found::Academy(_) => Some(Family::LeapPadAcademy),
         Found::Bios(..) => None,
     }
 }

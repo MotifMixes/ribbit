@@ -151,6 +151,30 @@ impl LfaSession {
         true
     }
 
+    /// A Leapster-style button (controller, touch pads), as the tablet's
+    /// own: the d-pad, A, B, Hint, Pause and Home.
+    pub fn set_button(&self, b: ribbit_input::Button, down: bool) {
+        use ribbit_input::Button as B;
+        let bit = match b {
+            B::Up => button::UP,
+            B::Down => button::DOWN,
+            B::Left => button::LEFT,
+            B::Right => button::RIGHT,
+            B::A => button::A,
+            B::B => button::B,
+            B::Hint => button::HINT,
+            B::Pause => button::PAUSE,
+            B::Home => button::HOME,
+            _ => return,
+        };
+        let mut i = self.shared.input.lock().unwrap();
+        if down {
+            i.buttons |= bit;
+        } else {
+            i.buttons &= !bit;
+        }
+    }
+
     /// Starts the title again from its APK.
     pub fn restart(self) -> anyhow::Result<Self> {
         let (apk, data) = (self.apk.clone(), self.data.clone());
@@ -165,6 +189,51 @@ impl LfaSession {
             let _ = t.join();
         }
     }
+}
+
+/// Names of the titles whose label is only in their resources (by the end
+/// of the package name, after `app.x<product id>.`).
+const TITLES: &[(&str, &str)] = &[("AP_DINO", "T-Rex Rush"), ("AP_SM2", "Stretchy Monkey 2: Big City Hijinks"), ("AP_SM2_NoSO", "Stretchy Monkey 2: Big City Hijinks")];
+
+/// A LeapPad Academy / LeapFrog Epic title for the library: an APK with
+/// its Brio native library inside (`ribbit_lfandroid::peek`, reading the
+/// manifest alone). System apps (no native activity) and the Academy's
+/// "NoSO" built-ins (their library is the firmware's, which File > Open
+/// doesn't load either) are not listed.
+pub fn describe_apk(path: &Path) -> Option<crate::library::Game> {
+    let p = ribbit_lfandroid::peek(path).ok()?;
+    if !p.has_library || !p.package.starts_with("com.leapfrog.") {
+        return None;
+    }
+    let product = p.package.rsplit('.').next().unwrap_or_default();
+    let title = TITLES.iter().find(|(k, _)| *k == product).map_or_else(
+        || product.strip_prefix("AP_").unwrap_or(product).replace('_', " "),
+        |(_, t)| t.to_string(),
+    );
+    // AND4 builds are the Academy's, ANDS the Epic's (docs/leappad-academy.md).
+    let system = if p.package.contains(".ANDS.") { "LeapFrog Epic" } else { "LeapPad Academy" };
+    let mut details = vec![("System", system.to_string()), ("Package", p.package.clone())];
+    if !p.version.is_empty() {
+        details.push(("Version", p.version.clone()));
+    }
+    if let Some(kind) = &p.content_type {
+        details.push(("Kind", kind.clone()));
+    }
+    details.push(("Screen", if p.portrait { "Portrait" } else { "Landscape" }.to_string()));
+    if let Ok(m) = std::fs::metadata(path) {
+        details.push(("Size", format!("{} MB", m.len().div_ceil(1 << 20))));
+    }
+    let subtitle = if p.version.is_empty() { system.to_string() } else { format!("{system} {}", p.version) };
+    Some(crate::library::Game {
+        path: path.to_path_buf(),
+        family: crate::library::Family::LeapPadAcademy,
+        title,
+        subtitle,
+        details,
+        tags: vec!["Experimental".into()],
+        key: format!("apk_{}_{}", p.package.replace('.', "_"), p.version.replace('.', "_")),
+        art: crate::library::Art::Missing,
+    })
 }
 
 fn run(mut t: Tablet, s: &Shared) {
@@ -225,5 +294,40 @@ fn run(mut t: Tablet, s: &Shared) {
         } else {
             next = now;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every .apk under RIBBIT_LFA_DIR (folders below too): the titles with
+    /// their native library are listed, system apps and NoSO built-ins not.
+    #[test]
+    #[ignore]
+    fn academy_titles_are_listed() {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("apk")) {
+                    out.push(p);
+                }
+            }
+        }
+        let mut apks = Vec::new();
+        walk(Path::new(&std::env::var("RIBBIT_LFA_DIR").expect("RIBBIT_LFA_DIR")), &mut apks);
+        let mut listed = 0;
+        for p in &apks {
+            let t = Instant::now();
+            let g = describe_apk(p);
+            eprintln!("{}: {:?} ({:.0} ms)", p.display(), g.as_ref().map(|g| (&g.title, &g.subtitle)), t.elapsed().as_secs_f64() * 1e3);
+            if let Some(g) = g {
+                assert!(!g.title.is_empty());
+                listed += 1;
+            }
+        }
+        assert!(listed > 0 && listed < apks.len());
     }
 }

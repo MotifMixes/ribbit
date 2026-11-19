@@ -91,6 +91,33 @@ fn after<'a>(strings: &'a [String], key: &str) -> Option<&'a String> {
     strings.iter().position(|s| s == key).and_then(|i| strings.get(i + 1))
 }
 
+/// What the library lists of a title, read without loading it (`apk::peek_file`).
+#[derive(Debug, Clone)]
+pub struct Peek {
+    pub package: String,
+    pub version: String,
+    /// `android.app.lib_name`: a Brio title (a native activity); system apps have none.
+    pub lib_name: Option<String>,
+    pub content_type: Option<String>,
+    /// Its native library is in the APK (not a "NoSO" built-in, whose library is the
+    /// firmware's /system/lib).
+    pub has_library: bool,
+    pub portrait: bool,
+}
+
+/// An APK's manifest facts, from its central directory and manifest alone.
+pub fn peek(apk_path: &Path) -> Result<Peek, String> {
+    let (names, axml) = apk::peek_file(apk_path, "AndroidManifest.xml")?;
+    let man = apk::manifest_strings(&axml);
+    let portrait = matches!(apk::activity_orientation(&axml, ".LFMainActivity"), Some(1 | 7 | 9 | 12));
+    let package = man.iter().find(|s| s.starts_with("com.") && s.matches('.').count() >= 2 && !s.contains("permission")).cloned().unwrap_or_default();
+    let version = man.iter().find(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.') && s.contains('.')).cloned().unwrap_or_default();
+    let lib_name = after(&man, "android.app.lib_name").cloned();
+    let content_type = after(&man, "contentType").cloned();
+    let has_library = lib_name.as_ref().is_some_and(|n| ["armeabi-v7a", "armeabi"].iter().any(|abi| names.iter().any(|e| *e == format!("lib/{abi}/lib{n}.so"))));
+    Ok(Peek { package, version, lib_name, content_type, has_library, portrait })
+}
+
 /// Opens a LeapFrog Android title. `system_lib` is the firmware's /system/lib, where the
 /// Academy keeps the libraries of its built-in titles (their APKs are "NoSO").
 pub fn open_title(apk_path: &Path, system_lib: Option<&Path>) -> Result<Title, String> {
