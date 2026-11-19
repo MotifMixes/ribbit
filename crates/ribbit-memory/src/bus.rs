@@ -224,7 +224,7 @@ impl SystemBus {
             // Power-on SDRAM contents are undefined; zero keeps runs
             // deterministic. HYPOTHESIS: firmware does not depend on them.
             ram: vec![0; firmware.ram_size() as usize],
-            vram: vec![0; VRAM_SIZE as usize],
+            vram: vec![0; firmware.vram_size() as usize],
             sram: vec![0; firmware.sram_size() as usize],
             unmapped: Vec::new(),
             unmapped_total: 0,
@@ -323,10 +323,11 @@ impl SystemBus {
         if in_window(MMIO_BASE, MMIO_SIZE) {
             return Region::Mmio(addr - MMIO_BASE);
         }
-        if in_window(VRAM_BASE, VRAM_SIZE) {
+        let vram_size = self.vram.len() as u32;
+        if in_window(VRAM_BASE, vram_size) {
             return Region::Vram((addr - VRAM_BASE) as usize);
         }
-        if in_window(VRAM_BASE + VRAM_SIZE, VRAM_OVERRUN_END - VRAM_BASE - VRAM_SIZE) {
+        if in_window(VRAM_BASE + vram_size, VRAM_OVERRUN_END - VRAM_BASE - vram_size) {
             return Region::VramOverrun;
         }
         if let Some(cart) = &self.cart
@@ -353,13 +354,16 @@ impl SystemBus {
         &self.unmapped_summary
     }
 
-    /// Restores RAM, VRAM and on-chip RAM (save states); false if the sizes differ.
+    /// Restores RAM, VRAM and on-chip RAM (save states); false if the sizes
+    /// differ. A shorter VRAM (a Leapster 2 state saved while VRAM was
+    /// modelled as 64 KiB) is accepted and the rest zeroed.
     pub fn restore_memory(&mut self, ram: &[u8], vram: &[u8], sram: &[u8]) -> bool {
-        if ram.len() != self.ram.len() || vram.len() != self.vram.len() || sram.len() != self.sram.len() {
+        if ram.len() != self.ram.len() || vram.len() > self.vram.len() || sram.len() != self.sram.len() {
             return false;
         }
         self.ram.copy_from_slice(ram);
-        self.vram.copy_from_slice(vram);
+        self.vram.fill(0);
+        self.vram[..vram.len()].copy_from_slice(vram);
         self.sram.copy_from_slice(sram);
         self.forget_code();
         true

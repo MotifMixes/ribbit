@@ -75,6 +75,14 @@ impl Firmware {
         }
     }
 
+    /// VRAM size at `map::VRAM_BASE` for this firmware's model.
+    pub fn vram_size(&self) -> u32 {
+        match self.known.map(|k| k.hardware) {
+            Some(Hardware::Leapster2) => map::VRAM_SIZE_LEAPSTER2,
+            _ => map::VRAM_SIZE,
+        }
+    }
+
     /// On-chip RAM at `map::SRAM_BASE` for this firmware's model (8 KiB on
     /// a known Leapster 2; none elsewhere).
     pub fn sram_size(&self) -> u32 {

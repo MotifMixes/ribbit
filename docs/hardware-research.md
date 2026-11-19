@@ -82,6 +82,7 @@ All SOURCED. How these lines map onto ARC vector numbers and levels needs confir
 | `0x0000_0000-0x007F_FFFF` | BIOS ("BaseROM"), also at `0x4000_0000` (MAME `.mirror(0x4000_0000)`) | SOURCED; BIOS at 0x4000_0000 is confirmed by two sources | S1, S6 |
 | `0x0180_0000-0x0180_FFFF` | On-chip peripherals (table below) | SOURCED | S1 |
 | `0x0300_0000-0x0300_FFFF` | VRAM, 64 KiB. Also used as stack before MQX starts | SOURCED | S1 |
+| `0x0300_0000-0x0301_FFFF` | Leapster 2: VRAM is larger than 64 KiB. The homebrew SM64 port LSTR-0x00130640 (correct on a real Leapster 2) keeps a 16 bpp picture at 0x0300_9600-0x0301_2BFF and a sound buffer at 0x0301_7E00. Modelled as 128 KiB | VERIFIED-BEHAVIOUR (>= 96 KiB); size HYPOTHESIS | app |
 | `0x0301_0000-0x0302_FFFF` | v1.5 BIOS clear-screen writes overrun VRAM here. MAME discards them | SOURCED; real behaviour UNKNOWN | S1 |
 | `0x3C00_0000-0x3C1F_FFFF` | SDRAM, 2 MiB (ISSI IS42S16100 on the PCB) | SOURCED (three sources) | S1, S6, S7 |
 | `0x3C20_0000-0x3FFF_FFFF` | MAME maps RAM here (for the Leapster 2's 16 MiB). On the original this is UNKNOWN: mirror, open bus or fault | CONFLICT | S1 |
@@ -430,6 +431,14 @@ Leapster TV and Leapster 2 BIOSes share (0.6 addresses; B5, m9 and the TV BIOS h
 
 What a burst does with 32-bit data that is not two samples (it would come out with its halves swapped) is
 UNKNOWN; no BIOS bursts such data.
+
+VRAM bursts keep words unchanged (2026-11-17, modelled): the homebrew SM64 port LSTR-0x00130640, which displays
+correctly on a real Leapster 2, bursts its 16 bpp picture from VRAM 0x0300_9600 into X memory, reads it through
+32-bit ports taking the lower-addressed pixel from the low half (GAME.BIN file offset 0xD1CE0), packs 12 bpp
+words whose low byte is the first byte on screen and bursts them out to the framebuffer at 0x0300_0000. With the
+halfword swap applied to both bursts every framebuffer word came out with its halves exchanged (colour fringes,
+broken text). So bursts to and from VRAM do not swap; SDRAM bursts keep the swap the PCM path implies. Why the
+two differ is UNKNOWN (HYPOTHESIS: the 16-bit SDRAM bus versus on-chip VRAM).
 
 ### ADC FIFO (0x0180_00A0 / 0x0180_00A8)
 
