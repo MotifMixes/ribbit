@@ -1093,7 +1093,7 @@ impl Cpu {
         }
     }
 
-    fn aux_read(&mut self, n: u32, i: &Instr, ext: &mut impl AuxExt) -> Result<u32, CpuError> {
+    fn aux_read(&mut self, n: u32, i: &Instr, ext: &mut impl AuxExt, bus: &mut impl Bus) -> Result<u32, CpuError> {
         let s = self.status32;
         let bit = |b: u32, pos: u32| ((s & b != 0) as u32) << pos;
         Ok(match n {
@@ -1136,7 +1136,7 @@ impl Cpu {
             {
                 self.xy.as_ref().map_or(0, |xy| xy.aux_read(n))
             }
-            _ => match ext.aux_read(n) {
+            _ => match ext.aux_read(n).or_else(|| bus.aux_read(n)) {
                 Some(v) => v,
                 None => {
                     // "Accessing the extension auxiliary register region in the
@@ -1204,7 +1204,7 @@ impl Cpu {
             // everything else: offer to the machine, otherwise log. "Writes to
             // non implemented auxiliary registers are ignored" (PRM).
             _ => {
-                if !ext.aux_write(n, v) {
+                if !ext.aux_write(n, v) && !bus.aux_write(n, v) {
                     self.log_unmodelled_aux(i.addr, n, AuxKind::Write, v);
                 }
             }
@@ -1312,7 +1312,7 @@ impl Cpu {
             }
             Op::Lr => {
                 let n = self.read(i.src2, i)?;
-                let v = self.aux_read(n, i, ext)?;
+                let v = self.aux_read(n, i, ext, bus)?;
                 self.write_dst(i.dst, v);
                 return Ok(Flow::Next);
             }
@@ -1694,8 +1694,14 @@ impl Cpu {
         let addr = self.address(i)?;
         if i.dst == Dst::Discard {
             // PREFETCH: "The returning load is not written to any core
-            // register." No cache is modelled, so no memory access is made.
+            // register." Only the data cache sees it (the line is filled).
+            bus.prefetch(addr);
             return Ok(Flow::Next);
+        }
+        // `.di` loads go past the data cache (the bus decides what that means).
+        let di = i.mem.bypass_cache;
+        if di {
+            bus.set_uncached(true);
         }
         let v = match (i.mem.size, i.mem.sign_extend) {
             (Size::Word, _) => bus.read32(addr),
@@ -1704,6 +1710,9 @@ impl Cpu {
             (Size::Byte, false) => bus.read8(addr) as u32,
             (Size::Byte, true) => bus.read8(addr) as i8 as i32 as u32,
         };
+        if di {
+            bus.set_uncached(false);
+        }
         self.write_dst(i.dst, v);
         Ok(Flow::Next)
     }
@@ -1711,10 +1720,17 @@ impl Cpu {
     fn exec_store(&mut self, i: &Instr, bus: &mut impl Bus) -> Result<Flow, CpuError> {
         let v = self.read(i.data, i)?;
         let addr = self.address(i)?;
+        let di = i.mem.bypass_cache;
+        if di {
+            bus.set_uncached(true);
+        }
         match i.mem.size {
             Size::Word => bus.write32(addr, v),
             Size::Half => bus.write16(addr, v as u16),
             Size::Byte => bus.write8(addr, v as u8),
+        }
+        if di {
+            bus.set_uncached(false);
         }
         Ok(Flow::Next)
     }

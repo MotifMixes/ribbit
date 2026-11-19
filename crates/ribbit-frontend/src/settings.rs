@@ -86,6 +86,10 @@ pub struct Settings {
     /// Leapster 2: start a cartridge directly instead of through the
     /// system's start-up screens and main menu (as a real one does).
     pub leapster2_skip_menu: bool,
+    /// Leapster 2: the CPU's caches hold data as on the console, so `.di`
+    /// accesses, DMA and the LCD can see RAM differ from the cache (catches
+    /// homebrew that works only with coherent memory). Off: faster, coherent.
+    pub leapster2_cache_contents: bool,
     /// Press the calibration targets automatically (needs the touchscreen).
     pub auto_calibrate: bool,
     /// Show the game being played on Discord.
@@ -303,6 +307,7 @@ impl Default for Settings {
             experimental_touch: true,
             skip_boot_calibration: false,
             leapster2_skip_menu: false,
+            leapster2_cache_contents: true,
             auto_calibrate: true,
             discord_presence: true,
             cpu_mhz: 96,

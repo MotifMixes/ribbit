@@ -545,6 +545,7 @@ impl App {
         if !self.settings.jit_enabled {
             machine.jit = None;
         }
+        machine.set_cache_contents(self.settings.leapster2_cache_contents);
         let mhz = self.opts.cpu_mhz.unwrap_or(self.settings.cpu_mhz).max(1);
         machine.clock = ribbit_core::Clock::new(mhz * 1_000_000, ribbit_core::Clock::PERIPHERAL_HZ);
         if self.settings.mame_gpio_lines {
