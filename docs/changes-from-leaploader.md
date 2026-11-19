@@ -3,6 +3,17 @@
 LeapLoader (an SD-card loader for the Leapster 2) is tested in Ribbit. Fixes found there are made in
 Ribbit directly and listed here.
 
+## 2026-11-18: RIBBIT_WARN_MISALIGNED reports misaligned loads and stores
+
+* **Why:** a 2-byte-aligned table read as words broke the SNES port's backgrounds on a real Leapster 2
+  (2026-11-17) and looked right in Ribbit. The ARC600 has no unaligned access; Ribbit clears the low address
+  bits, so a misaligned store and load at one address meet in the same word and code stays consistent with
+  itself. What the console does instead is UNKNOWN, so nothing is modelled.
+* **Change:** `RIBBIT_WARN_MISALIGNED=1` prints, once per instruction address, every 16- or 32-bit load or
+  store at an address that isn't a multiple of its size (width, load or store, address, pc), to stderr
+  (ribbit-core `io/mod.rs` `warn_misaligned`). It covers all code, the BIOS's too. While it is set the JIT
+  stays off (ribbit-jit `Jit::from_env`), so every access goes through the bus. Unset: no change.
+
 ## 2026-11-01: RIBBIT_WARN_LP reports zero-overhead loops in RAM code
 
 * **Why:** LeapLoader's NES and Game Boy apps ran right in Ribbit but failed on a real Leapster 2 (user's
