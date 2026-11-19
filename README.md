@@ -7,6 +7,9 @@ Leapster L-MAX, Leapster TV and Leapster 2, the Leapster Explorer, the Zippity, 
 original LeapPad and the ClickStart. Written in Rust, for **Windows, macOS,
 Linux and Android**.
 
+Ribbit's sister project **[Blub](https://github.com/MotifMixes/blub)** emulates Fisher-Price consoles, starting with
+the I Can Play Piano. It looks and works the same way, and its piano runs on the same chip family as the ClickStart.
+
 ## Download and play
 
 **You don't need to install Rust or anything else.** The download is the finished app. (Rust is only needed to
