@@ -189,6 +189,56 @@ pub fn gl_call(gl: &mut Gl, name: &str, g: &mut dyn Guest) -> Outcome {
                 gl.tex_env(target, pname, &vals);
             }
         }
+        "glGetTexEnviv" | "glGetTexEnvxv" | "glGetTexEnvfv" => {
+            let vals = gl.tex_env_get(a(g, 0), a(g, 1));
+            let colour = vals.len() == 4;
+            let words: Vec<u32> = vals
+                .iter()
+                .map(|&x| match name {
+                    "glGetTexEnvfv" => x.to_bits(),
+                    "glGetTexEnvxv" if colour => (x * 65536.) as i32 as u32,
+                    "glGetTexEnviv" if colour => (x as f64 * i32::MAX as f64) as i32 as u32,
+                    _ => x as i32 as u32,
+                })
+                .collect();
+            let at = a(g, 2);
+            write_u32s(g, at, &words);
+        }
+        // GL_OES_framebuffer_object
+        "glGenFramebuffersOES" | "glGenRenderbuffersOES" => {
+            let (n, at) = (a(g, 0) as usize, a(g, 1));
+            let names = gl.gen_names(n.min(1 << 16));
+            write_u32s(g, at, &names);
+        }
+        "glDeleteFramebuffersOES" | "glDeleteRenderbuffersOES" => {
+            let (n, at) = (a(g, 0) as usize, a(g, 1));
+            if let Some(names) = read_u32s(g, at, n.min(1 << 16)) {
+                if name == "glDeleteFramebuffersOES" { gl.delete_framebuffers(&names) } else { gl.delete_renderbuffers(&names) }
+            }
+        }
+        "glBindFramebufferOES" => gl.bind_framebuffer(a(g, 0), a(g, 1)),
+        "glBindRenderbufferOES" => gl.bind_renderbuffer(a(g, 1)),
+        // (target, internalformat, width, height)
+        "glRenderbufferStorageOES" => gl.renderbuffer_storage(a(g, 2), a(g, 3)),
+        // (target, attachment, textarget, texture, level)
+        "glFramebufferTexture2DOES" => gl.framebuffer_attach(a(g, 1), a(g, 3), false),
+        // (target, attachment, renderbuffertarget, renderbuffer)
+        "glFramebufferRenderbufferOES" => gl.framebuffer_attach(a(g, 1), a(g, 3), true),
+        "glCheckFramebufferStatusOES" => return Outcome::Value(gl.check_framebuffer_status()),
+        "glIsFramebufferOES" => return Outcome::Value(gl.is_framebuffer(a(g, 0)) as u32),
+        "glIsRenderbufferOES" => return Outcome::Value(gl.is_renderbuffer(a(g, 0)) as u32),
+        "glGetRenderbufferParameterivOES" => {
+            let (w, h) = gl.renderbuffer_size();
+            let v = match a(g, 1) {
+                0x8D42 => w,      // RENDERBUFFER_WIDTH
+                0x8D43 => h,      // RENDERBUFFER_HEIGHT
+                0x8D44 => 0x8058, // RENDERBUFFER_INTERNAL_FORMAT: RGBA8
+                _ => 8,           // the colour sizes; depth 16 isn't asked
+            };
+            let at = a(g, 2);
+            write_u32s(g, at, &[v]);
+        }
+        "glGenerateMipmapOES" => {}
         "glTexImage2D" => {
             let (level, internal, w, h, _border, format, kind, pixels) = (a(g, 1) as i32, a(g, 2), a(g, 3), a(g, 4), a(g, 5), a(g, 6), a(g, 7), a(g, 8));
             let data = if pixels == 0 { None } else { gl.image_bytes(w, h, format, kind).and_then(|n| g.read(pixels, n)) };

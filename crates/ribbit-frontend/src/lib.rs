@@ -46,6 +46,7 @@ mod updates;
 pub mod upscale;
 mod zippity;
 mod clickstart;
+mod lfa;
 mod iquest;
 
 pub use app::{StartOptions, run, run_with};

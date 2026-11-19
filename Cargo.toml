@@ -9,6 +9,7 @@ members = [
     "crates/ribbit-gles",
     "crates/ribbit-zippity",
     "crates/ribbit-clickstart",
+    "crates/ribbit-lfandroid",
     "crates/ribbit-twist",
     "crates/ribbit-didj",
     "crates/ribbit-leappad",
@@ -63,6 +64,7 @@ ribbit-armjit = { path = "crates/ribbit-armjit" }
 ribbit-gles = { path = "crates/ribbit-gles" }
 ribbit-zippity = { path = "crates/ribbit-zippity" }
 ribbit-clickstart = { path = "crates/ribbit-clickstart" }
+ribbit-lfandroid = { path = "crates/ribbit-lfandroid" }
 ribbit-twist = { path = "crates/ribbit-twist" }
 ribbit-didj = { path = "crates/ribbit-didj" }
 ribbit-leappad = { path = "crates/ribbit-leappad" }

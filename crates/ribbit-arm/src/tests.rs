@@ -474,3 +474,90 @@ fn v7_vfp_memory_and_doubles() {
     assert_eq!((st.d(8), st.d(9)), (11, 22));
     assert_eq!(bus.read32(0x2004), 1.5f64.to_bits() as u32);
 }
+
+// ---- Thumb-2 (thumb2.rs) and NEON ------------------------------------------
+
+fn run_t2(code: &[u16], steps: usize, setup: impl FnOnce(&mut Arm, &mut Ram)) -> (Arm, Ram) {
+    run_thumb(code, steps, |a, bus| {
+        a.v7 = Some(Box::default());
+        setup(a, bus)
+    })
+}
+
+#[test]
+fn t2_movw_and_modified_immediate() {
+    // movw r0,#0x1234; add.w r1,r0,#0x00FF00FF
+    let (a, _) = run_t2(&[0xF241, 0x2034, 0xF100, 0x11FF], 2, |_, _| {});
+    assert_eq!(a.r[0], 0x1234);
+    assert_eq!(a.r[1], 0x1234 + 0x00FF_00FF);
+    assert_eq!(a.r[15], 0x1008);
+}
+
+#[test]
+fn t2_it_block_keeps_flags() {
+    // cmp r0,#0; ite eq; movs r1,#1 (then: runs, flags kept); movs r2,#2 (else: skipped)
+    let (a, _) = run_t2(&[0x2800, 0xBF0C, 0x2101, 0x2202], 4, |_, _| {});
+    assert_eq!((a.r[1], a.r[2]), (1, 0));
+    assert!(a.cpsr & psr::Z != 0);
+    assert_eq!(a.cpsr & (3 << 25 | 0x3F << 10), 0);
+}
+
+#[test]
+fn t2_cbz_bl_tbb() {
+    // cbz r0,+4 skips to movs r2,#5
+    let (a, _) = run_t2(&[0xB110, 0x2101, 0x2102, 0x2103, 0x2205], 2, |_, _| {});
+    assert_eq!((a.r[1], a.r[2]), (0, 5));
+    // bl 0x1010
+    let (a, _) = run_t2(&[0xF000, 0xF806], 1, |_, _| {});
+    assert_eq!((a.r[15], a.r[14]), (0x1010, 0x1005));
+    // tbb [pc, r0] with the table {2, 3} after it: r0 = 1 -> 0x1004 + 6
+    let (a, _) = run_t2(&[0xE8DF, 0xF000, 0x0302], 1, |a, _| a.r[0] = 1);
+    assert_eq!(a.r[15], 0x100A);
+}
+
+#[test]
+fn t2_loads_stores_push_pop() {
+    // ldr.w r2,[pc,#8]: from Align(0x1004) + 8
+    let (a, _) = run_t2(&[0xF8DF, 0x2008], 1, |_, bus| bus.write32(0x100C, 0xDEAD_BEEF));
+    assert_eq!(a.r[2], 0xDEAD_BEEF);
+    // push.w {r4,lr}; mov r4,#0 (movs r4,#0); pop.w {r4,pc}
+    let (a, bus) = run_t2(&[0xE92D, 0x4010, 0x2400, 0xE8BD, 0x8010], 3, |a, _| {
+        a.r[13] = 0x8000;
+        a.r[4] = 7;
+        a.r[14] = 0x2001;
+    });
+    let mut bus = bus;
+    assert_eq!((bus.read32(0x7FF8), bus.read32(0x7FFC)), (7, 0x2001));
+    assert_eq!((a.r[4], a.r[13], a.r[15]), (7, 0x8000, 0x2000));
+    assert!(a.thumb());
+}
+
+#[test]
+fn t2_divide_and_vfp_literal() {
+    // udiv r0,r1,r2
+    let (a, _) = run_t2(&[0xFBB1, 0xF0F2], 1, |a, _| {
+        a.r[1] = 100;
+        a.r[2] = 7;
+    });
+    assert_eq!(a.r[0], 14);
+    // vldr s0,[pc,#4]: from Align(0x1004) + 4
+    let (a, _) = run_t2(&[0xED9F, 0x0A01], 1, |_, bus| bus.write32(0x1008, 0x3F80_0000));
+    assert_eq!(a.v7.as_ref().unwrap().s[0], 0x3F80_0000);
+}
+
+#[test]
+fn neon_vadd_vsub_i64() {
+    // vadd.i64 d16,d17,d18; vsub.i64 d16,d17,d18 (U = 1)
+    let (a, _) = run_v7(&[0xF271_08A2], |a, _| {
+        let v = a.v7.as_mut().unwrap();
+        v.set_d(17, 0xFFFF_FFFF);
+        v.set_d(18, 1);
+    });
+    assert_eq!(a.v7.as_ref().unwrap().d(16), 0x1_0000_0000);
+    let (a, _) = run_v7(&[0xF371_08A2], |a, _| {
+        let v = a.v7.as_mut().unwrap();
+        v.set_d(17, 0);
+        v.set_d(18, 1);
+    });
+    assert_eq!(a.v7.as_ref().unwrap().d(16), u64::MAX);
+}

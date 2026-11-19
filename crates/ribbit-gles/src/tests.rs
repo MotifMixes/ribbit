@@ -126,3 +126,26 @@ fn etc1_block_decodes() {
     let px = decode_etc1(4, 4, &block).unwrap();
     assert!(px.iter().all(|&p| p == 0xFF8A8A8A));
 }
+
+#[test]
+fn framebuffer_draws_into_its_texture() {
+    let mut g = Gl::new(8, 8);
+    g.clear_color([0., 0., 1., 1.]);
+    g.clear(gl::COLOR_BUFFER_BIT);
+    let tex = g.gen_names(1)[0];
+    g.bind_texture(gl::TEXTURE_2D, tex);
+    g.tex_image(0, gl::RGBA, 4, 2, gl::RGBA, gl::UNSIGNED_BYTE, None);
+    let fb = g.gen_names(1)[0];
+    g.bind_framebuffer(gl::FRAMEBUFFER_OES, fb);
+    g.framebuffer_attach(gl::COLOR_ATTACHMENT0_OES, tex, false);
+    assert_eq!(g.check_framebuffer_status(), gl::FRAMEBUFFER_COMPLETE_OES);
+    assert_eq!((g.surface.width, g.surface.height), (4, 2));
+    g.clear_color([1., 0., 0., 1.]);
+    g.clear(gl::COLOR_BUFFER_BIT);
+    g.bind_framebuffer(gl::FRAMEBUFFER_OES, 0);
+    // The texture has the red, the window kept its blue.
+    assert!(g.texture(tex).unwrap().pixels.iter().all(|&p| p == 0xFF00_00FF));
+    assert_eq!((g.surface.width, g.surface.height), (8, 8));
+    assert_eq!(g.surface.to_xrgb()[0], 0x0000FF);
+    assert_eq!(g.get_error(), 0);
+}
