@@ -710,6 +710,9 @@ impl Bus for MachineBus<'_> {
 
     #[inline(always)]
     fn read16(&mut self, addr: u32) -> u16 {
+        if addr & 1 != 0 {
+            warn_misaligned(self.pc, addr, 16, false);
+        }
         if !is_mmio(addr) {
             if self.io.mem.lines.contents {
                 return self.read_cached(addr, 2) as u16;
@@ -723,6 +726,9 @@ impl Bus for MachineBus<'_> {
 
     #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
+        if addr & 3 != 0 {
+            warn_misaligned(self.pc, addr, 32, false);
+        }
         if !is_mmio(addr) {
             if self.io.mem.lines.contents {
                 return self.read_cached(addr, 4) as u32;
@@ -755,6 +761,9 @@ impl Bus for MachineBus<'_> {
 
     #[inline(always)]
     fn write16(&mut self, addr: u32, value: u16) {
+        if addr & 1 != 0 {
+            warn_misaligned(self.pc, addr, 16, true);
+        }
         if !is_mmio(addr) {
             if self.io.mem.lines.contents {
                 return self.write_cached(addr, 2, value as u32);
@@ -770,6 +779,9 @@ impl Bus for MachineBus<'_> {
 
     #[inline(always)]
     fn write32(&mut self, addr: u32, value: u32) {
+        if addr & 3 != 0 {
+            warn_misaligned(self.pc, addr, 32, true);
+        }
         if !is_mmio(addr) {
             if self.io.mem.lines.contents {
                 return self.write_cached(addr, 4, value as u32);
@@ -781,6 +793,31 @@ impl Bus for MachineBus<'_> {
         }
         self.io.mem.device();
         self.write32_mmio(addr, value)
+    }
+}
+
+/// RIBBIT_WARN_MISALIGNED=1: prints, once per instruction address, every
+/// 16- or 32-bit load or store to an address not a multiple of its size. The
+/// ARC600 has no unaligned access: a 2-byte-aligned array read as words broke
+/// LeapLoader's SNES backgrounds on a real Leapster 2 (2026-11-17) while they
+/// were right here. Ribbit clears the low address bits (a misaligned store
+/// and load at one address meet in the same word, so code is consistent with
+/// itself); what the console does instead is UNKNOWN, so this only reports.
+/// The JIT stays off while it is set (ribbit-jit `Jit::from_env`), so every
+/// access comes through here.
+#[cold]
+fn warn_misaligned(pc: u32, addr: u32, width: u32, write: bool) {
+    use std::sync::{Mutex, OnceLock};
+    static ON: OnceLock<bool> = OnceLock::new();
+    static SEEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    if !*ON.get_or_init(|| std::env::var("RIBBIT_WARN_MISALIGNED").is_ok_and(|v| v != "0")) {
+        return;
+    }
+    let Ok(mut seen) = SEEN.lock() else { return };
+    if !seen.contains(&pc) {
+        seen.push(pc);
+        let what = if write { "store to" } else { "load from" };
+        eprintln!("ribbit: misaligned {width}-bit {what} {addr:#010x} at pc {pc:#010x}: the ARC600 has no unaligned access (fails on a real Leapster 2)");
     }
 }
 
