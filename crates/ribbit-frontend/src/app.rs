@@ -1220,6 +1220,7 @@ impl App {
                 if let Some(g) = self.library.games.iter().find(|g| g.path == apk) {
                     t.title = g.title.clone();
                 }
+                t.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 self.fit_window = FIT_TRIES;
                 self.lfa = Some(t);
                 self.paused = false;
@@ -2500,6 +2501,9 @@ impl App {
                 if let Some(c) = &self.clickstart {
                     c.set_turn_off_when_idle(self.settings.turn_off_when_idle);
                 }
+                if let Some(t) = &self.lfa {
+                    t.set_turn_off_when_idle(self.settings.turn_off_when_idle);
+                }
                 if let Some(d) = &self.didj {
                     d.set_frame_skip(self.settings.didj_frame_skip);
                     d.set_hd(self.settings.didj_hd.clamp(1, 4));
@@ -3751,6 +3755,12 @@ impl App {
             q.set_turn_off_when_idle(self.settings.turn_off_when_idle);
             self.speed_percent = q.speed_percent();
             Self::log_underruns(self.audio.as_ref(), &mut self.audio_log, self.speed_percent);
+            return;
+        }
+        // It went to sleep for idling: closed, as a Leapster that turned
+        // itself off.
+        if self.lfa.as_ref().is_some_and(|t| t.idle_powered_off()) {
+            self.end_session();
             return;
         }
         if let Some(stop) = self.lfa.as_ref().and_then(|t| t.stopped()) {

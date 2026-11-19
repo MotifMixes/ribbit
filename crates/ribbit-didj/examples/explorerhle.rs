@@ -13,6 +13,9 @@
 //! saves the sound; EXPLORER_HLE_FRAMES=<folder> the screen whenever it
 //! changed (named by host ms); EXPLORER_HLE_FPS=1 prints frames a second.
 //! EXPLORER_HLE_LEAPPAD2=1 runs a LeapPad 2 package folder instead.
+//! EXPLORER_HLE_IDLE=keep|count prints AppManager's idle timer
+//! (ribbit_didj::idle) every 10 s; `keep` puts it back to 0 each second, as
+//! the app does with "Turn off when idle" off.
 
 use ribbit_didj::hle::Process;
 use std::io::Write;
@@ -139,6 +142,8 @@ fn main() {
     let mut last_frame: Vec<u32> = Vec::new();
     let fps = std::env::var_os("EXPLORER_HLE_FPS").is_some();
     let (mut fps_second, mut fps_flips, mut fps_executed) = (0, 0, 0);
+    let idle_mode = std::env::var("EXPLORER_HLE_IDLE").ok();
+    let (mut idle, mut idle_second) = (ribbit_didj::idle::IdleTimer::default(), 0);
     let stop = loop {
         let ms = t.elapsed().as_millis();
         // EXPLORER_HLE_TRACE_FROM=<ms>: every system call from then on.
@@ -196,6 +201,15 @@ fn main() {
         if fps && t.elapsed().as_secs() > fps_second {
             eprintln!("[fps] {fps_second} s: {} frames shown, {} million instructions", p.explorer_pans() - fps_flips, (p.executed - fps_executed) / 1_000_000);
             (fps_second, fps_flips, fps_executed) = (t.elapsed().as_secs(), p.explorer_pans(), p.executed);
+        }
+        if let Some(mode) = &idle_mode
+            && t.elapsed().as_secs() > idle_second
+        {
+            idle_second = t.elapsed().as_secs();
+            p.idle_tick(&mut idle, mode == "keep");
+            if idle_second % 10 == 0 {
+                eprintln!("[idle] {idle_second} s: timer {:?}", idle.reading());
+            }
         }
         if let Some(dir) = frames_dir.as_ref().filter(|_| recording) {
             let (w, h, pixels) = p.m.bus.frame_hd();

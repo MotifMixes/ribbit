@@ -19,6 +19,33 @@ use std::time::{Duration, Instant};
 
 const FPS: f64 = 60.0;
 
+/// "Turn off when idle" on: the tablet goes to sleep after this long
+/// untouched (no finger, no button), and the app closes the title. GUESS:
+/// the LeapPad Academy's own sleep time is unknown (its Android settings and
+/// LeapFrog's parent settings aren't run here); this is the LeapPad 2's and
+/// Explorer's firmware shutdown time (ribbit_didj::idle, 240 s).
+const IDLE_OFF_SECS: u32 = 240;
+
+/// Frames since the last finger or button, for "Turn off when idle".
+#[derive(Default)]
+struct IdleCount {
+    frames: u32,
+}
+
+impl IdleCount {
+    /// One frame of the title. `active`: a finger is down or a button held
+    /// or changed. `keep_awake`: the setting is off (never idles off).
+    /// True when the tablet goes to sleep.
+    fn tick(&mut self, active: bool, keep_awake: bool) -> bool {
+        if active || keep_awake {
+            self.frames = 0;
+            return false;
+        }
+        self.frames += 1;
+        self.frames as f64 >= IDLE_OFF_SECS as f64 * FPS
+    }
+}
+
 #[derive(Default)]
 struct Input {
     touch: Option<(f32, f32)>,
@@ -35,6 +62,10 @@ struct Shared {
     speed: AtomicU32,
     gain: AtomicU32,
     sink: Mutex<Option<AudioSink>>,
+    /// "Turn off when idle" off: never sleeps.
+    keep_awake: AtomicBool,
+    /// It went to sleep for idling ("Turn off when idle" on).
+    idle_off: AtomicBool,
 }
 
 pub struct LfaSession {
@@ -61,6 +92,8 @@ impl LfaSession {
             speed: AtomicU32::new(100f32.to_bits()),
             gain: AtomicU32::new(1f32.to_bits()),
             sink: Mutex::new(sink),
+            keep_awake: AtomicBool::new(true),
+            idle_off: AtomicBool::new(false),
         });
         let (tx, rx) = std::sync::mpsc::channel();
         let (s, path, dir) = (shared.clone(), apk.to_path_buf(), data.to_path_buf());
@@ -115,6 +148,18 @@ impl LfaSession {
 
     pub fn set_gain(&self, gain: f32) {
         self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// "Turn off when idle": on, the tablet sleeps after `IDLE_OFF_SECS`
+    /// untouched (a GUESS at the real one) and `idle_powered_off` says so;
+    /// off, it never does.
+    pub fn set_turn_off_when_idle(&self, on: bool) {
+        self.shared.keep_awake.store(!on, Ordering::Relaxed);
+    }
+
+    /// It went to sleep for idling: the app closes it.
+    pub fn idle_powered_off(&self) -> bool {
+        self.shared.idle_off.load(Ordering::Relaxed)
     }
 
     pub fn set_running(&self, running: bool) {
@@ -179,8 +224,11 @@ impl LfaSession {
     pub fn restart(self) -> anyhow::Result<Self> {
         let (apk, data) = (self.apk.clone(), self.data.clone());
         let sink = self.shared.sink.lock().unwrap().take();
+        let keep_awake = self.shared.keep_awake.load(Ordering::Relaxed);
         self.stop();
-        Self::start(&apk, &data, sink)
+        let t = Self::start(&apk, &data, sink)?;
+        t.shared.keep_awake.store(keep_awake, Ordering::Relaxed);
+        Ok(t)
     }
 
     pub fn stop(mut self) {
@@ -242,6 +290,7 @@ fn run(mut t: Tablet, s: &Shared) {
     let (mut count, mut since) = (0u32, Instant::now());
     let (mut touch, mut buttons) = (None, 0);
     let mut audio = Vec::new();
+    let mut idle = IdleCount::default();
     while !s.quit.load(Ordering::Relaxed) {
         if !s.running.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
@@ -254,6 +303,12 @@ fn run(mut t: Tablet, s: &Shared) {
             let i = s.input.lock().unwrap();
             (i.touch, i.buttons)
         };
+        let active = want_touch.is_some() || want_buttons != 0 || want_buttons != buttons;
+        if idle.tick(active, s.keep_awake.load(Ordering::Relaxed)) {
+            tracing::info!(target: "ribbit::lfa", "untouched for {IDLE_OFF_SECS} s: the tablet went to sleep");
+            s.idle_off.store(true, Ordering::Relaxed);
+            return;
+        }
         let mut r = Ok(());
         if want_touch != touch {
             touch = want_touch;
@@ -300,6 +355,20 @@ fn run(mut t: Tablet, s: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Turn off when idle": on, asleep after IDLE_OFF_SECS of frames with
+    /// no finger or button (a touch starts the count again); off, never.
+    #[test]
+    fn idle_sleep_follows_the_setting() {
+        let limit = (IDLE_OFF_SECS as f64 * FPS) as u32;
+        let mut on = IdleCount::default();
+        assert!(!(1..limit).any(|_| on.tick(false, false)));
+        assert!(!on.tick(true, false), "a touch keeps it awake");
+        assert!(!(1..limit).any(|_| on.tick(false, false)));
+        assert!(on.tick(false, false), "asleep after {IDLE_OFF_SECS} s untouched");
+        let mut off = IdleCount::default();
+        assert!(!(0..limit * 3).any(|_| off.tick(false, true)), "off: never sleeps");
+    }
 
     /// Every .apk under RIBBIT_LFA_DIR (folders below too): the titles with
     /// their native library are listed, system apps and NoSO built-ins not.

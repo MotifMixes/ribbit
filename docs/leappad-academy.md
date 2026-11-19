@@ -437,6 +437,17 @@ Next steps, in order:
      second), AP_SM2 300 frames 22 s -> 2.6 s (116). Left: the heap never gives memory back
      (bump allocator, 512 MB).
 
+## In the app (2026-11-19)
+
+- Library: a **LeapPad Academy** tab lists the `.apk` files in the games folders that carry their
+  Brio native library (`ribbit_lfandroid::peek` reads only the central directory and manifest).
+  NoSO built-ins and Android's own apps are not listed (the app passes no /system/lib).
+- "Turn off when idle": off (the default), a title never stops for idling. On, it goes to sleep
+  after 240 s with no finger or button (frames of the title; paused time not counted) and the
+  app closes it, as a Leapster that turned itself off. GUESS: the real Academy's sleep time is
+  unknown (its Android display timeout and LeapFrog's parent settings are not run); 240 s is the
+  LeapPad 2's and Explorer's firmware shutdown time. CHECK on a real tablet.
+
 ## Questions for the user
 
 - Do you own a LeapPad Academy or an Epic? Which one (MT8127 or RK3326; a MIPI unit)? It would
