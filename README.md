@@ -4,8 +4,8 @@
 
 An emulator for **LeapFrog's handhelds and TV consoles**: the original 2003 Leapster (the main target), the
 Leapster L-MAX, Leapster TV and Leapster 2, the Leapster Explorer, the Zippity, the RockIt Twist, the Didj, the
-original LeapPad and the ClickStart. Written in Rust, for **Windows, macOS,
-Linux and Android**.
+original LeapPad and its family, the LeapPad Explorer and LeapPad 2, the ClickStart, the iQuest and the Turbo Twist
+Extreme, and the games of the LeapPad Academy. Written in Rust, for **Windows, macOS, Linux and Android**.
 
 Ribbit's sister project **[Blub](https://github.com/MotifMixes/blub)** emulates Fisher-Price consoles, starting with
 the I Can Play Piano. It looks and works the same way, and its piano runs on the same chip family as the ClickStart.
@@ -63,7 +63,7 @@ Linux.
 > there to check the behaviour.
 >
 > Ribbit is not affiliated with or endorsed by LeapFrog Enterprises. LeapFrog, Leapster, LeapPad, Zippity,
-> RockIt Twist, Didj and ClickStart are their trademarks.
+> RockIt Twist, Didj, ClickStart, iQuest, Turbo Twist and LeapPad Academy are their trademarks.
 
 ## You need your own dumps
 
@@ -85,7 +85,7 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
   and its built-in Flash player. ARCompact CPU core checked against GNU binutils on millions of instructions and
   against MAME's control flow on real firmware.
 * **Leapster L-MAX, Leapster 2, Leapster TV** (experimental): their own BIOSes boot and run the same games;
-  Leapster 2 touch, ADC, SD slot and PCM sound are modelled.
+  Leapster 2 touch, ADC, SD slot, PCM sound and its caches' contents are modelled.
 * **Zippity** (ARM9 TV console): system menu, built-in games and cartridges, dance mat and bopper controls, sound.
 * **RockIt Twist** (early): the real bootloader and firmware, menu, built-in games, MPEG-4 videos, sound, dials,
   spinner and slider, saves.
@@ -101,9 +101,18 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
   books. Cartridges hold no page pictures, so Ribbit draws each page from the cartridge's own touch layout (its spots,
   GO circle, stop sign and sentence buttons); click with the mouse as the pen. Its music and speech match a recording
   of a real pad. The printed words are filled in on your own PC by listening to the spots (a speech model downloaded
-  once); no book text comes with Ribbit.
+  once); no book text comes with Ribbit. **My First LeapPad**, **Little Touch LeapPad** and **LeapPad Plus
+  Microphone**: their own base ROMs, and every dumped book reads and answers (8 My First LeapPad books, 6 Little
+  Touch books, with the ABC Phonics Bus template as a setting).
+* **LeapPad Explorer and LeapPad 2** (tablets, experimental): built from their own firmware packages. The LeapPad
+  Explorer runs in Original or Enhanced (new) mode to its home screen, and 14 of 16 LeapPad cartridges tested reach
+  their title or first screen; the LeapPad 2 runs in Enhanced (new) mode, and its cartridges play.
 * **ClickStart** (2007 TV computer, experimental): the system ROM and all 15 known cartridges reach their menus,
   with picture, music, speech and the start-up jingle; its keyboard and mouse map to the PC's; players are saved.
+* **iQuest and Turbo Twist Extreme** (early): both boot to their menus with sound; iQuest cartridges plug in; every
+  key is mapped.
+* **LeapPad Academy and LeapFrog Epic games** (experimental): Ribbit runs each `.apk` game's own code without
+  Android; T-Rex Rush and Stretchy Monkey 2 play, with touch, buttons, sound and saves.
 
 **App**
 
@@ -164,8 +173,19 @@ packs (RockIt Twist `.lf3`) or works around copy protection.
 **Leapster Explorer and Didj**
 
 * Original mode needs a fast PC for 3D games; slower PCs can turn on frame skipping (Didj menu).
-* Some later Explorer cartridges say they are not supported on this console, and LeapPad cartridges ask for a
-  LeapPad, as on the real Explorer.
+* Some later Explorer cartridges say they are not supported on this console, as on the real Explorer. LeapPad
+  cartridges go into a LeapPad Explorer or LeapPad 2 when you have one.
+
+**LeapPad Explorer and LeapPad 2**
+
+* New and experimental. No save states, no tilt control on the LeapPad 2, no LeapFrog Connect (USB). A few LeapPad
+  cartridges stay black after loading (Disney Planes, Sofia the First, Toy Story 3).
+
+**iQuest, Turbo Twist Extreme, LeapPad Academy**
+
+* iQuest and Turbo Twist Extreme are early; no Turbo Twist Extreme cartridge dump is known.
+* LeapPad Academy and LeapFrog Epic: an early experiment; most titles are untested, and only titles that carry their
+  own game code are listed (the tablets' built-in apps aren't).
 
 **ClickStart**
 
@@ -214,8 +234,8 @@ Roughly in this order:
 4. **Zippity**: test more cartridges, ring pictures, sound envelopes, the remaining timing differences.
 5. **Accuracy**: replace MAME's guesses (touch, sound, v1.5 power line, Leapster TV) with hardware evidence;
    compare against more real-hardware recordings.
-6. **More LeapFrog systems** (in progress): the LeapPad 1, 2 and 3, the My First LeapPad, Little Touch LeapPad and
-   LeapPad Plus Microphone, the iQuest and Turbo Twist, and the games of the LeapFrog Epic and LeapPad Academy.
+6. **More LeapFrog systems** (in progress): the LeapPad 3, more of the LeapPad Explorer and LeapPad 2, more LeapPad
+   Academy and LeapFrog Epic games.
 7. **Homebrew**: documentation and tools for writing your own Leapster and RockIt Twist programs.
 8. **More platforms**: Android analogue sticks and update check; more testing on Linux and macOS.
 
@@ -274,6 +294,10 @@ All keys can be changed in Input → Key bindings…. Zippity and RockIt Twist c
 [zippity.md](docs/zippity.md#in-the-ribbit-app) and [rockit-twist.md](docs/rockit-twist.md#keys).
 **ClickStart**: type on the PC keyboard; arrows = arrow pad, End = Hint, Home or Pause = Pause, Page Up / Page Down /
 Insert / Delete = the four picture keys; move the mouse over the picture to move its pointer.
+**LeapPad Explorer and LeapPad 2**: mouse = stylus, arrows = d-pad (F1 lists the rest).
+**iQuest**: type on the PC keyboard; arrows, Enter, Backspace/Delete, Home = Menu, End = Repeat, `-`/`=` = volume.
+**Turbo Twist Extreme**: arrows = d-pad, W/S and E/D = twist slow/fast, Space or Enter = Slam, Home or M = Menu, End or
+R = Repeat. F1 shows every console's controls.
 
 ## Documentation
 
@@ -285,7 +309,9 @@ Insert / Delete = the four picture keys; move the mouse over the picture to move
   [ClickStart](docs/clickstart.md)
 * [RockIt Twist USB](docs/rockit-twist-usb.md): the USB controller and LeapFrog Connect protocol
 * [LeapPad](docs/leappad.md) and [LeapPad books](docs/leappad-books.md): research, the sound and pen, the books
-  drawn from cartridges
+  drawn from cartridges; [the LeapPad family](docs/leappad-family.md)
+* [LeapPad Explorer](docs/leappad1.md), [LeapPad 2](docs/leappad2.md),
+  [LeapPad Academy](docs/leappad-academy.md), [iQuest](docs/iquest.md) and [Turbo Twist Extreme](docs/turbotwist.md)
 * [Architecture](docs/architecture.md): crate layout, frontend choice, licensing notes
 * [Accuracy matrix](docs/accuracy-matrix.md): what Ribbit implements and how it is tested
 * [Open questions](docs/open-questions.md): unknowns and experiments to settle them

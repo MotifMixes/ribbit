@@ -14,6 +14,20 @@ Ribbit directly and listed here.
   (ribbit-core `io/mod.rs` `warn_misaligned`). It covers all code, the BIOS's too. While it is set the JIT
   stays off (ribbit-jit `Jit::from_env`), so every access goes through the bus. Unset: no change.
 
+## 2026-11-17: the Leapster 2's caches hold data; 128 KiB VRAM
+
+* **Why:** LeapLoader's LCD Timing app (v5) measured on a real Leapster 2 that `.di` loads and stores go past
+  the 32 KB write-back data cache and aren't coherent with it. Separately, the homebrew SM64 port (correct on
+  the console) was garbled in Ribbit: it keeps a picture and a sound buffer above 64 KiB of VRAM, and it moves
+  words with XY-memory bursts, which Ribbit halfword-swapped.
+* **Change:** the cache contents are modelled (`io/memtiming.rs` Lines): `.di` accesses, devices and the LCD
+  use RAM's copy, a dirty line is written back when it leaves, code lines keep the bytes they were filled
+  with; DC_FLDL does nothing, as on the console. On by default ("Leapster 2: cache contents (accurate)",
+  `RIBBIT_CACHE_CONTENTS=0` turns it off). Leapster 2 VRAM is 128 KiB (at least 96 KiB is verified by the
+  app; the size is a hypothesis), and bursts to or from VRAM no longer swap halfwords (SDRAM bursts still do).
+* **Tests:** LCD Timing v5 in Ribbit prints the console's coherence line; four Leapster 2 titles show identical
+  screens with the model on and off; SM64 draws right. docs/hardware-research.md "Cache contents".
+
 ## 2026-11-01: RIBBIT_WARN_LP reports zero-overhead loops in RAM code
 
 * **Why:** LeapLoader's NES and Game Boy apps ran right in Ribbit but failed on a real Leapster 2 (user's
@@ -30,7 +44,7 @@ Ribbit directly and listed here.
   no change. LeapFrog's own games run from RAM too, so a report there is only a hint.
 * **Also found on the console (not modelled):** `sr addr,[0x4C]` (DC_FLDL, flush one data-cache line) had
   no visible effect: pixels drawn into VRAM through the cache reached the LCD late or not at all. Writing
-  VRAM with `st.di` works. Ribbit doesn't model the caches (hardware-research.md).
+  VRAM with `st.di` works. Ribbit didn't model the caches then (it does since 2026-11-17, above).
 * **Tests:** ribbit-cpu tests pass unchanged; the check was not run against a card yet.
 
 ## 2026-10-29: code in RAM is cached and compiled (the JIT), with its writes watched
