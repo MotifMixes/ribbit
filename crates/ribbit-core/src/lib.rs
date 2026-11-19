@@ -362,6 +362,9 @@ pub struct Machine {
     pub batch_exits: [u64; 5],
     /// Debug option: first cycle at which each PC was executed (None = off).
     pub coverage: Option<std::collections::HashMap<u32, u64>>,
+    /// Debug option: cycles spent at each PC (None = off; a flat profile).
+    /// While on, runs go one instruction at a time (no batches, no JIT).
+    pub profile: Option<std::collections::HashMap<u32, u64>>,
     /// EXPERIMENTAL: HD capture from the BIOS's Flash rasterizer (hd.rs).
     pub hd: Option<hd::HdCapture>,
     /// Keep the console from turning itself off when idle: before each run,
@@ -485,6 +488,7 @@ impl Machine {
             batch_stats: [0; 5],
             batch_exits: [0; 5],
             coverage: None,
+            profile: None,
             hd: None,
             keep_awake: false,
             restart_straps: None,
@@ -785,8 +789,12 @@ impl Machine {
         if self.cpu.pc >= ribbit_memory::map::CART_BASE && self.first_cart_pc.is_none() {
             self.first_cart_pc = Some((start, self.cpu.pc));
         }
+        let pc0 = self.cpu.pc;
         let mut bus = MachineBus::new(&mut self.bus, &mut self.io, start, self.cpu.pc);
         let result = self.cpu.step(&mut bus);
+        if let Some(p) = &mut self.profile {
+            *p.entry(pc0).or_insert(0) += self.cpu.cycles - start;
+        }
         if let Some(dma) = self.io.lcd.pending.take() {
             self.run_framebuffer_dma(dma);
             self.io.sync_needed = true;
@@ -916,7 +924,7 @@ impl Machine {
         self.io.sync_needed = true;
         // Batches need nothing observed per instruction.
         let batch =
-            breakpoints.is_empty() && self.trace_sink.is_none() && self.coverage.is_none() && !self.cpu.record_last;
+            breakpoints.is_empty() && self.trace_sink.is_none() && self.coverage.is_none() && self.profile.is_none() && !self.cpu.record_last;
         while report.steps < max_steps {
             if report.steps > 0 && breakpoints.hit(self.cpu.pc) {
                 report.stop = StopReason::Breakpoint { pc: self.cpu.pc };

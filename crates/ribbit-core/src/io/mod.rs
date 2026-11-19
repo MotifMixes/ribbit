@@ -213,6 +213,20 @@ pub struct Peripherals {
     /// follow the same path as another emulator in differential tests (e.g.
     /// MAME 0.289's stubs). Empty by default; every use is labelled in traces.
     pub stubs: std::collections::BTreeMap<u32, u32>,
+    /// DEBUG: RAM write watch ranges (start, len) for the headless
+    /// `--watch-write` option; hits are logged to `watch_log`. Empty (the
+    /// default) costs one test per RAM write. Writes made by JIT-compiled
+    /// code that skip the bus are not seen.
+    #[serde(skip)]
+    pub watch: Vec<(u32, u32)>,
+    /// Only log watch hits from code outside the BIOS ROM (0x4000_0000..0x4080_0000).
+    #[serde(skip)]
+    pub watch_app_only: bool,
+    /// Watch hits: (cycle, pc, addr, width, value); capped at 4096.
+    #[serde(skip)]
+    pub watch_log: Vec<(u64, u32, u32, u8, u32)>,
+    #[serde(skip)]
+    pub watch_hits: u64,
     /// For each unmodelled register: the instruction addresses that accessed
     /// it (first 16), for finding the driver code behind an access.
     #[serde(skip)]
@@ -271,6 +285,10 @@ impl Default for Peripherals {
             events: Vec::new(),
             record_events: false,
             stubs: Default::default(),
+            watch: Vec::new(),
+            watch_app_only: false,
+            watch_log: Vec::new(),
+            watch_hits: 0,
             unmodelled_pcs: Default::default(),
             deferred: 0,
             horizon: 0,
@@ -746,6 +764,9 @@ impl Bus for MachineBus<'_> {
     #[inline(always)]
     fn write8(&mut self, addr: u32, value: u8) {
         if !is_mmio(addr) {
+            if !self.io.watch.is_empty() {
+                self.watch_hit(addr, 1, value as u32);
+            }
             if self.io.mem.lines.contents {
                 return self.write_cached(addr, 1, value as u32);
             }
@@ -765,6 +786,9 @@ impl Bus for MachineBus<'_> {
             warn_misaligned(self.pc, addr, 16, true);
         }
         if !is_mmio(addr) {
+            if !self.io.watch.is_empty() {
+                self.watch_hit(addr, 2, value as u32);
+            }
             if self.io.mem.lines.contents {
                 return self.write_cached(addr, 2, value as u32);
             }
@@ -783,6 +807,9 @@ impl Bus for MachineBus<'_> {
             warn_misaligned(self.pc, addr, 32, true);
         }
         if !is_mmio(addr) {
+            if !self.io.watch.is_empty() {
+                self.watch_hit(addr, 4, value);
+            }
             if self.io.mem.lines.contents {
                 return self.write_cached(addr, 4, value as u32);
             }
@@ -955,6 +982,22 @@ impl MachineBus<'_> {
 
 // Device-register paths, kept out of line so RAM accesses inline.
 impl MachineBus<'_> {
+    /// DEBUG `--watch-write`: logs a RAM write that falls in a watched range.
+    #[cold]
+    #[inline(never)]
+    fn watch_hit(&mut self, addr: u32, width: u8, value: u32) {
+        let pc = self.pc;
+        if self.io.watch_app_only && (0x4000_0000..0x4080_0000).contains(&pc) {
+            return;
+        }
+        if self.io.watch.iter().any(|&(s, l)| addr.wrapping_sub(s) < l) {
+            self.io.watch_hits += 1;
+            if self.io.watch_log.len() < 4096 {
+                self.io.watch_log.push((self.cycle, pc, addr, width, value));
+            }
+        }
+    }
+
     #[inline(never)]
     fn read8_mmio(&mut self, addr: u32) -> u8 {
         if let Some(tv) = self.io.lmax_tv.as_mut()

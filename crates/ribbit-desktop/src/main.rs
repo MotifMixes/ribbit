@@ -130,6 +130,39 @@ enum Command {
         /// WAV file: 16-bit mono, from the start of the run to its end.
         #[arg(long)]
         audio_out: Option<PathBuf>,
+        /// Write a flat profile: cycles spent at each executed PC
+        /// ("cycles pc" lines, most first). Runs one instruction at a time.
+        #[arg(long)]
+        profile: Option<PathBuf>,
+        /// Leapster 2: build the SD card from this folder (as the window's
+        /// "SD card folder" does), boot the L2 system with the card in, and
+        /// write what the app changes on the card back to the folder when the
+        /// run ends. Lets homebrew apps be run and traced without a window.
+        #[arg(long)]
+        sd_folder: Option<PathBuf>,
+        /// Leapster 2: load this internal-flash image (the window saves one as
+        /// saves/flash-<bios>.bin) so the console boots already set up (region,
+        /// touch calibration) instead of its first-boot screens.
+        #[arg(long)]
+        flash: Option<PathBuf>,
+        /// Stop the run the instant the program asks the BIOS to restart the
+        /// console (0x0180_B000 bit 8): reports the cycle and PC of the
+        /// restart, so a crash the BIOS turns into a reboot can be caught.
+        #[arg(long)]
+        stop_on_restart: bool,
+        /// Re-apply --sd-folder over the loaded state's card. Useful to run an
+        /// edited app from a menu state that reboots into the card; may leave
+        /// the card's FAT inconsistent with the state, so off by default.
+        #[arg(long)]
+        reapply_sd: bool,
+        /// DEBUG: log every RAM write into START:LEN (hex), with cycle and PC;
+        /// the first 4096 hits are printed after the run. Interpreted code
+        /// only: JIT-compiled code's writes are not all seen.
+        #[arg(long, value_parser = parse_range)]
+        watch_write: Vec<(u32, u32)>,
+        /// With --watch-write: ignore writes made by BIOS ROM code.
+        #[arg(long)]
+        watch_app_only: bool,
     },
     /// Open the desktop window (the default when no command is given).
     Run(Images),
@@ -226,6 +259,13 @@ fn real_main() -> Result<ExitCode> {
             cpu_mhz,
             cart_save,
             audio_out,
+            profile,
+            sd_folder,
+            flash,
+            stop_on_restart,
+            reapply_sd,
+            watch_write,
+            watch_app_only,
         } => {
             let mut config = config;
             config.system_eeprom = eeprom.or(config.system_eeprom);
@@ -235,11 +275,46 @@ fn real_main() -> Result<ExitCode> {
             config.input_lines = input_lines.or(config.input_lines);
             config.experimental_mame_touch |= experimental_mame_touch;
             let mut machine = build_machine(&images, &config)?;
+            if let Some(path) = &flash
+                && let Some(spi) = machine.io.spi_flash.as_mut()
+            {
+                let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+                spi.load(&bytes);
+                println!("internal flash loaded from {} ({} bytes)", path.display(), bytes.len());
+            }
+            // Leapster 2 SD-card folder: make the card from it and boot the
+            // system with it in, as the window does (app.rs). Kept to write
+            // back what the app changed (e.g. a homebrew app's log file).
+            let sd_folder = sd_folder.map(ribbit_frontend::sdcard::Folder::new);
+            if let Some(folder) = &sd_folder {
+                machine.ensure_touch_calibration();
+                if let Some(s) = machine.straps() {
+                    machine.set_straps(s | ribbit_core::io::straps::SKIP_CALIBRATION);
+                }
+                machine.boot_leapster2_system();
+                let card = machine
+                    .io
+                    .sd
+                    .as_mut()
+                    .and_then(|s| s.card.as_mut())
+                    .context("--sd-folder needs a Leapster 2 BIOS (--firmware): no SD slot on this machine")?;
+                let files = folder.load(card).context("building the SD card from --sd-folder")?;
+                println!("SD card: {files} files from {}", folder.dir.display());
+            }
             if let Some(path) = &load_state {
                 let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
                 machine.load_state(&bytes).with_context(|| format!("loading state {}", path.display()))?;
                 println!("state loaded from {} (cycle {})", path.display(), machine.cpu.cycles);
+                if reapply_sd
+                    && let Some(folder) = &sd_folder
+                    && let Some(card) = machine.io.sd.as_mut().and_then(|s| s.card.as_mut())
+                {
+                    let files = folder.load(card).context("re-applying --sd-folder after the state")?;
+                    println!("SD card re-applied from folder after state: {files} files");
+                }
             }
+            machine.io.watch = watch_write;
+            machine.io.watch_app_only = watch_app_only;
             if !touch_press.is_empty() {
                 machine
                     .enable_experimental_mame_touch(ribbit_core::io::touch::MameTouchConfig { presses: touch_press });
@@ -260,6 +335,9 @@ fn real_main() -> Result<ExitCode> {
             if coverage.is_some() {
                 machine.coverage = Some(Default::default());
             }
+            if profile.is_some() {
+                machine.profile = Some(Default::default());
+            }
             // Run in segments so tracing and breakpoints can start late.
             // Button presses take effect at exact emulated times (one cycle
             // per step at the CPU clock).
@@ -278,7 +356,15 @@ fn real_main() -> Result<ExitCode> {
             // The output ring holds a second of sound; a million steps is far
             // less than that (a run's steps go by at 24-28 million a second).
             let mut audio: Option<Vec<i16>> = audio_out.as_ref().map(|_| Vec::new());
-            let chunk = if audio.is_some() { 1_000_000 } else { u64::MAX };
+            // Small chunks when watching for the restart, so the run stops
+            // within a few hundred instructions of the write that asks for it.
+            let chunk = if stop_on_restart {
+                20_000
+            } else if audio.is_some() {
+                1_000_000
+            } else {
+                u64::MAX
+            };
             let mut report =
                 RunReport { steps: 0, instructions: 0, interrupts: 0, pc: machine.cpu.pc, stop: StopReason::StepLimit };
             for end in bounds {
@@ -305,11 +391,18 @@ fn real_main() -> Result<ExitCode> {
                         samples.resize(at + out.len(), 0);
                         out.pop_into(&mut samples[at..]);
                     }
+                    if stop_on_restart && machine.restarts > 0 {
+                        println!(
+                            "console restarted (BIOS fatal-assert / 0x0180_B000 bit 8) by step {} cycle {} pc {:#010x}",
+                            report.steps, machine.cpu.cycles, report.pc
+                        );
+                        break;
+                    }
                     if report.stop != StopReason::StepLimit || r.steps == 0 {
                         break;
                     }
                 }
-                if report.stop != StopReason::StepLimit {
+                if report.stop != StopReason::StepLimit || (stop_on_restart && machine.restarts > 0) {
                     break;
                 }
             }
@@ -318,6 +411,25 @@ fn real_main() -> Result<ExitCode> {
                 rows.sort_unstable();
                 let text: String = rows.iter().map(|(c, pc)| format!("{c} {pc:08x}\n")).collect();
                 std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+            }
+            if let (Some(path), Some(prof)) = (&profile, &machine.profile) {
+                let mut rows: Vec<(u64, u32)> = prof.iter().map(|(&pc, &c)| (c, pc)).collect();
+                rows.sort_unstable_by(|a, b| b.cmp(a));
+                let text: String = rows.iter().map(|(c, pc)| format!("{c} {pc:08x}\n")).collect();
+                std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+            }
+            if let Some(folder) = &sd_folder
+                && let Some(card) = machine.io.sd.as_mut().and_then(|s| s.card.as_mut())
+                && card.dirty
+            {
+                let files = folder.sync(card).context("writing the SD card back to --sd-folder")?;
+                println!("SD card: {files} files written back to {}", folder.dir.display());
+            }
+            if !machine.io.watch.is_empty() {
+                println!("== watch-write: {} hits", machine.io.watch_hits);
+                for (c, pc, a, w, v) in &machine.io.watch_log {
+                    println!("  {c} pc={pc:08x} [{a:08x}].{w} = {v:#x}");
+                }
             }
             machine.trace_sink = None; // flush
             print_report(&machine, &report, tail);
