@@ -230,6 +230,12 @@ fn walk<T: fatfs::ReadWriteSeek>(dir: &fatfs::Dir<'_, T>, prefix: &str, out: &mu
         if name == "." || name == ".." {
             continue;
         }
+        // A damaged directory entry can hold a NUL or a path separator, which
+        // no PC path can contain: skip it rather than fail the whole write-back.
+        if name.contains(['\0', '/', '\\', '|', '<', '>', ':', '"', '?', '*']) {
+            tracing::warn!(target: "ribbit::saves", ?name, "skipping a card entry with an invalid name");
+            continue;
+        }
         let path = format!("{prefix}{name}");
         out.push(Entry { path: path.clone(), is_dir: e.is_dir(), len: e.len(), stamp: format!("{:?} {:?}", e.created(), e.modified()) });
         if e.is_dir() {
