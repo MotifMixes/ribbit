@@ -37,6 +37,12 @@ pub trait Bus {
     fn write(&mut self, addr: u32, value: u16);
     /// The interrupt lines: bit 0 the FIQ, bit 1 + n IRQ n.
     fn lines(&self) -> u16;
+    /// A data segment the instruction just executed wrote through the I/O
+    /// register (0x3d2f), taken once: the CPU puts it in SR before it looks
+    /// at interrupts.
+    fn take_ds_write(&mut self) -> Option<u16> {
+        None
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -195,6 +201,17 @@ impl Cpu {
         let op = bus.read(at);
         self.add_lpc(1);
         let cycles = self.execute(bus, at, op);
+        // A write to the data segment register belongs to the code that made
+        // it: in SR before an interrupt pushes SR, so RETI brings it back.
+        // Applied after the interrupt was taken (as before 2026-11-16), the
+        // handler got it and the interrupted code went on with the old
+        // segment: the system's far read (0x28508b: [3d2f] = segment, then
+        // ds:[r4]) read the wrong bank now and then. Seen as the pointer
+        // jumping (a sprite's size read as garbage, 0x2788c0), wrong
+        // sequenced notes and one-frame text and tile garbage.
+        if let Some(ds) = bus.take_ds_write() {
+            self.set_ds(ds);
+        }
         if op != RETI {
             self.check_irqs(bus);
         }

@@ -104,8 +104,19 @@ const MOUSE_BUTTON: u8 = 0x10;
 /// Mouse units per pointer pixel. The system ROM's pointer code (0x3f03cc)
 /// adds each unit times a speed (12, set at start-up; no cartridge sets
 /// another) to a position in 1/32 pixels, clamped to 0-319 and 0-239
-/// pixels: 32/12 units move it one pixel.
+/// pixels: 32/12 units move it one pixel. But the screens put the pointer
+/// back through the ROM's setter (0x3f0380) every frame or two, which keeps
+/// whole pixels only (x << 5), so a packet's fraction of a pixel is lost,
+/// rounded down: 1 or 2 units move it 0 pixels, -1 or -2 one pixel left.
+/// `mouse_pixels` sends what reaches the wanted pixel.
 pub const MOUSE_UNITS_PER_PIXEL: f32 = 32.0 / 12.0;
+
+/// RAM words of the ROM's pointer: x (then y) in 1/32 pixels (y up), the
+/// speeds, and the movement the UART has taken that the pointer code
+/// hasn't added yet (0x3f0540 reads and clears it).
+const POINTER_X: u32 = 0x2c;
+const POINTER_SPEED_X: u32 = 0x2e;
+const POINTER_PENDING_X: u32 = 0x26;
 
 /// The save state format's version (bumped when the layout changes).
 const STATE_VERSION: u32 = 4;
@@ -195,10 +206,6 @@ impl ClickStart {
     fn step(&mut self) -> bool {
         self.bus.ds = self.cpu.ds();
         let cycles = cpu_step(&mut self.cpu, &mut self.bus);
-        if self.bus.ds_written {
-            self.bus.ds_written = false;
-            self.cpu.set_ds(self.bus.ds);
-        }
         self.instructions += 1;
         self.bus.now += cycles as u64;
         if self.bus.now >= self.bus.next_event {
@@ -390,6 +397,51 @@ impl ClickStart {
             low(dx),
             low(dy),
         ]);
+    }
+
+    /// The mouse moved by (dx, dy) whole pointer pixels (y down) with the
+    /// button held or not: sends the units that put the ROM's pointer in
+    /// the middle of the pixel that far from where it is (or will be, with
+    /// movement taken but not yet added). Sending MOUSE_UNITS_PER_PIXEL
+    /// times the pixels instead lost a pixel a packet one way and gained
+    /// one the other (see MOUSE_UNITS_PER_PIXEL): moved slowly, the pointer
+    /// crept left and down and wouldn't come back. At most about 90 pixels
+    /// a packet (255 units).
+    pub fn mouse_pixels(&mut self, dx: i32, dy: i32, button: bool) {
+        let ux = self.pointer_units(0, dx);
+        // The ROM's y counts up the screen; `mouse` takes y down.
+        let uy = -self.pointer_units(1, -dy);
+        self.mouse(ux, uy, button);
+    }
+
+    /// Units that move the ROM's pointer axis (0 x, 1 y; y up) by n pixels.
+    fn pointer_units(&self, axis: u32, n: i32) -> i32 {
+        if n == 0 {
+            return 0;
+        }
+        let speed = match self.peek(POINTER_SPEED_X + axis) as i16 as i32 {
+            s @ 1..=64 => s,
+            _ => 12,
+        };
+        let pending = self.peek(POINTER_PENDING_X + axis) as i16 as i32;
+        let pos = self.peek(POINTER_X + axis) as i16 as i32 + pending * speed;
+        // The fraction of a pixel read here may still be dropped by the
+        // setter before this packet's movement is added (the screens call
+        // it every other frame), or kept (a screen that doesn't call it).
+        // Moves of u * speed in [lo, hi) reach pixel + n either way.
+        let f = pos & 31;
+        let (lo, hi) = (32 * n, 32 * n + 32 - f);
+        let fits = |u: i32| (lo..hi).contains(&(u * speed));
+        let s = speed as f32;
+        let mut u = ((lo + hi) as f32 / 2.0 / s).round() as i32;
+        if !fits(u) {
+            u = (lo as f32 / s).ceil() as i32;
+        }
+        if !fits(u) {
+            // No move fits both: aim from where it is.
+            u = ((32 * n + 16 - f) as f32 / s).round() as i32;
+        }
+        u.clamp(-255, 254)
     }
 
     /// Whether the input line has caught up (all packets delivered).

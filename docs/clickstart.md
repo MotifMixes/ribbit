@@ -161,12 +161,50 @@ through 0x3fff0c) adds each movement unit times a speed (0x002e/0x002f,
 set to 12 at start-up by 0x3f0431/0x3f0450, range 1-20; no cartridge sets
 another) to a position in 1/32 pixels (0x002c/0x002d), clamped to 0-319
 and 0-239 pixels; y counts up the screen. No acceleration. So 32/12 units
-are one pixel: the app sends that (`MOUSE_UNITS_PER_PIXEL`), and the
-pointer follows the PC mouse 1:1 over the picture (until it meets an
-edge, where the PC cursor runs on). Checked: 80 units move it 30 pixels;
--5, +5, -80 bring it back to the same pixel. CONFIRMED (2026-11-15): no
+are one pixel (`MOUSE_UNITS_PER_PIXEL`). CONFIRMED (2026-11-15): no
 cartridge calls the speed setters (0x3fff0e, 0x3fff10) or reads the raw
 movement (0x3f0540); all 13 move their pointers through 0x3fff0c.
+
+But the screens keep the pointer on whole pixels: the system's pointer
+handler (0x296f7d) reads it through 0x3fff0c, keeps it inside the screen
+by the pointer sprite's size, and puts it back through the setter
+(0x3f0380, `x << 5`) every other frame. So a packet's fraction of a pixel
+is lost, rounded down (measured: 1 or 2 units move it 0 pixels, -1 or -2
+one pixel left, 3 one right, -3 two left). Until 2026-11-16 the app sent
+32/12 units per PC pixel, so a slowly moved mouse (a pixel or two a
+packet) crept left and down and barely came back right or up: "the mouse
+becomes insanely difficult to control". `ClickStart::mouse_pixels` now
+takes whole pixels and sends the units that land in the wanted pixel
+whether or not the setter drops the fraction first (from the pointer and
+the movement taken but not added, 0x0026/0x0027), and the app keeps the
+remaining fraction of a PC pixel for the next packet. Test
+`tests/mouse.rs`: 1 to 60 pixels a packet, four directions, there and
+back, exact. The app also forgets the cursor's position when it leaves
+the window (`CursorLeft`): coming back in elsewhere was one long move, to
+an edge.
+
+**The pointer jumped by itself** (fixed 2026-11-16): typing a letter on
+Player Profile put it at the left edge or a corner, and on Log-In it
+went back to the top a few frames after every move down. The handler's
+sprite size (0x2791ef/0x27920b, through 0x2788c0) came back as garbage
+(0x6d04, 0x3d39) because a far read (0x28508b: `[3d2f] = segment`, then
+`ds:[r4]`) read the wrong bank: the CPU took the data segment write into
+SR only after taking an interrupt, so the interrupt pushed the old SR and
+RETI brought the old segment back. Now a write to 0x3d2f goes into SR as
+the instruction ends, before interrupts are looked at (as MAME, whose
+`set_ds` is immediate).
+
+**Wrong notes** (the same race, fixed 2026-11-16): the sound driver's
+reads of its sequences went through the same far read, so now and then a
+channel started with a garbage pitch or sample. 123 Click, 180 s from the
+same saved state (sound unit channel starts): before, 17 of 3326 starts
+had a rate of 0 or over 30 kHz (205486, 256122 Hz...) and 32 sample
+addresses were used once or twice (mid-sample starts); after, 0 of 3362
+and 12 (the activity's own one-off sounds and the restarts listed under
+"Open questions"). Against a clean render of the Log-In music ("Sign
+In", 30 s) the pitch profile (CQT, C1-C8) matches within 2 dB below
+4 kHz, and the mean chroma cosine is 0.94 before and after (that loop
+was rarely hit).
 
 ## EEPROM
 
@@ -307,10 +345,12 @@ searched by spectrogram; Scout's lines found at 73, 97, 115, 203 and
 kbit/s. None of the recording's sounds is S720 (all 136 system S720
 sounds searched by spectrogram at 0.768-1.15 x 8 kHz: best 0.60-0.74, all
 at the same unrelated moment, where Scout's A1600 lines matched
-0.86-0.89), so its rate isn't measured: Ribbit uses the codec's own
-8 kHz (S720's 7.2 kbit/s is 144 bits per 160 samples at 8 kHz), which
-puts its speech's first formant where Scout's A1600 lines have theirs
-(about 510 Hz; at 12288 Hz it would be 790). Whether the 0.768 applies
+0.86-0.89), so its rate isn't measured. Until 2026-11-16 Ribbit used the
+codec's own 8 kHz (S720's 7.2 kbit/s is 144 bits per 160 samples at
+8 kHz), which puts its speech's first formant where Scout's A1600 lines
+have theirs (about 510 Hz; at 12288 Hz it would be 790; but Scout is an
+adult man's voice and most S720 lines are children's and a woman
+narrator's, so that comparison says little). Whether the 0.768 applies
 (6144 Hz) is open: nothing ties A1600's rate to a slow chip clock (the
 codec's 16 kHz isn't known to be what LeapFrog's sounds were made at), no
 sound is in both codecs to compare, and voice statistics don't decide it
@@ -328,19 +368,37 @@ sounds, at unrelated moments (chance level). The same search finds this
 ROM's A1600 sounds in that capture at 0.80-0.975 (a 2.7 s Scout line,
 0x2b0553, at 0.975; the jingle at 0.93). Its Player Profile screen
 (0:20-0:27) and its 56 s intro play only the system music, where Ribbit
-plays two S720 lines and seven. So the rate stays 8000 Hz, unmeasured.
+plays two S720 lines and seven. So the rate stayed 8000 Hz, unmeasured.
+
+**12288 Hz since 2026-11-16** (GUESS, the chip's one output rate, as for
+A1600). Players heard the 8 kHz voices as "at least half as fast as they
+should be" ("His name is Scout... and your new computer!", the intro).
+All 674 S720 and 307 A1600 sounds of the system ROM, decoded and
+transcribed (Whisper) with their pitch (pYIN): at 8 kHz the 431 S720
+speech sounds ran at a median 2.2 syllables a second (25-75%: 1.9-2.6;
+"To play 123Click, go to the desktop and click on the 123Click icon."
+8.8 s) with voices at a median 177 Hz (the woman narrator 140-165 Hz);
+at 12288 Hz that is 3.4 syllables a second and 272 Hz (the narrator
+215-250 Hz; the A1600 children's lines at their measured rate: 337 Hz).
+And Player Profile plays its first line (0x2c1dae) again 10.3 s after it
+started: at 8 kHz its two lines (4.4 s + 6.9 s) didn't fit and the
+second was cut off every time; at 12288 Hz (2.9 s + 4.5 s) both end with
+3 s to spare. 16 kHz would give 4.4 syllables a second and a 354 Hz
+narrator. Still unmeasured: a real console's recording of any S720
+sound (Player Profile with no players saved, or the intro of this ROM)
+would settle it.
 
 **In Ribbit** (2026-11-15, `SioAudio` in `sio_audio.rs`): the chip takes
 up to 64 words ahead (asking for more while 15 fit), decodes A1600 as it
 plays, resamples it to the sound unit's rate (linearly) and adds it to
 both sides at 16/32 of full scale, from the recording's jingle to system
 music loudness (rms 642 : 710; Ribbit now 0.90). "Finished" comes when
-the last frame has played. S720/S480 is decoded the same way (8 kHz),
+the last frame has played. S720/S480 is decoded the same way (12288 Hz),
 at the same level, "Finished" coming when its last whole frame has
 played. The system plays the "Click" jingle (0x3682ee 390 bytes and
 0x3adb46 3246; 3.25 s later 0x3ad98c and 0x38c890 3846, cut by the
 LeapFrog logo after 0.9 s) and an S720 line when Player Profile comes up
-(0x2c1dae, 3960 bytes, 4.4 s; heard in a headless run from 12.9 s, its
+(0x2c1dae, 3960 bytes, 2.9 s; heard in a headless run from 12.9 s, its
 loudness following the DLL's decoding of it). Finding Nemo plays S720
 lines on its title and menu and through Grab Shell's Squirt intro (the
 menu's right button, then Level 1).
@@ -436,11 +494,12 @@ make no difference.
   low makes the main loop call 0x3f0161 (an off/sleep path), so neither
   is obviously a cartridge switch.
 - Single frames: on Player Profile and Log-In a name's text sometimes
-  shows shifted or with letters missing for one frame ("ste" wrapped
+  showed shifted or with letters missing for one frame ("ste" wrapped
   left of "Name:Rok", "Rok ter", "Gu" for "Guest"), and on Log-In a block
-  of garbage tiles appears at the top left for a frame now and then. Not
+  of garbage tiles appeared at the top left for a frame now and then. Not
   seen in the capture (sampled every 0.5-3 s, so rare frames could be
-  missed).
+  missed). GUESS: the data segment race (see "Mouse"), fixed 2026-11-16,
+  which made far reads read the wrong bank; not rechecked frame by frame.
 - The same in both: the logos, the flags' panel and Player Profile's
   layout, "Profile Saved", the Log-In screen (Settings tab, Music), the
   home screen's other icons, the intro's Leap, Lily and Scout, the
@@ -504,8 +563,9 @@ that has since been formatted.
 - Arrows: Left (bit 1) and Down (bit 0) are confirmed by the developer
   mode; Up (bit 3) only by elimination.
 - What Pause does in a game (nothing visible headlessly).
-- The SIO chip's S720 rate (8 kHz assumed, 6144 if A1600's 0.768
-  applies; see "Rate"; the second capture has no S720 sound) and its own output filter. Ribbit's S720 decoder
+- The SIO chip's S720 rate (12288 Hz assumed since 2026-11-16, from
+  speech rate and pitch; see "Rate"; no real console's S720 sound has
+  been heard) and its own output filter. Ribbit's S720 decoder
   differs from S4872.DLL only in the LSP-to-LPC rounding; whether the chip
   rounds like the DLL is unknown. S480 (60-sample subframes) is decoded
   but no ROM uses it.
@@ -536,7 +596,14 @@ that has since been formatted.
   "BaseRom" icon on the home screen), and port A bits 12 and 14.
 - Whether a real console's home screen puts the pointer back by itself
   as it does headlessly, which keeps its 150 s idle count from running out.
-- The one-frame text glitches on Player Profile and Log-In.
+- The one-frame text glitches on Player Profile and Log-In: probably the
+  data segment race fixed 2026-11-16; to be rechecked.
+- A channel stopped and started again without its registers rewritten
+  (123 Click, as an activity starts: channels 0-3 at once) plays on from
+  where it was; after a loop or a stop Ribbit (as MAME) has cleared the
+  mode's ADPCM bit, so the rest of the ADPCM data plays as 16-bit PCM for
+  a moment (a burst of noise, about 25 ms). Whether the real sound unit
+  clears that bit or keeps a hidden "in the PCM loop" state is unknown.
 - The older system ROM (Beta, Jan 2007, PN 152-11757) with the country
   screen isn't dumped.
 - The SPG28x's exact model and timings (MAME's own question).

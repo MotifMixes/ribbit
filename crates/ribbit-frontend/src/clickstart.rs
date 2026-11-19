@@ -23,17 +23,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const FPS: f64 = 60.0;
-/// ClickStart mouse units per picture pixel the PC mouse moves: 32/12, from
-/// the system ROM's pointer code (no acceleration), so the pointer moves
-/// with the PC mouse 1:1 until it meets the picture's edge.
-const MOUSE_SCALE: f32 = ribbit_clickstart::MOUSE_UNITS_PER_PIXEL;
+/// Most picture pixels sent in one mouse packet (`mouse_pixels` takes up to
+/// about 90); the rest go in the next.
+const MOUSE_MAX_STEP: f32 = 80.0;
 
 #[derive(Default)]
 struct Input {
     /// Key events (code, pressed) not yet sent; ARROW | an ARROW_ bit for
     /// an arrow key.
     keys: Vec<(u8, bool)>,
-    /// Mouse movement not yet sent (units), and the button.
+    /// Mouse movement not yet sent (picture pixels), and the button.
     dx: f32,
     dy: f32,
     button: bool,
@@ -157,11 +156,16 @@ impl CsSession {
         true
     }
 
-    /// The PC mouse moved by (dx, dy) picture pixels.
+    /// The PC mouse moved by (dx, dy) picture pixels. The console's pointer
+    /// follows it 1:1 (the system ROM has no acceleration) until it meets
+    /// the picture's edge.
     pub fn mouse_move(&self, dx: f32, dy: f32) {
+        if !(dx.is_finite() && dy.is_finite()) {
+            return;
+        }
         let mut i = self.shared.input.lock().unwrap();
-        i.dx += dx * MOUSE_SCALE;
-        i.dy += dy * MOUSE_SCALE;
+        i.dx += dx;
+        i.dy += dy;
     }
 
     pub fn mouse_button(&self, down: bool) {
@@ -304,13 +308,15 @@ fn feed_input(cs: &mut ClickStart, input: &Mutex<Input>) {
         }
         return;
     }
+    // Whole pixels: the screens keep the pointer on whole pixels, so
+    // `mouse_pixels` aims at the pixel and the fraction waits here.
     let (dx, dy) = (i.dx.round(), i.dy.round());
     if dx != 0.0 || dy != 0.0 || i.button != i.button_sent {
-        let (sx, sy) = (dx.clamp(-255.0, 255.0), dy.clamp(-255.0, 255.0));
+        let (sx, sy) = (dx.clamp(-MOUSE_MAX_STEP, MOUSE_MAX_STEP), dy.clamp(-MOUSE_MAX_STEP, MOUSE_MAX_STEP));
         i.dx -= sx;
         i.dy -= sy;
         i.button_sent = i.button;
-        cs.mouse(sx as i32, sy as i32, i.button);
+        cs.mouse_pixels(sx as i32, sy as i32, i.button);
     }
 }
 

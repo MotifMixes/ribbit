@@ -188,6 +188,10 @@ pub struct App {
     #[cfg(not(target_os = "android"))]
     pads: Option<crate::gamepad::Gamepads>,
     cursor: Option<(f64, f64)>,
+    /// Where the cursor was at its last move inside the window, for the
+    /// ClickStart's mouse; None once it leaves (`CursorLeft`), so coming
+    /// back in elsewhere isn't taken as one long move.
+    mouse_from: Option<(f64, f64)>,
     mouse_down: bool,
     finger: Option<(u64, (f64, f64))>,
     /// The on-screen touch controls, and the game area they were laid out
@@ -369,6 +373,7 @@ impl App {
             #[cfg(not(target_os = "android"))]
             pads: crate::gamepad::Gamepads::open(),
             cursor: None,
+            mouse_from: None,
             mouse_down: false,
             finger: None,
             touch_pad: crate::touch_pad::TouchPad::new(),
@@ -4943,7 +4948,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 // The ClickStart's mouse: the movement over its picture, in
                 // its pixels.
-                if let (Some(c), Some((ox, oy))) = (&self.clickstart, self.cursor)
+                if let (Some(c), Some((ox, oy))) = (&self.clickstart, self.mouse_from)
                     && !self.paused
                 {
                     let (x, y, w, h) = self.lcd_px;
@@ -4955,9 +4960,17 @@ impl ApplicationHandler for App {
                     }
                 }
                 self.cursor = Some((position.x, position.y));
+                self.mouse_from = self.cursor;
                 if self.mouse_down {
                     self.set_stylus(self.cursor);
                 }
+            }
+            // Left the window: its next move in, wherever it comes in, starts
+            // afresh (before, the ClickStart pointer jumped by the distance
+            // between where the cursor left and where it came back, to an
+            // edge).
+            WindowEvent::CursorLeft { .. } => {
+                self.mouse_from = None;
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 let down = state == ElementState::Pressed;
