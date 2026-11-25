@@ -255,6 +255,9 @@ pub struct App {
     touch_pad: crate::touch_pad::TouchPad,
     touch_area: egui::Rect,
     lcd_px: (f32, f32, f32, f32),
+    /// The L-MAX's TV picture when the window shows it beside the LCD's: it
+    /// takes the stylus too (the same picture as the LCD's).
+    tv_px: Option<(f32, f32, f32, f32)>,
     /// Seconds until the idle power-off, in its last minute (shown).
     idle_left: Option<u32>,
     library: Library,
@@ -444,6 +447,7 @@ impl App {
             touch_pad: crate::touch_pad::TouchPad::new(),
             touch_area: egui::Rect::NOTHING,
             lcd_px: (0.0, 0.0, 0.0, 0.0),
+            tv_px: None,
             idle_left: None,
             fit_window: 0,
             drawn_at: Instant::now(),
@@ -4338,7 +4342,16 @@ impl App {
 
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
     fn set_stylus(&mut self, pos: Option<(f64, f64)>) {
-        self.set_stylus_at(pos, self.lcd_px);
+        // L-MAX: a press on the TV picture goes to the same spot on the LCD
+        // (players click the big or top picture; only the LCD's took it).
+        let inside = |(x, y, w, h): (f32, f32, f32, f32), (px, py): (f64, f64)| {
+            (x..x + w).contains(&(px as f32)) && (y..y + h).contains(&(py as f32))
+        };
+        let at = match (pos, self.tv_px) {
+            (Some(p), Some(tv)) if inside(tv, p) && !inside(self.lcd_px, p) => tv,
+            _ => self.lcd_px,
+        };
+        self.set_stylus_at(pos, at);
     }
 
     /// The stylus at `pos` on a picture drawn at `at` (x, y, w, h).
@@ -5077,10 +5090,12 @@ impl App {
         // The L-MAX's two pictures: the stylus goes on the LCD's (on the TV
         // picture's when the window has no LCD).
         let (mut main_px, mut main_display, mut second) = (self.lcd_px, display, None);
+        self.tv_px = None;
         if let Some((layout, _, _, separate_main)) = lmax {
             use crate::two_screens::{Picture, other_display, place};
             let placed = place(layout, px_area, display, self.settings.lmax_swap, separate_main);
             self.lcd_px = placed.rect_of(Picture::Lcd).unwrap_or(placed.main.1);
+            self.tv_px = placed.rect_of(Picture::Lcd).and(placed.rect_of(Picture::Tv));
             main_px = placed.main.1;
             if placed.main.0 == Picture::Tv && display == crate::gpu::Display::Lcd {
                 main_display = crate::gpu::Display::Sharp;
