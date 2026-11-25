@@ -63,6 +63,41 @@ pub struct StartOptions {
     pub pick_poll: Option<fn() -> Option<Result<Option<PathBuf>, String>>>,
     /// Android: keeps the screen from sleeping (true) or lets it (false).
     pub keep_screen_on: Option<fn(bool)>,
+    /// Android: the device's second display, for the L-MAX's second picture
+    /// (EXPERIMENTAL, two_screens.rs).
+    pub second_display: Option<SecondDisplay>,
+}
+
+/// EXPERIMENTAL (Android): a picture on the device's second display (a
+/// dual-screen handheld such as the AYN Thor), in an Android `Presentation`
+/// made by the app's Java code. Untested on such a device.
+#[derive(Debug, Clone, Copy)]
+pub struct SecondDisplay {
+    /// Shows (true) or takes away the picture's window there; false if the
+    /// device has no second display.
+    pub show: fn(bool) -> bool,
+    /// Changes whenever that window's surface comes or goes.
+    pub generation: fn() -> u32,
+    /// The surface's `ANativeWindow` (a reference the caller lets go of with
+    /// `release`) and its size, if it has one now.
+    pub acquire: fn() -> Option<(std::ptr::NonNull<std::ffi::c_void>, u32, u32)>,
+    /// Lets go of it, no longer drawn to (Android waits for this, briefly,
+    /// before it takes the surface away).
+    pub release: fn(std::ptr::NonNull<std::ffi::c_void>),
+    /// A finger on that display: where, in its surface's pixels.
+    pub touch: fn() -> Option<(f32, f32)>,
+}
+
+/// The second display's surface while it is drawn to.
+struct OnSecondDisplay {
+    generation: u32,
+    window: std::ptr::NonNull<std::ffi::c_void>,
+    surface: crate::gpu::PictureSurface,
+}
+
+/// How Video › L-MAX TV layout names a monitor (and the setting keeps it).
+fn monitor_key(i: usize, m: &winit::monitor::MonitorHandle) -> String {
+    m.name().filter(|n| !n.is_empty()).unwrap_or_else(|| format!("Monitor {}", i + 1))
 }
 
 struct Session {
@@ -83,6 +118,9 @@ struct Session {
     cart_path: Option<PathBuf>,
     /// EXPERIMENTAL HD picture, when HD vectors are on and this BIOS supports it.
     hd: Option<ribbit_core::hd::HdCanvas>,
+    /// EXPERIMENTAL: an L-MAX driving its TV chip (two pictures), as of the
+    /// last frame drawn.
+    lmax_tv: bool,
     /// The machine, running on its own thread.
     emu: Emu,
     experimental_touch: bool,
@@ -161,6 +199,22 @@ pub struct App {
     egui_state: Option<egui_winit::State>,
     ui: UiState,
     frame: Box<[u32; WIDTH * HEIGHT]>,
+    /// EXPERIMENTAL: the L-MAX's other picture (two_screens.rs): `frame`
+    /// holds the main one.
+    second_frame: Box<[u32; WIDTH * HEIGHT]>,
+    /// The L-MAX's other picture (the TV unless swapped) in a window of its
+    /// own (desktop, Separate), and whether that window has the keyboard.
+    second_window: Option<crate::gpu::PictureSurface>,
+    second_window_focused: bool,
+    /// The second display's surface (Android, Separate), whether its window
+    /// is asked for, and the surface generation last tried.
+    on_second_display: Option<OnSecondDisplay>,
+    second_display_asked: bool,
+    second_display_tried: Option<u32>,
+    /// A finger on the second display holds the stylus.
+    second_touch: bool,
+    /// The connected monitors' names (`refresh_monitors`), and when listed.
+    monitors: (Option<Instant>, Vec<String>),
     paused: bool,
     /// The debugger's breakpoints (code addresses), for whichever console runs.
     debug_breakpoints: Vec<u32>,
@@ -358,6 +412,14 @@ impl App {
             egui_state: None,
             ui: UiState::new(),
             frame: Box::new([0; WIDTH * HEIGHT]),
+            second_frame: Box::new([0; WIDTH * HEIGHT]),
+            second_window: None,
+            second_window_focused: false,
+            on_second_display: None,
+            second_display_asked: false,
+            second_display_tried: None,
+            second_touch: false,
+            monitors: (None, Vec::new()),
             paused: false,
             debug_breakpoints: Vec::new(),
             popouts: Default::default(),
@@ -573,7 +635,7 @@ impl App {
         // on for the v2.2 BaseROM (which drives both screens), off for v2.1
         // (whose LCD blanks).
         if machine.is_lmax() {
-            let auto = machine.firmware().known().is_some_and(|k| k.name.contains("v2.2"));
+            let auto = Self::lmax_auto(&machine);
             machine.set_lmax_tv_output(self.settings.lmax_tv_output.unwrap_or(auto));
         }
         tracing::info!(
@@ -652,6 +714,7 @@ impl App {
             first_start: first_start.then(Instant::now),
             cart_path: cart.clone(),
             hd,
+            lmax_tv: false,
             experimental_touch: machine.experimental_touch_enabled(),
             emu: {
                 let emu = Emu::start(machine);
@@ -1826,7 +1889,7 @@ impl App {
         if busy || self.woken {
             return now;
         }
-        let focused = self.main_focused || self.popouts.focused;
+        let focused = self.main_focused || self.popouts.focused || self.second_window_focused;
         let every = if focused { IDLE_REDRAW } else { BACKGROUND_REDRAW };
         let due = self.drawn_at + every;
         self.repaint_at.map_or(due, |at| at.min(due))
@@ -1844,7 +1907,7 @@ impl App {
         tracing::info!(target: "ribbit::perf",
             fps = (self.status.1 as f64 / span.as_secs_f64()).round(),
             running,
-            background = !(self.main_focused || self.popouts.focused),
+            background = !(self.main_focused || self.popouts.focused || self.second_window_focused),
             "status (last 30 s)");
         self.status = (now, 0);
         if let Ok(f) = std::fs::OpenOptions::new().append(true).open(self.opts.data_dir.join("ribbit.log")) {
@@ -1885,6 +1948,14 @@ impl App {
     /// The console view's layout for the running console, when it is on.
     fn view_layout(&self) -> Option<crate::console_view::Layout> {
         let hw = self.current_hardware()?;
+        // The L-MAX with its TV: only while the window shows the LCD alone.
+        if let Some(layout) = self.two_screens() {
+            use crate::two_screens::{Layout, Picture};
+            let lcd_alone = crate::two_screens::swapped(layout, self.settings.lmax_swap) == Layout::LcdOnly || (layout == Layout::Separate && self.separate_main() == Picture::Lcd);
+            if !lcd_alone {
+                return None;
+            }
+        }
         self.view_setting(hw).then(|| crate::console_view::layout_for(hw)).flatten()
     }
 
@@ -2074,6 +2145,324 @@ impl App {
     }
 
     /// F7: the running console's choice (the Leapster's when none runs).
+    /// EXPERIMENTAL: the L-MAX's two-picture layout, while one driving its
+    /// TV chip runs. Separate is stacked until its second window or
+    /// display is there (none on a single-display phone).
+    fn two_screens(&self) -> Option<crate::two_screens::Layout> {
+        use crate::two_screens::Layout;
+        self.session.as_ref().filter(|s| s.lmax_tv)?;
+        let layout = self.settings.lmax_layout;
+        let elsewhere = self.second_window.is_some() || self.on_second_display.is_some();
+        Some(if layout == Layout::Separate && !elsewhere { Layout::Stacked } else { layout })
+    }
+
+    /// With separate windows, the picture in the main one: on the desktop
+    /// the LCD (the stylus and HD follow it) with the TV in its own window;
+    /// on Android the TV on the main display (the AYN Thor's top screen,
+    /// GUESS: not tried on one) with the LCD on the second (its bottom
+    /// touchscreen). Swapped with `lmax_swap`.
+    fn separate_main(&self) -> crate::two_screens::Picture {
+        use crate::two_screens::Picture;
+        let main = if cfg!(target_os = "android") { Picture::Tv } else { Picture::Lcd };
+        if self.settings.lmax_swap { main.other() } else { main }
+    }
+
+    /// F6: the next L-MAX TV layout; Shift+F6: TV and LCD change places.
+    fn next_lmax_layout(&mut self, swap: bool) {
+        if !self.session.as_ref().is_some_and(|s| s.lmax_tv) {
+            self.ui.toast("F6 arranges an L-MAX's TV and LCD (Ctrl+F6: L-MAX TV mode)");
+            return;
+        }
+        if swap {
+            self.settings.lmax_swap = !self.settings.lmax_swap;
+            self.ui.toast("TV and LCD swapped");
+        } else {
+            self.settings.lmax_layout = self.settings.lmax_layout.next();
+            self.ui.toast(format!("L-MAX TV: {}", self.settings.lmax_layout.label()));
+        }
+        self.lmax_layout_changed();
+    }
+
+    /// Saved, and the window refitted to the new arrangement. The second
+    /// window opens again if it is still wanted (on the monitor now chosen,
+    /// with the title of the picture it now shows).
+    fn lmax_layout_changed(&mut self) {
+        self.fit_window = FIT_TRIES;
+        if self.second_window.take().is_some() {
+            self.second_window_focused = false;
+        }
+        self.save_settings();
+    }
+
+    /// Automatic L-MAX TV output: on for the v2.2 BaseROM (which drives the
+    /// TV and the LCD together), off for v2.1 (whose LCD blanks).
+    fn lmax_auto(m: &Machine) -> bool {
+        m.firmware().known().is_some_and(|k| k.name.contains("v2.2"))
+    }
+
+    /// Whether the L-MAX TV mode is on: for a running L-MAX what it does,
+    /// else the setting (Automatic counted as off: no BIOS to decide).
+    fn lmax_tv_mode(&self) -> bool {
+        if let Some(s) = &self.session {
+            let m = s.emu.lock();
+            if m.is_lmax() {
+                return self.settings.lmax_tv_output.unwrap_or_else(|| Self::lmax_auto(&m));
+            }
+        }
+        self.settings.lmax_tv_output == Some(true)
+    }
+
+    /// Ctrl+F6, Video › L-MAX TV mode: the TV output On or Off.
+    fn toggle_lmax_tv(&mut self) {
+        let on = !self.lmax_tv_mode();
+        self.set_lmax_tv_output(Some(on));
+        if !self.session.as_ref().is_some_and(|s| s.emu.lock().is_lmax()) {
+            self.ui.toast(if on { "L-MAX TV mode on (for the next L-MAX game)" } else { "L-MAX TV mode off" });
+        }
+    }
+
+    /// The L-MAX TV output setting (None: Automatic), saved. A running
+    /// L-MAX whose output changes restarts its game: the BIOS looks for the
+    /// TV chip only when it starts (io/lmax_tv.rs, 0x4009_B204; turned on
+    /// while running, the chip would stay blank; test
+    /// lmax_with_tv_draws_both_pictures). Saves are written first, as Reset.
+    fn set_lmax_tv_output(&mut self, choice: Option<bool>) {
+        self.settings.lmax_tv_output = choice;
+        self.save_settings();
+        self.fit_window = FIT_TRIES;
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        let on = {
+            let mut m = s.emu.lock();
+            if !m.is_lmax() {
+                return;
+            }
+            let on = choice.unwrap_or_else(|| Self::lmax_auto(&m));
+            if m.lmax_tv_output == on {
+                return;
+            }
+            m.set_lmax_tv_output(on);
+            let _ = s.saves.flush(&mut m);
+            m.reset();
+            on
+        };
+        s.emu.resync();
+        s.lmax_tv = on;
+        self.ui.toast(if on {
+            "L-MAX TV mode on: the game restarted (the L-MAX looks for a TV only when it starts)"
+        } else {
+            "L-MAX TV mode off: the game restarted (the L-MAX looks for a TV only when it starts)"
+        });
+    }
+
+    /// The connected monitors, as Video › L-MAX TV layout lists them (a
+    /// name, or "Monitor n" for one without), refreshed every few seconds.
+    fn refresh_monitors(&mut self, event_loop: &ActiveEventLoop) {
+        if self.monitors.0.is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+            return;
+        }
+        self.monitors = (Some(Instant::now()), event_loop.available_monitors().enumerate().map(|(i, m)| monitor_key(i, &m)).collect());
+    }
+
+    /// Opens or closes what the Separate layout draws on besides the main
+    /// window: a second window (desktop), or the second display (Android).
+    /// Each frame, from `about_to_wait`.
+    fn sync_second_screen(&mut self, event_loop: &ActiveEventLoop) {
+        let want = self.session.as_ref().is_some_and(|s| s.lmax_tv)
+            && self.settings.lmax_layout == crate::two_screens::Layout::Separate
+            && self.egui_state.is_some();
+        if self.gpu.is_none() {
+            return;
+        }
+        if let Some(sd) = self.opts.second_display {
+            if want != self.second_display_asked {
+                self.second_display_asked = want;
+                if !want {
+                    self.drop_second_display();
+                }
+                if !(sd.show)(want) && want {
+                    tracing::info!(target: "ribbit", "no second display: the L-MAX's pictures are stacked");
+                }
+            }
+            if !want {
+                return;
+            }
+            // A new surface (made, resized or gone): the old one is let go
+            // of first (Android waits for that before taking it away).
+            let generation = (sd.generation)();
+            if self.on_second_display.as_ref().is_some_and(|d| d.generation != generation) {
+                self.drop_second_display();
+            }
+            if self.on_second_display.is_none()
+                && self.second_display_tried != Some(generation)
+                && let Some((window, w, h)) = (sd.acquire)()
+            {
+                self.second_display_tried = Some(generation);
+                #[cfg(target_os = "android")]
+                // SAFETY: `window` stays acquired until `drop_second_display`.
+                let made = unsafe { self.gpu.as_ref().unwrap().picture_native(window, (w, h)) };
+                #[cfg(not(target_os = "android"))]
+                let made: Result<crate::gpu::PictureSurface> = {
+                    let _ = (w, h);
+                    Err(anyhow::anyhow!("only on Android"))
+                };
+                match made {
+                    Ok(surface) => self.on_second_display = Some(OnSecondDisplay { generation, window, surface }),
+                    Err(e) => {
+                        (sd.release)(window);
+                        tracing::warn!(target: "ribbit", "second display: {e:#}");
+                        self.ui.toast("Couldn't draw on the second display: the pictures are stacked");
+                    }
+                }
+            }
+            return;
+        }
+        if !want {
+            if self.second_window.take().is_some() {
+                self.second_window_focused = false;
+            }
+            return;
+        }
+        if self.second_window.is_some() {
+            return;
+        }
+        let title = match self.separate_main().other() {
+            crate::two_screens::Picture::Tv => format!("{APP_NAME} - L-MAX TV"),
+            crate::two_screens::Picture::Lcd => format!("{APP_NAME} - L-MAX LCD"),
+        };
+        let size = winit::dpi::LogicalSize::new(480.0, 480.0);
+        // A normal window, never maximized; full screen only on a chosen
+        // monitor with "Full screen on that monitor" set.
+        let mut attrs = Window::default_attributes()
+            .with_title(title)
+            .with_inner_size(size)
+            .with_min_inner_size(winit::dpi::LogicalSize::new(160.0, 160.0))
+            .with_window_icon(crate::icon::window_icon());
+        let chosen = self.settings.lmax_tv_monitor.as_ref().and_then(|want| {
+            event_loop.available_monitors().enumerate().find(|(i, m)| monitor_key(*i, m) == *want).map(|(_, m)| m)
+        });
+        let main = &self.gpu.as_ref().unwrap().window;
+        match chosen {
+            Some(mon) if self.settings.lmax_tv_fullscreen => {
+                attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(Some(mon))));
+            }
+            // Centred on the chosen monitor.
+            Some(mon) => {
+                let (at, area) = (mon.position(), mon.size());
+                let px: PhysicalSize<u32> = size.to_physical(mon.scale_factor());
+                let x = at.x + (area.width as i32 - px.width as i32).max(0) / 2;
+                let y = at.y + (area.height as i32 - px.height as i32).max(0) / 2;
+                attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
+            // Beside the main window (the right, else the left), on its
+            // monitor; where neither fits, where the system puts it.
+            None => {
+                if let Some(name) = &self.settings.lmax_tv_monitor {
+                    tracing::info!(target: "ribbit", monitor = %name, "the L-MAX TV window's monitor is not connected");
+                    self.ui.toast(format!("{name} isn't connected: the TV window opens beside Ribbit's"));
+                }
+                if let (Ok(pos), Some(mon)) = (main.outer_position(), main.current_monitor()) {
+                    let outer = main.outer_size();
+                    let px: PhysicalSize<u32> = size.to_physical(mon.scale_factor());
+                    let (w, gap) = (px.width as i32 + 16, (8.0 * mon.scale_factor()) as i32);
+                    let (left, right) = (mon.position().x, mon.position().x + mon.size().width as i32);
+                    let x = pos.x + outer.width as i32 + gap;
+                    let x = if x + w <= right { Some(x) } else { Some(pos.x - gap - w).filter(|&x| x >= left) };
+                    if let Some(x) = x {
+                        attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, pos.y));
+                    }
+                }
+            }
+        }
+        let made = event_loop
+            .create_window(attrs)
+            .context("creating window")
+            .and_then(|w| self.gpu.as_ref().unwrap().picture_window(Arc::new(w)));
+        match made {
+            Ok(p) => self.second_window = Some(p),
+            Err(e) => {
+                // Not tried again every frame: stacked instead.
+                tracing::warn!(target: "ribbit", "second window: {e:#}");
+                self.settings.lmax_layout = crate::two_screens::Layout::Stacked;
+                self.lmax_layout_changed();
+                self.ui.toast("A second window isn't available here: stacked instead");
+            }
+        }
+    }
+
+    /// An event for the L-MAX's second window: keys play the game there too.
+    fn second_window_event(&mut self, event: WindowEvent, event_loop: &ActiveEventLoop) {
+        match event {
+            WindowEvent::Resized(size) => {
+                if let (Some(g), Some(p)) = (&self.gpu, &mut self.second_window) {
+                    g.resize_picture(p, (size.width, size.height));
+                }
+            }
+            // Closed: the main window's picture alone.
+            WindowEvent::CloseRequested => {
+                use crate::two_screens::{Layout, Picture};
+                // Stored unswapped: `place` swaps it back.
+                let shown = if self.separate_main() == Picture::Lcd { Layout::LcdOnly } else { Layout::TvOnly };
+                self.settings.lmax_layout = crate::two_screens::swapped(shown, self.settings.lmax_swap);
+                self.lmax_layout_changed();
+                self.ui.toast("Second window closed (F6 or Video › L-MAX TV layout for the layouts)");
+            }
+            WindowEvent::Focused(f) => self.second_window_focused = f,
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state, repeat: false, .. }, .. } => {
+                self.woken = true;
+                self.key(code, state == ElementState::Pressed, event_loop);
+            }
+            _ => {}
+        }
+    }
+
+    /// Lets go of the second display's surface (Android).
+    fn drop_second_display(&mut self) {
+        if let Some(d) = self.on_second_display.take() {
+            drop(d.surface);
+            if let Some(sd) = self.opts.second_display {
+                (sd.release)(d.window);
+            }
+        }
+        if self.second_touch {
+            self.second_touch = false;
+            self.set_stylus(None);
+        }
+    }
+
+    /// Draws the second picture on the second window or display, and takes
+    /// a finger on the second display as the stylus (on the LCD's picture).
+    fn draw_second_screen(&mut self, display: crate::gpu::Display) {
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let other = self.separate_main().other();
+        let display = crate::two_screens::other_display(display, other);
+        if let Some(p) = &mut self.second_window {
+            if let Err(e) = gpu.render_picture(p, display) {
+                tracing::warn!(target: "ribbit", "second window: {e:#}");
+                self.second_window = None;
+            }
+            return;
+        }
+        let Some(d) = &mut self.on_second_display else {
+            return;
+        };
+        if let Err(e) = gpu.render_picture(&mut d.surface, display) {
+            tracing::warn!(target: "ribbit", "second display: {e:#}");
+            self.drop_second_display();
+            return;
+        }
+        let at = d.surface.at;
+        let touch = self.opts.second_display.and_then(|sd| (sd.touch)());
+        if other == crate::two_screens::Picture::Lcd && (touch.is_some() || self.second_touch) {
+            self.second_touch = touch.is_some();
+            self.set_stylus_at(touch.map(|(x, y)| (x as f64, y as f64)), at);
+        }
+    }
+
     fn toggle_console_view(&mut self) {
         let hw = self.current_hardware().unwrap_or(Hardware::Leapster);
         let on = !self.view_setting(hw);
@@ -2467,17 +2856,9 @@ impl App {
             Action::SdCard(job) => self.sd_card(job),
             Action::SetSdFolder(path) => self.set_sd_folder(path),
             Action::ConsoleViewChanged => self.console_view_changed(),
-            Action::SetLmaxTvOutput(choice) => {
-                self.settings.lmax_tv_output = choice;
-                self.save_settings();
-                if let Some(s) = &self.session {
-                    let mut m = s.emu.lock();
-                    if m.is_lmax() {
-                        let auto = m.firmware().known().is_some_and(|k| k.name.contains("v2.2"));
-                        m.set_lmax_tv_output(choice.unwrap_or(auto));
-                    }
-                }
-            }
+            Action::SetLmaxTvOutput(choice) => self.set_lmax_tv_output(choice),
+            Action::ToggleLmaxTv => self.toggle_lmax_tv(),
+            Action::LmaxLayoutChanged => self.lmax_layout_changed(),
             Action::Reset => self.reset(),
             Action::TogglePause => self.toggle_pause(),
             Action::Screenshot => self.screenshot(),
@@ -3946,9 +4327,14 @@ impl App {
 
     /// EXPERIMENTAL touch: the stylus at a window position (None = up).
     fn set_stylus(&mut self, pos: Option<(f64, f64)>) {
+        self.set_stylus_at(pos, self.lcd_px);
+    }
+
+    /// The stylus at `pos` on a picture drawn at `at` (x, y, w, h).
+    fn set_stylus_at(&mut self, pos: Option<(f64, f64)>, at: (f32, f32, f32, f32)) {
         // The LeapPad Academy's touch screen: the finger in its window's pixels.
         if let Some(t) = &self.lfa {
-            let (x, y, w, h) = self.lcd_px;
+            let (x, y, w, h) = at;
             let (sw, sh) = (t.size().0 as f32, t.size().1 as f32);
             t.set_touch(pos.and_then(|(cx, cy)| {
                 let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
@@ -3960,7 +4346,7 @@ impl App {
         // The LeapPad Explorer's: its picture shown upright (272x480), the
         // stylus in the panel's pixels (480x272).
         if let Some(d) = self.didj.as_ref().filter(|d| (d.leappad || d.leappad2) && d.upright()) {
-            let (x, y, w, h) = self.lcd_px;
+            let (x, y, w, h) = at;
             let (sw, sh) = (ribbit_didj::leappad::HEIGHT as f32, ribbit_didj::leappad::WIDTH as f32);
             d.set_touch(pos.and_then(|(cx, cy)| {
                 let (px, py) = ((cx as f32 - x) / w * sw, (cy as f32 - y) / h * sh);
@@ -3969,7 +4355,7 @@ impl App {
             return;
         }
         if let Some(d) = self.didj.as_ref().filter(|d| d.explorer) {
-            let (x, y, w, h) = self.lcd_px;
+            let (x, y, w, h) = at;
             let (sw, sh) = if d.leappad || d.leappad2 {
                 (ribbit_didj::leappad::WIDTH as f32, ribbit_didj::leappad::HEIGHT as f32)
             } else {
@@ -3988,7 +4374,7 @@ impl App {
         let Some(touch) = m.io.touch.as_mut() else {
             return;
         };
-        let (x, y, w, h) = self.lcd_px;
+        let (x, y, w, h) = at;
         touch.live = pos.and_then(|(cx, cy)| {
             let px = ((cx as f32 - x) / w * WIDTH as f32).floor();
             let py = ((cy as f32 - y) / h * HEIGHT as f32).floor();
@@ -4052,6 +4438,8 @@ impl App {
                 KeyCode::F8 => return self.toggle_record(),
                 KeyCode::F12 => return self.screenshot(),
                 KeyCode::F7 => return self.toggle_console_view(),
+                KeyCode::F6 if ctrl => return self.toggle_lmax_tv(),
+                KeyCode::F6 => return self.next_lmax_layout(self.modifiers.shift_key()),
                 KeyCode::F3 => {
                     self.settings.show_details = !self.settings.show_details;
                     return self.save_settings();
@@ -4302,19 +4690,66 @@ impl App {
         self.poll_encoding();
         self.record_test();
         let (mut hd_frame, mut hd_dirty) = (false, false);
+        // EXPERIMENTAL: an L-MAX driving its TV chip (not a Leapster TV,
+        // whose only picture it is).
+        if let Some(s) = &mut self.session {
+            let m = s.emu.lock();
+            s.lmax_tv = m.io.lmax_tv.as_ref().filter(|_| !m.is_leapster_tv()).inspect(|tvchip| {
+                // Diagnostic: how much the BIOS has touched the TV chip, once a
+                // second, so a run shows whether it is driving the TV at all.
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static TICK: AtomicU32 = AtomicU32::new(0);
+                if TICK.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
+                    tracing::info!(target: "ribbit::boot", "L-MAX TV chip: reads={} writes={}", tvchip.reads, tvchip.writes);
+                }
+            }).is_some();
+        }
+        // The layout, the window's main picture (into `frame`) and the other
+        // one (`second_frame`), drawn beside it or on the second window or
+        // display.
+        let lmax = self.two_screens().map(|layout| {
+            use crate::two_screens::{Layout, place};
+            let main = self.separate_main();
+            let p = place(layout, (0.0, 0.0, 1.0, 1.0), crate::gpu::Display::Sharp, self.settings.lmax_swap, main);
+            let other = p.other.map(|o| o.0).or((layout == Layout::Separate).then(|| main.other()));
+            (layout, p.main.0, other, main)
+        });
         if let Some(s) = &mut self.session {
             let passes = {
                 let mut m = s.emu.lock();
-                // With HD on, the frame HD matches and falls back to: on a
-                // Leapster TV the BIOS's own frame before its TV colour
-                // conversion (`render_hd_frame`).
-                if s.hd.is_some() {
-                    m.render_hd_frame(&mut self.frame);
-                } else {
-                    m.render_frame(&mut self.frame);
+                match lmax {
+                    Some((_, main, other, _)) => {
+                        use crate::two_screens::Picture;
+                        // No TV picture (the chip just taken away): black.
+                        let draw = |m: &Machine, p, out: &mut [u32; WIDTH * HEIGHT]| match p {
+                            Picture::Tv => {
+                                if m.render_tv(out).is_none() {
+                                    out.fill(0);
+                                }
+                            }
+                            Picture::Lcd => {
+                                m.render_lcd(out);
+                            }
+                        };
+                        draw(&m, main, &mut self.frame);
+                        if let Some(o) = other {
+                            draw(&m, o, &mut self.second_frame);
+                        }
+                    }
+                    // With HD on, the frame HD matches and falls back to: on a
+                    // Leapster TV the BIOS's own frame before its TV colour
+                    // conversion (`render_hd_frame`).
+                    None if s.hd.is_some() => {
+                        m.render_hd_frame(&mut self.frame);
+                    }
+                    None => {
+                        m.render_frame(&mut self.frame);
+                    }
                 }
                 m.hd.as_mut().map(|h| h.take()).unwrap_or_default()
             };
+            // HD's vectors are the LCD's: not over the TV picture.
+            let hd_here = lmax.is_none_or(|l| l.1 == crate::two_screens::Picture::Lcd);
 
             // Automatic calibration is hidden: black instead of its targets.
             let hidden = self.settings.auto_calibrate && crate::calibrate::target(&self.frame).is_some();
@@ -4334,6 +4769,7 @@ impl App {
             }
             if let Some(canvas) = &mut s.hd
                 && !hidden
+                && hd_here
             {
                 if canvas.fonts.is_none() {
                     canvas.fonts = crate::device_fonts::get();
@@ -4348,29 +4784,6 @@ impl App {
                 hd_dirty |= canvas.trace_pixels && from_lcd > 0;
                 hd_frame = true;
             }
-        }
-        // EXPERIMENTAL: the L-MAX's TV output (dual screen). render_frame left
-        // the handheld LCD in self.frame; render_tv gives the TV chip's
-        // picture, shown as the main screen with the LCD in a corner inset.
-        let lmax_tv = self.session.as_ref().and_then(|s| {
-            let m = s.emu.lock();
-            m.io.lmax_tv.as_ref().filter(|_| !m.is_leapster_tv()).map(|tvchip| {
-                // Diagnostic: how much the BIOS has touched the TV chip, once a
-                // second, so a run shows whether it is driving the TV at all.
-                use std::sync::atomic::{AtomicU32, Ordering};
-                static TICK: AtomicU32 = AtomicU32::new(0);
-                if TICK.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
-                    tracing::info!(target: "ribbit::boot", "L-MAX TV chip: reads={} writes={}", tvchip.reads, tvchip.writes);
-                }
-                let mut tv = Box::new([0u32; WIDTH * HEIGHT]);
-                m.render_tv(&mut tv);
-                tv
-            })
-        });
-        let lmax_dual = lmax_tv.is_some();
-        if let Some(tv) = lmax_tv {
-            self.tv_frame.clear();
-            self.tv_frame.extend_from_slice(&tv[..]);
         }
         if let Some(z) = &self.zippity {
             z.frame(&mut self.tv_frame);
@@ -4410,9 +4823,6 @@ impl App {
             Some(q.size())
         } else if let Some(size) = didj_size {
             Some(size)
-        } else if lmax_dual {
-            // The TV chip's 160x160 game picture is the main screen.
-            Some((WIDTH, HEIGHT))
         } else {
             None
         };
@@ -4425,10 +4835,14 @@ impl App {
             None => picture_hash(&self.frame[..]),
         });
         let details = self.settings.show_details.then(|| self.details_lines(tv_size));
+        let lmax_tv_mode = self.lmax_tv_mode();
         let (Some(gpu), Some(state)) = (&mut self.gpu, &mut self.egui_state) else {
             return;
         };
         gpu.upload(&self.frame);
+        if lmax.is_some_and(|l| l.2.is_some()) {
+            gpu.upload_second(&self.second_frame);
+        }
         gpu.show_hd = hd_frame;
         gpu.show_tv = tv_size.is_some();
         if let Some(size) = tv_size {
@@ -4443,6 +4857,8 @@ impl App {
         let raw = state.take_egui_input(&gpu.window);
         let info =
             ui::Info {
+                lmax_tv_mode,
+                monitors: self.monitors.1.clone(),
                 running: self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some() || self.leappad.is_some(),
                 explorer_cart: self.didj.as_ref().filter(|d| d.explorer).map(|d| d.has_cart()),
                 game_settings: self.session.as_ref().and_then(|s| s.cart_path.as_ref()).map(|_| self.game_own.is_some()),
@@ -4628,6 +5044,11 @@ impl App {
                     let h = 160.0 / l.screen_aspect / l.screen.height() * 1.04;
                     ((h * l.aspect).round() as u32, h.round() as u32)
                 }
+                // The L-MAX's two pictures side by side or stacked: two units.
+                None if lmax.is_some() => {
+                    let (c, r) = lmax.map_or((1, 1), |l| crate::two_screens::units(l.0));
+                    (160 * c, 160 * r)
+                }
                 None if tv_size.is_some() => (160, 120),
                 None => (160, 160),
             };
@@ -4642,18 +5063,24 @@ impl App {
             Some(size) => Gpu::tv_rect(px_area, size),
             None => Gpu::lcd_rect(px_area, display),
         };
+        // The L-MAX's two pictures: the stylus goes on the LCD's (on the TV
+        // picture's when the window has no LCD).
+        let (mut main_px, mut main_display, mut second) = (self.lcd_px, display, None);
+        if let Some((layout, _, _, separate_main)) = lmax {
+            use crate::two_screens::{Picture, other_display, place};
+            let placed = place(layout, px_area, display, self.settings.lmax_swap, separate_main);
+            self.lcd_px = placed.rect_of(Picture::Lcd).unwrap_or(placed.main.1);
+            main_px = placed.main.1;
+            if placed.main.0 == Picture::Tv && display == crate::gpu::Display::Lcd {
+                main_display = crate::gpu::Display::Sharp;
+            }
+            second = placed.other.map(|(p, r)| (r, other_display(display, p)));
+        }
         let jobs = self.egui_ctx.tessellate(out.shapes, ppp);
         let lcd = (self.session.is_some() || self.zippity.is_some() || self.clickstart.is_some() || self.lfa.is_some() || self.iquest.is_some() || self.didj.is_some() || self.twist.is_some())
-            .then_some((self.lcd_px, display, self.settings.ai));
-        // The handheld LCD inset in the bottom-right corner of the TV picture.
-        let inset = lmax_dual.then(|| {
-            let (x, y, w, h) = self.lcd_px;
-            let s = (w.min(h) / 3.0).max(1.0);
-            let m = s * 0.08;
-            (x + w - s - m, y + h - s - m, s, s)
-        });
+            .then_some((main_px, main_display, self.settings.ai));
         let mut deltas = out.textures_delta;
-        let rendered = gpu.render(lcd, inset, &jobs, &deltas, ppp);
+        let rendered = gpu.render(lcd, second, &jobs, &deltas, ppp);
         // Handled by `render` (debug builds of egui panic when an unhandled
         // delta is dropped).
         deltas.clear();
@@ -4736,6 +5163,9 @@ impl App {
                     }
                 }
             }
+        }
+        if lmax.is_some() {
+            self.draw_second_screen(display);
         }
         for a in actions {
             self.act(a, event_loop);
@@ -5001,11 +5431,23 @@ impl ApplicationHandler for App {
             g.detach();
         }
         self.egui_state = None;
+        // The second display's picture goes too (asked for again on return,
+        // `sync_second_screen`).
+        self.drop_second_display();
+        if std::mem::take(&mut self.second_display_asked)
+            && let Some(sd) = self.opts.second_display
+        {
+            (sd.show)(false);
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if let Some(w) = self.popouts.which(id) {
             self.popout_event(w, event);
+            return;
+        }
+        if self.second_window.as_ref().and_then(|p| p.window.as_ref()).is_some_and(|w| w.id() == id) {
+            self.second_window_event(event, event_loop);
             return;
         }
         // (`ui_at` decides whether a press belongs to the UI or the stylus.)
@@ -5144,7 +5586,7 @@ impl ApplicationHandler for App {
             self.save_settings();
             self.rescan_library();
         }
-        let focused = self.main_focused || self.popouts.focused;
+        let focused = self.main_focused || self.popouts.focused || self.second_window_focused;
         if focused == self.background {
             self.focus_changed(focused);
         }
@@ -5157,6 +5599,8 @@ impl ApplicationHandler for App {
             self.popouts.sync(event_loop, g, &mut self.ui.debug, &self.ui.debug_snapshot.system);
             self.popouts.request_redraws();
         }
+        self.refresh_monitors(event_loop);
+        self.sync_second_screen(event_loop);
         event_loop.set_control_flow(if next <= now {
             winit::event_loop::ControlFlow::Wait
         } else {

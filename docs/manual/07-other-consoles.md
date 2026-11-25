@@ -6,6 +6,7 @@ Choose the console in the library's console menu (see [The game library](#the-li
 
 These play the same Leapster cartridges with their own BIOS. Put the BIOS in your games folder or open it with **File › Open BIOS…**; the console then appears in the library's console menu.
 
+- The **L-MAX** can play with its TV output connected (experimental): its TV picture and its LCD together, in a choice of layouts. See [L-MAX TV](#picture-and-sound/l-max-tv-experimental).
 - The **Leapster TV** shows a 4:3 TV picture; its controller and stylus work as on the handhelds.
 - The **Leapster 2** starts on its own main menu, as the real one does; **Emulation › Leapster 2: start games directly** goes straight into the cartridge. **Leapster 2 Main Menu** in the library turns it on without a game.
 

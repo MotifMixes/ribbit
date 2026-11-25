@@ -633,3 +633,60 @@ fn leapster2_family_hd_hooks_are_found() {
         assert!(h.gradient.is_some() && h.gradient_blend.is_some() && h.bitmap_blend.is_some() && h.transform.is_some() && h.stroke.is_some(), "{name}: {h:x?}");
     }
 }
+
+/// EXPERIMENTAL: an L-MAX (v2.2) driving its TV chip (`set_lmax_tv_output`)
+/// draws a game on the TV and keeps the LCD on; without, there is no TV
+/// picture. The BIOS probes the chip once, at boot (io/lmax_tv.rs, 0x4009_B204):
+/// turned on while running, the chip answers but stays blank (so the app
+/// restarts the game for it), and after `reset` it is driven. Needs
+/// RIBBIT_BIOS_DIR and Talking Words Factory next to it (roms/).
+#[test]
+fn lmax_with_tv_draws_both_pictures() {
+    let Some(dir) = std::env::var_os("RIBBIT_BIOS_DIR") else {
+        eprintln!("RIBBIT_BIOS_DIR not set; skipping");
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    let Some(cart) = dir.parent().map(|p| p.join("Talking-Words-Factory_Leapster_EN.zip")).filter(|p| p.exists()) else {
+        eprintln!("the cartridge is not next to RIBBIT_BIOS_DIR; skipping");
+        return;
+    };
+    let fw = Firmware::from_bytes_any_model(std::fs::read(dir.join("leapsterlmx/152-11476_v2.2.bin")).unwrap()).unwrap();
+    let cart = ribbit_memory::Cartridge::from_bytes(ribbit_core::read_image(&cart).unwrap()).unwrap();
+    let colours = |px: &[u32]| px.iter().collect::<std::collections::BTreeSet<_>>().len();
+    let mut px = [0u32; WIDTH * HEIGHT];
+    // Off: the handheld alone.
+    let mut plain = Machine::with_straps(fw.clone(), Some(cart.clone()), STRAPS_SKIP_CALIBRATION);
+    assert!(plain.is_lmax());
+    plain.run_cycles(5 * plain.clock.cpu_hz, &Breakpoints::default());
+    assert!(plain.render_tv(&mut px).is_none(), "no TV unless driven");
+    // Turned on while running: the BIOS has already looked for the chip.
+    plain.set_lmax_tv_output(true);
+    plain.run_cycles(10 * plain.clock.cpu_hz, &Breakpoints::default());
+    plain.render_tv(&mut px).expect("TV chip");
+    let late = colours(&px);
+    assert!(late <= 2, "turned on while running: {late} colours (the BIOS only probes at boot)");
+    // Restarted: the BIOS finds it.
+    plain.reset();
+    plain.run_cycles(15 * plain.clock.cpu_hz, &Breakpoints::default());
+    plain.render_tv(&mut px).expect("TV chip");
+    let after_reset = colours(&px);
+    assert!(after_reset > 8, "after reset: {after_reset} colours");
+    // From boot: both pictures.
+    let mut m = Machine::with_straps(fw, Some(cart), STRAPS_SKIP_CALIBRATION);
+    m.set_lmax_tv_output(true);
+    m.run_cycles(15 * m.clock.cpu_hz, &Breakpoints::default());
+    m.render_tv(&mut px).expect("TV chip");
+    let tv = colours(&px);
+    m.render_lcd(&mut px);
+    let lcd = colours(&px);
+    eprintln!("TV turned on while running: {late} colours; after reset {after_reset}; from boot: TV {tv}, LCD {lcd}");
+    assert!(tv > 8 && lcd > 8, "TV {tv} colours, LCD {lcd} colours: both show the game");
+    // Turned off and restarted: no TV picture, the LCD as before.
+    m.set_lmax_tv_output(false);
+    m.reset();
+    m.run_cycles(15 * m.clock.cpu_hz, &Breakpoints::default());
+    assert!(m.render_tv(&mut px).is_none());
+    m.render_lcd(&mut px);
+    assert!(colours(&px) > 8);
+}

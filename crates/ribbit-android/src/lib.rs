@@ -37,6 +37,7 @@ fn android_main(app: AndroidApp) {
         pick_start: Some(pick_start),
         pick_poll: Some(pick_poll),
         keep_screen_on: Some(keep_screen_on),
+        second_display: Some(SECOND_DISPLAY),
         ..Default::default()
     };
     if let Err(e) = ribbit_frontend::run_with(event_loop, opts) {
@@ -60,6 +61,90 @@ fn keep_screen_on(on: bool) {
         env.call_static_method(&class, "keepOn", "(Landroid/app/Activity;Z)V", &[JValue::Object(activity), JValue::Bool(on.into())])?;
         Ok(())
     });
+}
+
+/// EXPERIMENTAL: the device's second display (SecondScreen.java), where the
+/// L-MAX's second picture goes on a dual-screen handheld. Not tried on one.
+const SECOND_DISPLAY: ribbit_frontend::SecondDisplay = ribbit_frontend::SecondDisplay {
+    show: second_show,
+    generation: second_generation,
+    acquire: second_acquire,
+    release: second_release,
+    touch: second_touch,
+};
+
+#[link(name = "android")]
+unsafe extern "C" {
+    fn ANativeWindow_fromSurface(env: *mut jni::sys::JNIEnv, surface: jni::sys::jobject) -> *mut std::ffi::c_void;
+    fn ANativeWindow_release(window: *mut std::ffi::c_void);
+}
+
+fn second_screen<'a>(env: &mut jni::JNIEnv<'a>, activity: &JObject) -> jni::errors::Result<jni::objects::JClass<'a>> {
+    app_class(env, activity, "dev.ribbit.emulator.SecondScreen")
+}
+
+fn second_show(on: bool) -> bool {
+    use jni::objects::JValue;
+    with_activity(|env, activity| {
+        let class = second_screen(env, activity)?;
+        env.call_static_method(&class, "show", "(Landroid/app/Activity;Z)Z", &[JValue::Object(activity), JValue::Bool(on.into())])?.z()
+    })
+    .unwrap_or(false)
+}
+
+fn second_generation() -> u32 {
+    with_activity(|env, activity| {
+        let class = second_screen(env, activity)?;
+        env.call_static_method(&class, "generation", "()I", &[])?.i()
+    })
+    .unwrap_or(0) as u32
+}
+
+/// The second display's surface as an `ANativeWindow` (a reference of our
+/// own, let go of in `second_release`), and its size.
+fn second_acquire() -> Option<(std::ptr::NonNull<std::ffi::c_void>, u32, u32)> {
+    with_activity(|env, activity| {
+        let class = second_screen(env, activity)?;
+        let surface = env.call_static_method(&class, "acquire", "()Landroid/view/Surface;", &[])?.l()?;
+        if surface.is_null() {
+            return Ok(None);
+        }
+        let w = env.call_static_method(&class, "width", "()I", &[])?.i()?;
+        let h = env.call_static_method(&class, "height", "()I", &[])?.i()?;
+        // SAFETY: a valid Surface (a local reference alive here).
+        let window = unsafe { ANativeWindow_fromSurface(env.get_raw(), surface.as_raw()) };
+        let Some(window) = std::ptr::NonNull::new(window) else {
+            env.call_static_method(&class, "released", "()V", &[])?;
+            return Ok(None);
+        };
+        Ok(Some((window, w.max(1) as u32, h.max(1) as u32)))
+    })
+    .flatten()
+}
+
+fn second_release(window: std::ptr::NonNull<std::ffi::c_void>) {
+    // SAFETY: the reference `second_acquire` took.
+    unsafe { ANativeWindow_release(window.as_ptr()) };
+    with_activity(|env, activity| {
+        let class = second_screen(env, activity)?;
+        env.call_static_method(&class, "released", "()V", &[])?;
+        Ok(())
+    });
+}
+
+/// A finger on the second display, in its surface's pixels.
+fn second_touch() -> Option<(f32, f32)> {
+    with_activity(|env, activity| {
+        let class = second_screen(env, activity)?;
+        let at = env.call_static_method(&class, "touch", "()[F", &[])?.l()?;
+        if at.is_null() {
+            return Ok(None);
+        }
+        let mut xy = [0.0f32; 2];
+        env.get_float_array_region(&jni::objects::JFloatArray::from(at), 0, &mut xy)?;
+        Ok(Some((xy[0], xy[1])))
+    })
+    .flatten()
 }
 
 /// The Java VM and the activity, for `activity_destroyed`.

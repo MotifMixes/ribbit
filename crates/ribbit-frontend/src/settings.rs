@@ -140,12 +140,24 @@ pub struct Settings {
     /// Console view: show each control's keyboard key on it, as a keycap
     /// that lights up when pressed.
     pub console_view_keys: bool,
-    /// EXPERIMENTAL: on an L-MAX, drive the TV video chip and show its
-    /// picture as the main screen with the handheld LCD in a corner inset.
+    /// EXPERIMENTAL: on an L-MAX, drive the TV video chip, so both its
+    /// pictures show (TV and handheld LCD, arranged by `lmax_layout`).
     /// None: automatic (on for the v2.2 BaseROM, which drives both screens;
     /// off for v2.1, whose LCD blanks). Some(true/false): forced on/off.
     #[serde(default)]
     pub lmax_tv_output: Option<bool>,
+    /// How the L-MAX's TV picture and LCD share the screen (F6 steps;
+    /// two_screens.rs).
+    pub lmax_layout: crate::two_screens::Layout,
+    /// The L-MAX's TV and LCD change places (side by side, stacked, and
+    /// which goes on the second window or display) (Shift+F6).
+    pub lmax_swap: bool,
+    /// Separate windows (desktop): the monitor the TV window opens on, by
+    /// name (None: beside the main window, as when that monitor is gone).
+    pub lmax_tv_monitor: Option<String>,
+    /// The TV window opens full screen on that monitor (only when one is
+    /// chosen and connected; off unless chosen).
+    pub lmax_tv_fullscreen: bool,
     /// A folder written onto the RockIt Twist's internal storage at power-on
     /// (laid out like its F: drive), if one is chosen.
     pub twist_content: Option<PathBuf>,
@@ -326,6 +338,16 @@ impl Default for Settings {
             console_view_twist: true,
             console_view_keys: true,
             lmax_tv_output: None,
+            // Android: the TV on the main display and the LCD on a second one
+            // (a dual-screen handheld), else stacked in the one.
+            lmax_layout: if cfg!(target_os = "android") {
+                crate::two_screens::Layout::Separate
+            } else {
+                crate::two_screens::Layout::Stacked
+            },
+            lmax_swap: false,
+            lmax_tv_monitor: None,
+            lmax_tv_fullscreen: false,
             twist_content: None,
             leapster2_sd_folder: None,
             twist_usb: false,
@@ -649,6 +671,22 @@ mod tests {
         assert_eq!((s.volume, s.window_scale), (0.25, 0));
         assert!(!s.console_view, "the Leapster's is off unless chosen");
         assert!(s.console_view_twist, "the RockIt Twist's is on unless turned off");
+    }
+
+    #[test]
+    fn lmax_layout_choices_are_kept() {
+        use crate::two_screens::Layout;
+        let s: Settings = toml::from_str("volume = 0.5").unwrap();
+        assert!(s.lmax_tv_output.is_none() && !s.lmax_swap, "automatic, not swapped, unless chosen");
+        assert!(s.lmax_tv_monitor.is_none() && !s.lmax_tv_fullscreen, "beside the main window, never full screen unless chosen");
+        let s = Settings { lmax_tv_monitor: Some(r"\.\DISPLAY2".into()), lmax_tv_fullscreen: true, ..Default::default() };
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!((back.lmax_tv_monitor, back.lmax_tv_fullscreen), (s.lmax_tv_monitor, true));
+        for layout in Layout::ALL {
+            let s = Settings { lmax_tv_output: Some(true), lmax_layout: layout, lmax_swap: true, ..Default::default() };
+            let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+            assert_eq!((back.lmax_tv_output, back.lmax_layout, back.lmax_swap), (Some(true), layout, true));
+        }
     }
 
     #[test]

@@ -42,6 +42,7 @@ mod serial;
 mod ui;
 mod touch_pad;
 mod twist;
+mod two_screens;
 mod updates;
 pub mod upscale;
 mod zippity;
@@ -49,5 +50,5 @@ mod clickstart;
 mod lfa;
 mod iquest;
 
-pub use app::{StartOptions, run, run_with};
+pub use app::{SecondDisplay, StartOptions, run, run_with};
 pub use settings::default_data_dir;

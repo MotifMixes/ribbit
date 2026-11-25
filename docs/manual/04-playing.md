@@ -21,6 +21,8 @@
 | Reset | `Ctrl+R` |
 | Open cartridge | `Ctrl+O` |
 | Console view on / off | `F7` |
+| L-MAX TV: next layout / swap TV and LCD | `F6` / `Shift+F6` |
+| L-MAX TV mode on / off | `Ctrl+F6` |
 | Show / hide the menu bar | `F10` |
 | Fullscreen | `F11` |
 | Screenshot | `F12` |

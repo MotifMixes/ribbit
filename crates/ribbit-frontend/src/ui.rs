@@ -98,6 +98,10 @@ pub enum Action {
     /// L-MAX TV output (dual screen): None automatic, Some(on/off) forced.
     /// Applies to a running L-MAX at once, and is saved.
     SetLmaxTvOutput(Option<bool>),
+    /// The L-MAX TV layout or swap changed (saved, window refitted).
+    LmaxLayoutChanged,
+    /// L-MAX TV mode on or off (Ctrl+F6): the TV output setting On or Off.
+    ToggleLmaxTv,
     /// The update is installed: save, start the new version and quit.
     RestartForUpdate,
     /// Start or stop screen recording.
@@ -180,6 +184,10 @@ pub struct Info {
     pub details: Option<Vec<(&'static str, String)>>,
     pub bios_name: Option<String>,
     pub fullscreen: bool,
+    /// The L-MAX TV mode is on (the running L-MAX's, else the setting).
+    pub lmax_tv_mode: bool,
+    /// The connected monitors' names, for the L-MAX's TV window.
+    pub monitors: Vec<String>,
     pub experimental_touch: bool,
     pub save_dir: String,
     /// When each save-state slot was last written (None = empty).
@@ -1168,9 +1176,10 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
         sub_menu(ui, "L-MAX TV output", |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Experimental. Drives the L-MAX's TV video chip and shows its picture as the \
-                     main screen, with the handheld LCD in a corner. The L-MAX can't tell a TV is \
-                     plugged in, so Ribbit decides. Applies at once.",
+                    "Experimental. Drives the L-MAX's TV video chip, so both pictures show: the TV \
+                     and the handheld LCD, arranged in Video › L-MAX TV layout (F6). The L-MAX \
+                     can't tell a TV is plugged in, so Ribbit decides. It looks for a TV only when \
+                     it starts: a running L-MAX game restarts (saves are written first).",
                 )
                 .weak(),
             );
@@ -1701,6 +1710,48 @@ fn menus(ui: &mut egui::Ui, st: &mut UiState, settings: &mut Settings, info: &In
             }
         });
         ui.separator();
+        // EXPERIMENTAL: how the L-MAX's two pictures share the screen
+        // (two_screens.rs), like Cemu's GamePad / TV views.
+        let mut tv_mode = info.lmax_tv_mode;
+        if ui
+            .add(egui::Checkbox::new(&mut tv_mode, "L-MAX TV mode"))
+            .on_hover_text("Experimental. An L-MAX with its TV output: the TV picture and the handheld LCD together (Ctrl+F6). Off: the handheld's LCD alone. A running L-MAX game restarts (saves are written first): the L-MAX looks for a TV only when it starts. Sets Emulation › L-MAX TV output to On or Off.")
+            .changed()
+        {
+            actions.push(Action::ToggleLmaxTv);
+        }
+        sub_menu(ui, "L-MAX TV layout", |ui| {
+            ui.label(egui::RichText::new("While an L-MAX drives its TV (L-MAX TV mode, Ctrl+F6).").weak());
+            let before = (settings.lmax_layout, settings.lmax_swap, settings.lmax_tv_monitor.clone(), settings.lmax_tv_fullscreen);
+            for layout in crate::two_screens::Layout::ALL {
+                ui.radio_value(&mut settings.lmax_layout, layout, layout.label());
+            }
+            ui.separator();
+            ui.checkbox(&mut settings.lmax_swap, "Swap TV and LCD (Shift+F6)")
+                .on_hover_text("Side by side, stacked and separate: the TV and the LCD change places.");
+            ui.label(egui::RichText::new("F6 steps through the layouts.").weak());
+            // Separate windows: the monitor for the TV window (desktop).
+            if !cfg!(target_os = "android") {
+                ui.separator();
+                ui.label(egui::RichText::new("Separate windows: the TV window's monitor").strong());
+                ui.radio_value(&mut settings.lmax_tv_monitor, None, "Same as main window")
+                    .on_hover_text("The TV window opens beside Ribbit's window.");
+                for (i, name) in info.monitors.iter().enumerate() {
+                    ui.radio_value(&mut settings.lmax_tv_monitor, Some(name.clone()), format!("{}: {name}", i + 1));
+                }
+                // A chosen monitor that isn't connected now stays chosen.
+                if let Some(name) = settings.lmax_tv_monitor.clone().filter(|n| !info.monitors.contains(n)) {
+                    ui.radio_value(&mut settings.lmax_tv_monitor, Some(name.clone()), format!("{name} (not connected: beside the main window)"));
+                }
+                ui.add_enabled_ui(settings.lmax_tv_monitor.is_some(), |ui| {
+                    ui.checkbox(&mut settings.lmax_tv_fullscreen, "Full screen on that monitor")
+                        .on_hover_text("The TV window fills the chosen monitor. Off: a normal window in its middle.");
+                });
+            }
+            if (settings.lmax_layout, settings.lmax_swap, settings.lmax_tv_monitor.clone(), settings.lmax_tv_fullscreen) != before {
+                actions.push(Action::LmaxLayoutChanged);
+            }
+        });
         if ui.add_enabled(info.running, egui::Button::new("Screenshot").shortcut_text("F12")).clicked() {
             actions.push(Action::Screenshot);
             ui.close();
@@ -4024,6 +4075,8 @@ fn dialogs(ctx: &egui::Context, st: &mut UiState, settings: &mut Settings, info:
                 ("Screenshot", "F12"),
                 ("Show/hide menu", "F10"),
                 ("Console view on/off", "F7"),
+                ("L-MAX TV: next layout / swap", "F6 / Shift+F6"),
+                ("L-MAX TV mode on/off", "Ctrl+F6"),
                 ("Details (frame rates)", "F3"),
             ] {
                 ui.label(what);

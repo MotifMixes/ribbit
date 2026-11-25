@@ -197,6 +197,10 @@ pub enum Display {
 /// Where the LCD goes (x, y, w, h in physical pixels) and how it is drawn.
 pub type LcdView = ((f32, f32, f32, f32), Display, AiSettings);
 
+/// Where the second picture goes (x, y, w, h in physical pixels) and how
+/// it is drawn (never AI: `two_screens::other_display`).
+pub type SecondView = ((f32, f32, f32, f32), Display);
+
 pub struct Gpu {
     pub window: Arc<Window>,
     /// Kept so a new surface can be made for a new window (Android takes
@@ -238,6 +242,11 @@ pub struct Gpu {
     /// console draws, and a new upload re-runs the AI upscale.
     tv_pixels: Vec<u32>,
     pub show_tv: bool,
+    /// EXPERIMENTAL: a second 160x160 picture drawn beside (or over) the
+    /// first: the L-MAX's TV picture or LCD (two_screens.rs). Its texture
+    /// and bind group, and the pixels last uploaded.
+    second: Option<(wgpu::Texture, wgpu::BindGroup)>,
+    second_pixels: Vec<u32>,
     /// A recording's frame drawn off screen (`capture`): its texture and
     /// the buffer it is read back through.
     capture: Option<(wgpu::Texture, wgpu::Buffer, (u32, u32))>,
@@ -607,6 +616,8 @@ impl Gpu {
             tv: None,
             tv_pixels: Vec::new(),
             show_tv: false,
+            second: None,
+            second_pixels: Vec::new(),
             capture: None,
             lcd_view: view,
             bgl,
@@ -746,6 +757,73 @@ impl Gpu {
         );
     }
 
+    /// EXPERIMENTAL: the second picture (`SecondView`; 0x00RRGGBB, 160x160).
+    pub fn upload_second(&mut self, frame: &[u32; WIDTH * HEIGHT]) {
+        if self.second.is_none() {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("second"),
+                size: wgpu::Extent3d { width: WIDTH as u32, height: HEIGHT as u32, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("second"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.second = Some((texture, group));
+            self.second_pixels.clear();
+        }
+        if self.second_pixels.as_slice() == frame.as_slice() {
+            return;
+        }
+        self.second_pixels.clear();
+        self.second_pixels.extend_from_slice(frame);
+        let rgba: Vec<u8> = frame.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 0xFF]).collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.second.as_ref().unwrap().0,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * WIDTH as u32), rows_per_image: None },
+            wgpu::Extent3d { width: WIDTH as u32, height: HEIGHT as u32, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// The pipeline drawing a 160x160 picture as it is (AI: Sharp).
+    fn plain(&self, display: Display) -> &wgpu::RenderPipeline {
+        match display {
+            Display::Pixel => &self.pixel,
+            Display::Ai | Display::Sharp => &self.sharp,
+            Display::Lcd => &self.lcd,
+            Display::Smooth => &self.smooth,
+        }
+    }
+
+    /// Sets the viewport to `rect` clipped to a `size` target; false if
+    /// nothing of it is left.
+    fn viewport(pass: &mut wgpu::RenderPass<'static>, rect: (f32, f32, f32, f32), size: (f32, f32)) -> bool {
+        let (x, y, w, h) = rect;
+        let (x0, y0) = (x.max(0.0), y.max(0.0));
+        let (w, h) = (w.min(size.0 - x0), h.min(size.1 - y0));
+        if w < 1.0 || h < 1.0 {
+            return false;
+        }
+        pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
+        true
+    }
+
     fn hd_texture(device: &wgpu::Device, size: u32) -> wgpu::Texture {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("hd"),
@@ -817,14 +895,12 @@ impl Gpu {
         })
     }
 
-    /// Draws the LCD into `lcd` (None: no game screen) and egui on top.
-    /// `inset`, if set, draws the handheld LCD (always uploaded to
-    /// `bind_group`) as a small picture at that rect over the main one: the
-    /// L-MAX's dual screen, where the main picture is the TV output.
+    /// Draws the LCD into `lcd` (None: no game screen), the second picture
+    /// (`upload_second`) into `second`, and egui on top.
     pub fn render(
         &mut self,
         lcd: Option<LcdView>,
-        inset: Option<(f32, f32, f32, f32)>,
+        second: Option<SecondView>,
         paint_jobs: &[egui::ClippedPrimitive],
         textures: &egui::TexturesDelta,
         pixels_per_point: f32,
@@ -973,18 +1049,15 @@ impl Gpu {
                     pass.set_viewport(0.0, 0.0, fw, fh, 0.0, 1.0);
                 }
             }
-            // The handheld LCD inset (L-MAX dual screen), drawn over the TV
-            // picture with the LCD's own look.
-            if let Some((x, y, w, h)) = inset {
-                let (fw, fh) = (self.config.width as f32, self.config.height as f32);
-                let (x0, y0) = (x.max(0.0), y.max(0.0));
-                let (w, h) = (w.min(fw - x0), h.min(fh - y0));
-                if w >= 1.0 && h >= 1.0 {
-                    pass.set_viewport(x0, y0, w, h, 0.0, 1.0);
-                    pass.set_pipeline(&self.lcd);
-                    pass.set_bind_group(0, &self.bind_group, &[]);
+            // The L-MAX's second picture (two_screens.rs), after the first:
+            // an inset is drawn over it.
+            if let (Some((rect, display)), Some((_, group))) = (second, &self.second) {
+                let size = (self.config.width as f32, self.config.height as f32);
+                if Self::viewport(&mut pass, rect, size) {
+                    pass.set_pipeline(self.plain(display));
+                    pass.set_bind_group(0, group, &[]);
                     pass.draw(0..3, 0..1);
-                    pass.set_viewport(0.0, 0.0, fw, fh, 0.0, 1.0);
+                    pass.set_viewport(0.0, 0.0, size.0, size.1, 0.0, 1.0);
                 }
             }
             self.egui.render(&mut pass, paint_jobs, &screen);
@@ -1197,6 +1270,120 @@ impl Gpu {
         }
         for id in &textures.free {
             t.egui.free_texture(id);
+        }
+        Ok(())
+    }
+}
+
+/// EXPERIMENTAL: another surface on the same GPU showing only the second
+/// picture (`upload_second`), as large as fits: the L-MAX's TV picture in a
+/// window of its own, or (Android) a picture on the device's second display.
+pub struct PictureSurface {
+    /// The desktop window (None: an Android display's surface).
+    pub window: Option<Arc<Window>>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    /// Where the picture was last drawn (x, y, w, h in the surface's pixels),
+    /// for touches on it.
+    pub at: (f32, f32, f32, f32),
+}
+
+impl Gpu {
+    /// A desktop window for the second picture. Fails where the backend
+    /// cannot show a second window (some OpenGL drivers).
+    pub fn picture_window(&self, window: Arc<Window>) -> Result<PictureSurface> {
+        let surface = self.instance.create_surface(window.clone()).context("creating surface")?;
+        let size = window.inner_size();
+        self.picture_surface(surface, Some(window), (size.width, size.height))
+    }
+
+    /// The surface of an Android `ANativeWindow` (`window`: a pointer the
+    /// caller holds a reference to until this surface is dropped), `size`
+    /// pixels.
+    ///
+    /// # Safety
+    /// `window` must stay a valid `ANativeWindow` while the result lives.
+    #[cfg(target_os = "android")]
+    pub unsafe fn picture_native(&self, window: std::ptr::NonNull<std::ffi::c_void>, size: (u32, u32)) -> Result<PictureSurface> {
+        use wgpu::rwh::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
+        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(RawDisplayHandle::Android(AndroidDisplayHandle::new())),
+            raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(window)),
+        };
+        // SAFETY: the caller keeps the window alive.
+        let surface = unsafe { self.instance.create_surface_unsafe(target) }.context("creating surface")?;
+        self.picture_surface(surface, None, size)
+    }
+
+    fn picture_surface(&self, surface: wgpu::Surface<'static>, window: Option<Arc<Window>>, size: (u32, u32)) -> Result<PictureSurface> {
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut config = surface
+            .get_default_config(&self.adapter, size.0.max(1), size.1.max(1))
+            .context("surface not supported by adapter")?;
+        // The pipelines are made for the main surface's format.
+        config.format = self.config.format;
+        // Not waiting for the screen's refresh: the main window does (two
+        // surfaces each waiting would halve its rate).
+        config.present_mode = wgpu::PresentMode::AutoNoVsync;
+        surface.configure(&self.device, &config);
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            anyhow::bail!("second picture surface: {e}");
+        }
+        Ok(PictureSurface { window, surface, config, at: (0.0, 0.0, 0.0, 0.0) })
+    }
+
+    pub fn resize_picture(&self, p: &mut PictureSurface, size: (u32, u32)) {
+        if size.0 > 0 && size.1 > 0 && (size.0, size.1) != (p.config.width, p.config.height) {
+            p.config.width = size.0;
+            p.config.height = size.1;
+            p.surface.configure(&self.device, &p.config);
+        }
+    }
+
+    /// Draws the second picture into `p`, as large as fits (black around).
+    /// Call after `render`, which uploads nothing for it: `upload_second`.
+    pub fn render_picture(&self, p: &mut PictureSurface, display: Display) -> Result<()> {
+        use wgpu::CurrentSurfaceTexture as Cst;
+        let (output, suboptimal) = match p.surface.get_current_texture() {
+            Cst::Success(o) => (o, false),
+            Cst::Suboptimal(o) => (o, true),
+            Cst::Outdated => {
+                p.surface.configure(&self.device, &p.config);
+                return Ok(());
+            }
+            Cst::Timeout | Cst::Occluded => return Ok(()),
+            Cst::Lost => anyhow::bail!("second picture surface lost"),
+            Cst::Validation => anyhow::bail!("GPU validation error acquiring the second picture's surface"),
+        };
+        let view = output.texture.create_view(&Default::default());
+        let size = (p.config.width as f32, p.config.height as f32);
+        p.at = Self::lcd_rect((0.0, 0.0, size.0, size.1), display);
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("second picture"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    ..Default::default()
+                })
+                .forget_lifetime();
+            if let Some((_, group)) = &self.second
+                && Self::viewport(&mut pass, p.at, size)
+            {
+                pass.set_pipeline(self.plain(display));
+                pass.set_bind_group(0, group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(output);
+        if suboptimal {
+            p.surface.configure(&self.device, &p.config);
         }
         Ok(())
     }

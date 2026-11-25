@@ -1214,6 +1214,11 @@ blanks the LCD (strings "TV Jack Inserted", "Tv check: running DisableWithShutdo
 How it senses the jack is UNKNOWN (not GIODataIn's unknown bits, not chip registers +0x00/+0x08/+0x0C; +0x18 is a
 bit-banged I2C link to the ADV7179: bit 0 clock, bit 4 data in). So Ribbit keeps the L-MAX without the chip by
 default ("TV HW not found", handheld only). `Machine::render_tv` / `render_lcd` give a frontend both pictures.
+The app offers it (Emulation › L-MAX TV output, Automatic = on for v2.2, off for v2.1; Video › L-MAX TV mode,
+`Machine::set_lmax_tv_output`: the chip answering stands in for the unknown jack sense; layouts in frontend
+`two_screens.rs`). The BIOS probes the chip only at boot: driven from a running game's middle, the chip stays
+blank (1 colour) until a reset, so the app restarts the game when the choice changes. Test
+`lmax_with_tv_draws_both_pictures` (v2.2, Talking Words Factory: TV 357 colours, LCD 359).
 Idle timer (2026-10-16): same layout as US v2.1 (state `[0x3C1F_ED2C]`, reload +0xCC, count
 +0xD4); with the count cut to 3 s the BIOS powers off (white flash, then black), as on the original.
 
