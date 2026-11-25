@@ -79,6 +79,20 @@ fn to_cartridge_game(nand: Vec<u8>, cart: Vec<u8>) -> Zippity {
     z
 }
 
+/// Any cartridge (RIBBIT_ZIPPITY_CART may be another game): its kernel and
+/// file system load, and its program runs: it asks for its player file
+/// (MCA.P04 for Cars, MDP.P04, MPF.P04; none yet for a fresh guest).
+#[test]
+fn the_cartridge_loads() {
+    let (nand, cart) = dumps_or_skip!();
+    let mut z = to_cartridge_game(nand, cart);
+    run(&mut z, 600);
+    let log = z.log();
+    eprintln!("{}", log.lines().rev().take(6).collect::<Vec<_>>().join("\n"));
+    let fs = log.find("Loaded filesystem: OTP").unwrap();
+    assert!(log[fs..].contains(".P0"), "no game file opened");
+}
+
 #[test]
 fn guest_plays_the_cartridge_after_a_state_load() {
     let (nand, cart) = dumps_or_skip!();

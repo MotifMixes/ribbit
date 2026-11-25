@@ -236,6 +236,14 @@ pub fn is_explorer_image(data: &[u8]) -> bool {
         && (&data[82..87] == b"FAT32" || &data[54..59] == b"FAT16" || &data[54..59] == b"FAT12")
         && !is_volume(data)
         && !(data.len() % (PAGE_RAW * PAGES_PER_BLOCK) == 0 && data[PAGE..PAGE_RAW].iter().all(|&b| b == 0xFF))
+        && !is_zippity_cart(data)
+}
+
+/// A Zippity cartridge dump: FAT16 from byte 0 too, but raw 512 + 16 byte
+/// pages, 0x420_0000 bytes (whole erase blocks of this chip as well). Taken
+/// for an Explorer image, it opened as a Didj game.
+fn is_zippity_cart(data: &[u8]) -> bool {
+    data.len() == 0x420_0000 && &data[54..59] == b"FAT16"
 }
 
 /// The raw flash of an Explorer cartridge dump (`is_explorer_image`): its
@@ -355,6 +363,17 @@ mod tests {
         small[71..82].copy_from_slice(b"Cartridge  ");
         small[510..512].copy_from_slice(&[0x55, 0xAA]);
         assert_eq!(Cart::new(from_volume(&small).unwrap()).unwrap().cart_type(), PRODUCTION);
+    }
+
+    #[test]
+    fn a_zippity_cartridge_is_no_explorer_image() {
+        let mut zip = vec![0u8; 0x420_0000];
+        zip[54..59].copy_from_slice(b"FAT16");
+        zip[510..512].copy_from_slice(&[0x55, 0xAA]);
+        assert!(!is_explorer_image(&zip) && !is_volume(&zip) && !Cart::looks_like(&zip));
+        // The same volume a block shorter is one.
+        zip.truncate(0x420_0000 - PAGE * PAGES_PER_BLOCK);
+        assert!(is_explorer_image(&zip));
     }
 
     #[test]

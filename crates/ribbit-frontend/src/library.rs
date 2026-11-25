@@ -1955,6 +1955,21 @@ mod tests {
 
     use super::*;
 
+    /// Zippity cartridge dumps in RIBBIT_ZIPPITY_CARTS (a folder) are listed
+    /// as Zippity games, not Didj ones (they are FAT16 from byte 0, as an
+    /// Explorer image is).
+    #[test]
+    fn zippity_carts_are_zippity_games() {
+        let Ok(dir) = std::env::var("RIBBIT_ZIPPITY_CARTS") else { return };
+        let mut n = 0;
+        for e in std::fs::read_dir(dir).unwrap() {
+            let path = e.unwrap().path();
+            assert_eq!(family_of(&path), Some(Family::Zippity), "{}", path.display());
+            n += 1;
+        }
+        assert!(n > 0);
+    }
+
     #[test]
     fn the_bios_chosen_with_open_bios_counts_for_its_console() {
         let mut lib = Library::new(Path::new("."));
