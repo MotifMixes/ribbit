@@ -1315,9 +1315,13 @@ pub fn is_internal(path: &Path) -> bool {
 
 /// A Leapster cartridge image, or None for anything else.
 fn read_cartridge(data: Vec<u8>) -> Option<Cartridge> {
-    // Later cartridges have no "LEAP" header; any power-of-two image of a
-    // cartridge's size is taken (the BIOS decides whether it boots).
-    let plausible = data.len().is_power_of_two() && data.len() >= 0x10_0000;
+    // Every dumped cartridge has the "LEAP" header, at 0 or where the word
+    // at 0x140 points (0x8000_0000 is the cartridge window). Any big
+    // power-of-two file was taken before, and other consoles' dumps (Beena,
+    // whole Downloads folders) showed up as Leapster games.
+    let at = |o: usize| data.get(o..o + 4) == Some(&b"LEAP"[..]);
+    let pointer = data.get(0x140..0x144).map(|w| u32::from_le_bytes(w.try_into().unwrap()));
+    let plausible = at(0) || pointer.and_then(|p| p.checked_sub(0x8000_0000)).is_some_and(|o| at(o as usize));
     let cart = Cartridge::from_bytes(data).ok()?;
     (cart.known().is_some() || cart.header().is_ok() || plausible).then_some(cart)
 }

@@ -149,13 +149,32 @@ const BOOT_STUB: [u8; 14] = [0x02, 0x00, 0x03, 0x90, 0xFC, 0x06, 0xE0, 0xF8, 0xA
 /// Whether `data` is a LeapPad base ROM or cartridge. Base ROMs hold the
 /// cartridge check ("Cart found:"); cartridges, which bring their own
 /// kernel, do not.
+///
+/// Other handhelds on the same chip start with the stub too and are no
+/// LeapPad images: the iQuest's and Turbo Twist Extreme's base ROMs (their
+/// names in the header at 0x38; ribbit_iquest), and the older Turbo Twist
+/// models' (`is_turbo_twist`). Taken for LeapPad images, the iQuest's base
+/// opened as a LeapPad and the Turbo Twists were listed as books.
 pub fn identify(data: &[u8]) -> Option<Image> {
     let data = data.get(lbk_header(data)..)?;
     if data.len() < 0x2_0000 || data[..BOOT_STUB.len()] != BOOT_STUB {
         return None;
     }
+    let head = &data[0x30..0x80];
+    let named = |s: &[u8]| head.windows(s.len()).any(|w| w == s);
+    if named(b"IQuest FullBase") || named(b"TTExtreme FullBase") || is_turbo_twist(data) {
+        return None;
+    }
     let base = data.windows(11).any(|w| w == b"Cart found:");
     Some(if base { Image::BaseRom } else { Image::Cartridge })
+}
+
+/// An older Turbo Twist's base ROM (Spelling, Fact Blaster: MAME's
+/// `ttwistsp`, `ttwistfb`; 1-2 MB, a one-line display; not emulated): the
+/// LeapPad's boot stub, and FFFFh at 0x10102, where every LeapPad dump (782
+/// checked) has its ROM Info Block's second word.
+pub fn is_turbo_twist(data: &[u8]) -> bool {
+    data.len() >= 0x2_0000 && data[..BOOT_STUB.len()] == BOOT_STUB && data.get(0x10102..0x10104) == Some(&[0xFF, 0xFF][..])
 }
 
 /// An LBK ("Leap Back-Up") file, what the Mind Station software writes when
@@ -413,6 +432,21 @@ impl Machine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn other_handhelds_on_the_chip_are_no_leappad_images() {
+        let mut rom = vec![0u8; 0x2_0000];
+        rom[..BOOT_STUB.len()].copy_from_slice(&BOOT_STUB);
+        rom[0x10102..0x10104].copy_from_slice(&[0xFE, 0xFF]);
+        assert_eq!(identify(&rom), Some(Image::Cartridge));
+        let mut iquest = rom.clone();
+        iquest[0x3A..0x3A + 30].copy_from_slice(b"ToolPad V2.3.x IQuest FullBase");
+        assert_eq!(identify(&iquest), None);
+        let mut twist = rom.clone();
+        twist[0x10102..0x10104].copy_from_slice(&[0xFF, 0xFF]);
+        assert!(is_turbo_twist(&twist) && !is_turbo_twist(&rom));
+        assert_eq!(identify(&twist), None);
+    }
 
     /// A cartridge with the RIB's checksum fields over `len` bytes of data.
     fn cart(len: u32) -> Vec<u8> {

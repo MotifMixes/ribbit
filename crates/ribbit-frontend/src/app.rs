@@ -818,14 +818,16 @@ impl App {
             self.ui.toast(format!("BIOS: {} base ROM", model.name()));
             return;
         }
-        // A Zippity's system NAND (as dropping it on the window takes it):
-        // kept with the BIOSes opened, as the Zippity's; the Leapster's BIOS
-        // stays as it is.
+        // A Zippity's system NAND (as dropping it on the window takes it),
+        // or the ClickStart's, iQuest's or Turbo Twist Extreme's base ROM:
+        // kept with the BIOSes opened, as that console's; the Leapster's
+        // BIOS stays as it is.
         if crate::library::is_internal(&path) {
+            let name = crate::library::family_of(&path).map_or("Zippity", |f| f.console().name());
             self.settings.opened_bios.retain(|p| p != &path);
             self.settings.opened_bios.insert(0, path);
             self.save_settings();
-            self.ui.toast("BIOS: Zippity");
+            self.ui.toast(format!("BIOS: {name}"));
             self.rescan_library();
             return;
         }
@@ -971,6 +973,15 @@ impl App {
                 self.update_title();
             }
             return;
+        }
+        // An older Turbo Twist (Spelling, Fact Blaster): not emulated.
+        if std::fs::read(&path).is_ok_and(|d| ribbit_leappad::is_turbo_twist(&d)) {
+            return self.ui.problem(
+                "Turbo Twist not supported yet",
+                "This is an older Turbo Twist's base ROM (Spelling, Fact Blaster and the like, with a one-line \
+                 display). Ribbit plays the Turbo Twist Extreme and the iQuest, but not these models yet.",
+                "",
+            );
         }
         // A LeapPad cartridge (or its base ROM): the LeapPad.
         match std::fs::read(&path).ok().and_then(|d| ribbit_leappad::identify(&d)) {
